@@ -9,13 +9,20 @@ class TalabatProductMapping(Document):
 	def validate(self):
 		self.validate_unique_item_vendor()
 
+	def before_save(self):
+		self.item_vendor_key = f"{self.item}-{self.vendor}"
+
 	def validate_unique_item_vendor(self):
+		# item_vendor_key isn't set yet at this point (before_save runs after
+		# validate) - compute the candidate directly for this friendly pre-check.
+		# The field's own DB unique index is the atomic backstop for the
+		# concurrent case; this is just a cleaner error for the common case.
+		candidate_key = f"{self.item}-{self.vendor}"
 		duplicate = frappe.db.exists(
 			"Talabat Product Mapping",
 			{
-				"item": self.item,
-				"vendor": self.vendor,
-				"name": ["!=", self.name],
+				"item_vendor_key": candidate_key,
+				"name": ["!=", self.name or ""],
 			},
 		)
 		if duplicate:
