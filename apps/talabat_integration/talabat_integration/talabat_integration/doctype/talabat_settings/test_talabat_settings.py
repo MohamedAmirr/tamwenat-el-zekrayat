@@ -10,17 +10,20 @@ class IntegrationTestTalabatSettings(IntegrationTestCase):
 		settings = frappe.get_single("Talabat Settings")
 		settings.client_id = "test-client-id"
 		settings.client_secret = "test-client-secret"
+		settings.chain_id = "test-chain-id"
 		settings.environment = "Sandbox"
 		settings.save()
 
 		settings.reload()
 		self.assertEqual(settings.client_id, "test-client-id")
 		self.assertEqual(settings.get_password("client_secret"), "test-client-secret")
+		self.assertEqual(settings.chain_id, "test-chain-id")
 		self.assertEqual(settings.environment, "Sandbox")
 
 	def test_get_base_url(self):
 		settings = frappe.get_single("Talabat Settings")
 
+		settings.chain_id = "test-chain-id"
 		settings.environment = "Sandbox"
 		settings.save()
 		self.assertEqual(settings.get_base_url(), "https://sandbox.partner.deliveryhero.io")
