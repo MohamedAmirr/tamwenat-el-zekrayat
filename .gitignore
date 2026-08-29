@@ -1,0 +1,21 @@
+# secrets / local config
+.env
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# node
+node_modules/
+
+# frappe bench artifacts (relevant once apps/ has a bench-managed app)
+apps/*/env/
+apps/*/node_modules/
+logs/
+sites/*
+!sites/.gitkeep
+
+# os / editor
+.DS_Store
+*.swp
