@@ -4,6 +4,7 @@
 from unittest.mock import MagicMock, patch
 
 import frappe
+import requests
 from frappe.tests import IntegrationTestCase
 
 from talabat_integration.api.auth import _cache_key, get_access_token
@@ -86,6 +87,23 @@ class IntegrationTestAuth(IntegrationTestCase):
 			"error": "invalid_client",
 			"error_description": "Client authentication failed",
 		}
+		mock_post.return_value = response
+
+		with self.assertRaises(frappe.ValidationError):
+			get_access_token()
+
+	@patch("talabat_integration.api.auth.requests.post")
+	def test_network_error_raises_clear_error(self, mock_post):
+		mock_post.side_effect = requests.exceptions.ConnectionError("connection refused")
+
+		with self.assertRaises(frappe.ValidationError):
+			get_access_token()
+
+	@patch("talabat_integration.api.auth.requests.post")
+	def test_malformed_response_raises_clear_error(self, mock_post):
+		response = MagicMock()
+		response.ok = True
+		response.json.return_value = {"token_type": "Bearer"}  # missing access_token
 		mock_post.return_value = response
 
 		with self.assertRaises(frappe.ValidationError):
