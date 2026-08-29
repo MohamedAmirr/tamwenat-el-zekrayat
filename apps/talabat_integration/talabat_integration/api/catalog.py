@@ -2,6 +2,7 @@
 # For license information, please see license.txt
 
 import frappe
+from frappe.utils import cint
 
 from talabat_integration.api.client import talabat_request
 
@@ -45,34 +46,41 @@ def get_vendor_products(vendor, page=1):
 
 
 @frappe.whitelist()
-def get_vendor_catalog_page(vendor, page=1):
+def get_vendor_catalog_page(vendor, page=1, page_size=20):
 	"""Live Talabat catalog page for `vendor`, cross-referenced against local
 	Talabat Product Mapping rows so the catalog-mapping page can show
 	mapped/not-mapped status and the current item without storing anything
 	from Talabat locally (title/price are display-only, per this app's
 	convention - see architecture.md).
+
+	`page_size` is chosen by the user on the catalog-mapping page and passed
+	through to Talabat (whose spec allows 1-500; clamped here so an
+	out-of-range value fails closed instead of erroring remotely).
 	"""
 	vendor_doc = frappe.get_doc("Talabat Vendor", vendor)
 	vendor_doc.check_permission("read")
 	chain_id = frappe.get_single("Talabat Settings").chain_id
+	page_size = min(max(cint(page_size), 1), MAX_PAGE_SIZE)
 
 	response = talabat_request(
 		"GET",
 		f"/v2/chains/{chain_id}/vendors/{vendor_doc.vendor_id}/catalog",
-		params={"page_size": MAX_PAGE_SIZE, "page": page},
+		params={"page_size": page_size, "page": page},
 	)
 	if not response.ok:
 		frappe.throw(frappe._("Failed to fetch Talabat's product catalog for this vendor."))
 
 	body = response.json()
-	skus = [p.get("sku") for p in body.get("products", []) if p.get("sku")]
 
-	mapped = frappe.get_all(
+	# Every mapping of this vendor (not just the SKUs on the requested page) -
+	# the mapping page uses this to keep already-mapped Items out of the item
+	# picker so the same product can't be mapped to a second SKU.
+	mappings = frappe.get_all(
 		"Talabat Product Mapping",
-		filters={"vendor": vendor, "talabat_sku": ["in", skus]},
+		filters={"vendor": vendor},
 		fields=["talabat_sku", "item"],
 	)
-	item_by_sku = {row.talabat_sku: row.item for row in mapped}
+	item_by_sku = {row.talabat_sku: row.item for row in mappings}
 
 	rows = [
 		{
@@ -87,6 +95,7 @@ def get_vendor_catalog_page(vendor, page=1):
 	return {
 		"rows": rows,
 		"has_more": body.get("total_pages", 1) > int(page),
+		"mappings": mappings,
 	}
 
 

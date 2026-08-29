@@ -157,6 +157,74 @@ class IntegrationTestCatalog(IntegrationTestCase):
 		self.assertIsNone(by_sku["999-unmapped"]["item"])
 		self.assertFalse(result["has_more"])
 
+	@patch("talabat_integration.api.catalog.talabat_request")
+	def test_catalog_page_passes_page_and_page_size(self, mock_request):
+		mock_request.return_value = _response({"page_number": 2, "total_pages": 3, "products": []})
+
+		result = get_vendor_catalog_page(self.vendor.name, page=2, page_size=50)
+
+		params = mock_request.call_args.kwargs["params"]
+		self.assertEqual(params["page"], 2)
+		self.assertEqual(params["page_size"], 50)
+		self.assertTrue(result["has_more"])
+
+	@patch("talabat_integration.api.catalog.talabat_request")
+	def test_catalog_page_clamps_page_size_to_talabat_limits(self, mock_request):
+		mock_request.return_value = _response({"page_number": 1, "total_pages": 1, "products": []})
+
+		get_vendor_catalog_page(self.vendor.name, page_size=1000)
+		self.assertEqual(mock_request.call_args.kwargs["params"]["page_size"], 500)
+
+		get_vendor_catalog_page(self.vendor.name, page_size=0)
+		self.assertEqual(mock_request.call_args.kwargs["params"]["page_size"], 1)
+
+		# default (no page_size arg) is the grid's default page size
+		get_vendor_catalog_page(self.vendor.name)
+		self.assertEqual(mock_request.call_args.kwargs["params"]["page_size"], 20)
+
+	@patch("talabat_integration.api.catalog.talabat_request")
+	def test_catalog_page_returns_mappings_across_all_skus(self, mock_request):
+		item = "TEST-CATALOG-ITEM-2"
+		if not frappe.db.exists("Item", item):
+			frappe.get_doc(
+				{
+					"doctype": "Item",
+					"item_code": item,
+					"item_group": "Products",
+					"stock_uom": "Nos",
+					"is_stock_item": 0,
+				}
+			).insert()
+
+		vendor = frappe.get_doc(
+			{"doctype": "Talabat Vendor", "vendor_id": "test-vendor-mappings-list"}
+		).insert(ignore_if_duplicate=True)
+
+		# mapped to a SKU that is NOT on the requested catalog page
+		frappe.get_doc(
+			{
+				"doctype": "Talabat Product Mapping",
+				"vendor": vendor.name,
+				"talabat_sku": "off-page-sku",
+				"item": item,
+			}
+		).insert(ignore_if_duplicate=True)
+
+		mock_request.return_value = _response(
+			{
+				"page_number": 1,
+				"total_pages": 1,
+				"products": [{"sku": "on-page-sku", "title": "Chips", "price": 10}],
+			}
+		)
+
+		result = get_vendor_catalog_page(vendor.name)
+
+		# the mapping page uses this list to keep mapped Items out of the picker
+		self.assertEqual(result["mappings"], [{"talabat_sku": "off-page-sku", "item": item}])
+		# on-page rows without a mapping still come back unmapped
+		self.assertIsNone(result["rows"][0]["item"])
+
 	def test_upsert_mapping_creates_then_updates(self):
 		if not frappe.db.exists("Item", TEST_ITEM):
 			frappe.get_doc(
@@ -188,6 +256,38 @@ class IntegrationTestCatalog(IntegrationTestCase):
 		self.assertEqual(result2["name"], result["name"])
 		mapping.reload()
 		self.assertEqual(mapping.item, other_item)
+
+	def test_upsert_mapping_rejects_item_already_mapped_to_another_sku(self):
+		if not frappe.db.exists("Item", TEST_ITEM):
+			frappe.get_doc(
+				{
+					"doctype": "Item",
+					"item_code": TEST_ITEM,
+					"item_group": "Products",
+					"stock_uom": "Nos",
+					"is_stock_item": 0,
+				}
+			).insert()
+
+		sku_suffix = frappe.generate_hash(length=10)
+		first_sku = f"duplicate-item-first-{sku_suffix}"
+		second_sku = f"duplicate-item-second-{sku_suffix}"
+		upsert_mapping(self.vendor.name, first_sku, TEST_ITEM)
+
+		with self.assertRaises(frappe.ValidationError):
+			upsert_mapping(self.vendor.name, second_sku, TEST_ITEM)
+
+		self.assertTrue(
+			frappe.db.exists(
+				"Talabat Product Mapping",
+				{"vendor": self.vendor.name, "talabat_sku": first_sku, "item": TEST_ITEM},
+			)
+		)
+		self.assertFalse(
+			frappe.db.exists(
+				"Talabat Product Mapping", {"vendor": self.vendor.name, "talabat_sku": second_sku}
+			)
+		)
 
 	def test_non_system_manager_cannot_fetch(self):
 		user = frappe.get_doc(

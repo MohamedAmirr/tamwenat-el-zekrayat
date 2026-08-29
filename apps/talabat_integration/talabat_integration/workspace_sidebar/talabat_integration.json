@@ -1,0 +1,31 @@
+{
+ "app": "talabat_integration",
+ "doctype": "Workspace Sidebar",
+ "header_icon": "store",
+ "items": [
+  {
+   "label": "Talabat Catalog Mapping",
+   "link_to": "talabat-catalog-mapping",
+   "link_type": "Page",
+   "type": "Link",
+   "icon": "panel-top"
+  },
+  {
+   "label": "Talabat Vendor",
+   "link_to": "Talabat Vendor",
+   "link_type": "DocType",
+   "type": "Link"
+  },
+  {
+   "label": "Talabat Settings",
+   "link_to": "Talabat Settings",
+   "link_type": "DocType",
+   "type": "Link",
+   "icon": "settings"
+  }
+ ],
+ "module": "Talabat Integration",
+ "name": "Talabat Integration",
+ "standard": 1,
+ "title": "Talabat Integration"
+}
