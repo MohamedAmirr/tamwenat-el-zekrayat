@@ -1,6 +1,5 @@
 {
  "actions": [],
- "autoname": "format:{item}-{vendor}",
  "creation": "2026-08-29 13:26:47.000000",
  "doctype": "DocType",
  "editable_grid": 1,
@@ -9,6 +8,7 @@
   "item",
   "vendor",
   "talabat_sku",
+  "item_vendor_key",
   "sync_status",
   "last_synced_on",
   "last_error"
@@ -36,6 +36,15 @@
    "ignore_xss_filter": 1,
    "in_list_view": 1,
    "label": "Talabat SKU"
+  },
+  {
+   "fieldname": "item_vendor_key",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "length": 64,
+   "read_only": 1,
+   "unique": 1,
+   "label": "Item-Vendor Key"
   },
   {
    "default": "Not Synced",
