@@ -1,0 +1,16 @@
+/* Copyright (c) 2026, Tamwenat El Zekrayat and contributors */
+/* For license information, please see license.txt */
+
+/* Layout owned by the Talabat Catalog Mapping page. Generic grid styles stay
+ * in remote_data_grid.css so future pages can load that component without
+ * inheriting Talabat-specific spacing. */
+.talabat-catalog-mapping-container {
+	margin: 0 var(--margin-md);
+	padding: var(--padding-sm) 0 var(--padding-md);
+}
+
+@media (max-width: 768px) {
+	.talabat-catalog-mapping-container {
+		margin: 0 var(--margin-sm);
+	}
+}
