@@ -1,5 +1,6 @@
 {
  "actions": [],
+ "autoname": "format:{item}-{vendor}",
  "creation": "2026-08-29 13:26:47.000000",
  "doctype": "DocType",
  "editable_grid": 1,
