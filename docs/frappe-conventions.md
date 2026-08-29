@@ -63,7 +63,7 @@ apps/<app_name>/
 
 ## Tests
 
-- `class Test<DocType>(FrappeTestCase)` in `test_<doctype_name>.py`, using `frappe.get_doc(...).insert()` fixtures per test, not shared global state.
+- `class Test<DocType>(IntegrationTestCase)` (from `frappe.tests`) in `test_<doctype_name>.py`, using `frappe.get_doc(...).insert()` fixtures per test, not shared global state. `FrappeTestCase` is deprecated as of Frappe v16 — use `IntegrationTestCase` for tests that touch the DB/site, `UnitTestCase` for pure-logic tests that don't.
 - Run with `bench --site $SITE_NAME run-tests --app <app_name>` (see `docs/docker-ops.md` for running this inside the container).
 
 ## Naming/style quick reference
