@@ -27,6 +27,14 @@ def get_access_token():
 	return token["access_token"]
 
 
+def invalidate_access_token():
+	"""Drop the cached token for the current environment, forcing the next
+	get_access_token() call to fetch a fresh one instead of returning a token
+	that a caller has determined is no longer accepted (e.g. a 401)."""
+	settings = frappe.get_single("Talabat Settings")
+	frappe.cache().delete_value(_cache_key(settings.environment))
+
+
 def _fetch_access_token(settings):
 	try:
 		response = requests.post(
