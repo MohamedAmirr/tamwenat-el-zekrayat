@@ -105,6 +105,28 @@ docker exec -it -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekraya
 
 `bench start` serves on `127.0.0.1:8000` (published by the compose file). Add `dev.localhost` to `/etc/hosts` pointing at `127.0.0.1` before browsing to `http://dev.localhost:8000`. Login `Administrator` / `admin`.
 
+## Running one-off Python against a site
+
+`bench console` is interactive (IPython-style), so feed it a script via `echo | ...`, not a heredoc directly on `docker exec` (that leaves the console waiting on a TTY it doesn't have):
+
+```bash
+docker exec -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekrayat-dev-frappe-1 bash -lc "echo '
+import frappe
+print(frappe.db.count(\"Item\"))
+' | bench --site dev.localhost console"
+```
+(End the session by typing `y` at the "Do you really want to exit" prompt it leaves open, or just ignore it — the script's output already printed.)
+
+**Passing a secret or special-character value in**: don't interpolate it into the python source string above — it can contain shell metacharacters (`$`, `!`, `` ` ``, `&`) that get mangled across the layers of quoting. Pass it through the environment instead, and have the python read `os.environ`:
+
+```bash
+docker exec -e MY_VALUE='literal $ecret! value' -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekrayat-dev-frappe-1 bash -lc "echo '
+import os
+print(os.environ[\"MY_VALUE\"])
+' | bench --site dev.localhost console"
+```
+The `-e KEY='...'` on `docker exec` is a single top-level single-quoted shell argument, so it's safe as long as the value itself contains no unescaped single quote.
+
 ## Gotcha: the dev site tracks whichever branch is checked out on the host
 
 `apps/talabat_integration` is bind-mounted from the host repo, so the container only ever sees whatever git branch is currently checked out on disk — there is no per-branch isolation. `bench migrate` reconciles the site's schema against *those* files: if you check out a branch that doesn't have a doctype another branch added (e.g. going from a branch with `Talabat Vendor` to one without it) and run `migrate`, Frappe treats the missing doctype as orphaned and **drops its table**. No code is lost (the doctype's JSON/controller are safe in the other branch/git history), but the live dev DB loses that data until you check that branch back out and `migrate` again.

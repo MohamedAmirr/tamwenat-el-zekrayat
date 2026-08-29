@@ -16,7 +16,8 @@ Keep this file short. Load these on demand rather than re-deriving them:
 
 - `docs/docker-ops.md` — every-day commands for the prod-shaped stack: start/stop, running `bench` inside the container, logs, backup/restore, migrations, resetting.
 - `docs/dev-environment.md` — the dev bench stack: bringing it up, `bench new-app`/`new-site`/`install-app`/`bench start`, how host↔container app code syncing works. Reusable for every future custom app, not just `talabat_integration`.
-- `docs/frappe-conventions.md` — Frappe/ERPNext framework conventions to follow for all custom app work: doctype structure, hooks.py, permissions, migrations/patches, whitelisted methods, client scripts, naming.
+- `docs/frappe-conventions.md` — Frappe/ERPNext framework conventions to follow for all custom app work: doctype structure, hooks.py, permissions, migrations/patches, whitelisted methods, client scripts, naming, plus hard-won gotchas (XSS-sanitizer field corruption, autoname/`_sync_autoname_field` traps, composite-uniqueness pattern).
+- `docs/talabat-integration/architecture.md` — a live map of what actually exists in `talabat_integration` (doctypes, API modules, client scripts) — read this before touching the app so you're not rediscovering the codebase by grep. **Must be kept current** — see the rule in `frappe-dev.md`/`frappe-review.md`.
 - `docs/issue-conventions.md` — how features become GitHub issues: epic + ordered sub-issues, the token-efficient body template, label rules.
 
 ## Custom app plan
