@@ -31,6 +31,7 @@ apps/<app_name>/
 - Prefer the Frappe ORM over raw SQL: `frappe.get_doc`, `frappe.get_list`/`get_all`, `frappe.db.get_value`, `doc.save()`/`doc.submit()`. Reach for `frappe.db.sql` only when the ORM genuinely can't express the query, and always parameterize (`%s`, never string-formatted SQL).
 - Controller hooks (`validate`, `on_submit`, `before_save`, etc.) go in `<doctype_name>.py` on the `Document` subclass — don't scatter business logic into API endpoints when it belongs on the doctype.
 - Naming series / autoname: prefer built-in `naming_series` or `autoname` in the JSON over custom Python naming unless there's a real reason.
+- Any field storing an **opaque external identifier or secret** (API keys, external SKUs/IDs, tokens — anything whose exact bytes matter and is never rendered as HTML) must set `"ignore_xss_filter": 1` in its JSON. `Document.save()` runs HTML/XSS sanitization on any field value containing `<`/`>`, Password fields included, and will silently strip characters that merely *look* like an HTML tag — a real Talabat client secret was corrupted this way in production testing (a `<...>` substring silently deleted on save, no error). This is a real, confirmed footgun, not a hypothetical.
 
 ## hooks.py
 
