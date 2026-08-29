@@ -23,4 +23,8 @@ When asked to create issues for a feature (usually handed to you as a plan from 
 
 When work is about to begin on a sub-issue, create its branch per the "Branch naming" section of `docs/issue-conventions.md` — `<type>/<issue-number>-<kebab-slug>` via `gh issue develop <number> --name <branch> --checkout`, not a bare `git checkout -b`. One branch per sub-issue, created only when work actually starts, not when the issue is filed.
 
+## Merging a sub-issue's PR
+
+Standing authorization: once `frappe-review` has passed a sub-issue's PR — either clean on first review, or clean after fixes were applied and re-verified (tests/migrate re-run, not just re-reviewed by eye) — merge it into `main` yourself (`gh pr merge <number> --merge --delete-branch`) without waiting for the user to do it manually. This is the one standing exception to "never push to `main` without being told." Don't merge a PR that hasn't been through `frappe-review`, and don't merge on your own judgment if `frappe-review` found something and it wasn't actually fixed/re-verified. After merging, sync the local branch (`git checkout main && git pull --ff-only`) and re-run `bench migrate` + the full test suite against the dev site so the dev environment reflects the new baseline (see `docs/dev-environment.md`'s branch-tracking gotcha — don't skip this, a stale dev-site schema is easy to end up with otherwise).
+
 Report back concisely: what you ran, the resulting commit SHA / PR URL / repo URL / issue URLs, and anything you deliberately did NOT do (e.g. "left .env untracked, didn't commit it").
