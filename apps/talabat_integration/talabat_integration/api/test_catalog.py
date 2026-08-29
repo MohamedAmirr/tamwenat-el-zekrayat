@@ -6,7 +6,12 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests import IntegrationTestCase
 
-from talabat_integration.api.catalog import get_vendor_catalog_page, get_vendor_products, upsert_mapping
+from talabat_integration.api.catalog import (
+	get_vendor_catalog_page,
+	get_vendor_mapped_items,
+	get_vendor_products,
+	upsert_mapping,
+)
 
 TEST_ITEM = "TEST-CATALOG-ITEM"
 
@@ -183,7 +188,17 @@ class IntegrationTestCatalog(IntegrationTestCase):
 		self.assertEqual(mock_request.call_args.kwargs["params"]["page_size"], 20)
 
 	@patch("talabat_integration.api.catalog.talabat_request")
-	def test_catalog_page_returns_mappings_across_all_skus(self, mock_request):
+	def test_catalog_page_clamps_page_to_at_least_one(self, mock_request):
+		mock_request.return_value = _response({"page_number": 1, "total_pages": 1, "products": []})
+
+		get_vendor_catalog_page(self.vendor.name, page=-1)
+		self.assertEqual(mock_request.call_args.kwargs["params"]["page"], 1)
+
+		get_vendor_catalog_page(self.vendor.name, page="not-a-number")
+		self.assertEqual(mock_request.call_args.kwargs["params"]["page"], 1)
+
+	@patch("talabat_integration.api.catalog.talabat_request")
+	def test_catalog_page_does_not_leak_off_page_mappings_into_row_status(self, mock_request):
 		item = "TEST-CATALOG-ITEM-2"
 		if not frappe.db.exists("Item", item):
 			frappe.get_doc(
@@ -220,10 +235,50 @@ class IntegrationTestCatalog(IntegrationTestCase):
 
 		result = get_vendor_catalog_page(vendor.name)
 
-		# the mapping page uses this list to keep mapped Items out of the picker
-		self.assertEqual(result["mappings"], [{"talabat_sku": "off-page-sku", "item": item}])
+		# get_vendor_catalog_page no longer returns the vendor's full mapping
+		# list (see get_vendor_mapped_items) - only per-row status
+		self.assertNotIn("mappings", result)
 		# on-page rows without a mapping still come back unmapped
 		self.assertIsNone(result["rows"][0]["item"])
+
+	@patch("talabat_integration.api.catalog.talabat_request")
+	def test_get_vendor_mapped_items_returns_item_to_sku_map(self, mock_request):
+		item = "TEST-CATALOG-ITEM-2"
+		if not frappe.db.exists("Item", item):
+			frappe.get_doc(
+				{
+					"doctype": "Item",
+					"item_code": item,
+					"item_group": "Products",
+					"stock_uom": "Nos",
+					"is_stock_item": 0,
+				}
+			).insert()
+
+		vendor = frappe.get_doc(
+			{"doctype": "Talabat Vendor", "vendor_id": "test-vendor-mapped-items"}
+		).insert(ignore_if_duplicate=True)
+
+		frappe.get_doc(
+			{
+				"doctype": "Talabat Product Mapping",
+				"vendor": vendor.name,
+				"talabat_sku": "some-sku",
+				"item": item,
+			}
+		).insert(ignore_if_duplicate=True)
+
+		result = get_vendor_mapped_items(vendor.name)
+
+		self.assertEqual(result, {item: "some-sku"})
+		mock_request.assert_not_called()
+
+	def test_get_vendor_mapped_items_empty_for_vendor_with_no_mappings(self):
+		vendor = frappe.get_doc(
+			{"doctype": "Talabat Vendor", "vendor_id": "test-vendor-no-mappings"}
+		).insert(ignore_if_duplicate=True)
+
+		self.assertEqual(get_vendor_mapped_items(vendor.name), {})
 
 	def test_upsert_mapping_creates_then_updates(self):
 		if not frappe.db.exists("Item", TEST_ITEM):
@@ -303,3 +358,44 @@ class IntegrationTestCatalog(IntegrationTestCase):
 		with self.set_user(user.name):
 			with self.assertRaises(frappe.PermissionError):
 				get_vendor_products(self.vendor.name)
+
+	def test_non_system_manager_cannot_upsert_mapping(self):
+		if not frappe.db.exists("Item", TEST_ITEM):
+			frappe.get_doc(
+				{
+					"doctype": "Item",
+					"item_code": TEST_ITEM,
+					"item_group": "Products",
+					"stock_uom": "Nos",
+					"is_stock_item": 0,
+				}
+			).insert()
+
+		user = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": "talabat-catalog-test-user@example.com",
+				"first_name": "Catalog Test User",
+				"send_welcome_email": 0,
+				"roles": [{"role": "All"}],
+			}
+		).insert(ignore_if_duplicate=True)
+
+		with self.set_user(user.name):
+			with self.assertRaises(frappe.PermissionError):
+				upsert_mapping(self.vendor.name, "non-manager-upsert-sku", TEST_ITEM)
+
+	def test_non_system_manager_cannot_fetch_mapped_items(self):
+		user = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": "talabat-catalog-test-user@example.com",
+				"first_name": "Catalog Test User",
+				"send_welcome_email": 0,
+				"roles": [{"role": "All"}],
+			}
+		).insert(ignore_if_duplicate=True)
+
+		with self.set_user(user.name):
+			with self.assertRaises(frappe.PermissionError):
+				get_vendor_mapped_items(self.vendor.name)

@@ -62,7 +62,10 @@ frappe.ui.RemoteDataGrid = class RemoteDataGrid {
 		this.on_error = on_error || function () {};
 		this.confirm_changes = !!confirm_changes;
 		this.page_size = page_size || 20;
-		this.page_size_options = page_size_options || [20, 50, 100];
+		// Copy before mutating below - page_size_options may be a caller-owned
+		// array (e.g. a module-level constant), and push()/sort() below would
+		// otherwise mutate it in place out from under the caller.
+		this.page_size_options = page_size_options ? [...page_size_options] : [20, 50, 100];
 		if (!this.page_size_options.includes(this.page_size)) {
 			this.page_size_options.push(this.page_size);
 			this.page_size_options.sort((a, b) => a - b);
@@ -71,6 +74,10 @@ frappe.ui.RemoteDataGrid = class RemoteDataGrid {
 		// Incremented per request so a slow earlier response can never
 		// overwrite a newer page's rows (rapid Prev/Next clicks).
 		this._request_seq = 0;
+		// row object -> {fieldname: $cell}, so update_cell() can update a
+		// derived/read-only column's display after an editable column in the
+		// same row changes, without re-fetching/re-rendering the whole page.
+		this._row_cells = new WeakMap();
 		this.make();
 	}
 
@@ -131,46 +138,58 @@ frappe.ui.RemoteDataGrid = class RemoteDataGrid {
 		this.$prev.prop("disabled", true);
 		this.$next.prop("disabled", true);
 		this.$page_indicator.text(__("Loading..."));
-		Promise.resolve(this.fetch_page(page_number, this.page_size))
-			.then(({ rows, has_more }) => {
+		// The .catch()/reject handler below covers only the fetch_page()
+		// promise itself - it must NOT also wrap render_page()'s rendering
+		// (rows.forEach(render_row)/make_link_cell), or a client-side
+		// rendering bug there gets misreported as "Unable to load data" and
+		// handed to on_error() as if it were a fetch failure.
+		Promise.resolve(this.fetch_page(page_number, this.page_size)).then(
+			(result) => {
 				if (seq !== this._request_seq) return; // superseded by a newer page request
-				this.has_more = has_more;
-				this.$prev.prop("disabled", this.page <= 1);
-				this.$next.prop("disabled", !has_more);
-				this.$page_indicator.text(__("Page {0}", [this.page]));
-				if (!rows.length) {
-					$('<tr class="remote-data-grid-empty"></tr>')
-						.append(
-							$("<td></td>")
-								.attr("colspan", this.columns.length)
-								.text(__("No Data"))
-						)
-						.appendTo(this.$tbody);
-					return;
-				}
-				rows.forEach((row) => this.render_row(row));
-			})
-			.catch((error) => {
+				this.render_page(result);
+			},
+			(error) => {
 				if (seq !== this._request_seq) return;
-				this.has_more = false;
-				this.$prev.prop("disabled", this.page <= 1);
-				this.$next.prop("disabled", true);
-				this.$page_indicator.text(__("Unable to load"));
-				$('<tr class="remote-data-grid-empty"></tr>')
-					.append(
-						$("<td></td>")
-							.attr("colspan", this.columns.length)
-							.text(__("Unable to load data"))
-					)
-					.appendTo(this.$tbody);
-				this.on_error(error);
-			});
+				this.render_error(error);
+			}
+		);
+	}
+
+	render_page({ rows, has_more }) {
+		this.has_more = has_more;
+		this.$prev.prop("disabled", this.page <= 1);
+		this.$next.prop("disabled", !has_more);
+		this.$page_indicator.text(__("Page {0}", [this.page]));
+		if (!rows.length) {
+			$('<tr class="remote-data-grid-empty"></tr>')
+				.append($("<td></td>").attr("colspan", this.columns.length).text(__("No Data")))
+				.appendTo(this.$tbody);
+			return;
+		}
+		rows.forEach((row) => this.render_row(row));
+	}
+
+	render_error(error) {
+		this.has_more = false;
+		this.$prev.prop("disabled", this.page <= 1);
+		this.$next.prop("disabled", true);
+		this.$page_indicator.text(__("Unable to load"));
+		$('<tr class="remote-data-grid-empty"></tr>')
+			.append(
+				$("<td></td>")
+					.attr("colspan", this.columns.length)
+					.text(__("Unable to load data"))
+			)
+			.appendTo(this.$tbody);
+		this.on_error(error);
 	}
 
 	render_row(row) {
 		let $row = $("<tr></tr>").appendTo(this.$tbody);
+		let cells = {};
 		this.columns.forEach((col) => {
 			let $cell = $("<td></td>").appendTo($row);
+			cells[col.fieldname] = $cell;
 			if (col.editable === "Link") {
 				this.make_link_cell($cell, row, col);
 			} else {
@@ -180,6 +199,22 @@ frappe.ui.RemoteDataGrid = class RemoteDataGrid {
 				$cell.text(row[col.fieldname] == null ? "" : row[col.fieldname]);
 			}
 		});
+		this._row_cells.set(row, cells);
+	}
+
+	// Updates a single read-only/derived column's display for one already-
+	// rendered row (e.g. a "status" column computed from an editable column
+	// that just changed), without re-fetching or re-rendering the whole page.
+	// Only supports plain text columns - editable (Link) cells manage their
+	// own DOM state via make_link_cell()'s closures and aren't touched here.
+	update_cell(row, fieldname, value) {
+		row[fieldname] = value;
+		let cells = this._row_cells.get(row);
+		let $cell = cells && cells[fieldname];
+		if (!$cell) return;
+		let col = this.columns.find((c) => c.fieldname === fieldname);
+		if (col && col.editable === "Link") return;
+		$cell.text(value == null ? "" : value);
 	}
 
 	make_link_cell($cell, row, col) {

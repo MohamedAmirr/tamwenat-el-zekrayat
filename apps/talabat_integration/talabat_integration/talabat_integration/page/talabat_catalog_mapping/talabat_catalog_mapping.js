@@ -26,7 +26,35 @@ frappe.pages["talabat-catalog-mapping"].on_page_load = function (wrapper) {
 	let mapped_item_by_item = new Map();
 
 	let current_vendor = null;
+	// Incremented on every load_vendor() call so a slow response for a
+	// previously-selected vendor (mapped-items fetch, or the frappe.require
+	// callback that builds the grid) can never land after the user has since
+	// picked a different vendor and overwrite this page's state for it.
+	let vendor_request_seq = 0;
 	page.set_primary_action(__("Add manual mapping"), show_manual_mapping_dialog, "add");
+	page.set_secondary_action(
+		__("Refresh"),
+		() => {
+			let vendor = vendor_field.get_value();
+			if (!vendor) return;
+			// Bypasses load_vendor()'s current_vendor equality guard so
+			// re-fetching the same vendor (e.g. after a failed load) works.
+			current_vendor = null;
+			load_vendor(vendor);
+		},
+		"refresh"
+	);
+
+	// Talabat SKUs/titles and Item names typed or picked here are never
+	// server-side XSS-sanitized before reaching this page (talabat_sku is an
+	// opaque external identifier with ignore_xss_filter: 1 - see
+	// frappe-conventions.md), and frappe.toast()/show_alert() render
+	// message.message straight into the DOM. Any value sourced from Talabat's
+	// live catalog or user typing must be escaped before it's interpolated
+	// into a toast message.
+	function esc(value) {
+		return frappe.utils.escape_html(value == null ? "" : String(value));
+	}
 
 	function get_available_item_query(current_sku) {
 		let taken = Array.from(mapped_item_by_item.entries())
@@ -72,7 +100,10 @@ frappe.pages["talabat-catalog-mapping"].on_page_load = function (wrapper) {
 				let existing_sku = mapped_item_by_item.get(values.item);
 				if (existing_sku && existing_sku !== values.talabat_sku) {
 					frappe.toast({
-						message: __("Item {0} is already mapped to SKU {1}.", [values.item, existing_sku]),
+						message: __("Item {0} is already mapped to SKU {1}.", [
+							esc(values.item),
+							esc(existing_sku),
+						]),
 						indicator: "red",
 					});
 					return;
@@ -88,10 +119,17 @@ frappe.pages["talabat-catalog-mapping"].on_page_load = function (wrapper) {
 						set_mapped_item(values.talabat_sku, values.item);
 						dialog.hide();
 						frappe.toast({
-							message: __("Mapping saved: {0} → {1}", [values.talabat_sku, values.item]),
+							message: __("Mapping saved: {0} → {1}", [
+								esc(values.talabat_sku),
+								esc(values.item),
+							]),
 							indicator: "green",
 						});
-						if (grid) grid.go(grid.page);
+						// A manually-added mapping is, by definition, for a SKU
+						// the live catalog page didn't return (that's this
+						// dialog's whole purpose - see architecture.md) so it
+						// can't be reflected in an on-page row. No grid refetch
+						// needed here.
 					});
 			},
 		});
@@ -105,6 +143,7 @@ frappe.pages["talabat-catalog-mapping"].on_page_load = function (wrapper) {
 		// and refetch the catalog twice per selection.
 		if (vendor === current_vendor) return;
 		current_vendor = vendor;
+		let seq = ++vendor_request_seq;
 		mapped_item_by_item.clear();
 		$status.text("");
 		$grid_wrapper.empty();
@@ -118,71 +157,135 @@ frappe.pages["talabat-catalog-mapping"].on_page_load = function (wrapper) {
 				"/assets/talabat_integration/css/talabat_catalog_mapping.css",
 			])
 			.then(() => {
-				grid = new frappe.ui.RemoteDataGrid({
-					wrapper: $grid_wrapper,
-					columns: [
-						{ fieldname: "sku", label: __("Talabat SKU") },
-						{ fieldname: "title", label: __("Title") },
-						{ fieldname: "price", label: __("Price") },
-						{ fieldname: "status", label: __("Status") },
-						{
-							fieldname: "item",
-							label: __("Item"),
-							editable: "Link",
-							options: "Item",
-							// Keep already-mapped Items out of the dropdown so
-							// the same product can't be mapped to a second SKU.
-							get_query: (row) => get_available_item_query(row.sku),
-						},
-					],
-					fetch_page: (page_number, page_size) =>
-						fetch_catalog_page(vendor, page_number, page_size),
-					on_error: () => $status.text(__("Failed to fetch Talabat's catalog for this vendor.")),
-					confirm_changes: true,
-					on_change: (row, fieldname, value) => {
-						if (fieldname !== "item") return;
-						let existing_sku = mapped_item_by_item.get(value);
-						if (existing_sku && existing_sku !== row.sku) {
-							frappe.toast({
-								message: __("Item {0} is already mapped to SKU {1}.", [
-									value,
-									existing_sku,
-								]),
-								indicator: "red",
-							});
-							// Rejecting reverts the cell to its saved value.
-							return Promise.reject();
-						}
-						return frappe
-							.call({
-								method: "talabat_integration.api.catalog.upsert_mapping",
-								args: { vendor: vendor, talabat_sku: row.sku, item: value },
-							})
-							.then(() => {
-								set_mapped_item(row.sku, value);
-								frappe.toast({
-									message: __("Mapping saved: {0} → {1}", [row.sku, value]),
-									indicator: "green",
-								});
-								grid.go(grid.page);
-							});
-					},
+				if (seq !== vendor_request_seq) return; // superseded by a newer vendor selection
+
+				// Wait for the vendor's full mapping map before the grid can be
+				// interacted with - otherwise the duplicate-item guard (both the
+				// Link get_query exclusion and the on_change/dialog checks below)
+				// is a no-op until this resolves, and a fast user can hit the
+				// server's raw item_vendor_key unique-index error instead of the
+				// intended client-side toast.
+				return fetch_mapped_items(vendor, seq)
+					.catch((err) => {
+						console.warn("Failed to fetch existing Talabat mappings for vendor", vendor, err);
+						if (seq !== vendor_request_seq) return;
+						$status.text(
+							__(
+								"Failed to fetch this vendor's existing mappings; duplicate-mapping checks may be incomplete until you refresh."
+							)
+						);
+					})
+					.then(() => {
+						if (seq !== vendor_request_seq) return; // superseded while mapped items were loading
+
+						grid = new frappe.ui.RemoteDataGrid({
+							wrapper: $grid_wrapper,
+							columns: [
+								{ fieldname: "sku", label: __("Talabat SKU") },
+								{ fieldname: "title", label: __("Title") },
+								{ fieldname: "price", label: __("Price") },
+								{ fieldname: "status", label: __("Status") },
+								{
+									fieldname: "item",
+									label: __("Item"),
+									editable: "Link",
+									options: "Item",
+									// Keep already-mapped Items out of the dropdown so
+									// the same product can't be mapped to a second SKU.
+									get_query: (row) => get_available_item_query(row.sku),
+								},
+							],
+							fetch_page: (page_number, page_size) =>
+								fetch_catalog_page(vendor, seq, page_number, page_size),
+							on_error: () => {
+								// Guard against a stale in-flight request for a
+								// since-superseded vendor selection overwriting $status
+								// for the vendor the user has since switched to.
+								if (seq !== vendor_request_seq) return;
+								$status.text(__("Failed to fetch Talabat's catalog for this vendor."));
+							},
+							confirm_changes: true,
+							on_change: (row, fieldname, value) => {
+								if (fieldname !== "item") return;
+								if (!value) {
+									// Item is a mandatory field on Talabat Product
+									// Mapping - sending an empty value would surface a
+									// raw "Item is required" framework error. This page
+									// doesn't support unmapping, so fail clearly instead.
+									frappe.toast({
+										message: __(
+											"Use a value to update the mapping; unmapping isn't supported here yet."
+										),
+										indicator: "orange",
+									});
+									return Promise.reject();
+								}
+								let existing_sku = mapped_item_by_item.get(value);
+								if (existing_sku && existing_sku !== row.sku) {
+									frappe.toast({
+										message: __("Item {0} is already mapped to SKU {1}.", [
+											esc(value),
+											esc(existing_sku),
+										]),
+										indicator: "red",
+									});
+									// Rejecting reverts the cell to its saved value.
+									return Promise.reject();
+								}
+								return frappe
+									.call({
+										method: "talabat_integration.api.catalog.upsert_mapping",
+										args: { vendor: vendor, talabat_sku: row.sku, item: value },
+									})
+									.then(() => {
+										if (seq !== vendor_request_seq) return; // superseded by a newer vendor selection
+										set_mapped_item(row.sku, value);
+										frappe.toast({
+											message: __("Mapping saved: {0} → {1}", [esc(row.sku), esc(value)]),
+											indicator: "green",
+										});
+										// Update just this row's derived Status display
+										// in place - the grid already has the value it
+										// just saved, no need to re-fetch Talabat's live
+										// catalog (and a full grid.go() refetch/re-render
+										// would also nuke any other row's staged-but-
+										// unsaved edit in confirm_changes mode).
+										if (grid) {
+											grid.update_cell(row, "status", "Mapped");
+										}
+									});
+							},
+						});
+					});
+			});
+	}
+
+	function fetch_mapped_items(vendor, seq) {
+		return frappe
+			.call({
+				method: "talabat_integration.api.catalog.get_vendor_mapped_items",
+				args: { vendor: vendor },
+			})
+			.then((r) => {
+				if (seq !== vendor_request_seq) return; // superseded by a newer vendor selection
+				mapped_item_by_item.clear();
+				Object.entries(r.message || {}).forEach(([item, sku]) => {
+					mapped_item_by_item.set(item, sku);
 				});
 			});
 	}
 
-	function fetch_catalog_page(vendor, page_number, page_size) {
+	function fetch_catalog_page(vendor, seq, page_number, page_size) {
 		return frappe
 			.call({
 				method: "talabat_integration.api.catalog.get_vendor_catalog_page",
 				args: { vendor: vendor, page: page_number, page_size: page_size },
 			})
 			.then((r) => {
-				$status.text("");
-				mapped_item_by_item.clear();
-				(r.message.mappings || []).forEach((m) => {
-					if (m.item) mapped_item_by_item.set(m.item, m.talabat_sku);
-				});
+				// Guard against a stale in-flight request for a
+				// since-superseded vendor selection overwriting $status for
+				// the vendor the user has since switched to.
+				if (seq === vendor_request_seq) $status.text("");
 				let rows = (r.message.rows || []).map((row) => ({
 					...row,
 					status: row.item ? "Mapped" : "Not Mapped",

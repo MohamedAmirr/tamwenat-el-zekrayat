@@ -63,6 +63,15 @@ apps/<app_name>/
 
 - App-shipped JS lives next to the doctype (`<doctype_name>.js`) and ships with the app.
 - Site-specific tweaks that shouldn't live in app code go in the **Client Script** doctype in the UI, then exported as a `fixtures` entry — don't hand-edit those JSON exports.
+- A `frappe.ui.form.make_control()` Link control with no backing Frappe document has no model to update asynchronously — call `set_input()` to render a server-returned value directly, not `set_value()` (which updates the model async and leaves the input blank since there's no document for it to attach to).
+- Frappe's Link control only fires the DOM `change` event on blur, not when a suggestion is picked from the awesomplete dropdown — bind `awesomplete-selectcomplete` too if you need to react to the pick immediately, or the UI will appear to do nothing until the user clicks elsewhere.
+- A page-field (`page.add_field()`) Link control's `change` handler fires **twice** per pick: once on the programmatic selection, once again on the following native blur. Guard against double-firing (e.g. compare against a "current value" variable) if the handler does something expensive like refetching data.
+- `frappe.DataTable` is bundled only with the report/web-form JS bundles — it is not available on a plain Desk page (`frappe.pages`). Build custom tabular UI there with plain DOM + `frappe.ui.form.make_control()` instead, or use `frappe.require()` to explicitly pull in whatever bundle actually contains it.
+
+## App-level folders auto-synced by `bench migrate`
+
+- An `<app_name>/<app_name>/workspace_sidebar/` directory (like `doctype/`, `page/`, `report/`) is a **Frappe app-level-folder convention** — every `*.json` fixture in it is synced automatically by `bench migrate` (via `import_file_by_path`). No `hooks.py` wiring is needed to pick it up.
+- That importer decides whether to reimport a file by comparing its `modified` timestamp against the DB row's (falling back to a content hash for DocType records). A workspace_sidebar (or any other app-level-folder) JSON that's missing `creation`/`modified`/`modified_by`/`owner`/`docstatus`/`idx` gets treated as always-newer-than-DB, so every `bench migrate` deletes and reimports it — harmless functionally, but noisy and worth avoiding. Give it real timestamps and the standard Frappe document metadata fields, matching the format Frappe/ERPNext use for their own shipped fixtures (e.g. `frappe/frappe/workspace_sidebar/*.json` in the framework source). This cuts both ways once a real `modified` is in place: `is_db_timestamp_latest` treats an unchanged-or-older `modified` as not-newer-than-DB and **silently skips the import**, so any future hand-edit to the JSON must also bump `modified` (to a value newer than what's already in the DB on every site that has previously imported it) or the edit will appear to do nothing on `bench migrate`.
 
 ## Tests
 
