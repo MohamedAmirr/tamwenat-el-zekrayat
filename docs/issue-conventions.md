@@ -82,6 +82,10 @@ Example: issue #1 "Talabat Authentication: Talabat Settings doctype" → `feat/1
 
 Create it with `gh issue develop <number> --name <branch> --checkout`, not a plain `git checkout -b` — this makes it a GitHub-linked branch that shows under the issue's "Development" section and lets a PR from it auto-close the issue on merge. Fall back to a plain branch only if `gh issue develop` isn't available.
 
+## Amending a sub-issue before it's merged
+
+If planning/implementation surfaces a correction to a sub-issue's scope *before its PR has merged* (e.g. a design gap found while building it), don't file a new issue for the correction — edit the existing issue body in place (`gh issue edit <number> --body ...`, keeping the same section structure) and amend the same branch/PR rather than opening a second one. If the correction adds a genuinely new step (a new file/doctype/deliverable, not just a tweak to an existing one), file it as its own sub-issue instead, insert it in the right dependency order, and update the epic body's numbered list to match — epics are allowed to grow past their initial sub-issue count when real scope was missing, not just when it was mis-estimated.
+
 ## Labels
 
 Ensure these exist before use (`gh label list`, create with `gh label create <name> --color <hex>` if missing): `epic`, and one label per feature area (e.g. `talabat`). Don't invent a new label per issue.
