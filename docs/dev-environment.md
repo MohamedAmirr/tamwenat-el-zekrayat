@@ -105,6 +105,12 @@ docker exec -it -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekraya
 
 `bench start` serves on `127.0.0.1:8000` (published by the compose file). Add `dev.localhost` to `/etc/hosts` pointing at `127.0.0.1` before browsing to `http://dev.localhost:8000`. Login `Administrator` / `admin`.
 
+## Gotcha: the dev site tracks whichever branch is checked out on the host
+
+`apps/talabat_integration` is bind-mounted from the host repo, so the container only ever sees whatever git branch is currently checked out on disk — there is no per-branch isolation. `bench migrate` reconciles the site's schema against *those* files: if you check out a branch that doesn't have a doctype another branch added (e.g. going from a branch with `Talabat Vendor` to one without it) and run `migrate`, Frappe treats the missing doctype as orphaned and **drops its table**. No code is lost (the doctype's JSON/controller are safe in the other branch/git history), but the live dev DB loses that data until you check that branch back out and `migrate` again.
+
+Practical rule: don't treat the dev site's current schema as a stable baseline across branch switches — only trust it immediately after running `migrate` on the branch you actually care about right now. Before merging multiple feature branches, the real integration check is checking out `main` after they've all landed and running `migrate` there once.
+
 ## Seeding sample product data (dev only)
 
 The dev site starts with zero `Item` records — real products aren't imported into ERPNext until the actual website goes live. To have realistic Items to develop/test Talabat product-mapping work against in the meantime, `scripts/seed_dev_items.py` (repo root, **not** part of `apps/talabat_integration` — this is dev tooling, never shipped) creates 5 sample grocery/snack Items (with a barcode row and a price each) plus the "Snacks"/"Beverages" Item Groups if they don't already exist. It's idempotent — safe to re-run.
