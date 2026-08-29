@@ -6,7 +6,9 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests import IntegrationTestCase
 
-from talabat_integration.api.catalog import get_vendor_products
+from talabat_integration.api.catalog import get_vendor_catalog_page, get_vendor_products, upsert_mapping
+
+TEST_ITEM = "TEST-CATALOG-ITEM"
 
 
 def _response(body, status_code=200):
@@ -110,6 +112,82 @@ class IntegrationTestCatalog(IntegrationTestCase):
 				{"sku": None, "title": None},
 			],
 		)
+
+	@patch("talabat_integration.api.catalog.talabat_request")
+	def test_catalog_page_marks_mapped_status(self, mock_request):
+		if not frappe.db.exists("Item", TEST_ITEM):
+			frappe.get_doc(
+				{
+					"doctype": "Item",
+					"item_code": TEST_ITEM,
+					"item_group": "Products",
+					"stock_uom": "Nos",
+					"is_stock_item": 0,
+				}
+			).insert()
+
+		vendor = frappe.get_doc(
+			{"doctype": "Talabat Vendor", "vendor_id": "test-vendor-catalog-page"}
+		).insert(ignore_if_duplicate=True)
+
+		frappe.get_doc(
+			{
+				"doctype": "Talabat Product Mapping",
+				"vendor": vendor.name,
+				"talabat_sku": "123",
+				"item": TEST_ITEM,
+			}
+		).insert(ignore_if_duplicate=True)
+
+		mock_request.return_value = _response(
+			{
+				"page_number": 1,
+				"total_pages": 1,
+				"products": [
+					{"sku": "123", "title": "Chips", "price": 10},
+					{"sku": "999-unmapped", "title": "Soda", "price": 5},
+				],
+			}
+		)
+
+		result = get_vendor_catalog_page(vendor.name)
+
+		by_sku = {row["sku"]: row for row in result["rows"]}
+		self.assertEqual(by_sku["123"]["item"], TEST_ITEM)
+		self.assertIsNone(by_sku["999-unmapped"]["item"])
+		self.assertFalse(result["has_more"])
+
+	def test_upsert_mapping_creates_then_updates(self):
+		if not frappe.db.exists("Item", TEST_ITEM):
+			frappe.get_doc(
+				{
+					"doctype": "Item",
+					"item_code": TEST_ITEM,
+					"item_group": "Products",
+					"stock_uom": "Nos",
+					"is_stock_item": 0,
+				}
+			).insert()
+		other_item = "TEST-CATALOG-ITEM-2"
+		if not frappe.db.exists("Item", other_item):
+			frappe.get_doc(
+				{
+					"doctype": "Item",
+					"item_code": other_item,
+					"item_group": "Products",
+					"stock_uom": "Nos",
+					"is_stock_item": 0,
+				}
+			).insert()
+
+		result = upsert_mapping(self.vendor.name, "upsert-test-sku", TEST_ITEM)
+		mapping = frappe.get_doc("Talabat Product Mapping", result["name"])
+		self.assertEqual(mapping.item, TEST_ITEM)
+
+		result2 = upsert_mapping(self.vendor.name, "upsert-test-sku", other_item)
+		self.assertEqual(result2["name"], result["name"])
+		mapping.reload()
+		self.assertEqual(mapping.item, other_item)
 
 	def test_non_system_manager_cannot_fetch(self):
 		user = frappe.get_doc(
