@@ -89,3 +89,39 @@ class IntegrationTestCatalog(IntegrationTestCase):
 	def test_unknown_vendor_raises_clear_error(self):
 		with self.assertRaises(frappe.DoesNotExistError):
 			get_vendor_products("does-not-exist")
+
+	@patch("talabat_integration.api.catalog.talabat_request")
+	def test_missing_sku_or_title_does_not_crash(self, mock_request):
+		mock_request.return_value = _response(
+			{
+				"page_number": 1,
+				"total_pages": 1,
+				"products": [{"sku": "123"}, {"title": "No SKU"}, {}],
+			}
+		)
+
+		result = get_vendor_products(self.vendor.name)
+
+		self.assertEqual(
+			result["products"],
+			[
+				{"sku": "123", "title": None},
+				{"sku": None, "title": "No SKU"},
+				{"sku": None, "title": None},
+			],
+		)
+
+	def test_non_system_manager_cannot_fetch(self):
+		user = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": "talabat-catalog-test-user@example.com",
+				"first_name": "Catalog Test User",
+				"send_welcome_email": 0,
+				"roles": [{"role": "All"}],
+			}
+		).insert(ignore_if_duplicate=True)
+
+		with self.set_user(user.name):
+			with self.assertRaises(frappe.PermissionError):
+				get_vendor_products(self.vendor.name)

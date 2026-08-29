@@ -21,6 +21,7 @@ def get_vendor_products(vendor):
 	not the raw API response, per the app's whitelisted-method convention.
 	"""
 	vendor_doc = frappe.get_doc("Talabat Vendor", vendor)
+	vendor_doc.check_permission("read")
 	chain_id = frappe.get_single("Talabat Settings").chain_id
 
 	response = talabat_request(
@@ -33,7 +34,7 @@ def get_vendor_products(vendor):
 		frappe.throw(frappe._("Failed to fetch Talabat's product catalog for this vendor."))
 
 	body = response.json()
-	products = [{"sku": p["sku"], "title": p["title"]} for p in body.get("products", [])]
+	products = [{"sku": p.get("sku"), "title": p.get("title")} for p in body.get("products", [])]
 
 	return {
 		"products": products,

@@ -1,14 +1,25 @@
 // Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 // For license information, please see license.txt
 
+const FETCH_BUTTON_LABEL = __("Fetch from Talabat");
+
 frappe.ui.form.on("Talabat Product Mapping", {
 	refresh(frm) {
-		if (!frm.doc.vendor) {
-			return;
-		}
-		frm.add_custom_button(__("Fetch from Talabat"), () => fetch_and_pick_sku(frm));
+		toggle_fetch_button(frm);
+	},
+	vendor(frm) {
+		toggle_fetch_button(frm);
 	},
 });
+
+function toggle_fetch_button(frm) {
+	// vendor doesn't trigger refresh(), so button visibility is re-derived
+	// from both events rather than only on load/save/reload.
+	frm.remove_custom_button(FETCH_BUTTON_LABEL);
+	if (frm.doc.vendor) {
+		frm.add_custom_button(FETCH_BUTTON_LABEL, () => fetch_and_pick_sku(frm));
+	}
+}
 
 function fetch_and_pick_sku(frm) {
 	frappe.call({
