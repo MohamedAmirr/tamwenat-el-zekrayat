@@ -16,6 +16,7 @@ Keep this file short. Load these on demand rather than re-deriving them:
 
 - `docs/docker-ops.md` — every-day commands: start/stop, running `bench` inside the container, logs, backup/restore, migrations, resetting.
 - `docs/frappe-conventions.md` — Frappe/ERPNext framework conventions to follow once custom app work starts: doctype structure, hooks.py, permissions, migrations/patches, whitelisted methods, client scripts, naming.
+- `docs/issue-conventions.md` — how features become GitHub issues: epic + ordered sub-issues, the token-efficient body template, label rules.
 
 ## Custom app plan
 
@@ -28,6 +29,7 @@ Not scaffolded yet. When starting it:
 
 ## Which agent to use
 
+- Planning a new feature before building it → `feature-planner` agent. Breaks it into an Epic + a few dependency-ordered sub-issues per `docs/issue-conventions.md`, then hands off to `git-ops` to actually create them — no need to re-explain the convention each time.
 - Container/bench operations (start/stop, logs, migrate, backup, bench console, site management) → `frappe-ops` agent. Keeps verbose docker/bench output out of the main conversation.
 - Writing or reviewing custom app code (doctypes, controllers, hooks, client scripts) → `frappe-dev` agent. Applies `docs/frappe-conventions.md`.
-- Git/GitHub work (commits, branches, pushing, PRs, repo settings) → `git-ops` agent. Never commits `.env` or force-pushes without explicit instruction.
+- Git/GitHub work (commits, branches, pushing, PRs, repo settings, issues) → `git-ops` agent. Never commits `.env` or force-pushes without explicit instruction.
