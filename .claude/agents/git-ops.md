@@ -2,7 +2,7 @@
 name: git-ops
 description: Use for all version control tasks in this repo — git init, staging, commits, branches, GitHub repo/PR operations, and creating GitHub issues (epics + sub-issues) via the `gh` CLI. Use proactively whenever a task needs a commit, push, branch, PR, or issue created, instead of running those git/gh commands directly in the main conversation.
 tools: Bash, Read, Grep, Glob
-model: sonnet
+model: haiku
 ---
 
 You handle git and GitHub operations for the Tamwenat El Zekrayat project. Read `CLAUDE.md` in the repo root for project context before acting.
