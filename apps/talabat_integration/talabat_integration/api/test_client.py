@@ -26,7 +26,7 @@ class IntegrationTestClient(IntegrationTestCase):
 		settings.save()
 
 	@patch("talabat_integration.api.client.get_access_token")
-	@patch("talabat_integration.api.client.requests.request")
+	@patch("talabat_integration.api.auth.requests.request")
 	def test_successful_request_passes_token(self, mock_request, mock_get_token):
 		mock_get_token.return_value = "token-abc"
 		mock_request.return_value = _response(200)
@@ -40,7 +40,7 @@ class IntegrationTestClient(IntegrationTestCase):
 
 	@patch("talabat_integration.api.client.invalidate_access_token")
 	@patch("talabat_integration.api.client.get_access_token")
-	@patch("talabat_integration.api.client.requests.request")
+	@patch("talabat_integration.api.auth.requests.request")
 	def test_401_triggers_single_retry_with_refreshed_token(
 		self, mock_request, mock_get_token, mock_invalidate
 	):
@@ -57,7 +57,7 @@ class IntegrationTestClient(IntegrationTestCase):
 
 	@patch("talabat_integration.api.client.invalidate_access_token")
 	@patch("talabat_integration.api.client.get_access_token")
-	@patch("talabat_integration.api.client.requests.request")
+	@patch("talabat_integration.api.auth.requests.request")
 	def test_second_401_raises_clear_error(self, mock_request, mock_get_token, mock_invalidate):
 		mock_get_token.side_effect = ["stale-token", "still-stale-token"]
 		mock_request.side_effect = [_response(401), _response(401)]
@@ -69,10 +69,23 @@ class IntegrationTestClient(IntegrationTestCase):
 		self.assertEqual(mock_request.call_count, 2)
 
 	@patch("talabat_integration.api.client.get_access_token")
-	@patch("talabat_integration.api.client.requests.request")
+	@patch("talabat_integration.api.auth.requests.request")
 	def test_network_error_raises_clear_error(self, mock_request, mock_get_token):
 		mock_get_token.return_value = "token-abc"
 		mock_request.side_effect = requests.exceptions.ConnectionError("connection refused")
 
 		with self.assertRaises(frappe.ValidationError):
 			talabat_request("GET", "/v2/chains/test-chain-id/vendors/v1/status")
+
+	@patch("talabat_integration.api.client.get_access_token")
+	@patch("talabat_integration.api.auth.requests.request")
+	def test_path_without_leading_slash_is_normalized(self, mock_request, mock_get_token):
+		mock_get_token.return_value = "token-abc"
+		mock_request.return_value = _response(200)
+
+		talabat_request("GET", "v2/chains/test-chain-id/vendors/v1/status")
+
+		args, _ = mock_request.call_args
+		self.assertEqual(
+			args[1], "https://sandbox.partner.deliveryhero.io/v2/chains/test-chain-id/vendors/v1/status"
+		)
