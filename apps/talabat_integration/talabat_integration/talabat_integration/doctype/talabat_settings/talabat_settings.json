@@ -14,16 +14,19 @@
   {
    "fieldname": "client_id",
    "fieldtype": "Data",
+   "ignore_xss_filter": 1,
    "label": "Client ID"
   },
   {
    "fieldname": "client_secret",
    "fieldtype": "Password",
+   "ignore_xss_filter": 1,
    "label": "Client Secret"
   },
   {
    "fieldname": "chain_id",
    "fieldtype": "Data",
+   "ignore_xss_filter": 1,
    "label": "Chain ID",
    "reqd": 1
   },

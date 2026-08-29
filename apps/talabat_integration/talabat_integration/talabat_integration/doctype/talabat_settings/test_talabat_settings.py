@@ -20,6 +20,20 @@ class IntegrationTestTalabatSettings(IntegrationTestCase):
 		self.assertEqual(settings.chain_id, "test-chain-id")
 		self.assertEqual(settings.environment, "Sandbox")
 
+	def test_client_secret_with_angle_brackets_persists_exactly(self):
+		# Regression: Frappe's Document.save() runs HTML/XSS sanitization on any
+		# field value containing "<"/">", and doesn't exclude Password fields by
+		# default. A real Talabat secret containing "<...>" got silently mutilated
+		# on save (48 chars -> 34 chars) before "ignore_xss_filter" was added to
+		# this field. This proves the fix holds.
+		settings = frappe.get_single("Talabat Settings")
+		tricky_secret = "fge1g^d5aQJZ@GiY@L2@c+(37jykOX<p<+P0kJ!M&40>$RR9"
+		settings.client_secret = tricky_secret
+		settings.save()
+
+		settings.reload()
+		self.assertEqual(settings.get_password("client_secret"), tricky_secret)
+
 	def test_get_base_url(self):
 		settings = frappe.get_single("Talabat Settings")
 

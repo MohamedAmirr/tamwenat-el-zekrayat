@@ -55,6 +55,27 @@ class IntegrationTestTalabatProductMapping(IntegrationTestCase):
 		self.assertEqual(mapping.talabat_sku, "34000000289")
 		self.assertEqual(mapping.sync_status, "Not Synced")
 
+	def test_talabat_sku_with_angle_brackets_persists_exactly(self):
+		# Regression: same class of bug as Talabat Settings' client_secret -
+		# Frappe's HTML/XSS sanitizer mutilates values containing "<"/">" unless
+		# the field sets "ignore_xss_filter". talabat_sku is an opaque external
+		# SKU, not HTML, and (unlike vendor_id) isn't part of autoname, so it can
+		# legitimately contain these characters and must survive a save intact.
+		vendor = self.make_vendor("test-mapping-vendor-005")
+		tricky_sku = "sku-<p<+X>-001"
+
+		mapping = frappe.get_doc(
+			{
+				"doctype": "Talabat Product Mapping",
+				"item": TEST_ITEM,
+				"vendor": vendor.name,
+				"talabat_sku": tricky_sku,
+			}
+		).insert()
+
+		mapping.reload()
+		self.assertEqual(mapping.talabat_sku, tricky_sku)
+
 	def test_duplicate_item_vendor_rejected(self):
 		# autoname is format:{item}-{vendor}, so a straight duplicate insert
 		# computes the same `name` as the existing record before validate()
