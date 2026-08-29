@@ -4,6 +4,10 @@
 import frappe
 from frappe.tests import IntegrationTestCase
 
+from talabat_integration.talabat_integration.doctype.talabat_product_mapping.talabat_product_mapping import (
+	compute_item_vendor_key,
+)
+
 # Frappe's IntegrationTestCase auto-generates a generic test record for every
 # doctype linked from the one under test (here: Item). ERPNext's generic Item
 # test-record generator hits a pre-existing Fiscal Year overlap bug on this
@@ -55,16 +59,13 @@ class IntegrationTestTalabatProductMapping(IntegrationTestCase):
 		self.assertEqual(mapping.talabat_sku, "34000000289")
 		self.assertEqual(mapping.sync_status, "Not Synced")
 
-	def test_talabat_sku_with_angle_brackets_rejected_by_name_validation(self):
-		# talabat_sku is now part of autoname (format:{vendor}-{talabat_sku},
-		# issue #19), so it's subject to Frappe's own document-name validation,
-		# which unconditionally rejects "<"/">" - the same restriction PR #17
-		# confirmed for vendor_id, and for the same reason: name validation
-		# runs before the XSS sanitizer ever would, so ignore_xss_filter (set
-		# on this field prior to #19) no longer has anything to protect
-		# against here and was removed. A real Talabat SKU containing "<"/">"
-		# would be rejected outright now - an accepted, documented limitation,
-		# not a silent gap.
+	def test_talabat_sku_with_angle_brackets_rejected_at_insert(self):
+		# name is built by a custom autoname() as f"{vendor}::{talabat_sku}",
+		# and Frappe's own document-name validation (validate_name) runs on
+		# whatever autoname() produces, unconditionally rejecting "<"/">" -
+		# regardless of ignore_xss_filter, which only governs field-value
+		# sanitization, not name validation. So an insert with "<"/">" in
+		# talabat_sku is still rejected outright, same as before #19.
 		vendor = self.make_vendor("test-mapping-vendor-005")
 
 		with self.assertRaises(frappe.NameError):
@@ -77,11 +78,50 @@ class IntegrationTestTalabatProductMapping(IntegrationTestCase):
 				}
 			).insert()
 
+	def test_talabat_sku_with_angle_brackets_survives_update(self):
+		# Unlike insert (name validation always guards this), an UPDATE to
+		# talabat_sku doesn't touch `name` at all (autoname() only runs at
+		# insert) - it just goes through _sanitize_content() like any other
+		# field save. ignore_xss_filter on talabat_sku is what stops that from
+		# silently mangling the value, the way it once did for client_secret
+		# (#17) - this proves the same protection now holds here.
+		vendor = self.make_vendor("test-mapping-vendor-007")
+
+		mapping = frappe.get_doc(
+			{
+				"doctype": "Talabat Product Mapping",
+				"item": TEST_ITEM,
+				"vendor": vendor.name,
+				"talabat_sku": "clean-sku-001",
+			}
+		).insert()
+
+		mapping.talabat_sku = "sku-<p<+X>-001"
+		mapping.save()
+		mapping.reload()
+
+		self.assertEqual(mapping.talabat_sku, "sku-<p<+X>-001")
+
+	def test_separator_rejected_in_vendor_or_sku(self):
+		# The naming scheme's whole safety argument depends on "::" never
+		# appearing in vendor or talabat_sku - enforce it, don't just assume it.
+		vendor = self.make_vendor("test-mapping-vendor-008")
+
+		with self.assertRaises(frappe.ValidationError):
+			frappe.get_doc(
+				{
+					"doctype": "Talabat Product Mapping",
+					"item": TEST_ITEM,
+					"vendor": vendor.name,
+					"talabat_sku": "sku::with-separator",
+				}
+			).insert()
+
 	def test_duplicate_vendor_sku_rejected(self):
-		# autoname is format:{vendor}-{talabat_sku}, so a straight duplicate
-		# insert (same vendor+sku, different item) computes the same `name`
-		# as the existing record before validate() runs - it's MariaDB's own
-		# primary-key constraint that rejects it, atomically, as
+		# autoname() computes name as f"{vendor}::{talabat_sku}", so a straight
+		# duplicate insert (same vendor+sku, different item) computes the same
+		# `name` as the existing record before validate() runs - it's
+		# MariaDB's own primary-key constraint that rejects it, atomically, as
 		# DuplicateEntryError.
 		vendor = self.make_vendor("test-mapping-vendor-002")
 
@@ -175,7 +215,7 @@ class IntegrationTestTalabatProductMapping(IntegrationTestCase):
 		mapping.reload()
 
 		self.assertEqual(mapping.item, other_item)
-		self.assertEqual(mapping.item_vendor_key, f"{other_item}-{vendor.name}")
+		self.assertEqual(mapping.item_vendor_key, compute_item_vendor_key(other_item, vendor.name))
 
 	def test_same_item_different_vendor_allowed(self):
 		vendor_a = self.make_vendor("test-mapping-vendor-003a")
@@ -200,3 +240,92 @@ class IntegrationTestTalabatProductMapping(IntegrationTestCase):
 		).insert()
 
 		self.assertEqual(second.vendor, vendor_b.name)
+
+	def test_item_vendor_key_does_not_collide_on_hyphen(self):
+		# A bare "-"-joined key would make item="AA-BB"+vendor="CC" collide
+		# with item="AA"+vendor="BB-CC" (both -> "AA-BB-CC"). Real risk here:
+		# item codes in this app's own seed data contain hyphens. JSON
+		# encoding (compute_item_vendor_key) must keep these distinct.
+		item_ab = "TEST-MAPPING-AA-BB"
+		item_a = "TEST-MAPPING-AA"
+		for code in (item_ab, item_a):
+			if not frappe.db.exists("Item", code):
+				frappe.get_doc(
+					{
+						"doctype": "Item",
+						"item_code": code,
+						"item_group": "Products",
+						"stock_uom": "Nos",
+						"is_stock_item": 0,
+					}
+				).insert()
+
+		vendor_cc = self.make_vendor("test-mapping-vendor-CC")
+		vendor_bc = self.make_vendor("test-mapping-vendor-BB-CC")
+
+		frappe.get_doc(
+			{
+				"doctype": "Talabat Product Mapping",
+				"item": item_ab,
+				"vendor": vendor_cc.name,
+				"talabat_sku": "collision-test-sku-1",
+			}
+		).insert()
+
+		# Should succeed - item_a + vendor_bc is a genuinely different pair,
+		# even though a bare "-" join would make both keys "AA-BB-CC".
+		second = frappe.get_doc(
+			{
+				"doctype": "Talabat Product Mapping",
+				"item": item_a,
+				"vendor": vendor_bc.name,
+				"talabat_sku": "collision-test-sku-2",
+			}
+		).insert()
+
+		self.assertEqual(second.item, item_a)
+		self.assertNotEqual(
+			compute_item_vendor_key(item_ab, vendor_cc.name),
+			compute_item_vendor_key(item_a, vendor_bc.name),
+		)
+
+	def test_name_does_not_collide_on_hyphen(self):
+		# Same collision shape, for the primary name this time: vendor="X-Y"
+		# + sku="Z" vs vendor="X" + sku="Y-Z" would both be "X-Y-Z" under a
+		# bare "-" join. The "::" separator must keep these distinct.
+		vendor_xy = self.make_vendor("test-mapping-vendor-X-Y")
+		vendor_x = self.make_vendor("test-mapping-vendor-X")
+
+		frappe.get_doc(
+			{
+				"doctype": "Talabat Product Mapping",
+				"item": TEST_ITEM,
+				"vendor": vendor_xy.name,
+				"talabat_sku": "Z",
+			}
+		).insert()
+
+		# Should succeed - a bare "-" join would collide on name "X-Y-Z" for
+		# both; "::" keeps them apart ("X-Y::Z" vs "X::Y-Z").
+		other_item = "TEST-MAPPING-ITEM-4"
+		if not frappe.db.exists("Item", other_item):
+			frappe.get_doc(
+				{
+					"doctype": "Item",
+					"item_code": other_item,
+					"item_group": "Products",
+					"stock_uom": "Nos",
+					"is_stock_item": 0,
+				}
+			).insert()
+
+		second = frappe.get_doc(
+			{
+				"doctype": "Talabat Product Mapping",
+				"item": other_item,
+				"vendor": vendor_x.name,
+				"talabat_sku": "Y-Z",
+			}
+		).insert()
+
+		self.assertNotEqual(second.name, f"{vendor_xy.name}::Z")
