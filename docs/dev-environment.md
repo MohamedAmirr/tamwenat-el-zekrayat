@@ -105,6 +105,20 @@ docker exec -it -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekraya
 
 `bench start` serves on `127.0.0.1:8000` (published by the compose file). Add `dev.localhost` to `/etc/hosts` pointing at `127.0.0.1` before browsing to `http://dev.localhost:8000`. Login `Administrator` / `admin`.
 
+## Seeding sample product data (dev only)
+
+The dev site starts with zero `Item` records — real products aren't imported into ERPNext until the actual website goes live. To have realistic Items to develop/test Talabat product-mapping work against in the meantime, `scripts/seed_dev_items.py` (repo root, **not** part of `apps/talabat_integration` — this is dev tooling, never shipped) creates 5 sample grocery/snack Items (with a barcode row and a price each) plus the "Snacks"/"Beverages" Item Groups if they don't already exist. It's idempotent — safe to re-run.
+
+Never run this against a real site.
+
+```bash
+docker cp scripts/seed_dev_items.py tamwenat-el-zekrayat-dev-frappe-1:/tmp/seed_dev_items.py
+docker exec -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekrayat-dev-frappe-1 bash -lc \
+  "printf \"ns = {}\nexec(open('/tmp/seed_dev_items.py').read(), ns)\nns['run']()\n\" | bench --site dev.localhost console"
+```
+
+(Piping into `bench console` needs the explicit `ns = {}` / `exec(..., ns)` / `ns['run']()` form — a bare `exec(open(...).read())` puts top-level names in a scope the function body can't see, raising `NameError` on its own globals.)
+
 ## Tearing down
 
 ```bash
