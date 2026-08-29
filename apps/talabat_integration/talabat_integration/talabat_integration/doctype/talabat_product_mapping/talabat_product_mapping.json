@@ -41,8 +41,7 @@
    "fieldname": "item_vendor_key",
    "fieldtype": "Data",
    "hidden": 1,
-   "ignore_xss_filter": 1,
-   "length": 300,
+   "length": 64,
    "read_only": 1,
    "unique": 1,
    "label": "Item-Vendor Key"

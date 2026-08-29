@@ -133,6 +133,20 @@ The `-e KEY='...'` on `docker exec` is a single top-level single-quoted shell ar
 
 Practical rule: don't treat the dev site's current schema as a stable baseline across branch switches — only trust it immediately after running `migrate` on the branch you actually care about right now. Before merging multiple feature branches, the real integration check is checking out `main` after they've all landed and running `migrate` there once.
 
+## Gotcha: `bench migrate` won't re-run a patch it already applied on this site
+
+Patches are tracked per-site in `Patch Log` and only ever run once, ever — this is correct behavior for a real site, but bites you while *iterating* on a not-yet-merged patch against the shared dev site: fix a bug in the patch's logic, run `migrate` again expecting it to redo the backfill, and nothing happens, because the site already marked that patch module as applied on the first (buggy) run. To force a re-run while developing, call the patch's `execute()` directly instead of going through `migrate`:
+
+```bash
+docker exec -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekrayat-dev-frappe-1 bash -lc "echo '
+from <app>.patches.<version>.<patch_module> import execute
+execute()
+frappe.db.commit()
+' | bench --site dev.localhost console"
+```
+
+This is purely a dev-iteration wrinkle — a real site installing the app for the first time, or upgrading past this patch for the first time, runs it normally.
+
 ## Seeding sample product data (dev only)
 
 The dev site starts with zero `Item` records — real products aren't imported into ERPNext until the actual website goes live. To have realistic Items to develop/test Talabat product-mapping work against in the meantime, `scripts/seed_dev_items.py` (repo root, **not** part of `apps/talabat_integration` — this is dev tooling, never shipped) creates 5 sample grocery/snack Items (with a barcode row and a price each) plus the "Snacks"/"Beverages" Item Groups if they don't already exist. It's idempotent — safe to re-run.

@@ -1,6 +1,8 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
+import hashlib
+
 import frappe
 from frappe.model.document import Document
 
@@ -15,13 +17,20 @@ NAME_SEPARATOR = "::"
 
 
 def compute_item_vendor_key(item, vendor):
-	"""Unambiguous encoding for the (item, vendor) secondary-uniqueness key.
+	"""Unambiguous, fixed-length encoding for the (item, vendor)
+	secondary-uniqueness key.
 
-	Uses JSON encoding (not a "-"-joined string) so the key can't collide the
-	same way a bare separator would - see NAME_SEPARATOR's docstring above for
-	why that's a real, not theoretical, risk with these fields' actual values.
+	A NUL-separated hash rather than a "-"-joined string (real collision risk
+	- see NAME_SEPARATOR's docstring) or a raw JSON encoding (that had its own
+	problem: frappe.as_json's default ensure_ascii=True blows up non-ASCII
+	content - e.g. Arabic item codes - into \\uXXXX escapes, and even the
+	pure-ASCII worst case of two 140-char fields left almost no margin against
+	the field's length limit). A hash is always a fixed 64 hex chars
+	regardless of input content or length, and the NUL byte can't appear in
+	either value undetected the way a printable separator could.
 	"""
-	return frappe.as_json([item, vendor])
+	digest_input = f"{item}\x00{vendor}".encode()
+	return hashlib.sha256(digest_input).hexdigest()
 
 
 class TalabatProductMapping(Document):
