@@ -1,0 +1,82 @@
+{
+ "actions": [],
+ "creation": "2026-08-29 13:26:47.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "item",
+  "vendor",
+  "talabat_sku",
+  "sync_status",
+  "last_synced_on",
+  "last_error"
+ ],
+ "fields": [
+  {
+   "fieldname": "item",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Item",
+   "options": "Item",
+   "reqd": 1
+  },
+  {
+   "fieldname": "vendor",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Vendor",
+   "options": "Talabat Vendor",
+   "reqd": 1
+  },
+  {
+   "fieldname": "talabat_sku",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Talabat SKU"
+  },
+  {
+   "default": "Not Synced",
+   "fieldname": "sync_status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Sync Status",
+   "options": "Not Synced\nSynced\nError"
+  },
+  {
+   "fieldname": "last_synced_on",
+   "fieldtype": "Datetime",
+   "label": "Last Synced On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_error",
+   "fieldtype": "Small Text",
+   "label": "Last Error",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-08-29 13:26:47.000000",
+ "modified_by": "Administrator",
+ "module": "Talabat Integration",
+ "name": "Talabat Product Mapping",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
