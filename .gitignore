@@ -9,9 +9,12 @@ __pycache__/
 # node
 node_modules/
 
-# frappe bench artifacts (relevant once apps/ has a bench-managed app)
+# frappe bench artifacts inside apps/<app_name>/ (bind-mounted into the dev
+# bench container — see docs/dev-environment.md). The bench itself (frappe,
+# erpnext, env, node_modules, sites) lives in a docker volume, never on host.
 apps/*/env/
 apps/*/node_modules/
+apps/*/.git/
 logs/
 sites/*
 !sites/.gitkeep
