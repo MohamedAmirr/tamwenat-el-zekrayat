@@ -68,6 +68,20 @@ Rules for keeping these cheap to read:
 - Every "Scope" and "Acceptance" bullet must be concrete (a file, a function, a behavior) — not "improve X" or "handle edge cases."
 - Skip sections that don't apply rather than filling them with filler text.
 
+## Branch naming
+
+One branch per sub-issue, created when work actually starts on it (not when the issue is filed). Format:
+
+`<type>/<issue-number>-<kebab-slug>`
+
+- `<type>`: `feat` (new capability), `fix`, `chore`, `docs` — matches the issue's actual work; sub-issues here are almost always `feat`.
+- `<issue-number>`: the sub-issue's own GitHub number, never the epic's.
+- `<kebab-slug>`: 2-5 words from the issue title, lowercase, hyphenated.
+
+Example: issue #1 "Talabat Authentication: Talabat Settings doctype" → `feat/1-talabat-settings-doctype`.
+
+Create it with `gh issue develop <number> --name <branch> --checkout`, not a plain `git checkout -b` — this makes it a GitHub-linked branch that shows under the issue's "Development" section and lets a PR from it auto-close the issue on merge. Fall back to a plain branch only if `gh issue develop` isn't available.
+
 ## Labels
 
 Ensure these exist before use (`gh label list`, create with `gh label create <name> --color <hex>` if missing): `epic`, and one label per feature area (e.g. `talabat`). Don't invent a new label per issue.

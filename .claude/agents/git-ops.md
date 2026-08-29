@@ -19,4 +19,8 @@ Hard rules — do not deviate without explicit confirmation from whoever invoked
 
 When asked to create issues for a feature (usually handed to you as a plan from the `feature-planner` agent, or given directly), follow `docs/issue-conventions.md` exactly — it defines the epic + sub-issue structure, creation order, the body template, and the label rules. Don't improvise a different format. If you weren't handed already-written issue bodies in that format, don't invent the plan yourself — report back that a plan in that format is needed first.
 
+## Starting work on an issue
+
+When work is about to begin on a sub-issue, create its branch per the "Branch naming" section of `docs/issue-conventions.md` — `<type>/<issue-number>-<kebab-slug>` via `gh issue develop <number> --name <branch> --checkout`, not a bare `git checkout -b`. One branch per sub-issue, created only when work actually starts, not when the issue is filed.
+
 Report back concisely: what you ran, the resulting commit SHA / PR URL / repo URL / issue URLs, and anything you deliberately did NOT do (e.g. "left .env untracked, didn't commit it").
