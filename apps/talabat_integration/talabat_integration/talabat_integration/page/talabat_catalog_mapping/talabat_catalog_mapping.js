@@ -5,6 +5,14 @@ frappe.pages["talabat-catalog-mapping"].on_page_load = function (wrapper) {
 		single_column: true,
 	});
 
+	// Talabat SKUs/titles and Item names typed or picked here are never
+	// server-side XSS-sanitized before reaching this page (talabat_sku is an
+	// opaque external identifier with ignore_xss_filter: 1 - see
+	// frappe-conventions.md), and frappe.toast()/show_alert() render
+	// message.message straight into the DOM. Any value sourced from Talabat's
+	// live catalog or user typing must be escaped (frappe.utils.escape_html)
+	// before it's interpolated into a toast message.
+
 	let vendor_field = page.add_field({
 		fieldtype: "Link",
 		fieldname: "vendor",
@@ -44,17 +52,6 @@ frappe.pages["talabat-catalog-mapping"].on_page_load = function (wrapper) {
 		},
 		"refresh"
 	);
-
-	// Talabat SKUs/titles and Item names typed or picked here are never
-	// server-side XSS-sanitized before reaching this page (talabat_sku is an
-	// opaque external identifier with ignore_xss_filter: 1 - see
-	// frappe-conventions.md), and frappe.toast()/show_alert() render
-	// message.message straight into the DOM. Any value sourced from Talabat's
-	// live catalog or user typing must be escaped before it's interpolated
-	// into a toast message.
-	function esc(value) {
-		return frappe.utils.escape_html(value == null ? "" : String(value));
-	}
 
 	function get_available_item_query(current_sku) {
 		let taken = Array.from(mapped_item_by_item.entries())
@@ -101,8 +98,8 @@ frappe.pages["talabat-catalog-mapping"].on_page_load = function (wrapper) {
 				if (existing_sku && existing_sku !== values.talabat_sku) {
 					frappe.toast({
 						message: __("Item {0} is already mapped to SKU {1}.", [
-							esc(values.item),
-							esc(existing_sku),
+							frappe.utils.escape_html(values.item),
+							frappe.utils.escape_html(existing_sku),
 						]),
 						indicator: "red",
 					});
@@ -120,8 +117,8 @@ frappe.pages["talabat-catalog-mapping"].on_page_load = function (wrapper) {
 						dialog.hide();
 						frappe.toast({
 							message: __("Mapping saved: {0} → {1}", [
-								esc(values.talabat_sku),
-								esc(values.item),
+								frappe.utils.escape_html(values.talabat_sku),
+								frappe.utils.escape_html(values.item),
 							]),
 							indicator: "green",
 						});
@@ -224,8 +221,8 @@ frappe.pages["talabat-catalog-mapping"].on_page_load = function (wrapper) {
 								if (existing_sku && existing_sku !== row.sku) {
 									frappe.toast({
 										message: __("Item {0} is already mapped to SKU {1}.", [
-											esc(value),
-											esc(existing_sku),
+											frappe.utils.escape_html(value),
+											frappe.utils.escape_html(existing_sku),
 										]),
 										indicator: "red",
 									});
@@ -241,7 +238,10 @@ frappe.pages["talabat-catalog-mapping"].on_page_load = function (wrapper) {
 										if (seq !== vendor_request_seq) return; // superseded by a newer vendor selection
 										set_mapped_item(row.sku, value);
 										frappe.toast({
-											message: __("Mapping saved: {0} → {1}", [esc(row.sku), esc(value)]),
+											message: __("Mapping saved: {0} → {1}", [
+												frappe.utils.escape_html(row.sku),
+												frappe.utils.escape_html(value),
+											]),
 											indicator: "green",
 										});
 										// Update just this row's derived Status display

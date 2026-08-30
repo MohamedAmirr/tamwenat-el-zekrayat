@@ -55,6 +55,11 @@ function fetch_and_pick_sku(frm) {
 	});
 }
 
+// Talabat SKUs/titles from get_vendor_products() are never server-side
+// XSS-sanitized before reaching this dialog (talabat_sku is an opaque
+// external identifier with ignore_xss_filter: 1 - see frappe-conventions.md),
+// and the Autocomplete control below renders each option's label via
+// .html() with no escaping of its own. Escape before interpolating.
 function show_product_picker(frm, products) {
 	const dialog = new frappe.ui.Dialog({
 		title: __("Select a Talabat product"),
@@ -65,9 +70,15 @@ function show_product_picker(frm, products) {
 				label: __("Product"),
 				reqd: 1,
 				options: products.map((p) => ({
-					label: `${p.sku} — ${p.title}`,
+					label: `${frappe.utils.escape_html(p.sku)} — ${frappe.utils.escape_html(p.title)}`,
 					value: p.sku,
 				})),
+				// Autocomplete isn't in ControlData.set_disp_area()'s escape
+				// whitelist (Data/Long Text/Small Text/Text/Password/
+				// MultiSelect), so the selected option's *display* value also
+				// renders unescaped via .html() - see frappe-conventions.md.
+				// `value` (used by frm.set_value below) must stay raw.
+				formatter: (value) => frappe.utils.escape_html(value),
 			},
 		],
 		primary_action_label: __("Select"),
