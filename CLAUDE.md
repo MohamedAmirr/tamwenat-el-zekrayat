@@ -26,6 +26,11 @@ First custom app: **`talabat_integration`** — integrates ERPNext with the Tala
 
 Scaffolded and installable — `apps/talabat_integration/` exists in this repo, bind-mounted live into the dev bench container (`docker-compose.dev.yml`), and installs cleanly on the dev site (`dev.localhost`). See `docs/dev-environment.md` for the day-to-day workflow (starting the stack, running bench commands, editing app code). Follow `docs/frappe-conventions.md` for doctype/hook/permission conventions when writing the actual features (starting with issues #1-#6, tracked under epics #7 and #8).
 
+## Ground rules
+
+- **Never assume.** Don't guess at missing information — endpoints, schemas, config values, business rules, anything. If a doc has a gap or you don't have what you need, stop and ask the user rather than inferring or picking a plausible default. This applies to every agent, not just the main session (e.g. the #6/#26 catalog-sync design was initially drafted around an assumed polling mechanism instead of checking `docs/talabat-integration/openapi.json`, which documents a webhook callback instead — exactly the kind of assumption this rule exists to prevent). If you look something up on the web to fill a gap, tell the user what you found and that it came from the internet (not this repo's docs), and get their explicit go-ahead before relying on it — don't silently fold external information into a decision, into code, or into an issue body.
+- **Don't over-engineer.** Build what the issue/task actually asks for — no speculative abstractions, extra config knobs, generic frameworks, or handling for cases that can't happen yet. A `talabat_integration`-specific need doesn't need to be generalized until a second real caller shows up (`RemoteDataGrid` is the one deliberate exception — it was scoped as reusable because the catalog-mapping page's own issue called for that). When in doubt about how much to build, ask rather than defaulting to the more elaborate version.
+
 ## Which agent to use
 
 Typical flow per sub-issue: `feature-planner` (plan it) → `frappe-dev` (build it) → `frappe-test` (test + lint it) → `frappe-review` (review it) → `git-ops` (commit/PR it).
