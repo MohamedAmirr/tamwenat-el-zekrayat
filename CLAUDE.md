@@ -8,7 +8,7 @@ Services (see `docker-compose.yml`): `mariadb`, `redis-cache`, `redis-queue`, `c
 
 Versions and site config live in `.env`: `ERPNEXT_VERSION`, `MARIADB_VERSION`, `REDIS_VERSION`, `SITE_NAME`, `COMPOSE_PROJECT_NAME`. Read `.env` before assuming a value — don't hardcode versions or the site name in commands.
 
-`docker-compose.yml` uses **prebuilt `frappe/erpnext` images** and can't run custom apps — it's the deploy-shaped stack. Custom app development happens in a separate `docker-compose.dev.yml` bench container (see "Custom app plan" below).
+`docker-compose.yml` uses **prebuilt `frappe/erpnext` images** and can't run custom apps — it's the deploy-shaped stack. Custom app development happens in a separate `docker-compose.dev.yml` bench container (see "Custom app strategy" below).
 
 ## Details are in docs/, not here
 
