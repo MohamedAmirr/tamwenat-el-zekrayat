@@ -15,6 +15,13 @@ frappe.pages["marketplace-talabat-catalog-mapping"].on_page_load = function (wra
 	const $container = $('<div class="marketplace-talabat-catalog-mapping-container"></div>').appendTo(
 		page.body
 	);
+	$("<p class=\"text-muted mb-3\"></p>")
+		.text(
+			__(
+				"Talabat Connection stores API credentials. Marketplace Account identifies the Talabat store. A saved mapping links one Talabat SKU to one ERPNext Item."
+			)
+		)
+		.appendTo($container);
 	const $status = $('<div class="text-muted mb-2"></div>').appendTo($container);
 	const $grid_wrapper = $("<div></div>").appendTo($container);
 	let grid = null;
@@ -41,6 +48,30 @@ frappe.pages["marketplace-talabat-catalog-mapping"].on_page_load = function (wra
 			]),
 			indicator: "green",
 		});
+	}
+
+	function disable_mapping(row, marketplace_account, seq) {
+		frappe.confirm(
+			__("Disable the saved mapping for Talabat SKU {0}? It will remain in history and the SKU will become unmapped.", [
+				frappe.utils.escape_html(row.sku),
+			]),
+			() =>
+				frappe
+					.call({
+						method: "marketplace_integrations.api.talabat_catalog.disable_mapping",
+						args: { marketplace_account, external_reference: row.sku },
+						freeze: true,
+						freeze_message: __("Disabling mapping..."),
+					})
+					.then(() => {
+						if (seq !== account_request_seq || !grid) return;
+						frappe.toast({
+							message: __("Mapping disabled: {0}", [frappe.utils.escape_html(row.sku)]),
+							indicator: "green",
+						});
+						grid.go(grid.page);
+					}),
+		);
 	}
 
 	function show_manual_mapping_dialog() {
@@ -97,6 +128,17 @@ frappe.pages["marketplace-talabat-catalog-mapping"].on_page_load = function (wra
 						{ fieldname: "price", label: __("Price") },
 						{ fieldname: "status", label: __("Status") },
 						{ fieldname: "item", label: __("Item"), editable: "Link", options: "Item" },
+						{
+							fieldname: "actions",
+							label: __("Actions"),
+							render: ($cell, row) => {
+								if (!row.item) return;
+								$("<button class=\"btn btn-default btn-xs\" type=\"button\"></button>")
+									.text(__("Disable mapping"))
+									.on("click", () => disable_mapping(row, marketplace_account, seq))
+									.appendTo($cell);
+							},
+						},
 					],
 					fetch_page: (page_number, page_size) =>
 						fetch_catalog_page(marketplace_account, seq, page_number, page_size),
@@ -110,7 +152,7 @@ frappe.pages["marketplace-talabat-catalog-mapping"].on_page_load = function (wra
 						if (fieldname !== "item") return;
 						if (!value) {
 							frappe.toast({
-								message: __("Use a value to update the mapping; unmapping isn't supported here yet."),
+								message: __("Use Disable mapping to unmap this SKU."),
 								indicator: "orange",
 							});
 							return Promise.reject();
@@ -123,7 +165,10 @@ frappe.pages["marketplace-talabat-catalog-mapping"].on_page_load = function (wra
 							.then(() => {
 								if (seq !== account_request_seq) return;
 								toast_mapping_saved(row.sku, value);
-								if (grid) grid.update_cell(row, "status", __("Mapped"));
+								if (grid) {
+									grid.update_cell(row, "status", __("Mapped"));
+									grid.update_cell(row, "actions");
+								}
 							});
 					},
 				});

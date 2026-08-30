@@ -7,7 +7,7 @@
  "idx": 0,
  "items": [
   {
-   "label": "Talabat Catalog Mapping",
+   "label": "Legacy Talabat Catalog Mapping",
    "link_to": "talabat-catalog-mapping",
    "link_type": "Page",
    "type": "Link",
@@ -27,7 +27,7 @@
    "icon": "settings"
   }
  ],
- "modified": "2026-08-29 00:00:00.000000",
+ "modified": "2026-08-30 01:00:00.000000",
  "modified_by": "Administrator",
  "module": "Talabat Integration",
  "name": "Talabat Integration",

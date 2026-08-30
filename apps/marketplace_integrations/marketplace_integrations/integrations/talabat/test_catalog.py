@@ -7,6 +7,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.integrations.talabat.catalog import (
+	disable_mapping,
 	get_catalog_page,
 	get_mapped_items,
 	upsert_mapping,
@@ -109,6 +110,46 @@ class IntegrationTestTalabatCatalog(IntegrationTestCase):
 		self.assertEqual(
 			frappe.get_doc("Marketplace Product Mapping", first["name"]).item, self.other_item.name
 		)
+
+	def test_disable_mapping_preserves_history_and_upsert_reenables_it(self):
+		created = upsert_mapping(self.account.name, "disable-me", self.item.name)
+
+		result = disable_mapping(self.account.name, "disable-me")
+		mapping = frappe.get_doc("Marketplace Product Mapping", created["name"])
+
+		self.assertEqual(result, {"name": created["name"], "enabled": 0})
+		self.assertEqual(mapping.enabled, 0)
+		self.assertEqual(mapping.item, self.item.name)
+		self.assertEqual(get_mapped_items(self.account.name), {})
+
+		reenabled = upsert_mapping(self.account.name, "disable-me", self.other_item.name)
+		mapping.reload()
+		self.assertEqual(reenabled["name"], created["name"])
+		self.assertEqual(mapping.enabled, 1)
+		self.assertEqual(mapping.item, self.other_item.name)
+
+	def test_disable_mapping_is_idempotent_and_rejects_missing_or_disabled_account_or_mapping(self):
+		created = upsert_mapping(self.account.name, "disable-me", self.item.name)
+
+		with self.assertRaises(frappe.DoesNotExistError):
+			disable_mapping("missing-account", "disable-me")
+
+		with self.assertRaises(frappe.ValidationError):
+			disable_mapping(self.account.name, "unknown-sku")
+
+		self.assertEqual(
+			disable_mapping(self.account.name, "disable-me"),
+			{"name": created["name"], "enabled": 0},
+		)
+		self.assertEqual(
+			disable_mapping(self.account.name, "disable-me"),
+			{"name": created["name"], "enabled": 0},
+		)
+
+		self.account.enabled = 0
+		self.account.save()
+		with self.assertRaises(frappe.ValidationError):
+			disable_mapping(self.account.name, "disable-me")
 
 	def test_non_system_manager_cannot_browse_or_save(self):
 		user = frappe.get_doc(

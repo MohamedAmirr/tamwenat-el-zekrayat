@@ -192,6 +192,8 @@ frappe.ui.RemoteDataGrid = class RemoteDataGrid {
 			cells[col.fieldname] = $cell;
 			if (col.editable === "Link") {
 				this.make_link_cell($cell, row, col);
+			} else if (col.render) {
+				col.render($cell, row);
 			} else {
 				// Ellipsis only on plain text cells - an editable cell must never
 				// clip, or the Link's dropdown gets cut off at the cell boundary.
@@ -205,15 +207,20 @@ frappe.ui.RemoteDataGrid = class RemoteDataGrid {
 	// Updates a single read-only/derived column's display for one already-
 	// rendered row (e.g. a "status" column computed from an editable column
 	// that just changed), without re-fetching or re-rendering the whole page.
-	// Only supports plain text columns - editable (Link) cells manage their
-	// own DOM state via make_link_cell()'s closures and aren't touched here.
+	// Plain text and caller-rendered cells are supported; editable (Link) cells
+	// manage their own DOM state via make_link_cell()'s closures.
 	update_cell(row, fieldname, value) {
-		row[fieldname] = value;
+		if (arguments.length > 2) row[fieldname] = value;
 		let cells = this._row_cells.get(row);
 		let $cell = cells && cells[fieldname];
 		if (!$cell) return;
 		let col = this.columns.find((c) => c.fieldname === fieldname);
 		if (col && col.editable === "Link") return;
+		if (col && col.render) {
+			$cell.empty();
+			col.render($cell, row);
+			return;
+		}
 		$cell.text(value == null ? "" : value);
 	}
 

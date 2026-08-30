@@ -59,7 +59,11 @@ def get_catalog_page(account_name, page=1, page_size=20):
 			row.external_reference: row.item
 			for row in frappe.get_all(
 				"Marketplace Product Mapping",
-				filters={"marketplace_account": account.name, "external_reference": ["in", page_skus]},
+				filters={
+					"marketplace_account": account.name,
+					"external_reference": ["in", page_skus],
+					"enabled": 1,
+				},
 				fields=["external_reference", "item"],
 			)
 		}
@@ -86,7 +90,7 @@ def get_mapped_items(account_name):
 		row.external_reference: row.item
 		for row in frappe.get_all(
 			"Marketplace Product Mapping",
-			filters={"marketplace_account": account.name},
+			filters={"marketplace_account": account.name, "enabled": 1},
 			fields=["external_reference", "item"],
 		)
 	}
@@ -113,6 +117,7 @@ def upsert_mapping(account_name, external_reference, item):
 		mapping = frappe.get_doc("Marketplace Product Mapping", existing)
 		mapping.check_permission("write")
 		mapping.item = item_doc.name
+		mapping.enabled = 1
 		mapping.save()
 	else:
 		_require_mapping_permission("create")
@@ -127,3 +132,29 @@ def upsert_mapping(account_name, external_reference, item):
 		)
 		mapping.insert()
 	return {"name": mapping.name}
+
+
+def disable_mapping(account_name, external_reference):
+	"""Disable one current Talabat SKU mapping without deleting its history."""
+	account, _connection = get_account(account_name)
+	if not account.enabled:
+		frappe.throw(_("Marketplace Account {0} is disabled.").format(account.name))
+
+	external_reference = cstr(external_reference).strip()
+	if not external_reference:
+		frappe.throw(_("Talabat SKU is required."))
+
+	mapping_name = frappe.db.get_value(
+		"Marketplace Product Mapping",
+		{"marketplace_account": account.name, "external_reference": external_reference},
+		"name",
+	)
+	if not mapping_name:
+		frappe.throw(_("No mapping exists for Talabat SKU {0}.").format(external_reference))
+
+	mapping = frappe.get_doc("Marketplace Product Mapping", mapping_name)
+	mapping.check_permission("write")
+	if mapping.enabled:
+		mapping.enabled = 0
+		mapping.save()
+	return {"name": mapping.name, "enabled": mapping.enabled}

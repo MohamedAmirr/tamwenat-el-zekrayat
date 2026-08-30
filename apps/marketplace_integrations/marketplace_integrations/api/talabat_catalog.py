@@ -21,3 +21,8 @@ def get_mapped_items(marketplace_account):
 @frappe.whitelist()
 def upsert_mapping(marketplace_account, external_reference, item):
 	return catalog.upsert_mapping(marketplace_account, external_reference, item)
+
+
+@frappe.whitelist()
+def disable_mapping(marketplace_account, external_reference):
+	return catalog.disable_mapping(marketplace_account, external_reference)
