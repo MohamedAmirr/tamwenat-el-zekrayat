@@ -12,6 +12,19 @@ Docker images, with MariaDB and Redis running as containers alongside it.
 | MariaDB | 12.3.3 | Current MariaDB LTS. If you hit compatibility issues, Frappe is most heavily tested against 10.6/11.4 — pin `MARIADB_VERSION` in `.env` to `11.4` as a fallback. |
 | Redis | 8.10.1 | Used for both cache and queue/socketio |
 
+## Marketplace integrations
+
+The target custom integration architecture lives in the new
+`marketplace_integrations` app and is documented in
+[`docs/marketplace-integrations/architecture.md`](docs/marketplace-integrations/architecture.md).
+
+The existing `apps/talabat_integration/` app is the legacy Talabat
+implementation and remains in the repository while its proven behavior and data
+are migrated incrementally. Talabat's checked-in API contract remains under
+`docs/talabat-integration/`.
+
+See `docs/codex-project-map.md` for task-oriented repository navigation.
+
 ## Before you start
 
 1. Edit `.env` and change:

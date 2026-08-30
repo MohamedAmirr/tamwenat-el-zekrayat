@@ -8,7 +8,7 @@ Services (see `docker-compose.yml`): `mariadb`, `redis-cache`, `redis-queue`, `c
 
 Versions and site config live in `.env`: `ERPNEXT_VERSION`, `MARIADB_VERSION`, `REDIS_VERSION`, `SITE_NAME`, `COMPOSE_PROJECT_NAME`. Read `.env` before assuming a value — don't hardcode versions or the site name in commands.
 
-`docker-compose.yml` uses **prebuilt `frappe/erpnext` images** and can't run custom apps — it's the deploy-shaped stack. Custom app development happens in a separate `docker-compose.dev.yml` bench container (see "Custom app plan" below).
+`docker-compose.yml` uses **prebuilt `frappe/erpnext` images** and can't run custom apps — it's the deploy-shaped stack. Custom app development happens in a separate `docker-compose.dev.yml` bench container (see "Custom app strategy" below).
 
 ## Details are in docs/, not here
 
@@ -17,19 +17,22 @@ Keep this file short. Load these on demand rather than re-deriving them:
 - `docs/docker-ops.md` — every-day commands for the prod-shaped stack: start/stop, running `bench` inside the container, logs, backup/restore, migrations, resetting.
 - `docs/dev-environment.md` — the dev bench stack: bringing it up, `bench new-app`/`new-site`/`install-app`/`bench start`, how host↔container app code syncing works. Reusable for every future custom app, not just `talabat_integration`.
 - `docs/frappe-conventions.md` — Frappe/ERPNext framework conventions to follow for all custom app work: doctype structure, hooks.py, permissions, migrations/patches, whitelisted methods, client scripts, naming, plus hard-won gotchas (XSS-sanitizer field corruption, autoname/`_sync_autoname_field` traps, composite-uniqueness pattern).
-- `docs/talabat-integration/architecture.md` — a live map of what actually exists in `talabat_integration` (doctypes, API modules, client scripts) — read this before touching the app so you're not rediscovering the codebase by grep. **Must be kept current** — see the rule in `frappe-dev.md`/`frappe-review.md`.
+- `docs/marketplace-integrations/architecture.md` — target shared marketplace architecture: connection/account/mapping/inventory boundaries, import shapes, and migration rules. Read this for all new marketplace work.
+- `docs/talabat-integration/architecture.md` — live map of what actually exists in the legacy `talabat_integration` app. Read it for legacy fixes/migration so proven behavior isn't rediscovered or lost.
 - `docs/issue-conventions.md` — how features become GitHub issues: epic + ordered sub-issues, the token-efficient body template, label rules.
 
-## Custom app plan
+## Custom app strategy
 
-First custom app: **`talabat_integration`** — integrates ERPNext with the Talabat Partner API (catalog, orders, promotions). Reference docs/spec: `docs/talabat-integration/` (OpenAPI spec + notes — read the README there before writing any code against it).
+Target shared app: **`marketplace_integrations`** — owns cross-marketplace account, product-mapping, inventory-partition, import/export, and future platform integration work. Its agreed architecture is `docs/marketplace-integrations/architecture.md` and its foundation is tracked by #33.
 
-Scaffolded and installable — `apps/talabat_integration/` exists in this repo, bind-mounted live into the dev bench container (`docker-compose.dev.yml`), and installs cleanly on the dev site (`dev.localhost`). See `docs/dev-environment.md` for the day-to-day workflow (starting the stack, running bench commands, editing app code). Follow `docs/frappe-conventions.md` for doctype/hook/permission conventions when writing the actual features (starting with issues #1-#6, tracked under epics #7 and #8).
+Legacy app: **`talabat_integration`** — the existing, tested Talabat implementation. Keep it installed and functional during the incremental migration tracked by #8. Closed Talabat issues and `docs/talabat-integration/architecture.md` remain evidence of behavior/security decisions that migration work should preserve where applicable.
+
+Do not add new cross-marketplace functionality to `talabat_integration`. New shared functionality belongs in `marketplace_integrations`; change the legacy app only for an explicit legacy fix or migration step. Talabat API behavior continues to come from `docs/talabat-integration/README.md` and the checked-in `openapi.json`, not from the shared architecture document.
 
 ## Ground rules
 
 - **Never assume.** Don't guess at missing information — endpoints, schemas, config values, business rules, anything. If a doc has a gap or you don't have what you need, stop and ask the user rather than inferring or picking a plausible default. This applies to every agent, not just the main session (e.g. the #6/#26 catalog-sync design was initially drafted around an assumed polling mechanism instead of checking `docs/talabat-integration/openapi.json`, which documents a webhook callback instead — exactly the kind of assumption this rule exists to prevent). If you look something up on the web to fill a gap, tell the user what you found and that it came from the internet (not this repo's docs), and get their explicit go-ahead before relying on it — don't silently fold external information into a decision, into code, or into an issue body.
-- **Don't over-engineer.** Build what the issue/task actually asks for — no speculative abstractions, extra config knobs, generic frameworks, or handling for cases that can't happen yet. A `talabat_integration`-specific need doesn't need to be generalized until a second real caller shows up (`RemoteDataGrid` is the one deliberate exception — it was scoped as reusable because the catalog-mapping page's own issue called for that). When in doubt about how much to build, ask rather than defaulting to the more elaborate version.
+- **Don't over-engineer.** Build what the issue/task actually asks for — no speculative abstractions, extra config knobs, generic frameworks, or handling for cases that can't happen yet. Even inside `marketplace_integrations`, don't invent generic platform adapters/fields before a second real platform creates the need. `RemoteDataGrid` is the existing deliberate reusable exception because its issue explicitly scoped it that way. When in doubt about how much to build, ask rather than defaulting to the more elaborate version.
 - **Ask before deciding.** When a task has more than one reasonable way to do it — a design choice, a scope call, which endpoint/mechanism/UI approach to use — don't pick one and proceed. Surface the real options (with a recommendation if you have one) and let the user choose, the way the #6/#26 endpoint-and-trigger decisions and #5's deferred-UI note were handled. This is stricter than "never assume": even when you have enough information to make a defensible call yourself, the call is still the user's to make, not yours.
 
 ## Which agent to use
