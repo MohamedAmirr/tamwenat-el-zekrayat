@@ -2,9 +2,11 @@
 
 ## Project map
 
-Tamwenat El Zekrayat is an ERPNext/Frappe deployment with a custom
-`talabat_integration` app. The production-shaped Compose stack uses prebuilt
-images; build custom apps only in the separate dev bench stack.
+Tamwenat El Zekrayat is an ERPNext/Frappe deployment. The target shared
+marketplace app is `marketplace_integrations`; the existing
+`talabat_integration` app is legacy and remains in place during the Talabat
+migration. The production-shaped Compose stack uses prebuilt images; build
+custom apps only in the separate dev bench stack.
 
 Start with [`docs/codex-project-map.md`](docs/codex-project-map.md) when you
 need orientation. Load the referenced document for the active task; do not
@@ -14,7 +16,8 @@ load every document by default.
 
 | Task | Required reference |
 | --- | --- |
-| Frappe app code or review | `docs/frappe-conventions.md`, `docs/talabat-integration/architecture.md` |
+| Shared marketplace app code or review | `docs/frappe-conventions.md`, `docs/marketplace-integrations/architecture.md` |
+| Legacy Talabat app code or migration | `docs/frappe-conventions.md`, `docs/talabat-integration/architecture.md`, `docs/marketplace-integrations/architecture.md` |
 | Talabat API behavior | `docs/talabat-integration/README.md`, then `openapi.json` as needed |
 | Docker, bench, logs, backups, migration | `docs/docker-ops.md`; read `.env` before using site/version values |
 | Dev bench or tests | `docs/dev-environment.md`, `docs/frappe-conventions.md` |
@@ -44,8 +47,13 @@ load every document by default.
 - Keep business logic in controllers or `doc_events`, not in API endpoints.
 - Do not expose secrets in logs or responses. Every whitelisted API method
   authorizes its caller; public webhooks validate their signature.
-- Update `docs/talabat-integration/architecture.md` in the same change when a
-  Talabat app module, doctype, API, or core client-side pattern changes.
+- Update `docs/marketplace-integrations/architecture.md` when the shared
+  marketplace app's core model/module boundaries change. Update
+  `docs/talabat-integration/architecture.md` when the legacy Talabat app's
+  actual code map changes.
+- Do not add new cross-marketplace functionality to `talabat_integration`.
+  New shared functionality belongs in `marketplace_integrations`; touch the
+  legacy app only for an explicit legacy fix or migration step.
 - Do not run destructive Docker/data/Git actions without explicit user
   confirmation. Take a backup before migrating a site with data that matters.
 - Preserve existing uncommitted work and avoid broad staging commands.
