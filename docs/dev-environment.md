@@ -27,7 +27,7 @@ docker exec -u root tamwenat-el-zekrayat-dev-frappe-1 chown -R frappe:frappe /ho
 ## What lives where
 
 - **`dev-bench-data` volume**, mounted at `/home/frappe/bench-workspace`: the actual bench — `frappe-bench/apps/frappe`, `apps/erpnext`, `env/` (Python venv), `node_modules`, `sites/`. Never bind-mounted to host, never committed. It's mounted at the *parent* of `frappe-bench`, not `frappe-bench` itself — `bench init` refuses to target a path that already exists (even empty), which a volume mounted directly at `frappe-bench` would trigger.
-- **`apps/talabat_integration/` bind mount** → `/home/frappe/bench-workspace/frappe-bench/apps/talabat_integration`: this is the only thing shared between host and container. Edit it from your editor on the host; the container sees changes immediately, and vice versa.
+- **`apps/talabat_integration/` and `apps/marketplace_integrations/` bind mounts** → their matching path under `frappe-bench/apps/`: these are the only things shared between host and container (one mount line per custom app). Edit them from your editor on the host; the container sees changes immediately, and vice versa.
 - **`dev-mariadb-data` volume**: throwaway dev database, root password `123` (matches the upstream `frappe_docker` dev convention — this is a disposable local dev DB, not reused anywhere else).
 
 ## One-time setup (already done for `frappe-bench` + `talabat_integration` — reference for the *next* app)
@@ -129,7 +129,7 @@ The `-e KEY='...'` on `docker exec` is a single top-level single-quoted shell ar
 
 ## Gotcha: the dev site tracks whichever branch is checked out on the host
 
-`apps/talabat_integration` is bind-mounted from the host repo, so the container only ever sees whatever git branch is currently checked out on disk — there is no per-branch isolation. `bench migrate` reconciles the site's schema against *those* files: if you check out a branch that doesn't have a doctype another branch added (e.g. going from a branch with `Talabat Vendor` to one without it) and run `migrate`, Frappe treats the missing doctype as orphaned and **drops its table**. No code is lost (the doctype's JSON/controller are safe in the other branch/git history), but the live dev DB loses that data until you check that branch back out and `migrate` again.
+Both `apps/talabat_integration` and `apps/marketplace_integrations` are bind-mounted from the host repo, so the container only ever sees whatever git branch is currently checked out on disk — there is no per-branch isolation, for either app. `bench migrate` reconciles the site's schema against *those* files: if you check out a branch that doesn't have a doctype another branch added (e.g. going from a branch with `Talabat Vendor` to one without it) and run `migrate`, Frappe treats the missing doctype as orphaned and **drops its table**. No code is lost (the doctype's JSON/controller are safe in the other branch/git history), but the live dev DB loses that data until you check that branch back out and `migrate` again. This will bite harder as `marketplace_integrations`' doctypes land incrementally across issues — a branch missing one of them and a `migrate` in between is enough to drop it.
 
 Practical rule: don't treat the dev site's current schema as a stable baseline across branch switches — only trust it immediately after running `migrate` on the branch you actually care about right now. Before merging multiple feature branches, the real integration check is checking out `main` after they've all landed and running `migrate` there once.
 
