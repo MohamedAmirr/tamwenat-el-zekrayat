@@ -59,6 +59,11 @@ class IntegrationTestTalabatProductMapping(IntegrationTestCase):
 		self.assertEqual(mapping.talabat_sku, "34000000289")
 		self.assertEqual(mapping.sync_status, "Not Synced")
 
+	def test_talabat_sku_is_not_in_default_list_view(self):
+		field = frappe.get_meta("Talabat Product Mapping").get_field("talabat_sku")
+
+		self.assertFalse(field.in_list_view)
+
 	def test_talabat_sku_with_angle_brackets_rejected_at_insert(self):
 		# name is built by a custom autoname() as f"{vendor}::{talabat_sku}",
 		# and Frappe's own document-name validation (validate_name) runs on
