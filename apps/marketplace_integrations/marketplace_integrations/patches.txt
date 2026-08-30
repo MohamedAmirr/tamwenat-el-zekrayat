@@ -5,3 +5,4 @@
 [post_model_sync]
 # Patches added in this section will be executed after doctypes are migrated
 marketplace_integrations.patches.v0_0.create_talabat_connection_from_legacy_settings
+marketplace_integrations.patches.v0_0.migrate_talabat_accounts_and_mappings
