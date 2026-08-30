@@ -12,6 +12,13 @@ It describes the target model and the boundaries already agreed for the new `mar
 - Changes to `talabat_integration` should be limited to legacy fixes or explicit migration work.
 - Talabat API truth remains `docs/talabat-integration/openapi.json` plus its README. The shared architecture does not replace the platform contract.
 
+### What actually exists right now (#30 — scaffold only)
+
+- A plain `bench new-app` scaffold, no business doctypes yet — `apps/marketplace_integrations/marketplace_integrations/hooks.py` sets `required_apps = ["erpnext"]` (its future core models link to ERPNext Item/Warehouse/UOM, per the domain model below) and nothing else non-default.
+- Bind-mounted into the dev bench the same way as `talabat_integration`: `./apps/marketplace_integrations:/home/frappe/bench-workspace/frappe-bench/apps/marketplace_integrations` in `docker-compose.dev.yml`.
+- Installed on `dev.localhost` alongside `frappe`, `erpnext`, and `talabat_integration`; `bench --site dev.localhost migrate` and `bench --site dev.localhost run-tests --app marketplace_integrations` both run cleanly with all four apps present.
+- Everything else in this document (Marketplace Account, Marketplace Product Mapping, Platform-specific Connection, import flows) is the **agreed target design**, not yet implemented — it lands incrementally under #31, #32, #36, and the Talabat migration steps below.
+
 ## Domain model
 
 ```text

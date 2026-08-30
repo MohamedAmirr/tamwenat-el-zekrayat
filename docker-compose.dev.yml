@@ -2,7 +2,7 @@ name: tamwenat-el-zekrayat-dev
 
 # Standalone Frappe bench dev environment, separate from the production-style
 # docker-compose.yml (prebuilt images, no custom apps). Used to develop custom
-# apps (starting with talabat_integration) with bench directly.
+# apps (talabat_integration, marketplace_integrations) with bench directly.
 #
 # IMPORTANT: always invoke with an explicit -p to avoid picking up
 # COMPOSE_PROJECT_NAME from .env (which belongs to the prod stack):
@@ -48,9 +48,10 @@ services:
       # Whole bench (frappe/erpnext core, venv, node_modules) lives in here —
       # not bind-mounted, not committed to this repo.
       - dev-bench-data:/home/frappe/bench-workspace
-      # Only our own app's source is bind-mounted host<->container, so
+      # Only our own apps' source is bind-mounted host<->container, so
       # edits made on the host show up in the container immediately.
       - ./apps/talabat_integration:/home/frappe/bench-workspace/frappe-bench/apps/talabat_integration
+      - ./apps/marketplace_integrations:/home/frappe/bench-workspace/frappe-bench/apps/marketplace_integrations
     ports:
       - "127.0.0.1:8000-8005:8000-8005"
       - "127.0.0.1:9000-9005:9000-9005"
