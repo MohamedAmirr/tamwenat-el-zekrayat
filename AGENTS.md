@@ -32,6 +32,12 @@ load every document by default.
   speculative abstractions, extra config knobs, generic frameworks, or
   handling for cases that can't happen yet. Generalize only when a second
   real caller actually shows up, not in anticipation of one.
+- Ask before deciding. When a task has more than one reasonable way to do
+  it — a design choice, a scope call, which endpoint/mechanism/UI approach
+  to use — do not pick one and proceed. Surface the real options (with a
+  recommendation if you have one) and let the user choose. This is
+  stricter than "never assume": even when you have enough information to
+  make a defensible call yourself, the call is still the user's to make.
 - Never edit vendored `frappe` or `erpnext`; change only the custom app or
   exported Frappe fixtures.
 - Prefer the Frappe ORM. Parameterize any unavoidable SQL.
