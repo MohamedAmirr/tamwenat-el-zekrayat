@@ -41,6 +41,13 @@ load every document by default.
   recommendation if you have one) and let the user choose. This is
   stricter than "never assume": even when you have enough information to
   make a defensible call yourself, the call is still the user's to make.
+- Show GitHub issue content before it is created or edited. Never create or
+  edit a GitHub issue's actual content (title, scope, acceptance criteria,
+  which options got picked) without showing the user that content first
+  and getting a go-ahead. This applies even when the content follows an
+  already-agreed decision — the issue text itself is the thing to confirm.
+  If an issue does get created without this step, surface its full content
+  immediately afterward and offer to revise it.
 - Never edit vendored `frappe` or `erpnext`; change only the custom app or
   exported Frappe fixtures.
 - Prefer the Frappe ORM. Parameterize any unavoidable SQL.
