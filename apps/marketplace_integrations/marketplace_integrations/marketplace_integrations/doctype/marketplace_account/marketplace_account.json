@@ -1,0 +1,107 @@
+{
+ "actions": [],
+ "autoname": "MKTACC-.#####",
+ "creation": "2026-08-30 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "account_name",
+  "platform",
+  "external_account_id",
+  "account_identity_key",
+  "connection_doctype",
+  "connection",
+  "warehouse",
+  "enabled"
+ ],
+ "fields": [
+  {
+   "fieldname": "account_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Account Name",
+   "reqd": 1
+  },
+  {
+   "fieldname": "platform",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Platform",
+   "options": "Talabat",
+   "reqd": 1
+  },
+  {
+   "fieldname": "external_account_id",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "in_list_view": 1,
+   "label": "External Account ID",
+   "reqd": 1
+  },
+  {
+   "fieldname": "account_identity_key",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Account Identity Key",
+   "length": 64,
+   "read_only": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "connection_doctype",
+   "fieldtype": "Link",
+   "hidden": 1,
+   "label": "Connection DocType",
+   "options": "DocType",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "connection",
+   "fieldtype": "Dynamic Link",
+   "in_list_view": 1,
+   "label": "Connection",
+   "options": "connection_doctype",
+   "reqd": 1
+  },
+  {
+   "fieldname": "warehouse",
+   "fieldtype": "Link",
+   "label": "Warehouse",
+   "options": "Warehouse"
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-08-30 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Marketplace Integrations",
+ "name": "Marketplace Account",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "account_name",
+ "track_changes": 1
+}
