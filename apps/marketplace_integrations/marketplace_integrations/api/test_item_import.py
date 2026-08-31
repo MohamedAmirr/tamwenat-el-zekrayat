@@ -482,6 +482,65 @@ class IntegrationTestItemImport(IntegrationTestCase):
 			with self.assertRaises(frappe.PermissionError):
 				item_import.apply_items_import(file_url)
 
+	# --- batch lookups and progress ---------------------------------------
+
+	def test_link_targets_are_looked_up_once_per_link_doctype(self):
+		parsed = [
+			{"values": {"item_group": ITEM_GROUP, "brand": "Brand A", "stock_uom": UOM}},
+			{"values": {"item_group": ITEM_GROUP, "brand": "Brand B", "stock_uom": UOM}},
+		]
+
+		with mock.patch.object(item_import.frappe, "get_all", return_value=[]) as get_all:
+			item_import._fetch_known_links(parsed)
+
+		self.assertEqual(get_all.call_count, len(item_import.LINK_FIELDS))
+		self.assertEqual(
+			{call.args[0] for call in get_all.call_args_list}, set(item_import.LINK_FIELDS.values())
+		)
+
+	def test_barcode_lookup_splits_large_item_sets_into_bounded_queries(self):
+		item_codes = [
+			f"TEST-II-BARCODE-{index}" for index in range(item_import.ITEM_CODES_PER_BARCODE_QUERY + 1)
+		]
+
+		with mock.patch.object(item_import.frappe, "get_all", return_value=[]) as get_all:
+			item_import._fetch_first_barcodes(item_codes)
+
+		self.assertEqual(get_all.call_count, 2)
+		self.assertEqual(len(get_all.call_args_list[0].kwargs["filters"]["parent"][1]), 500)
+		self.assertEqual(len(get_all.call_args_list[1].kwargs["filters"]["parent"][1]), 1)
+
+	def test_apply_progress_counts_every_processed_row_including_errors(self):
+		valid_code = self.unique_code("TEST-II-PROGRESS")
+		invalid_code = self.unique_code("TEST-II-PROGRESS-INVALID")
+		rows = [
+			self.blank_row(valid_code, item_name="Valid", item_group=ITEM_GROUP, stock_uom=UOM),
+			self.blank_row(invalid_code, item_name="Invalid", item_group="Missing Group", stock_uom=UOM),
+		]
+		progress = []
+
+		result = item_import._apply_items_import(
+			self.make_file(self.build_xlsx(rows)),
+			progress_callback=lambda complete, total: progress.append((complete, total)),
+		)
+
+		self.assertEqual(result["applied_count"], 1)
+		self.assertEqual(progress, [(1, 2), (2, 2)])
+
+	def test_queued_apply_checks_file_permission_without_parsing_in_the_web_request(self):
+		with (
+			mock.patch.object(item_import, "_get_uploaded_file") as get_uploaded_file,
+			mock.patch.object(item_import, "_read_uploaded_workbook") as read_uploaded_workbook,
+			mock.patch.object(
+				item_import.item_import_jobs, "queue_apply", return_value={"job_id": "job-token"}
+			),
+		):
+			result = item_import.queue_items_import_apply("/private/files/items.xlsx")
+
+		self.assertEqual(result, {"job_id": "job-token"})
+		get_uploaded_file.assert_called_once_with("/private/files/items.xlsx")
+		read_uploaded_workbook.assert_not_called()
+
 	# --- POST-only whitelisting (finding 4) --------------------------------
 
 	def test_preview_and_apply_are_post_only(self):
@@ -496,6 +555,12 @@ class IntegrationTestItemImport(IntegrationTestCase):
 		self.assertEqual(
 			frappe.allowed_http_methods_for_whitelisted_func[item_import.export_items_xlsx],
 			["GET", "POST", "PUT", "DELETE"],
+		)
+		self.assertEqual(
+			frappe.allowed_http_methods_for_whitelisted_func[item_import.queue_items_xlsx_export], ["POST"]
+		)
+		self.assertEqual(
+			frappe.allowed_http_methods_for_whitelisted_func[item_import.queue_items_import_apply], ["POST"]
 		)
 
 	# --- authorization via real Item permissions, not Administrator (finding 5) --
