@@ -110,3 +110,31 @@ class IntegrationTestTalabatConnection(IntegrationTestCase):
 		connection.reload()
 
 		self.assertEqual(connection.get_password("order_webhook_secret"), secret)
+
+	def test_order_webhook_secret_is_generated_only_when_missing(self):
+		generated = make_connection("Generated Webhook Secret")
+		supplied = make_connection("Supplied Webhook Secret", order_webhook_secret="provided-secret")
+
+		self.assertTrue(generated.get_password("order_webhook_secret"))
+		self.assertEqual(supplied.get_password("order_webhook_secret"), "provided-secret")
+		original = generated.get_password("order_webhook_secret")
+		generated.connection_name = "Generated Webhook Secret Updated"
+		generated.save()
+		self.assertEqual(generated.get_password("order_webhook_secret"), original)
+
+	def test_order_webhook_secret_copy_requires_write_permission(self):
+		connection = make_connection("Copy Webhook Secret", order_webhook_secret="copyable-secret")
+		self.assertEqual(
+			connection.get_order_webhook_secret_for_copy()["order_webhook_secret"], "copyable-secret"
+		)
+		user = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": f"secret-copy-{frappe.generate_hash(length=8)}@example.com",
+				"first_name": "Secret Copy User",
+				"send_welcome_email": 0,
+				"roles": [{"role": "All"}],
+			}
+		).insert()
+		with self.set_user(user.name), self.assertRaises(frappe.PermissionError):
+			connection.get_order_webhook_secret_for_copy()

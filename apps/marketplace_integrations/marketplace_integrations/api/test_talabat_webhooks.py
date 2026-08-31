@@ -104,6 +104,10 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 		connection = _make_connection(
 			f"Secretless Connection {frappe.generate_hash(length=8)}", order_webhook_secret=None
 		)
+		frappe.db.delete(
+			"__Auth",
+			{"doctype": "Talabat Connection", "name": connection.name, "fieldname": "order_webhook_secret"},
+		)
 		account = _make_account(f"Secretless Account {frappe.generate_hash(length=8)}", connection)
 
 		with self.assertRaises(frappe.PermissionError):
