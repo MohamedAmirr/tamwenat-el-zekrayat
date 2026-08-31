@@ -1,6 +1,8 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
+import secrets
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
@@ -19,6 +21,7 @@ PRODUCTION_BASE_URL = "https://talabat.partner.deliveryhero.io"
 class TalabatConnection(Document):
 	def before_insert(self):
 		self.set_order_webhook_url_if_missing()
+		self.set_order_webhook_secret_if_missing()
 
 	def on_update(self):
 		"""A saved connection may have rotated credentials or a different API
@@ -29,6 +32,10 @@ class TalabatConnection(Document):
 	def set_order_webhook_url_if_missing(self):
 		if not self.order_webhook_url:
 			self.order_webhook_url = self.get_order_webhook_url()
+
+	def set_order_webhook_secret_if_missing(self):
+		if not self.order_webhook_secret:
+			self.order_webhook_secret = secrets.token_urlsafe(32)
 
 	def get_order_webhook_url(self):
 		"""Build the public order webhook endpoint from the configured site URL.
@@ -49,6 +56,12 @@ class TalabatConnection(Document):
 		self.order_webhook_url = self.get_order_webhook_url()
 		self.save()
 		return {"order_webhook_url": self.order_webhook_url}
+
+	@frappe.whitelist()
+	def get_order_webhook_secret_for_copy(self):
+		"""Return the secret only to an editor explicitly requesting a copy."""
+		self.check_permission("write")
+		return {"order_webhook_secret": self.get_password("order_webhook_secret", raise_exception=False)}
 
 	def get_base_url(self):
 		"""Return the Talabat Partner API base URL for this connection's
