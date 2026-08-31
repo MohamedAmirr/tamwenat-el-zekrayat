@@ -1,6 +1,8 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
+from unittest.mock import patch
+
 import frappe
 from frappe.tests import IntegrationTestCase
 
@@ -72,3 +74,39 @@ class IntegrationTestTalabatConnection(IntegrationTestCase):
 		self.assertNotEqual(connection_a.name, connection_b.name)
 		self.assertEqual(connection_a.client_id, "client-a")
 		self.assertEqual(connection_b.client_id, "client-b")
+
+	def test_order_webhook_url_is_generated_on_insert_and_refreshes_on_demand(self):
+		with patch(
+			"marketplace_integrations.marketplace_integrations.doctype.talabat_connection.talabat_connection.get_url",
+			return_value="https://old.example.com/api/method/marketplace_integrations.api.talabat_webhooks.order_event",
+		) as get_url:
+			connection = make_connection("Test Order Webhook URL")
+
+		self.assertEqual(
+			connection.order_webhook_url,
+			"https://old.example.com/api/method/marketplace_integrations.api.talabat_webhooks.order_event",
+		)
+		get_url.assert_called_once_with(
+			"/api/method/marketplace_integrations.api.talabat_webhooks.order_event",
+			allow_header_override=False,
+		)
+
+		with patch(
+			"marketplace_integrations.marketplace_integrations.doctype.talabat_connection.talabat_connection.get_url",
+			return_value="https://new.example.com/api/method/marketplace_integrations.api.talabat_webhooks.order_event",
+		):
+			result = connection.refresh_order_webhook_url()
+
+		connection.reload()
+		self.assertEqual(
+			connection.order_webhook_url,
+			"https://new.example.com/api/method/marketplace_integrations.api.talabat_webhooks.order_event",
+		)
+		self.assertEqual(result["order_webhook_url"], connection.order_webhook_url)
+
+	def test_order_webhook_secret_round_trips_without_xss_corruption(self):
+		secret = "webhook-<static>-secret"
+		connection = make_connection("Test Webhook Secret", order_webhook_secret=secret)
+		connection.reload()
+
+		self.assertEqual(connection.get_password("order_webhook_secret"), secret)

@@ -11,6 +11,9 @@
    "client_secret",
    "chain_id",
    "environment",
+   "order_webhook_section",
+   "order_webhook_url",
+   "order_webhook_secret",
    "legacy_migration_source",
    "enabled"
  ],
@@ -59,6 +62,23 @@
    "fieldtype": "Check",
    "in_list_view": 1,
    "label": "Enabled"
+  },
+  {
+   "fieldname": "order_webhook_section",
+   "fieldtype": "Section Break",
+   "label": "Order Webhook"
+  },
+  {
+   "fieldname": "order_webhook_url",
+   "fieldtype": "Data",
+   "label": "Order Webhook URL",
+   "read_only": 1
+  },
+  {
+   "fieldname": "order_webhook_secret",
+   "fieldtype": "Password",
+   "ignore_xss_filter": 1,
+   "label": "Order Webhook Secret"
   },
   {
    "fieldname": "legacy_migration_source",
