@@ -29,9 +29,10 @@ function build_page(page) {
 		export_label: __("Export Items"),
 		import_label: __("Import Items"),
 		upload_title: __("Upload Items workbook"),
-		export_method: "marketplace_integrations.api.item_import.export_items_xlsx",
+		export_method: "marketplace_integrations.api.item_import.queue_items_xlsx_export",
 		preview_method: "marketplace_integrations.api.item_import.preview_items_import",
-		apply_method: "marketplace_integrations.api.item_import.apply_items_import",
+		apply_method: "marketplace_integrations.api.item_import.queue_items_import_apply",
+		job_status_method: "marketplace_integrations.api.item_import.get_items_import_job_status",
 		identifier: (row) => row.item_code || "",
 	});
 
@@ -73,6 +74,13 @@ function make_import_section(parent, config) {
 	const state = { file_url: null, has_valid_preview: false, operation_id: 0 };
 
 	export_button.addEventListener("click", () => {
+		if (config.job_status_method) {
+			frappe
+				.call({ method: config.export_method })
+				.then((response) => watch_job(response.message, config, preview))
+				.catch(() => render_request_failure(preview, __("Could not start the background job.")));
+			return;
+		}
 		open_url_post(`/api/method/${config.export_method}`, {});
 	});
 
@@ -94,6 +102,30 @@ function make_import_section(parent, config) {
 
 		const operation_id = state.operation_id;
 		const file_url = state.file_url;
+		if (config.job_status_method) {
+			state.has_valid_preview = false;
+			apply_button.disabled = true;
+			frappe
+				.call({ method: config.apply_method, args: { file_url } })
+				.then((response) => {
+					if (!is_current_file_operation(state, operation_id, file_url)) return;
+					watch_job(
+						response.message,
+						config,
+						preview,
+						() => is_current_file_operation(state, operation_id, file_url),
+						() => {
+							state.file_url = null;
+						}
+					);
+				})
+				.catch(() => {
+					if (is_current_file_operation(state, operation_id, file_url)) {
+						render_request_failure(preview, __("Applying the workbook failed."));
+					}
+				});
+			return;
+		}
 		state.has_valid_preview = false;
 		apply_button.disabled = true;
 		frappe
@@ -115,6 +147,54 @@ function make_import_section(parent, config) {
 				render_request_failure(preview, __("Applying the workbook failed."));
 			});
 	});
+}
+
+function watch_job(job, config, preview, is_current = () => true, on_complete = () => {}) {
+	if (!job || !job.job_id) return render_request_failure(preview, __("Could not start the background job."));
+	preview.replaceChildren(make_element("p", "text-muted", __("Background job queued...")));
+	let timer;
+	const stop = () => {
+		clearInterval(timer);
+		if (frappe.realtime && frappe.realtime.off) frappe.realtime.off("marketplace_item_import_progress", on_progress);
+	};
+	const on_progress = (status) => {
+		if (!status || status.job_id !== job.job_id) return;
+		if (!is_current()) return stop();
+		if (status.status === "completed") {
+			stop();
+			on_complete();
+			if (status.kind === "export" && status.result && status.result.file_url) download_file(status.result.file_url);
+			else render_preview(preview, status.result, config, { applied: true });
+		} else if (status.status === "failed") {
+			stop();
+			render_request_failure(preview, status.error || __("The background job failed."));
+		} else {
+			preview.replaceChildren(
+				make_element("p", "text-muted", __("Background job: {0}% complete.", [status.progress || 0]))
+			);
+		}
+	};
+	const check_status = () => {
+		frappe
+			.call({ method: config.job_status_method, args: { job_id: job.job_id } })
+			.then((response) => on_progress({ job_id: job.job_id, ...(response.message || {}) }))
+			.catch(() => {
+				stop();
+				if (is_current()) render_request_failure(preview, __("Could not retrieve the background job status."));
+			});
+	};
+	if (frappe.realtime && frappe.realtime.on) frappe.realtime.on("marketplace_item_import_progress", on_progress);
+	timer = setInterval(check_status, 1000);
+	check_status();
+}
+
+function download_file(file_url) {
+	const link = document.createElement("a");
+	link.href = file_url;
+	link.download = "items.xlsx";
+	document.body.append(link);
+	link.click();
+	link.remove();
 }
 
 function preview_uploaded_file(file_doc, config, state, preview, apply_button) {

@@ -32,6 +32,8 @@ from frappe.desk.utils import provide_binary_file
 from frappe.utils import cint, cstr
 from frappe.utils.xlsxutils import make_xlsx, read_xlsx_file_from_attached_file
 
+from marketplace_integrations.services import item_import_jobs
+
 # Managed columns, in worksheet column order. item_code is the stable
 # identity column; __modified is bookkeeping for the stale-write guard below,
 # not a field the user is meant to hand-edit.
@@ -58,6 +60,7 @@ LINK_FIELDS = {
 	"brand": "Brand",
 	"stock_uom": "UOM",
 }
+ITEM_CODES_PER_BARCODE_QUERY = 500
 
 # disabled cell parsing: blank/None is deliberately treated as *disabled*
 # (fail safe - a row a user forgot to fill the column in for should not
@@ -94,6 +97,37 @@ ITEM_FIELDS = [
 @frappe.whitelist()
 def export_items_xlsx():
 	"""Export one XLSX worksheet with one row per Item the user can read."""
+	provide_binary_file("items", "xlsx", _export_items_xlsx_bytes())
+
+
+@frappe.whitelist(methods=["POST"])
+def apply_items_import(file_url: str):
+	"""Re-parse, re-validate, and synchronously apply a workbook."""
+	_require_item_code_naming()
+	return _apply_items_import(file_url)
+
+
+@frappe.whitelist()
+def get_items_import_job_status(job_id: str):
+	"""Return the requesting user's short-lived Item import job state."""
+	return item_import_jobs.get_status(job_id)
+
+
+@frappe.whitelist(methods=["POST"])
+def queue_items_xlsx_export():
+	"""Queue an Item workbook export for the requesting user."""
+	return item_import_jobs.queue_export()
+
+
+@frappe.whitelist(methods=["POST"])
+def queue_items_import_apply(file_url: str):
+	_require_item_code_naming()
+	_get_uploaded_file(file_url)
+	return item_import_jobs.queue_apply(file_url)
+
+
+def _export_items_xlsx_bytes():
+	"""Build one XLSX worksheet with one row per Item the user can read."""
 	items = frappe.get_list(
 		"Item",
 		fields=ITEM_FIELDS,
@@ -120,7 +154,7 @@ def export_items_xlsx():
 		)
 
 	xlsx_file = make_xlsx(rows, XLSX_SHEET_NAME)
-	provide_binary_file("items", "xlsx", xlsx_file.getvalue())
+	return xlsx_file.getvalue()
 
 
 @frappe.whitelist(methods=["POST"])
@@ -130,8 +164,7 @@ def preview_items_import(file_url: str):
 	return _summarize(_evaluate_rows(file_url))
 
 
-@frappe.whitelist(methods=["POST"])
-def apply_items_import(file_url: str):
+def _apply_items_import(file_url: str, progress_callback=None):
 	"""Re-parse, re-validate, and write an uploaded workbook.
 
 	Never trusts a client-supplied preview result: runs the exact same
@@ -147,33 +180,33 @@ def apply_items_import(file_url: str):
 	_require_item_code_naming()
 	results = _evaluate_rows(file_url)
 	applied = 0
-	for result in results:
-		if result["status"] not in ("new", "changed"):
-			continue
-
-		# Per-row savepoint (frappe.db.savepoint()/rollback(save_point=...)/
-		# release_savepoint() - frappe/database/database.py) rather than the
-		# swallow-on-catch savepoint(catch=...) context-manager wrapper also
-		# defined there: that wrapper discards the exception on rollback,
-		# but we need the exact message to report against this row. Without
-		# this, a row that fails partway through doc.insert()/doc.save()
-		# (e.g. a child table row already written before an after_insert
-		# hook raises) would leave that partial write committed even though
-		# the row is reported as "error" and excluded from applied_count.
-		savepoint_name = "item_import_" + frappe.generate_hash(length=10)
-		frappe.db.savepoint(savepoint_name)
-		try:
-			_write_row(result)
-		except (frappe.ValidationError, frappe.PermissionError, frappe.DuplicateEntryError) as exc:
-			frappe.db.rollback(save_point=savepoint_name)
-			result["status"] = "error"
-			result["errors"] = [str(exc)]
-			result.pop("diff", None)
-			result.pop("new_values", None)
-		else:
-			frappe.db.release_savepoint(savepoint_name)
-			result["applied"] = True
-			applied += 1
+	for processed, result in enumerate(results, start=1):
+		if result["status"] in ("new", "changed"):
+			# Per-row savepoint (frappe.db.savepoint()/rollback(save_point=...)/
+			# release_savepoint() - frappe/database/database.py) rather than the
+			# swallow-on-catch savepoint(catch=...) context-manager wrapper also
+			# defined there: that wrapper discards the exception on rollback,
+			# but we need the exact message to report against this row. Without
+			# this, a row that fails partway through doc.insert()/doc.save()
+			# (e.g. a child table row already written before an after_insert
+			# hook raises) would leave that partial write committed even though
+			# the row is reported as "error" and excluded from applied_count.
+			savepoint_name = "item_import_" + frappe.generate_hash(length=10)
+			frappe.db.savepoint(savepoint_name)
+			try:
+				_write_row(result)
+			except (frappe.ValidationError, frappe.PermissionError, frappe.DuplicateEntryError) as exc:
+				frappe.db.rollback(save_point=savepoint_name)
+				result["status"] = "error"
+				result["errors"] = [str(exc)]
+				result.pop("diff", None)
+				result.pop("new_values", None)
+			else:
+				frappe.db.release_savepoint(savepoint_name)
+				result["applied"] = True
+				applied += 1
+		if progress_callback:
+			progress_callback(processed, len(results))
 
 	summary = _summarize(results)
 	summary["applied_count"] = applied
@@ -210,8 +243,8 @@ def _require_item_code_naming():
 # --- File access --------------------------------------------------------
 
 
-def _read_uploaded_workbook(file_url: str):
-	"""Load and permission-check the uploaded File before reading its rows.
+def _get_uploaded_file(file_url: str):
+	"""Load and permission-check an uploaded File without parsing it.
 
 	frappe.utils.xlsxutils.read_xlsx_file_from_attached_file() itself does
 	`frappe.get_doc("File", {"file_url": file_url})` with no type check and
@@ -223,11 +256,17 @@ def _read_uploaded_workbook(file_url: str):
 	reject non-str values before this ever runs; loading the File doc
 	ourselves and calling check_permission("read") (which raises
 	frappe.PermissionError on failure) closes the missing-permission-check
-	gap, and passing filepath= (not file_url=) below avoids ever repeating
-	the unchecked lookup a second time.
+	gap. Queueing uses this lightweight check so workbook parsing remains in
+	the long-running worker.
 	"""
 	file_doc = frappe.get_doc("File", {"file_url": file_url})
 	file_doc.check_permission("read")
+	return file_doc
+
+
+def _read_uploaded_workbook(file_url: str):
+	"""Read an already permission-checked workbook by its resolved path."""
+	file_doc = _get_uploaded_file(file_url)
 	return read_xlsx_file_from_attached_file(filepath=file_doc.get_full_path()) or []
 
 
@@ -269,6 +308,7 @@ def _evaluate_rows(file_url: str):
 
 	existing_items = _fetch_existing_items(lookup_codes)
 	existing_barcodes = _fetch_first_barcodes(list(existing_items.keys()))
+	known_links = _fetch_known_links(parsed)
 
 	results = []
 	for entry in parsed:
@@ -288,7 +328,12 @@ def _evaluate_rows(file_url: str):
 			continue
 		results.append(
 			_evaluate_row(
-				entry["row"], entry["values"], existing_items, existing_barcodes, entry["parse_errors"]
+				entry["row"],
+				entry["values"],
+				existing_items,
+				existing_barcodes,
+				known_links,
+				entry["parse_errors"],
 			)
 		)
 	return results
@@ -394,24 +439,38 @@ def _fetch_first_barcodes(item_codes):
 	item_codes = [code for code in item_codes if code]
 	if not item_codes:
 		return {}
-	rows = frappe.get_all(
-		"Item Barcode",
-		filters={"parent": ["in", item_codes], "parenttype": "Item"},
-		fields=["parent", "barcode", "idx"],
-		order_by="parent asc, idx asc",
-	)
 	first_by_parent = {}
-	for row in rows:
-		first_by_parent.setdefault(row.parent, row)
+	for offset in range(0, len(item_codes), ITEM_CODES_PER_BARCODE_QUERY):
+		rows = frappe.get_all(
+			"Item Barcode",
+			filters={
+				"parent": ["in", item_codes[offset : offset + ITEM_CODES_PER_BARCODE_QUERY]],
+				"parenttype": "Item",
+			},
+			fields=["parent", "barcode", "idx"],
+			order_by="parent asc, idx asc",
+		)
+		for row in rows:
+			first_by_parent.setdefault(row.parent, row)
 	return first_by_parent
 
 
-def _evaluate_row(row_number, values, existing_items, existing_barcodes, parse_errors=()):
+def _fetch_known_links(parsed):
+	known_links = {}
+	for field, doctype in LINK_FIELDS.items():
+		values = list({entry["values"].get(field) for entry in parsed if entry["values"].get(field)})
+		known_links[field] = (
+			set(frappe.get_all(doctype, filters={"name": ["in", values]}, pluck="name")) if values else set()
+		)
+	return known_links
+
+
+def _evaluate_row(row_number, values, existing_items, existing_barcodes, known_links, parse_errors=()):
 	item_code = values["item_code"]
 	if not item_code:
 		return _error_result(row_number, None, [_("item_code is required.")])
 
-	errors = list(parse_errors) + _validate_mandatory_and_links(values)
+	errors = list(parse_errors) + _validate_mandatory_and_links(values, known_links)
 
 	existing = existing_items.get(item_code)
 	if existing:
@@ -443,14 +502,14 @@ def _evaluate_row(row_number, values, existing_items, existing_barcodes, parse_e
 	}
 
 
-def _validate_mandatory_and_links(values):
+def _validate_mandatory_and_links(values, known_links):
 	errors = []
 	for field in MANDATORY_FIELDS:
 		if not values.get(field):
 			errors.append(_("{0} is mandatory.").format(field))
 	for field, target_doctype in LINK_FIELDS.items():
 		value = values.get(field)
-		if value and not frappe.db.exists(target_doctype, value):
+		if value and value not in known_links[field]:
 			errors.append(_("{0} '{1}' does not exist as a {2}.").format(field, value, target_doctype))
 	return errors
 
