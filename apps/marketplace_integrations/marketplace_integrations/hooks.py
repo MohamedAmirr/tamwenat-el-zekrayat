@@ -211,7 +211,9 @@ required_apps = ["erpnext"]
 
 # Request Events
 # ----------------
-# before_request = ["marketplace_integrations.utils.before_request"]
+before_request = [
+	"marketplace_integrations.api.request.normalize_talabat_webhook_authorization",
+]
 # after_request = ["marketplace_integrations.utils.after_request"]
 
 # Job Events
@@ -261,4 +263,3 @@ required_apps = ["erpnext"]
 # ------------
 # List of apps whose translatable strings should be excluded from this app's translations.
 # ignore_translatable_strings_from = []
-

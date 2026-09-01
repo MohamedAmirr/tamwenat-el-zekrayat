@@ -9,6 +9,7 @@ from frappe.model.document import Document
 from frappe.utils import get_url
 
 from marketplace_integrations.integrations.talabat.client import get_access_token_cache_key
+from marketplace_integrations.integrations.talabat.constants import TALABAT_ORDER_WEBHOOK_PATH
 
 # Same base URLs as legacy talabat_integration's Talabat Settings
 # (talabat_integration/talabat_integration/doctype/talabat_settings/talabat_settings.py)
@@ -45,7 +46,7 @@ class TalabatConnection(Document):
 		portal after an administrator explicitly refreshes this URL.
 		"""
 		return get_url(
-			"/api/method/marketplace_integrations.api.talabat_webhooks.order_event",
+			TALABAT_ORDER_WEBHOOK_PATH,
 			allow_header_override=False,
 		)
 
