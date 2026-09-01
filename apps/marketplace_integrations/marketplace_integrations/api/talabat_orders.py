@@ -16,7 +16,7 @@ module calls persistence, and only in response to an explicit manual action
 
 import frappe
 from frappe import _
-from frappe.utils import cint, cstr
+from frappe.utils import cint, cstr, flt
 
 from marketplace_integrations.integrations.talabat import orders as talabat_orders
 from marketplace_integrations.integrations.talabat.order_mapper import normalize_order
@@ -123,3 +123,76 @@ def import_vendor_orders(account: str, start: str, end: str):
 		page += 1
 
 	return {"imported": imported, "count": len(imported), "errors": errors}
+
+
+@frappe.whitelist(methods=["POST"])
+def update_order(marketplace_order: str, status: str, cancellation_reason: str = "", items=None):
+	"""Update a Talabat order, then reconcile the returned order locally."""
+	doc = frappe.get_doc("Marketplace Order", marketplace_order)
+	doc.check_permission("write")
+	status = cstr(status).strip()
+	if status not in talabat_orders.ORDER_UPDATE_STATUSES:
+		frappe.throw(_("Unsupported Talabat order update status."))
+	if doc.external_status in {"CANCELLED", "DISPATCHED", "READY_FOR_PICKUP", "DELIVERED"}:
+		frappe.throw(_("This order cannot be updated from its current status."))
+	if status == "DISPATCHED" and doc.transport_type != "VENDOR_DELIVERY":
+		frappe.throw(_("DISPATCHED is only valid for Vendor Delivery orders."))
+	if status == "READY_FOR_PICKUP" and doc.transport_type != "LOGISTICS_DELIVERY":
+		frappe.throw(_("READY_FOR_PICKUP is only valid for Logistics Delivery orders."))
+	if status in {"DISPATCHED", "READY_FOR_PICKUP"} and doc.external_status not in {"RECEIVED", "UPDATE_CART"}:
+		frappe.throw(_("This fulfillment update is not valid from the current order status."))
+	try:
+		items = frappe.parse_json(items) if isinstance(items, str) else items
+	except (TypeError, ValueError):
+		frappe.throw(_("Order update items must be valid JSON."))
+	if items is None:
+		items = [_item_update_payload(row) for row in doc.items]
+	payload = {"order_id": doc.external_order_id, "status": status, "items": items}
+	if status == "CANCELLED":
+		payload["cancellation"] = {"reason": cstr(cancellation_reason).strip()}
+	talabat_orders.validate_order_update(payload)
+	_validate_current_item_updates(doc, items)
+	raw_order = talabat_orders.update_order(doc.marketplace_account, doc.external_order_id, payload)
+	normalized = normalize_order(raw_order)
+	if normalized["external_order_id"] != cstr(doc.external_order_id).strip():
+		frappe.throw(_("Talabat returned a different order ID."))
+	updated = upsert_marketplace_order(doc.marketplace_account, normalized)
+	return {"name": updated.name}
+
+
+def _item_update_payload(row):
+	pricing = {"pricing_type": row.pricing_type}
+	if row.external_status not in {"NOT_FOUND", "REPLACED"}:
+		if row.pricing_type == "KG":
+			pricing["weight"] = flt(row.fulfilled_weight)
+			pricing["weighted_pieces"] = cint(row.fulfilled_weighted_pieces)
+		else:
+			pricing["quantity"] = flt(row.fulfilled_quantity)
+	pricing["unit_price"] = flt(row.fulfilled_unit_price)
+	return {
+		"_id": row.external_item_id,
+		"sku": row.external_sku,
+		"status": row.external_status if row.external_status in {"IN_CART", "NOT_FOUND", "REPLACED", "ADDITION"} else "IN_CART",
+		"pricing": pricing,
+		**({"replaced_id": row.replaced_external_item_id} if row.replaced_external_item_id else {}),
+	}
+
+
+def _validate_current_item_updates(doc, items):
+	by_id = {cstr(row.external_item_id).strip(): row for row in doc.items}
+	for item in items:
+		row = by_id.get(cstr(item.get("_id")).strip())
+		if not row:
+			if not cstr(item.get("sku")).strip() or item.get("status") not in {"IN_CART", "ADDITION"}:
+				frappe.throw(_("New order items require a SKU and IN_CART or ADDITION status."))
+			continue
+		pricing = item.get("pricing") or {}
+		if cstr(item.get("status")).strip() in {"NOT_FOUND", "REPLACED"}:
+			if "quantity" in pricing or "weight" in pricing:
+				frappe.throw(_("NOT_FOUND and REPLACED items cannot include fulfilled quantity or weight."))
+		if pricing.get("pricing_type") != row.pricing_type:
+			frappe.throw(_("An item's pricing type cannot be changed."))
+		if row.pricing_type == "KG" and float(pricing.get("weight", 0)) > float(row.original_weight or 0):
+			frappe.throw(_("Fulfilled weight cannot exceed the original weight."))
+		if row.pricing_type == "UNIT" and float(pricing.get("quantity", 0)) > float(row.original_quantity or 0):
+			frappe.throw(_("Fulfilled quantity cannot exceed the original quantity."))

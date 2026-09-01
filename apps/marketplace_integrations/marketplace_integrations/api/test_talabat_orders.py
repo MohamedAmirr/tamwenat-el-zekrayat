@@ -9,6 +9,7 @@ from frappe.tests import IntegrationTestCase
 from marketplace_integrations.api.talabat_orders import (
 	import_vendor_orders,
 	refresh_order,
+	update_order,
 )
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 
@@ -104,6 +105,125 @@ class IntegrationTestRefreshOrder(IntegrationTestCase):
 		self.connection = _make_connection(f"Test Refresh Connection {suffix}")
 		self.account = _make_account(f"Test Refresh Account {suffix}", self.connection)
 		self.order = upsert_marketplace_order(self.account.name, _sample_normalized_order())
+
+	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.update_order")
+	def test_update_order_sends_selected_cancellation_reason(self, mock_update):
+		mock_update.return_value = {
+			"order_id": "order-001",
+			"status": "CANCELLED",
+			"items": [],
+			"customer": {},
+			"payment": {},
+			"sys": {},
+			"cancellation": {"reason": "CLOSED"},
+		}
+		result = update_order(self.order.name, "CANCELLED", "CLOSED")
+		self.assertEqual(result["name"], self.order.name)
+		payload = mock_update.call_args.args[2]
+		self.assertEqual(payload["cancellation"], {"reason": "CLOSED"})
+
+	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.update_order")
+	def test_update_order_rejects_missing_cancellation_reason_before_remote_call(self, mock_update):
+		with self.assertRaises(frappe.ValidationError):
+			update_order(self.order.name, "CANCELLED")
+		mock_update.assert_not_called()
+
+	@patch("marketplace_integrations.api.talabat_orders.upsert_marketplace_order")
+	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.update_order")
+	def test_update_order_reconciles_successful_remote_response(self, mock_update, mock_upsert):
+		mock_update.return_value = {
+			"order_id": "order-001",
+			"status": "CANCELLED",
+			"items": [],
+			"customer": {},
+			"payment": {},
+			"sys": {},
+			"cancellation": {"reason": "CLOSED"},
+		}
+		mock_upsert.return_value = self.order
+		result = update_order(self.order.name, "CANCELLED", "CLOSED")
+		self.assertEqual(result["name"], self.order.name)
+		mock_upsert.assert_called_once()
+
+	@patch("marketplace_integrations.api.talabat_orders.upsert_marketplace_order")
+	@patch(
+		"marketplace_integrations.api.talabat_orders.talabat_orders.update_order",
+		side_effect=frappe.ValidationError("remote"),
+	)
+	def test_update_order_remote_failure_does_not_upsert(self, mock_update, mock_upsert):
+		with self.assertRaises(frappe.ValidationError):
+			update_order(self.order.name, "CANCELLED", "CLOSED")
+		mock_upsert.assert_not_called()
+
+	def test_update_order_rejects_unit_quantity_above_original(self):
+		self.order.append(
+			"items",
+			{
+				"external_item_id": "item-1",
+				"external_sku": "sku-1",
+				"pricing_type": "UNIT",
+				"original_quantity": 1,
+				"fulfilled_quantity": 1,
+				"external_status": "IN_CART",
+			},
+		)
+		self.order.save()
+		with self.assertRaises(frappe.ValidationError):
+			update_order(
+				self.order.name,
+				"UPDATE_CART",
+				items=[
+					{"_id": "item-1", "status": "IN_CART", "pricing": {"pricing_type": "UNIT", "quantity": 2}}
+				],
+			)
+
+	def test_update_order_rejects_kg_weight_above_original(self):
+		self.order.append(
+			"items",
+			{
+				"external_item_id": "item-kg",
+				"external_sku": "sku-kg",
+				"pricing_type": "KG",
+				"original_weight": 1,
+				"fulfilled_weight": 1,
+				"external_status": "IN_CART",
+			},
+		)
+		self.order.save()
+		with self.assertRaises(frappe.ValidationError):
+			update_order(
+				self.order.name,
+				"UPDATE_CART",
+				items=[
+					{"_id": "item-kg", "status": "IN_CART", "pricing": {"pricing_type": "KG", "weight": 2}}
+				],
+			)
+
+	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.update_order")
+	def test_update_order_rejects_wrong_transport_and_terminal_status(self, mock_update):
+		with self.assertRaises(frappe.ValidationError):
+			update_order(self.order.name, "DISPATCHED")
+		self.order.external_status = "DELIVERED"
+		self.order.save()
+		with self.assertRaises(frappe.ValidationError):
+			update_order(self.order.name, "CANCELLED", "CLOSED")
+		mock_update.assert_not_called()
+
+	@patch("marketplace_integrations.api.talabat_orders.upsert_marketplace_order")
+	@patch("marketplace_integrations.integrations.talabat.orders.TalabatClient.request")
+	def test_update_order_rejects_response_from_different_vendor(self, mock_request, mock_upsert):
+		"""A mismatched vendor in Talabat's PUT response is rejected before upsert."""
+		mock_request.return_value = _response(
+			{
+				"order_id": "order-001",
+				"client": {"id": "different-vendor", "store_id": "different-store"},
+			}
+		)
+		with self.assertRaises(frappe.ValidationError):
+			update_order(self.order.name, "CANCELLED", "CLOSED")
+		mock_request.assert_called_once()
+		self.assertEqual(mock_request.call_args.args[0], "PUT")
+		mock_upsert.assert_not_called()
 
 	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.get_order")
 	def test_refresh_order_fetches_and_updates_by_external_order_id(self, mock_get_order):
@@ -222,9 +342,7 @@ class IntegrationTestImportVendorOrders(IntegrationTestCase):
 				import_vendor_orders(self.account.name, "2026-08-01", "2026-08-31")
 
 	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.get_vendor_orders")
-	def test_import_vendor_orders_requires_marketplace_order_create_permission(
-		self, mock_get_vendor_orders
-	):
+	def test_import_vendor_orders_requires_marketplace_order_create_permission(self, mock_get_vendor_orders):
 		"""import_vendor_orders requires create permission on Marketplace Order,
 		even for a user who can read the Marketplace Account (i.e. the account
 		read check alone must not be enough to import)."""
@@ -435,6 +553,7 @@ class IntegrationTestImportVendorOrders(IntegrationTestCase):
 
 		call_kwargs = mock_get_vendor_orders.call_args[1]
 		from marketplace_integrations.integrations.talabat import orders as talabat_orders_module
+
 		self.assertEqual(call_kwargs["page_size"], talabat_orders_module.MAX_PAGE_SIZE)
 
 	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.get_vendor_orders")

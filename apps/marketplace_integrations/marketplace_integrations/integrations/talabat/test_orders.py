@@ -10,6 +10,86 @@ from frappe.tests import IntegrationTestCase
 from marketplace_integrations.integrations.talabat import orders as talabat_orders
 
 
+class TestOrderUpdatePayloadValidation(IntegrationTestCase):
+	def test_not_found_requires_only_pricing_type(self):
+		talabat_orders.validate_order_update(
+			{
+				"status": "UPDATE_CART",
+				"items": [{"sku": "x", "status": "NOT_FOUND", "pricing": {"pricing_type": "UNIT"}}],
+			}
+		)
+
+	def test_replacement_requires_in_cart_link(self):
+		payload = {
+			"status": "UPDATE_CART",
+			"items": [
+				{"_id": "old", "status": "REPLACED", "pricing": {"pricing_type": "UNIT"}},
+				{
+					"sku": "new",
+					"status": "IN_CART",
+					"replaced_id": "old",
+					"pricing": {"pricing_type": "UNIT", "quantity": 1},
+				},
+			],
+		}
+		talabat_orders.validate_order_update(payload)
+
+	def test_replacement_without_link_is_rejected(self):
+		with self.assertRaises(frappe.ValidationError):
+			talabat_orders.validate_order_update(
+				{
+					"status": "UPDATE_CART",
+					"items": [{"_id": "old", "status": "REPLACED", "pricing": {"pricing_type": "UNIT"}}],
+				}
+			)
+
+	def test_malformed_pricing_is_clean_validation_error(self):
+		with self.assertRaises(frappe.ValidationError):
+			talabat_orders.validate_order_update(
+				{
+					"status": "UPDATE_CART",
+					"items": [
+						{
+							"sku": "x",
+							"status": "IN_CART",
+							"pricing": {"pricing_type": "UNIT", "quantity": "bad"},
+						}
+					],
+				}
+			)
+
+	def test_unit_and_kg_payloads_require_matching_measurement(self):
+		talabat_orders.validate_order_update(
+			{
+				"status": "UPDATE_CART",
+				"items": [
+					{"sku": "x", "status": "IN_CART", "pricing": {"pricing_type": "UNIT", "quantity": 1}}
+				],
+			}
+		)
+		talabat_orders.validate_order_update(
+			{
+				"status": "UPDATE_CART",
+				"items": [
+					{"sku": "x", "status": "IN_CART", "pricing": {"pricing_type": "KG", "weight": 1.5}}
+				],
+			}
+		)
+		with self.assertRaises(frappe.ValidationError):
+			talabat_orders.validate_order_update(
+				{
+					"status": "UPDATE_CART",
+					"items": [
+						{"sku": "x", "status": "IN_CART", "pricing": {"pricing_type": "UNIT", "quantity": -1}}
+					],
+				}
+			)
+
+	def test_non_dict_nested_item_is_clean_validation_error(self):
+		with self.assertRaises(frappe.ValidationError):
+			talabat_orders.validate_order_update({"status": "UPDATE_CART", "items": ["bad"]})
+
+
 def _response(body, status_code=200):
 	"""Helper to mock HTTP responses."""
 	response = MagicMock()
