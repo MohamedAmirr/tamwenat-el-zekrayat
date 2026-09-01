@@ -13,6 +13,13 @@
   "connection_doctype",
   "connection",
   "warehouse",
+  "outlet_status_section",
+  "external_status",
+  "external_status_reason",
+  "external_status_until",
+  "external_status_checked_on",
+  "external_status_error",
+  "external_status_payload",
   "erpnext_sync_section",
   "erpnext_company",
   "erpnext_selling_price_list",
@@ -74,6 +81,49 @@
    "fieldtype": "Link",
    "label": "Warehouse",
    "options": "Warehouse"
+  },
+  {
+   "fieldname": "outlet_status_section",
+   "fieldtype": "Section Break",
+   "label": "Marketplace Availability"
+  },
+  {
+   "fieldname": "external_status",
+   "fieldtype": "Data",
+   "label": "Last Confirmed External Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "external_status_reason",
+   "fieldtype": "Data",
+   "label": "Last Confirmed External Status Reason",
+   "read_only": 1
+  },
+  {
+   "fieldname": "external_status_until",
+   "fieldtype": "Datetime",
+   "label": "Last Confirmed External Status Until",
+   "read_only": 1
+  },
+  {
+   "fieldname": "external_status_checked_on",
+   "fieldtype": "Datetime",
+   "label": "External Status Last Checked On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "external_status_error",
+   "fieldtype": "Small Text",
+   "label": "External Status Error",
+   "read_only": 1
+  },
+  {
+   "fieldname": "external_status_payload",
+   "fieldtype": "JSON",
+   "hidden": 1,
+   "ignore_xss_filter": 1,
+   "label": "External Status Payload",
+   "read_only": 1
   },
   {
    "fieldname": "erpnext_sync_section",
