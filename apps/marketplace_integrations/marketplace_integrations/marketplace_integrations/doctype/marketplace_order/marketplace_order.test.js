@@ -1,7 +1,12 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const {build_cart_update_items} = require("./marketplace_order.js");
+const {
+	build_cart_update_items,
+	get_status_indicator,
+	TALABAT_STATUS_COLORS,
+	ERPNEXT_SYNC_STATUS_COLORS,
+} = require("./marketplace_order.js");
 
 test("cart update preserves existing replacement and addition items on repeat", () => {
 	const rows = [
@@ -43,4 +48,14 @@ test("cart update preserves existing replacement and addition items on repeat", 
 
 	assert.deepEqual(build_cart_update_items(rows, values), expected);
 	assert.deepEqual(build_cart_update_items(rows, values), expected);
+});
+
+test("Talabat and ERPNext status indicators use the agreed standard colors", () => {
+	assert.deepEqual(get_status_indicator("RECEIVED", TALABAT_STATUS_COLORS), {label: "RECEIVED", color: "green"});
+	assert.deepEqual(get_status_indicator("PREPARING", TALABAT_STATUS_COLORS), {label: "PREPARING", color: "orange"});
+	assert.deepEqual(get_status_indicator("CANCELLED", TALABAT_STATUS_COLORS), {label: "CANCELLED", color: "red"});
+	assert.deepEqual(get_status_indicator("UNAVAILABLE", TALABAT_STATUS_COLORS), {label: "UNAVAILABLE", color: "gray"});
+	assert.deepEqual(get_status_indicator("Synced", ERPNEXT_SYNC_STATUS_COLORS), {label: "Synced", color: "green"});
+	assert.deepEqual(get_status_indicator("Modified After Sync", ERPNEXT_SYNC_STATUS_COLORS), {label: "Modified After Sync", color: "orange"});
+	assert.deepEqual(get_status_indicator("Sync Error", ERPNEXT_SYNC_STATUS_COLORS), {label: "Sync Error", color: "red"});
 });
