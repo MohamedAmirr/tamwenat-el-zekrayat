@@ -131,15 +131,43 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 
 	@patch("marketplace_integrations.integrations.talabat.order_events.upsert_marketplace_order")
 	@patch("marketplace_integrations.integrations.talabat.order_events.normalize_order")
-	def test_worker_uses_shared_mapper_and_upsert(self, normalize_order, upsert_marketplace_order):
+	@patch("marketplace_integrations.integrations.talabat.order_events.frappe.set_user")
+	def test_worker_sets_system_user_before_shared_mapper_and_upsert(
+		self, set_user, normalize_order, upsert_marketplace_order
+	):
 		payload = _payload(self.account)
 		normalized = {"external_order_id": "webhook-order-001", "items": [], "latest_payload": payload}
-		normalize_order.return_value = normalized
+		call_order = []
+		set_user.side_effect = lambda user: call_order.append(("set_user", user))
+		normalize_order.side_effect = lambda event_payload: call_order.append(("normalize", event_payload)) or normalized
+		upsert_marketplace_order.side_effect = lambda account, order: call_order.append(("upsert", account, order))
 
 		process_order_event(self.account.name, payload)
 
-		normalize_order.assert_called_once_with(payload)
-		upsert_marketplace_order.assert_called_once_with(self.account.name, normalized)
+		self.assertEqual(
+			call_order,
+			[
+				("set_user", "Administrator"),
+				("normalize", payload),
+				("upsert", self.account.name, normalized),
+			],
+		)
+
+	def test_worker_persists_an_authenticated_webhook_started_as_guest(self):
+		payload = _payload(self.account, order_id=f"guest-worker-{frappe.generate_hash(length=8)}")
+		original_user = frappe.session.user
+
+		with self.set_user("Guest"):
+			process_order_event(self.account.name, payload)
+			self.assertEqual(frappe.session.user, "Administrator")
+
+		self.assertEqual(frappe.session.user, original_user)
+		self.assertTrue(
+			frappe.db.exists(
+				"Marketplace Order",
+				{"marketplace_account": self.account.name, "external_order_id": payload["order_id"]},
+			)
+		)
 
 	def test_duplicate_redelivery_creates_one_marketplace_order(self):
 		payload = _payload(self.account, order_id=f"duplicate-{frappe.generate_hash(length=8)}")
