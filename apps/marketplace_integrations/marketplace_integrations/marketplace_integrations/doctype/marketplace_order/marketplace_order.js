@@ -5,6 +5,7 @@ if (typeof frappe !== "undefined") {
 			frm.set_df_property("items", "read_only", 1);
 			frm.set_df_property("external_status", "read_only", 1);
 			frm.set_df_property("transport_type", "read_only", 1);
+			add_status_indicators(frm);
 
 			frm.add_custom_button(__("Refresh from Talabat"), () => {
 				frappe.call({
@@ -19,6 +20,42 @@ if (typeof frappe !== "undefined") {
 			load_item_presentation(frm);
 		},
 	});
+}
+
+const TALABAT_STATUS_COLORS = {
+	RECEIVED: "green",
+	ACCEPTED: "green",
+	COMPLETED: "green",
+	DELIVERED: "green",
+	READY_FOR_PICKUP: "green",
+	DISPATCHED: "green",
+	PENDING: "orange",
+	PREPARING: "orange",
+	UPDATE_CART: "orange",
+	CANCELLED: "red",
+	REJECTED: "red",
+	FAILED: "red",
+};
+
+const ERPNEXT_SYNC_STATUS_COLORS = {
+	"Not Synced": "gray",
+	Synced: "green",
+	"Modified After Sync": "orange",
+	"Sync Error": "red",
+};
+
+function get_status_indicator(status, color_by_status) {
+	return {
+		label: status || __("Unavailable"),
+		color: color_by_status[status] || "gray",
+	};
+}
+
+function add_status_indicators(frm) {
+	const talabat_status = get_status_indicator(frm.doc.external_status, TALABAT_STATUS_COLORS);
+	const erpnext_sync_status = get_status_indicator(frm.doc.erpnext_sync_status, ERPNEXT_SYNC_STATUS_COLORS);
+	frm.dashboard.add_indicator(__("Talabat: {0}", [talabat_status.label]), talabat_status.color);
+	frm.dashboard.add_indicator(__("ERPNext: {0}", [erpnext_sync_status.label]), erpnext_sync_status.color);
 }
 
 function load_item_presentation(frm) {
@@ -116,7 +153,12 @@ function build_cart_update_items(rows, values) {
 }
 
 if (typeof module !== "undefined") {
-	module.exports = {build_cart_update_items};
+	module.exports = {
+		build_cart_update_items,
+		get_status_indicator,
+		TALABAT_STATUS_COLORS,
+		ERPNEXT_SYNC_STATUS_COLORS,
+	};
 }
 
 function render_item_presentation(frm, presentation) {
@@ -129,27 +171,94 @@ function render_item_presentation(frm, presentation) {
 	wrapper.append(note);
 
 	const by_item_id = new Map((presentation.items || []).map((item) => [item.external_item_id, item]));
+	const table_wrapper = document.createElement("div");
+	table_wrapper.className = "table-responsive";
+	const table = document.createElement("table");
+	table.className = "table table-bordered";
+	table.setAttribute("aria-label", __("Talabat order items"));
+	const caption = document.createElement("caption");
+	caption.className = "sr-only";
+	caption.textContent = __("Talabat order items with fulfillment and live mapping status");
+	table.append(caption);
+
+	const headers = [
+		__("Item"),
+		__("SKU"),
+		__("Status"),
+		__("Mapping"),
+		__("Replacement Item ID"),
+		__("Pricing Type"),
+		__("Original"),
+		__("Fulfilled"),
+		__("Original Unit / Total"),
+		__("Fulfilled Unit / Total"),
+	];
+	const header_row = document.createElement("tr");
+	for (const header of headers) append_table_cell(header_row, header, "th");
+	const thead = document.createElement("thead");
+	thead.append(header_row);
+	table.append(thead);
+
+	const tbody = document.createElement("tbody");
 	for (const row of frm.doc.items || []) {
 		const mapping = by_item_id.get(row.external_item_id) || {};
-		const card = document.createElement("div");
-		card.className = "form-section card-section";
-		const title = document.createElement("h5");
-		title.textContent = `${row.product_name || __("Unnamed item")} (${row.external_sku || __("No SKU")})`;
-		card.append(title);
-		const details = document.createElement("p");
-		const original = row.pricing_type === "KG" ? row.original_weight : row.original_quantity;
-		const fulfilled = row.pricing_type === "KG" ? row.fulfilled_weight : row.fulfilled_quantity;
-		details.textContent = [
-			`${__("Status")}: ${row.external_status || "—"}`,
-			`${__("Pricing")}: ${row.pricing_type || "—"}`,
-			`${__("Original")}: ${original ?? "—"}`,
-			`${__("Fulfilled")}: ${fulfilled ?? "—"}`,
-			`${__("Original unit / total")}: ${row.original_unit_price ?? "—"} / ${row.original_total_price ?? "—"}`,
-			`${__("Fulfilled unit / total")}: ${row.fulfilled_unit_price ?? "—"} / ${row.fulfilled_total_price ?? "—"}`,
-			`${__("Replacement item ID")}: ${row.replaced_external_item_id || "—"}`,
-			`${__("Mapping")}: ${mapping.mapped_item ? __("Mapped") : __("Unmapped")}${mapping.mapped_item ? ` (${mapping.mapped_item})` : ""}`,
-		].join(" · ");
-		card.append(details);
-		wrapper.append(card);
+		const item_row = document.createElement("tr");
+		append_table_cell(item_row, row.product_name || __("Unnamed item"));
+		append_table_cell(item_row, display_value(row.external_sku));
+		append_status_cell(item_row, get_status_indicator(row.external_status, TALABAT_STATUS_COLORS));
+		append_mapping_cell(item_row, mapping.mapped_item);
+		append_table_cell(item_row, display_value(row.replaced_external_item_id));
+		append_table_cell(item_row, display_value(row.pricing_type));
+		append_table_cell(item_row, fulfillment_value(row, "original"));
+		append_table_cell(item_row, fulfillment_value(row, "fulfilled"));
+		append_table_cell(item_row, price_value(row.original_unit_price, row.original_total_price));
+		append_table_cell(item_row, price_value(row.fulfilled_unit_price, row.fulfilled_total_price));
+		tbody.append(item_row);
 	}
+	table.append(tbody);
+	table_wrapper.append(table);
+	wrapper.append(table_wrapper);
+}
+
+function append_table_cell(table_row, value, tag_name = "td") {
+	const cell = document.createElement(tag_name);
+	cell.textContent = value;
+	table_row.append(cell);
+}
+
+function append_status_cell(table_row, status) {
+	const cell = document.createElement("td");
+	const indicator = document.createElement("span");
+	indicator.className = `indicator-pill ${status.color}`;
+	indicator.textContent = status.label;
+	cell.append(indicator);
+	table_row.append(cell);
+}
+
+function append_mapping_cell(table_row, mapped_item) {
+	const cell = document.createElement("td");
+	const indicator = document.createElement("span");
+	indicator.className = `indicator-pill ${mapped_item ? "green" : "gray"}`;
+	indicator.textContent = mapped_item ? __("Mapped") : __("Unmapped");
+	cell.append(indicator);
+	if (mapped_item) cell.append(document.createTextNode(` ${mapped_item}`));
+	table_row.append(cell);
+}
+
+function display_value(value) {
+	return value === undefined || value === null || value === "" ? "—" : String(value);
+}
+
+function fulfillment_value(row, prefix) {
+	const value = row.pricing_type === "KG" ? row[`${prefix}_weight`] : row[`${prefix}_quantity`];
+	const unit = row.pricing_type === "KG" ? __("Weight") : __("Quantity");
+	const weighted_pieces = row[`${prefix}_weighted_pieces`];
+	const pieces = weighted_pieces === undefined || weighted_pieces === null || weighted_pieces === ""
+		? ""
+		: `; ${__("Weighted pieces")}: ${weighted_pieces}`;
+	return `${unit}: ${display_value(value)}${pieces}`;
+}
+
+function price_value(unit_price, total_price) {
+	return `${display_value(unit_price)} / ${display_value(total_price)}`;
 }
