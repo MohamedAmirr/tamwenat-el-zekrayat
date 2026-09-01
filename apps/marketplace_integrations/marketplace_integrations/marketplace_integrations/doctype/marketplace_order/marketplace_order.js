@@ -6,6 +6,7 @@ if (typeof frappe !== "undefined") {
 			frm.set_df_property("external_status", "read_only", 1);
 			frm.set_df_property("transport_type", "read_only", 1);
 			add_status_indicators(frm);
+			load_erpnext_sync_status(frm);
 
 			frm.add_custom_button(__("Refresh from Talabat"), () => {
 				frappe.call({
@@ -19,6 +20,35 @@ if (typeof frappe !== "undefined") {
 
 			load_item_presentation(frm);
 		},
+	});
+}
+
+function load_erpnext_sync_status(frm) {
+	frappe.call({
+		method: "marketplace_integrations.api.marketplace_orders.get_erpnext_sync_status",
+		args: {marketplace_order: frm.doc.name},
+	}).then((response) => {
+		frm.doc.erpnext_sync_status = response.message.status;
+		frm.refresh_field("erpnext_sync_status");
+		add_erpnext_sync_action(frm);
+	});
+}
+
+function add_erpnext_sync_action(frm) {
+	if (frm.doc.erpnext_sales_order && frm.doc.erpnext_sync_status === "Synced") return;
+	const label = frm.doc.erpnext_sales_order ? __("Update ERPNext Order") : __("Send to ERPNext");
+	frm.add_custom_button(label, () => {
+		frappe.call({
+			method: "marketplace_integrations.api.marketplace_orders.sync_to_erpnext",
+			args: {marketplace_order: frm.doc.name},
+			freeze: true,
+			freeze_message: __("Synchronizing with ERPNext..."),
+		}).then((response) => {
+			if (!response.message.ok) {
+				frappe.msgprint({message: response.message.error, indicator: "red", title: __("ERPNext Sync Blocked")});
+			}
+			frm.reload_doc();
+		});
 	});
 }
 
@@ -167,7 +197,7 @@ function render_item_presentation(frm, presentation) {
 	const note = document.createElement("p");
 	note.textContent = presentation.price_comparison_available
 		? __("ERPNext reference prices are shown for configured comparisons.")
-		: __("ERPNext reference-price comparison is unavailable until a price source is configured.");
+		: __("ERPNext calculates Sales Order prices when you send this order to ERPNext.");
 	wrapper.append(note);
 
 	const by_item_id = new Map((presentation.items || []).map((item) => [item.external_item_id, item]));
