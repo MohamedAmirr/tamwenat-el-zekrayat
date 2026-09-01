@@ -13,6 +13,10 @@
   "connection_doctype",
   "connection",
   "warehouse",
+  "erpnext_sync_section",
+  "erpnext_company",
+  "erpnext_selling_price_list",
+  "erpnext_customer",
   "enabled"
  ],
  "fields": [
@@ -70,6 +74,30 @@
    "fieldtype": "Link",
    "label": "Warehouse",
    "options": "Warehouse"
+  },
+  {
+   "fieldname": "erpnext_sync_section",
+   "fieldtype": "Section Break",
+   "label": "ERPNext Sales Order Synchronization"
+  },
+  {
+   "fieldname": "erpnext_company",
+   "fieldtype": "Link",
+   "label": "ERPNext Company",
+   "options": "Company"
+  },
+  {
+   "fieldname": "erpnext_selling_price_list",
+   "fieldtype": "Link",
+   "label": "ERPNext Selling Price List",
+   "options": "Price List"
+  },
+  {
+   "fieldname": "erpnext_customer",
+   "fieldtype": "Link",
+   "label": "ERPNext Customer",
+   "options": "Customer",
+   "read_only": 1
   },
   {
    "default": "1",

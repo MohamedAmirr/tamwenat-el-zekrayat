@@ -23,14 +23,15 @@ OTHER_DOCTYPE_WITH_DIFFERENT_RECORD = "Item Group"
 OTHER_DOCTYPE_RECORD = "Products"
 
 # Frappe's IntegrationTestCase auto-generates a generic test record for every
-# doctype linked from the one under test (here: Warehouse, via the
-# `warehouse` field). ERPNext's generic Company/Fiscal Year test-record
-# generator hits a pre-existing Fiscal Year overlap bug on this dev site,
-# unrelated to this doctype (same root cause documented in
-# talabat_product_mapping's test file for its own Item dependency). We build
-# our own Warehouse below instead, using the site's real configured company,
-# so skip just the auto-generation step for Warehouse.
-IGNORE_TEST_RECORD_DEPENDENCIES = ["Warehouse"]
+# doctype linked from the one under test (Warehouse, plus #61's optional
+# Company/Price List/Customer sync configuration). ERPNext's generic
+# Company/Fiscal Year test-record generator hits a pre-existing Fiscal Year
+# overlap bug on this dev site, unrelated to this doctype (same root cause
+# documented in talabat_product_mapping's test file for its own Item
+# dependency). These tests construct only their required Warehouse with the
+# site's real configured company, so skip generic generation for every
+# optional ERPNext Link target.
+IGNORE_TEST_RECORD_DEPENDENCIES = ["Warehouse", "Company", "Price List", "Customer"]
 
 
 class IntegrationTestMarketplaceAccount(IntegrationTestCase):

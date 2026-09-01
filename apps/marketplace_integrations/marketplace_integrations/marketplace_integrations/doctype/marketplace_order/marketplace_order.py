@@ -39,3 +39,7 @@ class MarketplaceOrder(Document):
 	def before_save(self):
 		self.external_order_id = cstr(self.external_order_id).strip()
 		self.order_identity_key = compute_order_identity_key(self.marketplace_account, self.external_order_id)
+		if not self.flags.skip_sync_status_update:
+			from marketplace_integrations.services.sales_order_sync import set_sync_status_from_current_snapshot
+
+			set_sync_status_from_current_snapshot(self)
