@@ -58,14 +58,14 @@
   "latest_payload"
  ],
  "fields": [
-  {"fieldname": "marketplace_account", "fieldtype": "Link", "in_list_view": 1, "label": "Marketplace Account", "options": "Marketplace Account", "reqd": 1, "search_index": 1},
-  {"fieldname": "external_order_id", "fieldtype": "Data", "ignore_xss_filter": 1, "in_list_view": 1, "label": "External Order ID", "reqd": 1, "search_index": 1},
+  {"fieldname": "marketplace_account", "fieldtype": "Link", "in_list_view": 1, "label": "Marketplace Account", "options": "Marketplace Account", "read_only": 1, "reqd": 1, "search_index": 1},
+  {"fieldname": "external_order_id", "fieldtype": "Data", "ignore_xss_filter": 1, "in_list_view": 1, "label": "External Order ID", "read_only": 1, "reqd": 1, "search_index": 1},
   {"fieldname": "order_identity_key", "fieldtype": "Data", "hidden": 1, "label": "Order Identity Key", "length": 64, "read_only": 1, "unique": 1},
   {"fieldname": "platform_order_reference", "fieldtype": "Data", "ignore_xss_filter": 1, "label": "Platform Order Reference", "search_index": 1},
   {"fieldname": "order_code", "fieldtype": "Data", "ignore_xss_filter": 1, "in_list_view": 1, "label": "Order Code", "search_index": 1},
-  {"fieldname": "external_status", "fieldtype": "Select", "in_list_view": 1, "label": "Talabat Status", "options": "RECEIVED\nREADY_FOR_PICKUP\nDISPATCHED\nCANCELLED\nDELIVERED"},
+  {"fieldname": "external_status", "fieldtype": "Select", "hidden": 1, "in_list_view": 1, "label": "Talabat Status", "options": "RECEIVED\nREADY_FOR_PICKUP\nDISPATCHED\nCANCELLED\nDELIVERED", "read_only": 1},
   {"fieldname": "order_type", "fieldtype": "Select", "label": "Order Type", "options": "DELIVERY\nPICKUP"},
-  {"fieldname": "transport_type", "fieldtype": "Select", "label": "Transport Type", "options": "VENDOR_DELIVERY\nLOGISTICS_DELIVERY"},
+  {"fieldname": "transport_type", "fieldtype": "Select", "label": "Transport Type", "options": "VENDOR_DELIVERY\nLOGISTICS_DELIVERY", "read_only": 1},
   {"fieldname": "is_preorder", "fieldtype": "Check", "label": "Is Preorder"},
   {"fieldname": "accepted_for", "fieldtype": "Datetime", "label": "Accepted For"},
   {"fieldname": "promised_for", "fieldtype": "Datetime", "label": "Promised For"},

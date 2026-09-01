@@ -27,6 +27,9 @@ from marketplace_integrations.integrations.talabat.client import TalabatClient
 MIN_PAGE_SIZE = 1
 MAX_PAGE_SIZE = 500
 DEFAULT_PAGE_SIZE = 20
+ORDER_UPDATE_STATUSES = {"CANCELLED", "DISPATCHED", "READY_FOR_PICKUP", "UPDATE_CART"}
+ITEM_UPDATE_STATUSES = {"IN_CART", "NOT_FOUND", "REPLACED", "ADDITION"}
+CANCELLATION_REASONS = {"CLOSED", "ITEM_UNAVAILABLE", "TOO_BUSY"}
 
 
 def get_account(account_name):
@@ -159,3 +162,80 @@ def get_vendor_orders(
 			_("Failed to fetch Talabat vendor order history for {0}.").format(account_doc.name)
 		)
 	return response.json()
+
+
+def update_order(account, order_id, payload):
+	"""Send a validated order update to Talabat and return its raw order."""
+	account_doc, connection = get_account(account)
+	order_id = cstr(order_id).strip()
+	if not order_id:
+		frappe.throw(_("Order ID is required."))
+	validate_order_update(payload)
+	response = TalabatClient(connection.name).request(
+		"PUT",
+		f"/v2/chains/{quote(connection.chain_id, safe='')}/orders/{quote(order_id, safe='')}",
+		json=payload,
+	)
+	if not response.ok:
+		frappe.throw(_("Talabat rejected the order update."))
+	result = response.json()
+	_verify_order_belongs_to_account(result, account_doc)
+	return result
+
+
+def validate_order_update(payload):
+	if not isinstance(payload, dict):
+		frappe.throw(_("Order update must be an object."))
+	status = cstr(payload.get("status")).strip()
+	if status not in ORDER_UPDATE_STATUSES:
+		frappe.throw(_("Unsupported Talabat order update status."))
+	payload["status"] = status
+	if not isinstance(payload.get("items"), list):
+		frappe.throw(_("Order update items must be a list."))
+	if status == "CANCELLED":
+		reason = cstr((payload.get("cancellation") or {}).get("reason")).strip()
+		if reason not in CANCELLATION_REASONS:
+			frappe.throw(_("A valid cancellation reason is required."))
+	for item in payload["items"]:
+		if not isinstance(item, dict) or (
+			not cstr(item.get("_id")).strip() and not cstr(item.get("sku")).strip()
+		):
+			frappe.throw(_("Every order item must include an ID or SKU."))
+		if cstr(item.get("status")).strip() not in ITEM_UPDATE_STATUSES:
+			frappe.throw(_("Every order item must have a valid update status."))
+		item_status = cstr(item.get("status")).strip()
+		item["status"] = item_status
+		pricing = item.get("pricing")
+		if not isinstance(pricing, dict) or pricing.get("pricing_type") not in {"UNIT", "KG"}:
+			frappe.throw(_("Every order item must include pricing information."))
+		try:
+			quantity = float(pricing.get("quantity")) if "quantity" in pricing else None
+			weight = float(pricing.get("weight")) if "weight" in pricing else None
+			weighted_pieces = int(pricing.get("weighted_pieces")) if "weighted_pieces" in pricing else None
+		except (TypeError, ValueError):
+			frappe.throw(_("Order item pricing values must be numbers."))
+		if item_status in {"IN_CART", "ADDITION"} and pricing["pricing_type"] == "UNIT":
+			if quantity is None or quantity < 0:
+				frappe.throw(_("UNIT items require a non-negative quantity."))
+		elif item_status in {"IN_CART", "ADDITION"}:
+			if weight is None or weight < 0:
+				frappe.throw(_("KG items require a non-negative weight."))
+			if weighted_pieces is not None and weighted_pieces < 0:
+				frappe.throw(_("Weighted pieces cannot be negative."))
+		if item_status in {"NOT_FOUND", "REPLACED"} and any(k in pricing for k in ("quantity", "weight")):
+			frappe.throw(_("NOT_FOUND and REPLACED items cannot include fulfilled quantity or weight."))
+	if status == "UPDATE_CART":
+		by_id = {cstr(item.get("_id")).strip(): item for item in payload["items"] if cstr(item.get("_id")).strip()}
+		for item in payload["items"]:
+			item_status = cstr(item.get("status")).strip()
+			replacement_id = cstr(item.get("replaced_id")).strip()
+			if item_status == "REPLACED" and replacement_id:
+				frappe.throw(_("Original replaced items must not include replaced_id."))
+			if replacement_id:
+				replacement = by_id.get(replacement_id)
+				if item_status != "IN_CART" or not replacement or cstr(replacement.get("status")).strip().upper() != "REPLACED":
+					frappe.throw(_("Replacement items must be IN_CART and reference a REPLACED item."))
+		replaced_ids = {cstr(item.get("_id")).strip() for item in payload["items"] if cstr(item.get("status")).strip().upper() == "REPLACED"}
+		for replaced_id in replaced_ids:
+			if sum(cstr(item.get("replaced_id")).strip() == replaced_id for item in payload["items"]) != 1:
+				frappe.throw(_("Each REPLACED item must have exactly one replacement."))
