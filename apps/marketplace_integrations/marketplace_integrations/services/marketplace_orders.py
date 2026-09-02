@@ -22,6 +22,7 @@ ORDER_FIELDS = (
 	"external_status",
 	"order_type",
 	"transport_type",
+	"promotion_status",
 	"is_preorder",
 	"accepted_for",
 	"promised_for",
@@ -68,7 +69,9 @@ ITEM_FIELDS = (
 	"fulfilled_weighted_pieces",
 	"fulfilled_unit_price",
 	"fulfilled_total_price",
+	"container_deposit",
 )
+JSON_ITEM_FIELDS = ("barcodes", "promotions")
 
 
 def upsert_marketplace_order(marketplace_account, normalized_order):
@@ -145,7 +148,8 @@ def _upsert_order_items(doc, items):
 		row.external_item_id = external_item_id
 		for fieldname in ITEM_FIELDS:
 			row.set(fieldname, values.get(fieldname))
-		row.barcodes = _as_json(values.get("barcodes"))
+		for fieldname in JSON_ITEM_FIELDS:
+			row.set(fieldname, _as_json(values.get(fieldname)))
 
 
 def _as_json(value):

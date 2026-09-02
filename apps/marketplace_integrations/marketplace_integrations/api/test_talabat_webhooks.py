@@ -191,6 +191,38 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 			1,
 		)
 
+	def test_webhook_payload_converges_through_shared_mapper_for_promotion_evidence(self):
+		"""A webhook-delivered order.Order's promotion_status and item
+		container_deposit/promotion fields land correctly end-to-end through
+		the webhook path (mapper identity with manual retrieval's path is
+		proven separately by test_worker_sets_system_user_before_shared_mapper_and_upsert)."""
+		order_id = f"promo-webhook-{frappe.generate_hash(length=8)}"
+		payload = _payload(
+			self.account,
+			order_id=order_id,
+			promotion_status="UNAVAILABLE",
+			items=[
+				{
+					"_id": "webhook-item-001",
+					"sku": "SKU-001",
+					"name": "Product",
+					"container_deposit": 0.25,
+					"promotion": [],
+				}
+			],
+		)
+
+		process_order_event(self.account.name, payload)
+
+		order = frappe.get_doc(
+			"Marketplace Order",
+			{"marketplace_account": self.account.name, "external_order_id": order_id},
+		)
+		self.assertEqual(order.promotion_status, "UNAVAILABLE")
+		item = order.items[0]
+		self.assertEqual(item.container_deposit, 0.25)
+		self.assertEqual(frappe.parse_json(item.promotions), [])
+
 
 def _catalog_payload(account, job_id="job-001", **overrides):
 	payload = {
