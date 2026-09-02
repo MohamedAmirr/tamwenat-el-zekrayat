@@ -188,17 +188,27 @@ if (typeof module !== "undefined") {
 		get_status_indicator,
 		TALABAT_STATUS_COLORS,
 		ERPNEXT_SYNC_STATUS_COLORS,
+		promotion_status_note,
+		promotion_lines,
+		parse_promotions,
+		catalog_price_cell_text,
+		price_difference_text,
 	};
 }
 
 function render_item_presentation(frm, presentation) {
 	const wrapper = frm.get_field("talabat_order_presentation").$wrapper;
 	wrapper.empty();
-	const note = document.createElement("p");
-	note.textContent = presentation.price_comparison_available
-		? __("ERPNext reference prices are shown for configured comparisons.")
-		: __("ERPNext calculates Sales Order prices when you send this order to ERPNext.");
-	wrapper.append(note);
+
+	const reference_note = document.createElement("p");
+	reference_note.textContent = __(
+		"Current ERPNext Catalog Price below is a live current reference, not this order's historical pricing, and is never written back onto this order. ERPNext still calculates Sales Order prices separately when you send this order to ERPNext."
+	);
+	wrapper.append(reference_note);
+
+	const promotion_note = document.createElement("p");
+	promotion_note.textContent = promotion_status_note(frm.doc.promotion_status);
+	wrapper.append(promotion_note);
 
 	const by_item_id = new Map((presentation.items || []).map((item) => [item.external_item_id, item]));
 	const table_wrapper = document.createElement("div");
@@ -208,7 +218,7 @@ function render_item_presentation(frm, presentation) {
 	table.setAttribute("aria-label", __("Talabat order items"));
 	const caption = document.createElement("caption");
 	caption.className = "sr-only";
-	caption.textContent = __("Talabat order items with fulfillment and live mapping status");
+	caption.textContent = __("Talabat order items with fulfillment, live mapping, and price comparison");
 	table.append(caption);
 
 	const headers = [
@@ -220,8 +230,13 @@ function render_item_presentation(frm, presentation) {
 		__("Pricing Type"),
 		__("Original"),
 		__("Fulfilled"),
-		__("Original Unit / Total"),
-		__("Fulfilled Unit / Total"),
+		__("Talabat Original Unit / Total"),
+		__("Talabat Fulfilled Unit / Total"),
+		__("Original vs Fulfilled Diff (Unit / Total)"),
+		__("Current ERPNext Catalog Price"),
+		__("Talabat Order List Price"),
+		__("Catalog vs List Price Diff"),
+		__("Promotion"),
 	];
 	const header_row = document.createElement("tr");
 	for (const header of headers) append_table_cell(header_row, header, "th");
@@ -243,6 +258,20 @@ function render_item_presentation(frm, presentation) {
 		append_table_cell(item_row, fulfillment_value(row, "fulfilled"));
 		append_table_cell(item_row, price_value(row.original_unit_price, row.original_total_price));
 		append_table_cell(item_row, price_value(row.fulfilled_unit_price, row.fulfilled_total_price));
+		append_table_cell(
+			item_row,
+			price_value(
+				price_difference_text(row.fulfilled_unit_price, row.original_unit_price),
+				price_difference_text(row.fulfilled_total_price, row.original_total_price)
+			)
+		);
+		append_table_cell(item_row, catalog_price_cell_text(mapping));
+		append_table_cell(item_row, display_value(row.original_list_price));
+		append_table_cell(
+			item_row,
+			price_difference_text(mapping.current_catalog_price, row.original_list_price)
+		);
+		append_promotion_cell(item_row, parse_promotions(row.promotions), frm.doc.promotion_status);
 		tbody.append(item_row);
 	}
 	table.append(tbody);
@@ -275,6 +304,16 @@ function append_mapping_cell(table_row, mapped_item) {
 	table_row.append(cell);
 }
 
+function append_promotion_cell(table_row, promotions, promotion_status) {
+	const cell = document.createElement("td");
+	for (const line of promotion_lines(promotions, promotion_status)) {
+		const line_element = document.createElement("div");
+		line_element.textContent = line;
+		cell.append(line_element);
+	}
+	table_row.append(cell);
+}
+
 function display_value(value) {
 	return value === undefined || value === null || value === "" ? "—" : String(value);
 }
@@ -291,4 +330,80 @@ function fulfillment_value(row, prefix) {
 
 function price_value(unit_price, total_price) {
 	return `${display_value(unit_price)} / ${display_value(total_price)}`;
+}
+
+// Any promotion_status other than exactly "AVAILABLE" - including blank and any
+// unrecognized future value, since #83 made this a raw Talabat Data field rather
+// than a closed enum - is treated as "promotion detail unavailable", per #84.
+function promotion_status_note(promotion_status) {
+	if (promotion_status === "AVAILABLE") {
+		return __("Talabat promotion detail is available and shown per item below.");
+	}
+	return __(
+		"Talabat promotion detail is unavailable for this order (status: {0}). Sub Total and Order Total in the Payment section remain accurate per Talabat.",
+		[display_value(promotion_status)]
+	);
+}
+
+// Promotion name/type/discount_amount/sponsorships are untrusted external
+// (Talabat) text. This returns plain strings only - callers must render them
+// with a text-node API (see append_promotion_cell above), never innerHTML.
+function promotion_lines(promotions, promotion_status) {
+	if (promotion_status !== "AVAILABLE") {
+		return [__("Promotion detail unavailable")];
+	}
+	if (!Array.isArray(promotions) || promotions.length === 0) {
+		return [__("No promotion applied")];
+	}
+	const lines = [];
+	for (const promotion of promotions) {
+		// Stored promotion JSON is untrusted external data preserved without
+		// interpretation (#83) - a non-object element (e.g. `[null]`) must be
+		// skipped rather than throwing and breaking the entire item table.
+		if (typeof promotion !== "object" || promotion === null) continue;
+		lines.push(
+			`${display_value(promotion.name)} (${display_value(promotion.type)}): ${display_value(promotion.discount_amount)}`
+		);
+		const sponsorships = Array.isArray(promotion.sponsorships) ? promotion.sponsorships : [];
+		for (const sponsorship of sponsorships) {
+			if (typeof sponsorship !== "object" || sponsorship === null) continue;
+			const sponsor = display_value(sponsorship.sponsor);
+			const amount = display_value(sponsorship.amount);
+			// Only Talabat's own documented VENDOR sponsorship value gets the
+			// explicit "VENDOR-sponsored" label; any other sponsor value is
+			// shown as-is rather than guessing it means PLATFORM/other funding.
+			lines.push(sponsor === "VENDOR" ? __("VENDOR-sponsored amount: {0}", [amount]) : `${sponsor}: ${amount}`);
+		}
+	}
+	return lines;
+}
+
+// A JSON-fieldtype grid value may arrive as a raw JSON string or as an
+// already-parsed array depending on how the framework populated frm.doc for
+// this session - handle both rather than assuming one.
+function parse_promotions(raw) {
+	if (!raw) return [];
+	if (Array.isArray(raw)) return raw;
+	try {
+		const parsed = JSON.parse(raw);
+		return Array.isArray(parsed) ? parsed : [];
+	} catch (error) {
+		return [];
+	}
+}
+
+function catalog_price_cell_text(mapping) {
+	if (typeof mapping.current_catalog_price === "number") {
+		return mapping.current_catalog_price.toFixed(2);
+	}
+	return `${__("Catalog Price Unavailable")}: ${display_value(mapping.catalog_price_unavailable_reason)}`;
+}
+
+// Never labeled "discount" - #84 requires this only when Talabat data
+// explicitly supports that interpretation, which this generic diff does not.
+function price_difference_text(current, comparison) {
+	if (typeof current !== "number" || typeof comparison !== "number") return "—";
+	const diff = current - comparison;
+	const sign = diff > 0 ? "+" : "";
+	return `${sign}${diff.toFixed(2)}`;
 }
