@@ -7,6 +7,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api import talabat_webhooks
+from marketplace_integrations.integrations.talabat.catalog_feedback import process_catalog_feedback
 from marketplace_integrations.integrations.talabat.order_events import process_order_event
 
 
@@ -20,6 +21,7 @@ def _make_connection(connection_name, **kwargs):
 		"environment": "Sandbox",
 		"enabled": 1,
 		"order_webhook_secret": "test-order-webhook-secret",
+		"catalog_webhook_secret": "test-catalog-webhook-secret",
 	}
 	doc.update(kwargs)
 	return frappe.get_doc(doc).insert()
@@ -116,7 +118,9 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 
 	@patch.object(talabat_webhooks.frappe, "enqueue")
 	def test_store_id_can_resolve_account_and_ambiguous_matches_are_rejected(self, enqueue):
-		payload = _payload(self.account, client={"id": "internal-id", "store_id": self.account.external_account_id})
+		payload = _payload(
+			self.account, client={"id": "internal-id", "store_id": self.account.external_account_id}
+		)
 		self._call_webhook(payload, "test-order-webhook-secret")
 		enqueue.assert_called_once()
 
@@ -139,8 +143,12 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 		normalized = {"external_order_id": "webhook-order-001", "items": [], "latest_payload": payload}
 		call_order = []
 		set_user.side_effect = lambda user: call_order.append(("set_user", user))
-		normalize_order.side_effect = lambda event_payload: call_order.append(("normalize", event_payload)) or normalized
-		upsert_marketplace_order.side_effect = lambda account, order: call_order.append(("upsert", account, order))
+		normalize_order.side_effect = (
+			lambda event_payload: call_order.append(("normalize", event_payload)) or normalized
+		)
+		upsert_marketplace_order.side_effect = lambda account, order: call_order.append(
+			("upsert", account, order)
+		)
 
 		process_order_event(self.account.name, payload)
 
@@ -182,3 +190,81 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 			),
 			1,
 		)
+
+
+def _catalog_payload(account, job_id="job-001", **overrides):
+	payload = {
+		"job_id": job_id,
+		"status": "COMPLETED",
+		"platform_vendor_id": account.external_account_id,
+		"download_url": "https://example.com/feedback/job.csv",
+	}
+	payload.update(overrides)
+	return payload
+
+
+class IntegrationTestTalabatCatalogFeedbackWebhook(IntegrationTestCase):
+	def setUp(self):
+		suffix = frappe.generate_hash(length=8)
+		self.connection = _make_connection(f"Catalog Webhook Connection {suffix}")
+		self.account = _make_account(f"Catalog Webhook Account {suffix}", self.connection)
+
+	def _call_webhook(self, payload, authorization):
+		request = MagicMock()
+		request.get_json.return_value = payload
+		with (
+			patch.object(talabat_webhooks.frappe, "request", request),
+			patch.object(talabat_webhooks.frappe, "get_request_header", return_value=authorization),
+		):
+			return talabat_webhooks.catalog_update_feedback()
+
+	@patch.object(talabat_webhooks.frappe, "enqueue")
+	def test_valid_webhook_enqueues_catalog_feedback_processor(self, enqueue):
+		payload = _catalog_payload(self.account)
+		result = self._call_webhook(payload, "test-catalog-webhook-secret")
+
+		self.assertEqual(result, {"accepted": True})
+		enqueue.assert_called_once_with(
+			process_catalog_feedback,
+			queue="default",
+			timeout=600,
+			payload=payload,
+		)
+
+	@patch.object(talabat_webhooks.frappe, "enqueue")
+	def test_missing_authorization_is_rejected_before_enqueue(self, enqueue):
+		with self.assertRaises(frappe.PermissionError):
+			self._call_webhook(_catalog_payload(self.account), "")
+		enqueue.assert_not_called()
+
+	@patch.object(talabat_webhooks.frappe, "enqueue")
+	def test_invalid_authorization_is_rejected_before_enqueue(self, enqueue):
+		with self.assertRaises(frappe.PermissionError):
+			self._call_webhook(_catalog_payload(self.account), "wrong-secret")
+		enqueue.assert_not_called()
+
+	@patch.object(talabat_webhooks.frappe, "enqueue")
+	def test_order_webhook_secret_cannot_authenticate_catalog_callback(self, enqueue):
+		with self.assertRaises(frappe.PermissionError):
+			self._call_webhook(_catalog_payload(self.account), "test-order-webhook-secret")
+		enqueue.assert_not_called()
+
+	@patch.object(talabat_webhooks.frappe, "enqueue")
+	def test_missing_required_field_is_rejected_before_enqueue(self, enqueue):
+		payload = _catalog_payload(self.account)
+		del payload["download_url"]
+		with self.assertRaises(frappe.PermissionError):
+			self._call_webhook(payload, "test-catalog-webhook-secret")
+		enqueue.assert_not_called()
+
+	@patch.object(talabat_webhooks.frappe, "enqueue")
+	def test_unknown_or_disabled_account_is_rejected_before_enqueue(self, enqueue):
+		unknown = _catalog_payload(self.account, platform_vendor_id="unknown-vendor")
+		with self.assertRaises(frappe.PermissionError):
+			self._call_webhook(unknown, "test-catalog-webhook-secret")
+
+		self.account.enabled = 0
+		self.account.save()
+		with self.assertRaises(frappe.PermissionError):
+			self._call_webhook(_catalog_payload(self.account), "test-catalog-webhook-secret")
+		enqueue.assert_not_called()

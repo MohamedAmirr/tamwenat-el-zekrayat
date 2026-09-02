@@ -4,7 +4,12 @@
 
 import frappe
 
-from marketplace_integrations.integrations.talabat.constants import TALABAT_ORDER_WEBHOOK_PATH
+from marketplace_integrations.integrations.talabat.constants import (
+	TALABAT_CATALOG_WEBHOOK_PATH,
+	TALABAT_ORDER_WEBHOOK_PATH,
+)
+
+TALABAT_WEBHOOK_PATHS = (TALABAT_ORDER_WEBHOOK_PATH, TALABAT_CATALOG_WEBHOOK_PATH)
 
 
 def normalize_talabat_webhook_authorization():
@@ -12,12 +17,16 @@ def normalize_talabat_webhook_authorization():
 
 	Talabat labels its shared webhook secret as a Bearer credential, while Frappe
 	interprets every Bearer header as an OAuth token during global authentication.
-	This hook runs before that authentication and is restricted to the exact
-	Talabat order webhook route. The webhook handler then validates the raw value
-	against the connection's stored secret.
+	This hook runs before that authentication and is restricted to Talabat's
+	webhook routes - both the order and catalog feedback webhooks document the
+	exact same ``WebhookKeyAuth`` scheme in openapi.json, and the order webhook
+	has empirically been observed sending a ``Bearer`` prefix despite that
+	scheme documenting a raw static token, so the same normalization applies to
+	both rather than duplicating it per route. The webhook handler then
+	validates the raw value against the connection's stored secret.
 	"""
 	request = frappe.local.request
-	if request.path != TALABAT_ORDER_WEBHOOK_PATH:
+	if request.path not in TALABAT_WEBHOOK_PATHS:
 		return
 
 	authorization = request.headers.get("Authorization")

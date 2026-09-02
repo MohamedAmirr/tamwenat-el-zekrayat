@@ -86,7 +86,9 @@ class IntegrationTestTalabatConnection(IntegrationTestCase):
 			connection.order_webhook_url,
 			"https://old.example.com/api/method/marketplace_integrations.api.talabat_webhooks.order_event",
 		)
-		get_url.assert_called_once_with(
+		# before_insert() also sets the separate catalog webhook URL, so
+		# get_url() is called twice on insert - once per webhook path.
+		get_url.assert_any_call(
 			"/api/method/marketplace_integrations.api.talabat_webhooks.order_event",
 			allow_header_override=False,
 		)
@@ -138,3 +140,103 @@ class IntegrationTestTalabatConnection(IntegrationTestCase):
 		).insert()
 		with self.set_user(user.name), self.assertRaises(frappe.PermissionError):
 			connection.get_order_webhook_secret_for_copy()
+
+	def test_catalog_webhook_url_is_generated_on_insert_and_refreshes_on_demand(self):
+		with patch(
+			"marketplace_integrations.marketplace_integrations.doctype.talabat_connection.talabat_connection.get_url",
+			return_value=(
+				"https://old.example.com/api/method/"
+				"marketplace_integrations.api.talabat_webhooks.catalog_update_feedback"
+			),
+		) as get_url:
+			connection = make_connection("Test Catalog Webhook URL")
+
+		self.assertEqual(
+			connection.catalog_webhook_url,
+			"https://old.example.com/api/method/"
+			"marketplace_integrations.api.talabat_webhooks.catalog_update_feedback",
+		)
+		# before_insert() also sets the separate order webhook URL, so
+		# get_url() is called twice on insert - once per webhook path.
+		get_url.assert_any_call(
+			"/api/method/marketplace_integrations.api.talabat_webhooks.catalog_update_feedback",
+			allow_header_override=False,
+		)
+
+		with patch(
+			"marketplace_integrations.marketplace_integrations.doctype.talabat_connection.talabat_connection.get_url",
+			return_value=(
+				"https://new.example.com/api/method/"
+				"marketplace_integrations.api.talabat_webhooks.catalog_update_feedback"
+			),
+		):
+			result = connection.refresh_catalog_webhook_url()
+
+		connection.reload()
+		self.assertEqual(
+			connection.catalog_webhook_url,
+			"https://new.example.com/api/method/"
+			"marketplace_integrations.api.talabat_webhooks.catalog_update_feedback",
+		)
+		self.assertEqual(result["catalog_webhook_url"], connection.catalog_webhook_url)
+
+	def test_catalog_webhook_secret_round_trips_without_xss_corruption(self):
+		secret = "catalog-<static>-secret"
+		connection = make_connection("Test Catalog Webhook Secret", catalog_webhook_secret=secret)
+		connection.reload()
+
+		self.assertEqual(connection.get_password("catalog_webhook_secret"), secret)
+
+	def test_catalog_webhook_secret_is_generated_only_when_missing(self):
+		generated = make_connection("Generated Catalog Webhook Secret")
+		supplied = make_connection(
+			"Supplied Catalog Webhook Secret", catalog_webhook_secret="provided-catalog-secret"
+		)
+
+		self.assertTrue(generated.get_password("catalog_webhook_secret"))
+		self.assertEqual(supplied.get_password("catalog_webhook_secret"), "provided-catalog-secret")
+		original = generated.get_password("catalog_webhook_secret")
+		generated.connection_name = "Generated Catalog Webhook Secret Updated"
+		generated.save()
+		self.assertEqual(generated.get_password("catalog_webhook_secret"), original)
+
+	def test_catalog_webhook_secret_is_distinct_from_order_webhook_secret(self):
+		connection = make_connection(
+			"Distinct Webhook Secrets",
+			order_webhook_secret="order-secret-value",
+			catalog_webhook_secret="catalog-secret-value",
+		)
+		connection.reload()
+
+		self.assertEqual(connection.get_password("order_webhook_secret"), "order-secret-value")
+		self.assertEqual(connection.get_password("catalog_webhook_secret"), "catalog-secret-value")
+		self.assertNotEqual(connection.order_webhook_url, connection.catalog_webhook_url)
+
+	def test_catalog_webhook_secret_copy_excludes_other_fields(self):
+		connection = make_connection(
+			"Copy Catalog Webhook Secret",
+			order_webhook_secret="order-secret-for-copy-test",
+			catalog_webhook_secret="copyable-catalog-secret",
+		)
+		response = connection.get_catalog_webhook_secret_for_copy()
+
+		self.assertEqual(response, {"catalog_webhook_secret": "copyable-catalog-secret"})
+
+	def test_catalog_webhook_secret_copy_requires_write_permission(self):
+		connection = make_connection(
+			"Copy Catalog Webhook Secret Permission", catalog_webhook_secret="copyable-secret"
+		)
+		self.assertEqual(
+			connection.get_catalog_webhook_secret_for_copy()["catalog_webhook_secret"], "copyable-secret"
+		)
+		user = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": f"catalog-secret-copy-{frappe.generate_hash(length=8)}@example.com",
+				"first_name": "Catalog Secret Copy User",
+				"send_welcome_email": 0,
+				"roles": [{"role": "All"}],
+			}
+		).insert()
+		with self.set_user(user.name), self.assertRaises(frappe.PermissionError):
+			connection.get_catalog_webhook_secret_for_copy()

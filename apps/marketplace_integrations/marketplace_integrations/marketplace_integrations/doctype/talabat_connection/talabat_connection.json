@@ -14,6 +14,9 @@
    "order_webhook_section",
    "order_webhook_url",
    "order_webhook_secret",
+   "catalog_webhook_section",
+   "catalog_webhook_url",
+   "catalog_webhook_secret",
    "legacy_migration_source",
    "enabled"
  ],
@@ -72,6 +75,7 @@
    "fieldname": "order_webhook_url",
    "fieldtype": "Data",
    "label": "Order Webhook URL",
+   "length": 255,
    "read_only": 1
   },
   {
@@ -79,6 +83,24 @@
    "fieldtype": "Password",
    "ignore_xss_filter": 1,
    "label": "Order Webhook Secret"
+  },
+  {
+   "fieldname": "catalog_webhook_section",
+   "fieldtype": "Section Break",
+   "label": "Catalog Webhook"
+  },
+  {
+   "fieldname": "catalog_webhook_url",
+   "fieldtype": "Data",
+   "label": "Catalog Webhook URL",
+   "length": 255,
+   "read_only": 1
+  },
+  {
+   "fieldname": "catalog_webhook_secret",
+   "fieldtype": "Password",
+   "ignore_xss_filter": 1,
+   "label": "Catalog Webhook Secret"
   },
   {
    "fieldname": "legacy_migration_source",
@@ -90,7 +112,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-08-30 00:00:00.000000",
+ "modified": "2026-09-02 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Talabat Connection",
