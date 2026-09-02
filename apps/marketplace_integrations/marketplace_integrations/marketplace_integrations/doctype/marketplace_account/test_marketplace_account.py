@@ -58,6 +58,26 @@ class IntegrationTestMarketplaceAccount(IntegrationTestCase):
 			.name
 		)
 
+	def make_group_warehouse(self, warehouse_name):
+		company = frappe.defaults.get_global_default("company")
+		abbr = frappe.db.get_value("Company", company, "abbr")
+		existing_name = f"{warehouse_name} - {abbr}"
+		if frappe.db.exists("Warehouse", existing_name):
+			return existing_name
+
+		return (
+			frappe.get_doc(
+				{
+					"doctype": "Warehouse",
+					"warehouse_name": warehouse_name,
+					"company": company,
+					"is_group": 1,
+				}
+			)
+			.insert()
+			.name
+		)
+
 	def make_account(self, account_name, external_account_id, **kwargs):
 		doc = {
 			"doctype": "Marketplace Account",
@@ -95,6 +115,12 @@ class IntegrationTestMarketplaceAccount(IntegrationTestCase):
 		account.reload()
 
 		self.assertFalse(account.warehouse)
+
+	def test_group_warehouse_is_rejected(self):
+		group_warehouse = self.make_group_warehouse("Test Group Catalog Warehouse")
+
+		with self.assertRaisesRegex(frappe.ValidationError, "leaf Warehouse"):
+			self.make_account("Test Group Warehouse", "ext-account-group-warehouse", warehouse=group_warehouse)
 
 	def test_two_accounts_may_share_one_warehouse(self):
 		shared_warehouse = self.make_warehouse("Test Shared Warehouse")

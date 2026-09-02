@@ -20,7 +20,9 @@ def _response(body, status_code=202):
 class IntegrationTestTalabatCatalogSync(IntegrationTestCase):
 	def setUp(self):
 		self.suffix = frappe.generate_hash(length=8)
-		self.warehouse = frappe.get_all("Warehouse", filters={"disabled": 0}, pluck="name", limit=1)[0]
+		self.warehouse = frappe.get_all(
+			"Warehouse", filters={"disabled": 0, "is_group": 0}, pluck="name", limit=1
+		)[0]
 		self.price_list = frappe.get_all(
 			"Price List", filters={"selling": 1, "enabled": 1}, pluck="name", limit=1
 		)[0]

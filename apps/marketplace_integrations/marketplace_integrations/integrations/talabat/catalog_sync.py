@@ -39,6 +39,10 @@ def validate_catalog_sync_account(account):
 		frappe.throw(
 			_("Marketplace Account {0} requires a Warehouse for catalog sync.").format(account_doc.name)
 		)
+	if frappe.db.get_value("Warehouse", account_doc.warehouse, "is_group"):
+		frappe.throw(
+			_("Marketplace Account {0} requires a leaf Warehouse for catalog sync.").format(account_doc.name)
+		)
 	if not account_doc.erpnext_selling_price_list:
 		frappe.throw(
 			_("Marketplace Account {0} requires an ERPNext Selling Price List for catalog sync.").format(
