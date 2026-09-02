@@ -57,6 +57,7 @@ def compute_account_identity_key(platform, external_account_id):
 class MarketplaceAccount(Document):
 	def validate(self):
 		self.validate_connection()
+		self.validate_warehouse()
 		self.validate_unique_account_identity()
 
 	def before_save(self):
@@ -73,6 +74,10 @@ class MarketplaceAccount(Document):
 			frappe.throw(
 				_("Connection {0} does not exist as a {1}.").format(self.connection, self.connection_doctype)
 			)
+
+	def validate_warehouse(self):
+		if self.warehouse and frappe.db.get_value("Warehouse", self.warehouse, "is_group"):
+			frappe.throw(_("Marketplace Account Warehouse must be a leaf Warehouse, not a group Warehouse."))
 
 	def validate_unique_account_identity(self):
 		# account_identity_key isn't set yet at this point (before_save runs

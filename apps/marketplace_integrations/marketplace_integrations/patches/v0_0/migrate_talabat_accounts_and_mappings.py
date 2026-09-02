@@ -146,19 +146,23 @@ def create_or_update_account(vendor, connection):
 		if account_name_by_identity
 		else frappe.get_doc({"doctype": "Marketplace Account"})
 	)
-	account.update(
-		{
-			"account_name": account_name,
-			"platform": "Talabat",
-			"external_account_id": vendor_id,
-			"connection_doctype": CONNECTION_DOCTYPE,
-			"connection": connection,
-			"enabled": vendor.is_active,
-		}
-	)
+	values = {
+		"account_name": account_name,
+		"platform": "Talabat",
+		"external_account_id": vendor_id,
+		"connection_doctype": CONNECTION_DOCTYPE,
+		"connection": connection,
+		"enabled": vendor.is_active,
+	}
 	if account.is_new():
+		account.update(values)
 		account.insert(ignore_permissions=True)
-	else:
+	elif any(account.get(fieldname) != value for fieldname, value in values.items()):
+		# A completed legacy migration must remain idempotent even if an
+		# administrator later has an invalid historical Warehouse configured.
+		# Do not re-save an unchanged record just to replay source values: normal
+		# Desk edits still validate the Warehouse, and catalog sync rejects it.
+		account.update(values)
 		account.save(ignore_permissions=True)
 	return account.name
 

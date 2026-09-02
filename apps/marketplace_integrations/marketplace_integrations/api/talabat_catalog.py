@@ -44,3 +44,22 @@ def queue_catalog_sync(account: str):
 		account=account_doc.name,
 	)
 	return {"queued": True}
+
+
+@frappe.whitelist(methods=["POST"])
+def queue_mapping_catalog_sync(mapping: str):
+	"""Authorize and enqueue one Mapping's current Talabat catalog state."""
+	mapping_doc = frappe.get_doc("Marketplace Product Mapping", mapping)
+	mapping_doc.check_permission("write")
+	account_doc = frappe.get_doc("Marketplace Account", mapping_doc.marketplace_account)
+	account_doc.check_permission("write")
+	catalog_sync.validate_catalog_sync_account(account_doc)
+	frappe.enqueue(
+		catalog_sync.sync_catalog,
+		queue="long",
+		timeout=3600,
+		enqueue_after_commit=True,
+		account=account_doc.name,
+		mapping_names=[mapping_doc.name],
+	)
+	return {"queued": True}
