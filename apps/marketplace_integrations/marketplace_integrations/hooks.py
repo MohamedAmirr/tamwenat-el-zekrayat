@@ -151,6 +151,23 @@ required_apps = ["erpnext"]
 # 		"on_trash": "method"
 # 	}
 # }
+doc_events = {
+	"Stock Ledger Entry": {
+		"after_insert": "marketplace_integrations.events.catalog_sync.stock_ledger_entry_after_insert",
+	},
+	"Item Price": {
+		"after_insert": "marketplace_integrations.events.catalog_sync.item_price_after_insert",
+		"on_update": "marketplace_integrations.events.catalog_sync.item_price_on_update",
+		"after_delete": "marketplace_integrations.events.catalog_sync.item_price_after_delete",
+	},
+	"Item": {"on_update": "marketplace_integrations.events.catalog_sync.item_on_update"},
+	"Marketplace Product Mapping": {
+		"on_update": "marketplace_integrations.events.catalog_sync.marketplace_product_mapping_on_update",
+	},
+	"Marketplace Account": {
+		"on_update": "marketplace_integrations.events.catalog_sync.marketplace_account_on_update",
+	},
+}
 
 # Scheduled Tasks
 # ---------------

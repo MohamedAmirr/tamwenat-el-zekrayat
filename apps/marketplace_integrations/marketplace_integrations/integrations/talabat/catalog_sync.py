@@ -149,8 +149,31 @@ def submit_catalog_batch(account, mapping_names=None):
 	for error in built["errors"]:
 		_mark_error(error["mapping_name"], error["error"])
 
+	return {
+		"batches": _submit_catalog_records(account_doc, connection, built["batches"]),
+		"errors": built["errors"],
+	}
+
+
+def submit_catalog_products(account, records):
+	"""Submit already-built products for a real mapping state transition.
+
+	The event path uses this only to deactivate a mapping's previous external
+	identity after it has been changed locally. Normal sync continues to build
+	from current database state through ``submit_catalog_batch``.
+	"""
+	account_doc, connection, _price_list = validate_catalog_sync_account(account)
+	if not records:
+		return {"batches": []}
+	batches = [
+		records[index : index + CATALOG_BATCH_SIZE] for index in range(0, len(records), CATALOG_BATCH_SIZE)
+	]
+	return {"batches": _submit_catalog_records(account_doc, connection, batches)}
+
+
+def _submit_catalog_records(account_doc, connection, batches):
 	results = []
-	for batch in built["batches"]:
+	for batch in batches:
 		mapping_names_in_batch = [record["mapping_name"] for record in batch]
 		try:
 			response = TalabatClient(connection.name).request(
@@ -168,7 +191,7 @@ def submit_catalog_batch(account, mapping_names=None):
 		for mapping_name in mapping_names_in_batch:
 			_mark_queued(mapping_name, job_id)
 		results.append({"mapping_names": mapping_names_in_batch, "ok": True, "job_id": job_id})
-	return {"batches": results, "errors": built["errors"]}
+	return results
 
 
 def sync_catalog(account, mapping_names=None):
