@@ -128,7 +128,7 @@
   {
    "fieldname": "erpnext_sync_section",
    "fieldtype": "Section Break",
-   "label": "ERPNext Sales Order Synchronization"
+   "label": "ERPNext Integration Settings"
   },
   {
    "fieldname": "erpnext_company",
