@@ -23,7 +23,9 @@
   "fulfilled_weight",
   "fulfilled_weighted_pieces",
   "fulfilled_unit_price",
-  "fulfilled_total_price"
+  "fulfilled_total_price",
+  "container_deposit",
+  "promotions"
  ],
  "fields": [
   {"fieldname": "external_item_id", "fieldtype": "Data", "ignore_xss_filter": 1, "in_list_view": 1, "label": "External Item ID", "reqd": 1},
@@ -44,7 +46,9 @@
   {"fieldname": "fulfilled_weight", "fieldtype": "Float", "label": "Fulfilled Weight"},
   {"fieldname": "fulfilled_weighted_pieces", "fieldtype": "Int", "label": "Fulfilled Weighted Pieces"},
   {"fieldname": "fulfilled_unit_price", "fieldtype": "Float", "label": "Fulfilled Unit Price"},
-  {"fieldname": "fulfilled_total_price", "fieldtype": "Float", "label": "Fulfilled Total Price"}
+  {"fieldname": "fulfilled_total_price", "fieldtype": "Float", "label": "Fulfilled Total Price"},
+  {"fieldname": "container_deposit", "fieldtype": "Float", "label": "Container Deposit", "read_only": 1},
+  {"description": "Full Talabat item.promotion array (name, type, discount_amount, sponsorships[]), preserved without interpretation.", "fieldname": "promotions", "fieldtype": "JSON", "ignore_xss_filter": 1, "label": "Promotions", "read_only": 1}
  ],
  "index_web_pages_for_search": 1,
  "istable": 1,

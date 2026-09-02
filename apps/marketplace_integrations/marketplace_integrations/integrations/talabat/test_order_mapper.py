@@ -21,6 +21,7 @@ class UnitTestOrderMapper(UnitTestCase):
 			"status": "RECEIVED",
 			"order_type": "DELIVERY",
 			"transport_type": "LOGISTICS_DELIVERY",
+			"promotion_status": "AVAILABLE",
 			"isPreorder": False,
 			"accepted_for": "2026-08-31T13:00:00Z",
 			"promised_for": "2026-08-31T13:30:00Z",
@@ -86,6 +87,15 @@ class UnitTestOrderMapper(UnitTestCase):
 						"list_price": None,
 						"total_price": 40.0,
 					},
+					"container_deposit": 0.25,
+					"promotion": [
+						{
+							"name": "Drinks 0.5l and 1l on sale",
+							"type": "STRIKETHROUGH",
+							"discount_amount": 2.25,
+							"sponsorships": [{"sponsor": "VENDOR", "amount": 2.25}],
+						}
+					],
 				}
 			],
 		}
@@ -103,6 +113,7 @@ class UnitTestOrderMapper(UnitTestCase):
 		self.assertEqual(normalized["external_status"], "RECEIVED")
 		self.assertEqual(normalized["order_type"], "DELIVERY")
 		self.assertEqual(normalized["transport_type"], "LOGISTICS_DELIVERY")
+		self.assertEqual(normalized["promotion_status"], "AVAILABLE")
 		self.assertEqual(normalized["is_preorder"], 0)
 		self.assertIsNotNone(normalized["accepted_for"])
 		self.assertIsNotNone(normalized["promised_for"])
@@ -145,6 +156,64 @@ class UnitTestOrderMapper(UnitTestCase):
 		self.assertEqual(item["external_item_id"], "item-uuid-001")
 		self.assertEqual(item["external_sku"], "SKU-001")
 		self.assertEqual(item["product_name"], "Product A")
+		self.assertEqual(item["container_deposit"], 0.25)
+		self.assertEqual(item["promotions"][0]["name"], "Drinks 0.5l and 1l on sale")
+
+	def test_normalize_order_maps_promotion_status_available(self):
+		"""AVAILABLE promotion_status is preserved exactly."""
+		raw = self.sample_raw_order(promotion_status="AVAILABLE")
+		normalized = normalize_order(raw)
+		self.assertEqual(normalized["promotion_status"], "AVAILABLE")
+
+	def test_normalize_order_maps_promotion_status_unavailable_with_empty_promotions(self):
+		"""UNAVAILABLE promotion_status is preserved while item promotions are
+		empty and payment totals remain untouched by this mapper."""
+		raw = self.sample_raw_order(promotion_status="UNAVAILABLE")
+		raw["items"][0]["promotion"] = []
+		normalized = normalize_order(raw)
+
+		self.assertEqual(normalized["promotion_status"], "UNAVAILABLE")
+		self.assertEqual(normalized["items"][0]["promotions"], [])
+		# payment.sub_total/order_total remain accurate per Talabat's own
+		# documented guarantee, and this mapper does not touch them.
+		self.assertEqual(normalized["sub_total"], 100.0)
+		self.assertEqual(normalized["order_total"], 110.0)
+
+	def test_normalize_order_maps_missing_promotion_status_to_none(self):
+		"""An older/pre-#83 payload without promotion_status normalizes to
+		None rather than raising or inventing a value."""
+		raw = self.sample_raw_order()
+		raw.pop("promotion_status")
+		normalized = normalize_order(raw)
+		self.assertIsNone(normalized["promotion_status"])
+
+	def test_normalize_order_item_container_deposit_missing_normalizes_to_none(self):
+		"""An item without container_deposit (older payload) normalizes to
+		None rather than 0 or raising."""
+		raw = self.sample_raw_order()
+		del raw["items"][0]["container_deposit"]
+		normalized = normalize_order(raw)
+		self.assertIsNone(normalized["items"][0]["container_deposit"])
+
+	def test_normalize_order_item_promotions_preserve_sponsorships_exactly(self):
+		"""promotion name/type/discount_amount/sponsorships survive the
+		mapper unchanged, including the sponsor/amount shape."""
+		raw = self.sample_raw_order()
+		normalized = normalize_order(raw)
+
+		promotion = normalized["items"][0]["promotions"][0]
+		self.assertEqual(promotion["name"], "Drinks 0.5l and 1l on sale")
+		self.assertEqual(promotion["type"], "STRIKETHROUGH")
+		self.assertEqual(promotion["discount_amount"], 2.25)
+		self.assertEqual(promotion["sponsorships"], [{"sponsor": "VENDOR", "amount": 2.25}])
+
+	def test_normalize_order_item_promotions_missing_normalizes_to_none(self):
+		"""An item without a promotion array at all (older payload) normalizes
+		to None."""
+		raw = self.sample_raw_order()
+		del raw["items"][0]["promotion"]
+		normalized = normalize_order(raw)
+		self.assertIsNone(normalized["items"][0]["promotions"])
 
 	def test_normalize_order_handles_missing_nested_objects(self):
 		"""Missing nested objects like customer, payment, sys are handled gracefully."""
@@ -417,9 +486,7 @@ class UnitTestOrderMapperItems(UnitTestCase):
 			"sys": {},
 			"cancellation": {},
 			"items": [
-				self.sample_item(
-					original_pricing={"pricing_type": "KG"}, pricing={"pricing_type": "UNIT"}
-				)
+				self.sample_item(original_pricing={"pricing_type": "KG"}, pricing={"pricing_type": "UNIT"})
 			],
 		}
 		normalized1 = normalize_order(raw1)

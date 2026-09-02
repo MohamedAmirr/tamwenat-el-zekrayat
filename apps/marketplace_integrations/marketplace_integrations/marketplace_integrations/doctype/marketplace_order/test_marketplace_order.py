@@ -51,6 +51,7 @@ class IntegrationTestMarketplaceOrder(IntegrationTestCase):
 			"external_status": "RECEIVED",
 			"order_type": "DELIVERY",
 			"transport_type": "LOGISTICS_DELIVERY",
+			"promotion_status": "AVAILABLE",
 			"is_preorder": 0,
 			"accepted_for": "2026-08-31 13:00:00",
 			"promised_for": "2026-08-31 13:30:00",
@@ -101,6 +102,15 @@ class IntegrationTestMarketplaceOrder(IntegrationTestCase):
 					"fulfilled_weighted_pieces": None,
 					"fulfilled_unit_price": 20.0,
 					"fulfilled_total_price": 40.0,
+					"container_deposit": 0.25,
+					"promotions": [
+						{
+							"name": "Drinks 0.5l and 1l on sale",
+							"type": "STRIKETHROUGH",
+							"discount_amount": 2.25,
+							"sponsorships": [{"sponsor": "VENDOR", "amount": 2.25}],
+						}
+					],
 				},
 				{
 					"external_item_id": "line-kg-001",
@@ -143,12 +153,19 @@ class IntegrationTestMarketplaceOrder(IntegrationTestCase):
 		self.assertEqual(frappe.parse_json(order.discounts)[0]["name"], "<Promotion>")
 		self.assertEqual(frappe.parse_json(order.discounts)[0]["value"], -5.0)
 		self.assertEqual(frappe.parse_json(order.additional_fees)["holiday_fee"], 2.0)
+		self.assertEqual(order.promotion_status, "AVAILABLE")
 		self.assertIsNone(order.erpnext_sales_order)
 		self.assertEqual(order.erpnext_sync_status, "Not Synced")
 
 		unit_line = next(row for row in order.items if row.external_item_id == "line-unit-001")
 		kg_line = next(row for row in order.items if row.external_item_id == "line-kg-001")
 		self.assertEqual(unit_line.original_quantity, 2)
+		self.assertEqual(unit_line.container_deposit, 0.25)
+		promotion = frappe.parse_json(unit_line.promotions)[0]
+		self.assertEqual(promotion["name"], "Drinks 0.5l and 1l on sale")
+		self.assertEqual(promotion["type"], "STRIKETHROUGH")
+		self.assertEqual(promotion["discount_amount"], 2.25)
+		self.assertEqual(promotion["sponsorships"], [{"sponsor": "VENDOR", "amount": 2.25}])
 		# Frappe persists an empty Float as 0.0 on reload; the separate
 		# pricing_type still tells the later UI whether quantity or weight is
 		# the meaningful fulfillment dimension.
@@ -164,7 +181,10 @@ class IntegrationTestMarketplaceOrder(IntegrationTestCase):
 
 		updated = self.sample_order()
 		updated["external_status"] = "READY_FOR_PICKUP"
+		updated["promotion_status"] = "UNAVAILABLE"
 		updated["items"][0]["fulfilled_quantity"] = 1
+		updated["items"][0]["container_deposit"] = 0.5
+		updated["items"][0]["promotions"] = []
 		updated["items"].append(
 			{
 				"external_item_id": "line-addition-001",
@@ -197,6 +217,9 @@ class IntegrationTestMarketplaceOrder(IntegrationTestCase):
 		self.assertEqual(unit_line.name, unit_line_name)
 		self.assertEqual(unit_line.fulfilled_quantity, 1)
 		self.assertEqual(second.external_status, "READY_FOR_PICKUP")
+		self.assertEqual(second.promotion_status, "UNAVAILABLE")
+		self.assertEqual(unit_line.container_deposit, 0.5)
+		self.assertEqual(frappe.parse_json(unit_line.promotions), [])
 		self.assertEqual(
 			frappe.db.count("Marketplace Order", {"order_identity_key": second.order_identity_key}), 1
 		)
@@ -256,3 +279,49 @@ class IntegrationTestMarketplaceOrder(IntegrationTestCase):
 
 		with self.assertRaises(frappe.ValidationError):
 			upsert_marketplace_order(account.name, order)
+
+	def test_upsert_persists_unavailable_promotion_status_with_empty_promotions(self):
+		"""UNAVAILABLE promotion_status persists alongside empty item
+		promotions, while payment totals remain intact - this service never
+		derives or adjusts them based on promotion availability."""
+		account = self.make_account()
+		order_values = self.sample_order()
+		order_values["promotion_status"] = "UNAVAILABLE"
+		order_values["items"][0]["promotions"] = []
+
+		order = upsert_marketplace_order(account.name, order_values)
+		order.reload()
+
+		self.assertEqual(order.promotion_status, "UNAVAILABLE")
+		self.assertEqual(order.sub_total, 100.0)
+		self.assertEqual(order.order_total, 110.0)
+		unit_line = next(row for row in order.items if row.external_item_id == "line-unit-001")
+		self.assertEqual(frappe.parse_json(unit_line.promotions), [])
+
+	def test_upsert_persists_an_unrecognized_promotion_status_without_raising(self):
+		"""promotion_status is a Data field, not a closed Select: a value
+		Talabat hasn't documented yet (a future third status) must persist
+		as-is rather than failing the whole order's persistence."""
+		account = self.make_account()
+		order_values = self.sample_order()
+		order_values["promotion_status"] = "PARTIALLY_AVAILABLE"
+
+		order = upsert_marketplace_order(account.name, order_values)
+		order.reload()
+
+		self.assertEqual(order.promotion_status, "PARTIALLY_AVAILABLE")
+
+	def test_upsert_preserves_promotion_name_with_html_like_characters(self):
+		"""ignore_xss_filter on the promotions JSON field must actually
+		protect it: a promotion name containing HTML-like characters must
+		survive insert()/reload completely unmodified, the same way the
+		discounts field's <Promotion> content already proves for itself."""
+		account = self.make_account()
+		order_values = self.sample_order()
+		order_values["items"][0]["promotions"][0]["name"] = "Buy 2 <get 1 free>"
+
+		order = upsert_marketplace_order(account.name, order_values)
+		order.reload()
+
+		unit_line = next(row for row in order.items if row.external_item_id == "line-unit-001")
+		self.assertEqual(frappe.parse_json(unit_line.promotions)[0]["name"], "Buy 2 <get 1 free>")

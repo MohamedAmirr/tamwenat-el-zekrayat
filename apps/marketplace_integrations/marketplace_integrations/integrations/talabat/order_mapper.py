@@ -18,6 +18,11 @@ writes a document - it is pure data translation.
 
 Talabat's own external_status/item-status enum spellings (e.g. ``CANCELLED``)
 are preserved exactly as documented, not remapped to an invented spelling.
+
+Order-level ``promotion_status`` and per-item ``container_deposit``/
+``promotion`` (-> ``promotions``) are preserved as external facts only (#83):
+this module never derives merchant paid/settled state, commission, or any
+other accounting interpretation from them.
 """
 
 import frappe
@@ -56,6 +61,7 @@ def normalize_order(order):
 		"external_status": order.get("status"),
 		"order_type": order.get("order_type"),
 		"transport_type": order.get("transport_type"),
+		"promotion_status": order.get("promotion_status"),
 		"is_preorder": 1 if order.get("isPreorder") else 0,
 		"accepted_for": _parse_datetime(order.get("accepted_for")),
 		"promised_for": _parse_datetime(order.get("promised_for")),
@@ -116,6 +122,8 @@ def _normalize_item(item):
 		"fulfilled_weighted_pieces": pricing.get("weighted_pieces"),
 		"fulfilled_unit_price": pricing.get("unit_price"),
 		"fulfilled_total_price": pricing.get("total_price"),
+		"container_deposit": item.get("container_deposit"),
+		"promotions": item.get("promotion"),
 	}
 
 
