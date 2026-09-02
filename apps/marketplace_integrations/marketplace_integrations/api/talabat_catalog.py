@@ -49,17 +49,52 @@ def queue_catalog_sync(account: str):
 @frappe.whitelist(methods=["POST"])
 def queue_mapping_catalog_sync(mapping: str):
 	"""Authorize and enqueue one Mapping's current Talabat catalog state."""
-	mapping_doc = frappe.get_doc("Marketplace Product Mapping", mapping)
-	mapping_doc.check_permission("write")
-	account_doc = frappe.get_doc("Marketplace Account", mapping_doc.marketplace_account)
-	account_doc.check_permission("write")
-	catalog_sync.validate_catalog_sync_account(account_doc)
-	frappe.enqueue(
-		catalog_sync.sync_catalog,
-		queue="long",
-		timeout=3600,
-		enqueue_after_commit=True,
-		account=account_doc.name,
-		mapping_names=[mapping_doc.name],
-	)
+	_queue_mapping_catalog_syncs([mapping])
 	return {"queued": True}
+
+
+@frappe.whitelist(methods=["POST"])
+def queue_mappings_catalog_sync(mapping_names):
+	"""Authorize and enqueue selected Mappings' current Talabat catalog state."""
+	mapping_names = _parse_mapping_names(mapping_names)
+	accounts = _queue_mapping_catalog_syncs(mapping_names)
+	return {"queued": len(mapping_names), "jobs": len(accounts)}
+
+
+def _parse_mapping_names(mapping_names):
+	try:
+		mapping_names = frappe.parse_json(mapping_names) if isinstance(mapping_names, str) else mapping_names
+	except (TypeError, ValueError):
+		frappe.throw(frappe._("Marketplace Product Mappings must be valid JSON."))
+	if not isinstance(mapping_names, list) or not mapping_names:
+		frappe.throw(frappe._("Select at least one Marketplace Product Mapping."))
+	if any(not isinstance(name, str) or not name.strip() for name in mapping_names):
+		frappe.throw(frappe._("Marketplace Product Mappings must be valid names."))
+	return list(dict.fromkeys(name.strip() for name in mapping_names))
+
+
+def _queue_mapping_catalog_syncs(mapping_names):
+	"""Check every selected Mapping before enqueueing one job per Account."""
+	accounts = {}
+	for mapping_name in mapping_names:
+		mapping_doc = frappe.get_doc("Marketplace Product Mapping", mapping_name)
+		mapping_doc.check_permission("write")
+		account_doc = frappe.get_doc("Marketplace Account", mapping_doc.marketplace_account)
+		account_doc.check_permission("write")
+		accounts.setdefault(account_doc.name, {"account": account_doc, "mapping_names": []})[
+			"mapping_names"
+		].append(mapping_doc.name)
+
+	for selected in accounts.values():
+		catalog_sync.validate_catalog_sync_account(selected["account"])
+
+	for selected in accounts.values():
+		frappe.enqueue(
+			catalog_sync.sync_catalog,
+			queue="long",
+			timeout=3600,
+			enqueue_after_commit=True,
+			account=selected["account"].name,
+			mapping_names=selected["mapping_names"],
+		)
+	return accounts

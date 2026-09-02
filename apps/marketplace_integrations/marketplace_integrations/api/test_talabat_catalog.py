@@ -1,12 +1,18 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
+import json
 from unittest.mock import patch
 
 import frappe
+import frappe.share
 from frappe.tests import IntegrationTestCase
 
-from marketplace_integrations.api.talabat_catalog import queue_catalog_sync, queue_mapping_catalog_sync
+from marketplace_integrations.api.talabat_catalog import (
+	queue_catalog_sync,
+	queue_mapping_catalog_sync,
+	queue_mappings_catalog_sync,
+)
 
 
 class IntegrationTestTalabatCatalogApi(IntegrationTestCase):
@@ -95,6 +101,129 @@ class IntegrationTestTalabatCatalogApi(IntegrationTestCase):
 		self.assertEqual(enqueue.call_args.kwargs["account"], self.account.name)
 		self.assertEqual(enqueue.call_args.kwargs["mapping_names"], [self.mapping.name])
 		self.assertTrue(enqueue.call_args.kwargs["enqueue_after_commit"])
+
+	@patch("marketplace_integrations.api.talabat_catalog.frappe.enqueue")
+	def test_queue_mappings_groups_selected_mappings_by_account(self, enqueue):
+		second_account = frappe.get_doc(
+			{
+				"doctype": "Marketplace Account",
+				"account_name": f"Catalog API Second Account {frappe.generate_hash(length=8)}",
+				"platform": "Talabat",
+				"external_account_id": f"test-vendor-{frappe.generate_hash(length=8)}",
+				"connection_doctype": "Talabat Connection",
+				"connection": self.account.connection,
+				"warehouse": self.account.warehouse,
+				"erpnext_selling_price_list": self.account.erpnext_selling_price_list,
+			}
+		).insert()
+		second_mapping = frappe.get_doc(
+			{
+				"doctype": "Marketplace Product Mapping",
+				"marketplace_account": second_account.name,
+				"item": self.item.name,
+				"external_reference": f"catalog-api-second-sku-{frappe.generate_hash(length=8)}",
+			}
+		).insert()
+		extra_mapping = frappe.get_doc(
+			{
+				"doctype": "Marketplace Product Mapping",
+				"marketplace_account": self.account.name,
+				"item": self.item.name,
+				"external_reference": f"catalog-api-extra-sku-{frappe.generate_hash(length=8)}",
+			}
+		).insert()
+
+		result = queue_mappings_catalog_sync([self.mapping.name, second_mapping.name])
+
+		self.assertEqual(result, {"queued": 2, "jobs": 2})
+		self.assertEqual(enqueue.call_count, 2)
+		queued = {call.kwargs["account"]: call.kwargs["mapping_names"] for call in enqueue.call_args_list}
+		self.assertEqual(queued[self.account.name], [self.mapping.name])
+		self.assertEqual(queued[second_account.name], [second_mapping.name])
+		self.assertNotIn(extra_mapping.name, [name for names in queued.values() for name in names])
+
+	@patch("marketplace_integrations.api.talabat_catalog.frappe.enqueue")
+	def test_queue_mappings_accepts_a_json_encoded_string_of_names(self, enqueue):
+		# frappe.call() always JSON-stringifies array arguments before sending, so
+		# in real usage mapping_names arrives as a JSON string, never a native list.
+		mapping_names_json = json.dumps([self.mapping.name])
+
+		result = queue_mappings_catalog_sync(mapping_names_json)
+
+		self.assertEqual(result, {"queued": 1, "jobs": 1})
+		enqueue.assert_called_once()
+		self.assertEqual(enqueue.call_args.kwargs["account"], self.account.name)
+		self.assertEqual(enqueue.call_args.kwargs["mapping_names"], [self.mapping.name])
+
+	@patch("marketplace_integrations.api.talabat_catalog.frappe.enqueue")
+	def test_queue_mappings_rejects_malformed_json_string(self, enqueue):
+		with self.assertRaisesRegex(frappe.ValidationError, "valid JSON"):
+			queue_mappings_catalog_sync("[not valid json")
+		enqueue.assert_not_called()
+
+	@patch("marketplace_integrations.api.talabat_catalog.frappe.enqueue")
+	def test_queue_mappings_rejects_json_string_that_is_not_a_list(self, enqueue):
+		# Valid JSON, but parses to a bare string rather than a list.
+		not_a_list_json = json.dumps(self.mapping.name)
+
+		with self.assertRaisesRegex(frappe.ValidationError, "Select at least one"):
+			queue_mappings_catalog_sync(not_a_list_json)
+		enqueue.assert_not_called()
+
+	@patch("marketplace_integrations.api.talabat_catalog.frappe.enqueue")
+	def test_queue_mappings_rejects_an_empty_list(self, enqueue):
+		with self.assertRaisesRegex(frappe.ValidationError, "Select at least one"):
+			queue_mappings_catalog_sync([])
+		enqueue.assert_not_called()
+
+	@patch("marketplace_integrations.api.talabat_catalog.frappe.enqueue")
+	def test_queue_mappings_rejects_a_blank_element(self, enqueue):
+		with self.assertRaisesRegex(frappe.ValidationError, "valid names"):
+			queue_mappings_catalog_sync([self.mapping.name, "  "])
+		enqueue.assert_not_called()
+
+	@patch("marketplace_integrations.api.talabat_catalog.frappe.enqueue")
+	def test_queue_mappings_deduplicates_repeated_names(self, enqueue):
+		result = queue_mappings_catalog_sync([self.mapping.name, self.mapping.name])
+
+		self.assertEqual(result, {"queued": 1, "jobs": 1})
+		enqueue.assert_called_once()
+		self.assertEqual(enqueue.call_args.kwargs["mapping_names"], [self.mapping.name])
+
+	@patch("marketplace_integrations.api.talabat_catalog.frappe.enqueue")
+	def test_queue_mappings_checks_all_permissions_before_enqueueing(self, enqueue):
+		second_mapping = frappe.get_doc(
+			{
+				"doctype": "Marketplace Product Mapping",
+				"marketplace_account": self.account.name,
+				"item": self.item.name,
+				"external_reference": f"catalog-api-permission-sku-{frappe.generate_hash(length=8)}",
+			}
+		).insert()
+		user = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": f"bulk-mapping-sync-{frappe.generate_hash(length=10)}@example.com",
+				"first_name": "Bulk Mapping Sync Test User",
+				"send_welcome_email": 0,
+				"roles": [{"role": "All"}],
+			}
+		).insert()
+		# Grant the test user real write permission on the *first* mapping (and its
+		# account) via an explicit share, but not on the second mapping - neither
+		# role has any permission on this doctype otherwise. This proves the
+		# implementation checks every selected mapping's permission before
+		# enqueueing anything, rather than checking-and-enqueueing one at a time
+		# (which would have already enqueued a job for the permitted mapping by
+		# the time the second mapping's permission check fails).
+		frappe.share.add("Marketplace Product Mapping", self.mapping.name, user.name, write=1)
+		frappe.share.add("Marketplace Account", self.account.name, user.name, write=1)
+		enqueue.reset_mock()
+
+		with self.set_user(user.name):
+			with self.assertRaises(frappe.PermissionError):
+				queue_mappings_catalog_sync([self.mapping.name, second_mapping.name])
+		enqueue.assert_not_called()
 
 	@patch("marketplace_integrations.api.talabat_catalog.frappe.enqueue")
 	def test_queue_mapping_requires_mapping_write_permission(self, enqueue):
