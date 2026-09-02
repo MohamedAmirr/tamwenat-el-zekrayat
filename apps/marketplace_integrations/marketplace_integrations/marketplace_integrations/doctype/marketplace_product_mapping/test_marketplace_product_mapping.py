@@ -7,7 +7,7 @@ from frappe.tests import IntegrationTestCase
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_product_mapping.marketplace_product_mapping import (
 	compute_mapping_identity_key,
 )
-from marketplace_integrations.services.mappings import resolve_item
+from marketplace_integrations.services.mappings import resolve_item, resolve_mapping
 
 # No platform-specific "Connection" DocType exists yet (Talabat Connection
 # lands under #37/#38) - same stand-in rationale as
@@ -244,6 +244,44 @@ class IntegrationTestMarketplaceProductMapping(IntegrationTestCase):
 		self.assertEqual(mapping.enabled, 1)
 		self.assertEqual(account.enabled, 0)
 		self.assertIsNone(resolve_item(account.name, "ext-ref-disabled-account-001"))
+
+	def test_resolve_mapping_returns_the_mapping_document_name(self):
+		# resolve_mapping() must have exactly the same resolution semantics as
+		# resolve_item() above (same identity key, same enabled-mapping AND
+		# enabled-account requirement) - it only returns a different field of
+		# the same resolved row, for callers that need the mapping document
+		# itself (e.g. #84's catalog price comparison needs the mapping's
+		# sales_uom for #6's get_listing_price()).
+		account = self.make_account("Test MPM Account Resolve Mapping", "ext-acct-mpm-resolve-mapping")
+		mapping = self.make_mapping(account.name, TEST_ITEM, "ext-ref-resolve-mapping-001")
+
+		self.assertEqual(resolve_mapping(account.name, "ext-ref-resolve-mapping-001"), mapping.name)
+		self.assertIsNone(resolve_mapping(account.name, "ext-ref-resolve-mapping-nonexistent"))
+
+	def test_resolve_mapping_returns_none_for_disabled_mapping_or_account(self):
+		disabled_mapping_account = self.make_account(
+			"Test MPM Account Resolve Mapping Disabled", "ext-acct-mpm-resolve-mapping-disabled"
+		)
+		self.make_mapping(
+			disabled_mapping_account.name, TEST_ITEM, "ext-ref-resolve-mapping-disabled-001", enabled=0
+		)
+		self.assertIsNone(
+			resolve_mapping(disabled_mapping_account.name, "ext-ref-resolve-mapping-disabled-001")
+		)
+
+		disabled_account = self.make_account(
+			"Test MPM Account Resolve Mapping Disabled Account",
+			"ext-acct-mpm-resolve-mapping-disabled-account",
+			enabled=0,
+		)
+		self.make_mapping(disabled_account.name, TEST_ITEM, "ext-ref-resolve-mapping-disabled-account-001")
+		self.assertIsNone(
+			resolve_mapping(disabled_account.name, "ext-ref-resolve-mapping-disabled-account-001")
+		)
+
+	def test_resolve_mapping_returns_none_for_blank_input(self):
+		self.assertIsNone(resolve_mapping(None, "ext-ref-resolve-mapping-blank"))
+		self.assertIsNone(resolve_mapping("Test MPM Account Resolve Mapping", None))
 
 	def test_resolve_item_returns_none_for_blank_input(self):
 		# resolve_item()'s documented contract is "Item or None" - a blank/
