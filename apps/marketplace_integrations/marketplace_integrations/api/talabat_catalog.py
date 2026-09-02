@@ -5,7 +5,7 @@
 
 import frappe
 
-from marketplace_integrations.integrations.talabat import catalog
+from marketplace_integrations.integrations.talabat import catalog, catalog_sync
 
 
 @frappe.whitelist()
@@ -26,3 +26,21 @@ def upsert_mapping(marketplace_account, external_reference, item):
 @frappe.whitelist()
 def disable_mapping(marketplace_account, external_reference):
 	return catalog.disable_mapping(marketplace_account, external_reference)
+
+
+@frappe.whitelist(methods=["POST"])
+def queue_catalog_sync(account: str):
+	"""Authorize and enqueue a Talabat catalog update without remote HTTP here."""
+	account_doc = frappe.get_doc("Marketplace Account", account)
+	account_doc.check_permission("write")
+	if not frappe.has_permission("Marketplace Product Mapping", ptype="write"):
+		frappe.throw(frappe._("Not permitted"), frappe.PermissionError)
+	catalog_sync.validate_catalog_sync_account(account_doc)
+	frappe.enqueue(
+		catalog_sync.sync_catalog,
+		queue="long",
+		timeout=3600,
+		enqueue_after_commit=True,
+		account=account_doc.name,
+	)
+	return {"queued": True}
