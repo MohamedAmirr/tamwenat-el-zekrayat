@@ -35,13 +35,19 @@ def get_access_token_cache_key(connection_name):
 	return f"{CACHE_KEY_PREFIX}:{connection_name}"
 
 
-def _request(method, url, **kwargs):
-	"""Make an HTTP request to Talabat, raising a clean frappe error on any
-	network-level failure (connection error, timeout, SSL error, ...).
+def http_request(method, url, **kwargs):
+	"""Make an HTTP request, raising a clean frappe error on any network-level
+	failure (connection error, timeout, SSL error, ...).
 
 	Shared by every Talabat call a TalabatClient makes - token fetch and the
 	general `request()` choke point alike - so timeout/network-error handling
-	has exactly one implementation instead of drifting copies.
+	has exactly one implementation instead of drifting copies. Also the app's
+	one shared bounded-timeout/network-error request wrapper for any other
+	plain (non-Talabat-authenticated) HTTP call, e.g.
+	``integrations/talabat/catalog_feedback.py``'s feedback CSV download -
+	callers outside this module should reuse this rather than opening a
+	second ad-hoc ``requests`` call site. Public (no leading underscore)
+	specifically because it is called across that module boundary.
 	"""
 	kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
 	try:
@@ -124,11 +130,11 @@ class TalabatClient:
 	def _send(self, method, url, access_token, **kwargs):
 		headers = kwargs.pop("headers", {}) or {}
 		headers["Authorization"] = f"Bearer {access_token}"
-		return _request(method, url, headers=headers, **kwargs)
+		return http_request(method, url, headers=headers, **kwargs)
 
 	def _fetch_access_token(self):
 		connection = self.get_connection()
-		response = _request(
+		response = http_request(
 			"POST",
 			f"{connection.get_base_url()}/v2/oauth/token",
 			data={

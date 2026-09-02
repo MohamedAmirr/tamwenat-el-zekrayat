@@ -98,6 +98,18 @@ def get_listing_price(account, mapping, item, on_date=None):
 	return _decimal(stock_price.price_list_rate) * _conversion_factor(item_doc, listing_uom)
 
 
+def effective_outbound_sku(external_sku, external_reference):
+	"""Return the Talabat sku a mapping actually gets sent as.
+
+	A non-blank ``external_sku`` wins over ``external_reference``. Shared with
+	``integrations/talabat/catalog_feedback.py`` so a feedback CSV's ``sku``
+	column - which echoes back whatever was actually sent - is correlated
+	against exactly this same value rather than a separately-maintained copy
+	of this precedence rule.
+	"""
+	return cstr(external_sku).strip() or cstr(external_reference).strip()
+
+
 def build_catalog_product(account, mapping):
 	"""Build one Talabat EditProductRequest without changing local sync state."""
 	account_doc, _connection, _price_list = validate_catalog_sync_account(account)
@@ -108,7 +120,7 @@ def build_catalog_product(account, mapping):
 		)
 
 	item = frappe.get_doc("Item", mapping_doc.item)
-	sku = cstr(mapping_doc.external_sku).strip() or cstr(mapping_doc.external_reference).strip()
+	sku = effective_outbound_sku(mapping_doc.external_sku, mapping_doc.external_reference)
 	if not sku:
 		raise CatalogBuildError(
 			_("Marketplace Product Mapping {0} requires a Talabat SKU.").format(mapping_doc.name)

@@ -9,7 +9,10 @@ from frappe.model.document import Document
 from frappe.utils import get_url
 
 from marketplace_integrations.integrations.talabat.client import get_access_token_cache_key
-from marketplace_integrations.integrations.talabat.constants import TALABAT_ORDER_WEBHOOK_PATH
+from marketplace_integrations.integrations.talabat.constants import (
+	TALABAT_CATALOG_WEBHOOK_PATH,
+	TALABAT_ORDER_WEBHOOK_PATH,
+)
 
 # Same base URLs as legacy talabat_integration's Talabat Settings
 # (talabat_integration/talabat_integration/doctype/talabat_settings/talabat_settings.py)
@@ -23,6 +26,8 @@ class TalabatConnection(Document):
 	def before_insert(self):
 		self.set_order_webhook_url_if_missing()
 		self.set_order_webhook_secret_if_missing()
+		self.set_catalog_webhook_url_if_missing()
+		self.set_catalog_webhook_secret_if_missing()
 
 	def on_update(self):
 		"""A saved connection may have rotated credentials or a different API
@@ -63,6 +68,38 @@ class TalabatConnection(Document):
 		"""Return the secret only to an editor explicitly requesting a copy."""
 		self.check_permission("write")
 		return {"order_webhook_secret": self.get_password("order_webhook_secret", raise_exception=False)}
+
+	def set_catalog_webhook_url_if_missing(self):
+		if not self.catalog_webhook_url:
+			self.catalog_webhook_url = self.get_catalog_webhook_url()
+
+	def set_catalog_webhook_secret_if_missing(self):
+		if not self.catalog_webhook_secret:
+			self.catalog_webhook_secret = secrets.token_urlsafe(32)
+
+	def get_catalog_webhook_url(self):
+		"""Build the public catalog feedback webhook endpoint from the configured
+		site URL. Entirely separate from the order webhook URL - see
+		``get_order_webhook_url()`` for the same rationale (no header override,
+		explicit admin refresh after a domain change)."""
+		return get_url(
+			TALABAT_CATALOG_WEBHOOK_PATH,
+			allow_header_override=False,
+		)
+
+	@frappe.whitelist()
+	def refresh_catalog_webhook_url(self):
+		"""Persist the current site-derived catalog webhook URL on demand."""
+		self.check_permission("write")
+		self.catalog_webhook_url = self.get_catalog_webhook_url()
+		self.save()
+		return {"catalog_webhook_url": self.catalog_webhook_url}
+
+	@frappe.whitelist()
+	def get_catalog_webhook_secret_for_copy(self):
+		"""Return the secret only to an editor explicitly requesting a copy."""
+		self.check_permission("write")
+		return {"catalog_webhook_secret": self.get_password("catalog_webhook_secret", raise_exception=False)}
 
 	def get_base_url(self):
 		"""Return the Talabat Partner API base URL for this connection's
