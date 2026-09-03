@@ -232,3 +232,59 @@ class IntegrationTestTalabatCatalogSync(IntegrationTestCase):
 		self.assertEqual(request.call_count, 2)
 		self.assertEqual(len(request.call_args_list[0].kwargs["json"]["products"]), 2)
 		self.assertEqual(len(request.call_args_list[1].kwargs["json"]["products"]), 1)
+
+	def test_disabled_warehouse_blocks_catalog_sync(self):
+		"""#85 review finding #7: validate_catalog_sync_account() now goes
+		through the shared services/account_warehouse.py helper, which also
+		checks Warehouse.disabled - not previously reachable through this
+		call site."""
+		self.account.reload()
+		self.account.warehouse = (
+			frappe.get_doc(
+				{
+					"doctype": "Warehouse",
+					"warehouse_name": f"Catalog Sync Disabled WH {self.suffix}",
+					"company": frappe.get_cached_value("Warehouse", self.warehouse, "company"),
+					"disabled": 1,
+				}
+			)
+			.insert()
+			.name
+		)
+		self.account.save()
+
+		with self.assertRaises(frappe.ValidationError) as context:
+			catalog_sync.validate_catalog_sync_account(self.account.name)
+		self.assertIn("disabled", str(context.exception).lower())
+
+	def test_warehouse_belonging_to_a_different_company_blocks_catalog_sync_when_account_has_a_company(self):
+		"""#85 review finding #7: the shared helper's Company-match check is a
+		no-op when Marketplace Account.erpnext_company is unset (the normal
+		catalog-sync-only case), but must still fire once a Company is set."""
+		warehouse_company = frappe.get_cached_value("Warehouse", self.warehouse, "company")
+		other_company = frappe.get_all(
+			"Company", filters={"name": ["!=", warehouse_company]}, pluck="name", limit=1
+		)
+		if not other_company:
+			other_company = [
+				frappe.get_doc(
+					{
+						"doctype": "Company",
+						"company_name": f"Catalog Sync Other Co {self.suffix}",
+						"default_currency": frappe.get_cached_value(
+							"Company", warehouse_company, "default_currency"
+						),
+						"country": frappe.get_cached_value("Company", warehouse_company, "country"),
+					}
+				)
+				.insert()
+				.name
+			]
+
+		self.account.reload()
+		self.account.erpnext_company = other_company[0]
+		self.account.save()
+
+		with self.assertRaises(frappe.ValidationError) as context:
+			catalog_sync.validate_catalog_sync_account(self.account.name)
+		self.assertIn("company", str(context.exception).lower())

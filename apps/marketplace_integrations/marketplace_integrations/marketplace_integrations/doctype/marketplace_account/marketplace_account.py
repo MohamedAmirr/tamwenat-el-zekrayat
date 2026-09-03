@@ -76,6 +76,15 @@ class MarketplaceAccount(Document):
 			)
 
 	def validate_warehouse(self):
+		# Deliberately lighter-weight than services/account_warehouse.py's
+		# validate_account_warehouse() (#85 review finding #7): this is a
+		# basic save-time sanity check (leaf-vs-group only) that applies
+		# regardless of which sync flow ever uses this Warehouse, while the
+		# stricter check (disabled, Company match) only makes sense in the
+		# context of one specific sync operation - a Company mismatch isn't
+		# an error at save time for a Warehouse that will only ever be used
+		# for catalog sync, which doesn't require a Company at all. Do not
+		# fold the two together; they intentionally check different things.
 		if self.warehouse and frappe.db.get_value("Warehouse", self.warehouse, "is_group"):
 			frappe.throw(_("Marketplace Account Warehouse must be a leaf Warehouse, not a group Warehouse."))
 

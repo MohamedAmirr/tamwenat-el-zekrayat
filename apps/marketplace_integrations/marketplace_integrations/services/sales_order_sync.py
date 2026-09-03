@@ -5,8 +5,24 @@
 
 Marketplace Order remains Talabat's operational record.  This module creates
 or updates only a Draft Sales Order after an authorized user explicitly asks
-for it.  ERPNext's configured price list and pricing rules calculate the
-commercial values; Talabat payment values never enter the Sales Order.
+for it.
+
+Commercial values are the historical, finalized marketplace transaction, not
+whatever ERPNext's current Item Price/Pricing Rules would compute today:
+
+    Marketplace Account.erpnext_selling_price_list = catalog offer/reference
+    Marketplace Order fulfilled pricing            = historical accepted transaction
+    ERPNext Sales Order                            = explicit copy of the final transaction
+
+ERPNext's standard Sales Order controller (`set_missing_values()`) is used
+only once, to resolve structural defaults (Item/UOM/conversion, accounts,
+currency, company/customer party details) - never to price a line.  Every
+line's `rate`/`price_list_rate` is then explicitly overwritten with the
+Talabat fulfilled effective rate, `ignore_pricing_rule` is set, and totals
+are recalculated from that overridden rate.  The current Selling Price List
+remains only a pricing *context* on the Sales Order header (matching
+Marketplace Account's configured reference), never the historical-order rate
+source.
 """
 
 import hashlib
@@ -18,6 +34,7 @@ from frappe.utils import cstr, flt, getdate, now_datetime
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_product_mapping.marketplace_product_mapping import (
 	compute_mapping_identity_key,
 )
+from marketplace_integrations.services.account_warehouse import validate_account_warehouse
 
 FINAL_ITEM_STATUSES = {"IN_CART", "ADDITION"}
 
@@ -43,7 +60,7 @@ def sync_sales_order(marketplace_order):
 		_validate_account_configuration(account)
 		lines = _build_sales_order_lines(order, account)
 		customer = _get_or_create_customer(account)
-		snapshot = _make_snapshot(account, customer, lines, _delivery_date(order))
+		snapshot = _make_snapshot(account, customer, lines, _transaction_date(order), _delivery_date(order))
 		current_hash = _snapshot_hash(snapshot)
 
 		if order.erpnext_sales_order:
@@ -53,11 +70,13 @@ def sync_sales_order(marketplace_order):
 			if sales_order.docstatus != 0:
 				return _save_submitted_blocker(order)
 			_apply_snapshot(sales_order, snapshot)
+			_verify_line_amounts(sales_order, snapshot, account)
 			sales_order.save()
 			return _save_success(order, current_hash, sales_order.name, updated=True)
 
 		sales_order = frappe.new_doc("Sales Order")
 		_apply_snapshot(sales_order, snapshot)
+		_verify_line_amounts(sales_order, snapshot, account)
 		sales_order.insert()
 		return _save_success(order, current_hash, sales_order.name, updated=False)
 	except SyncBlocker as exc:
@@ -65,39 +84,66 @@ def sync_sales_order(marketplace_order):
 	except frappe.PermissionError:
 		raise
 	except Exception:
-		frappe.log_error(
-			title=_("Marketplace Sales Order synchronization"),
-			message=_("Marketplace Sales Order synchronization failed."),
+		# Deliberately no `message=` kwarg: frappe.log_error() only calls
+		# frappe.get_traceback() itself when `message` is falsy - passing a
+		# static string there (as this used to) replaces the real traceback
+		# in the Error Log with that string, discarding the actual diagnostic
+		# content for every plausible ERPNext-side throw this can catch
+		# (warehouse/company mismatch, negative rate, below-cost validation,
+		# delivery_date < transaction_date, etc.). The user-facing message
+		# below is unaffected either way - it never came from this call.
+		frappe.log_error(title=_("Marketplace Sales Order synchronization"))
+		return _save_failure(
+			order,
+			_(
+				"ERPNext Sales Order synchronization failed. Please review the ERPNext configuration and try again."
+			),
 		)
-		return _save_failure(order, _("ERPNext Sales Order synchronization failed. Please review the ERPNext configuration and try again."))
 
 
 def build_sales_order_snapshot(order, account=None, customer=None):
 	"""Return the deterministic ERPNext-commercial input for an order.
 
-	No Talabat money, customer PII, status, address, or raw payload belongs in
-	the snapshot.  The ERPNext Sales Order uses its normal transaction-date,
-	price-list, and pricing-rule defaults when the explicit sync happens.
+	No Talabat customer PII, status, address, raw payload, or current Item
+	Price belongs in the snapshot.  The historical Talabat fulfilled amount
+	for each final line is the only commercial rate input.
 	"""
 	account = account or _get_account(order)
 	_validate_account_configuration(account)
 	lines = _build_sales_order_lines(order, account)
 	customer = customer or _require_customer(account)
-	return _make_snapshot(account, customer, lines, _delivery_date(order))
+	return _make_snapshot(account, customer, lines, _transaction_date(order), _delivery_date(order))
 
 
 def _build_sales_order_lines(order, account):
-	"""Validate and return the final UNIT lines that affect a Sales Order."""
+	"""Validate and return the final UNIT lines that affect a Sales Order.
 
+	The authoritative Talabat line amount is `fulfilled_total_price`: zero is
+	a valid, final amount, a negative amount is never valid, and a genuinely
+	missing (null) amount blocks the line. `effective_rate =
+	fulfilled_total_price / fulfilled_quantity`, rounded to the ERPNext rate
+	precision that the resulting Sales Order Item will itself use.
+
+	The null-vs-zero distinction cannot be read off `fulfilled_total_price`
+	itself: it is a Frappe Float column (NOT NULL DEFAULT 0), so a genuinely
+	absent Talabat `pricing.total_price` is already coerced to `0.0` by the
+	time it reaches this row - indistinguishable here from a real zero
+	fulfilled amount. `fulfilled_total_price_missing` is computed once, at
+	parse time against the raw payload, before that coercion happens (see
+	`integrations/talabat/order_mapper.py`), and is the only reliable signal
+	for "missing" (#85 review finding #1).
+	"""
+
+	rate_precision = _rate_precision(account)
 	lines = []
 	for row in order.items or []:
 		if row.external_status not in FINAL_ITEM_STATUSES:
 			continue
 		if row.pricing_type == "KG":
 			raise SyncBlocker(
-				_("Talabat KG line {0} ({1}) cannot be synchronized until its ERPNext UOM setup is configured.").format(
-					row.external_item_id, _line_identifier(row)
-				)
+				_(
+					"Talabat KG line {0} ({1}) cannot be synchronized until its ERPNext UOM setup is configured."
+				).format(row.external_item_id, _line_identifier(row))
 			)
 		if row.pricing_type != "UNIT":
 			raise SyncBlocker(
@@ -107,9 +153,28 @@ def _build_sales_order_lines(order, account):
 			)
 		if flt(row.fulfilled_quantity) <= 0:
 			raise SyncBlocker(
-				_("Talabat line {0} ({1}) needs a positive fulfilled quantity before it can be synchronized.").format(
+				_(
+					"Talabat line {0} ({1}) needs a positive fulfilled quantity before it can be synchronized."
+				).format(row.external_item_id, _line_identifier(row))
+			)
+		# Both conditions matter: fulfilled_total_price_missing is the reliable
+		# signal once a row has round-tripped through the DB's NOT NULL Float
+		# coercion (see the module docstring above), but `is None` is kept
+		# too as defence-in-depth for an in-memory caller that hasn't gone
+		# through that save/reload yet - dropping it would leave exactly that
+		# caller's `fulfilled_total_price=None`/flag-not-yet-set row treated
+		# as a valid free line via `flt(None) == 0` (#85 review finding #8).
+		if row.fulfilled_total_price_missing or row.fulfilled_total_price is None:
+			raise SyncBlocker(
+				_("Talabat line {0} ({1}) has no fulfilled total price and cannot be synchronized.").format(
 					row.external_item_id, _line_identifier(row)
 				)
+			)
+		if flt(row.fulfilled_total_price) < 0:
+			raise SyncBlocker(
+				_(
+					"Talabat line {0} ({1}) has a negative fulfilled total price and cannot be synchronized."
+				).format(row.external_item_id, _line_identifier(row))
 			)
 
 		mapping = _get_enabled_mapping(account.name, row.external_sku)
@@ -120,12 +185,17 @@ def _build_sales_order_lines(order, account):
 				)
 			)
 		item_uom = mapping.sales_uom or frappe.get_cached_value("Item", mapping.item, "stock_uom")
+		fulfilled_total_price = flt(row.fulfilled_total_price)
+		effective_rate = flt(flt(fulfilled_total_price) / flt(row.fulfilled_quantity), rate_precision)
 		lines.append(
 			{
 				"external_item_id": cstr(row.external_item_id).strip(),
 				"item_code": mapping.item,
 				"qty": flt(row.fulfilled_quantity),
 				"uom": item_uom,
+				"warehouse": account.warehouse,
+				"fulfilled_total_price": fulfilled_total_price,
+				"effective_rate": effective_rate,
 			}
 		)
 
@@ -134,11 +204,60 @@ def _build_sales_order_lines(order, account):
 	return sorted(lines, key=lambda line: line["external_item_id"])
 
 
-def _make_snapshot(account, customer, lines, delivery_date):
+def _resolved_currency(account):
+	"""Return the currency the resulting Sales Order will actually be in.
+
+	ERPNext's real resolution order (confirmed directly against the
+	installed `erpnext/accounts/party.py::get_party_details()`, called via
+	`selling_controller.set_missing_values()`) is Customer.default_currency
+	FIRST, falling back to the Sales Order's already-set `currency` (which
+	itself is only ever backfilled from the Price List when still blank -
+	never true here, since party details are resolved before that), and
+	only finally to the Company's default currency. This function does not
+	need to read `Customer.default_currency` itself to mirror that, though:
+	`_validate_account_configuration()` requires both the Price List's
+	currency AND the account's Customer's `default_currency` (when either is
+	set) to already equal the Company's default currency (#85 review finding
+	#1/#9, V1 single-currency assumption) - so by the time this runs, every
+	link in that chain that could matter is guaranteed to already agree, and
+	reading the Price List/Company currency here is equivalent to reading
+	whichever of the three ERPNext would actually pick.
+
+	Resolved from account/Price List configuration rather than a live Sales
+	Order instance, so it is available before any Sales Order document
+	exists (e.g. while only computing a snapshot for hash/status
+	comparison).
+
+	This is the one shared source both `_rate_precision()` (line rate
+	rounding, used for the real document and the snapshot/hash) and
+	`_amount_precision()` (post-calculation amount verification) resolve
+	their precision from, so the two can never diverge onto different
+	currencies (#85 review finding #8).
+	"""
+	price_list_currency = frappe.get_cached_value(
+		"Price List", account.erpnext_selling_price_list, "currency"
+	)
+	return price_list_currency or frappe.get_cached_value(
+		"Company", account.erpnext_company, "default_currency"
+	)
+
+
+def _rate_precision(account):
+	"""Return the ERPNext rate precision the resulting Sales Order Item will use."""
+	return frappe.get_precision("Sales Order Item", "rate", currency=_resolved_currency(account))
+
+
+def _amount_precision(account):
+	"""Return the ERPNext amount precision the resulting Sales Order Item will use."""
+	return frappe.get_precision("Sales Order Item", "amount", currency=_resolved_currency(account))
+
+
+def _make_snapshot(account, customer, lines, transaction_date, delivery_date):
 	return {
 		"company": account.erpnext_company,
 		"customer": customer,
 		"selling_price_list": account.erpnext_selling_price_list,
+		"transaction_date": transaction_date,
 		"delivery_date": delivery_date,
 		"items": lines,
 	}
@@ -197,18 +316,70 @@ def _validate_sync_permissions(order, account):
 
 def _validate_account_configuration(account):
 	if not account.erpnext_company:
-		raise SyncBlocker(_("Marketplace Account {0} needs an ERPNext Company before synchronizing orders.").format(account.name))
-	if not account.erpnext_selling_price_list:
 		raise SyncBlocker(
-			_("Marketplace Account {0} needs an ERPNext Selling Price List before synchronizing orders.").format(
+			_("Marketplace Account {0} needs an ERPNext Company before synchronizing orders.").format(
 				account.name
 			)
+		)
+	if not account.erpnext_selling_price_list:
+		raise SyncBlocker(
+			_(
+				"Marketplace Account {0} needs an ERPNext Selling Price List before synchronizing orders."
+			).format(account.name)
 		)
 	price_list = frappe.get_doc("Price List", account.erpnext_selling_price_list)
 	if not price_list.enabled or not price_list.selling:
 		raise SyncBlocker(
-			_("ERPNext Selling Price List {0} must be enabled and marked for selling.").format(price_list.name)
+			_("ERPNext Selling Price List {0} must be enabled and marked for selling.").format(
+				price_list.name
+			)
 		)
+	# V1 assumes single-currency operation: Talabat fulfilled amounts are bare
+	# numbers in the outlet's local currency, and Marketplace Order itself
+	# stores no currency of its own. If the Selling Price List's currency, or
+	# the account's generic Customer's own default_currency, ever diverged
+	# from the Company's default currency, those bare Talabat numbers would
+	# get copied as a raw rate into a different currency without any
+	# conversion - so both are enforced rather than silently trusted (#85
+	# review finding #9, corrected by finding #1 to also cover the Customer:
+	# ERPNext actually resolves a Sales Order's own `currency` from
+	# Customer.default_currency FIRST - see `_resolved_currency()` - so a
+	# Customer-level override slips past a Price-List-only check entirely
+	# while `rate * qty == fulfilled_total_price` still holds numerically).
+	company_currency = frappe.get_cached_value("Company", account.erpnext_company, "default_currency")
+	if price_list.currency and price_list.currency != company_currency:
+		raise SyncBlocker(
+			_(
+				"ERPNext Selling Price List {0}'s currency ({1}) must match Company {2}'s default "
+				"currency ({3}) before synchronizing orders. Multi-currency Sales Order synchronization "
+				"is not supported."
+			).format(price_list.name, price_list.currency, account.erpnext_company, company_currency)
+		)
+	if account.erpnext_customer:
+		customer_currency = frappe.get_cached_value("Customer", account.erpnext_customer, "default_currency")
+		if customer_currency and customer_currency != company_currency:
+			raise SyncBlocker(
+				_(
+					"ERPNext Customer {0}'s default currency ({1}) must match Company {2}'s default "
+					"currency ({3}) before synchronizing orders. Multi-currency Sales Order synchronization "
+					"is not supported."
+				).format(
+					account.erpnext_customer, customer_currency, account.erpnext_company, company_currency
+				)
+			)
+	try:
+		validate_account_warehouse(account, context=_("Sales Order synchronization"))
+	except frappe.ValidationError as exc:
+		# validate_account_warehouse() raises via frappe.throw(), which already
+		# appended its (non-escape_html'd) message to frappe.local.message_log
+		# before raising - catching the exception here does not undo that.
+		# Left uncleared, that raw message could still reach the client
+		# alongside the properly re-raised SyncBlocker, bypassing the
+		# escaping discipline #85 review finding #7 established for exactly
+		# this class of message. Clear it so only the SyncBlocker's own
+		# str(exc) (escaped client-side by marketplace_order.js) is shown.
+		frappe.clear_messages()
+		raise SyncBlocker(str(exc)) from exc
 
 
 def _get_or_create_customer(account):
@@ -258,21 +429,97 @@ def _get_enabled_mapping(marketplace_account, external_sku):
 
 
 def _apply_snapshot(sales_order, snapshot):
-	"""Populate a Sales Order and let ERPNext calculate all commercial data."""
+	"""Populate a Sales Order, then overwrite every line with the historical
+	Talabat transaction amount so it survives ERPNext's own recalculation.
+
+	`set_missing_values()` is used exactly once, purely for structural
+	defaults (Item/UOM/conversion, accounts, party/company details,
+	currency) - not to price a line: `ignore_pricing_rule = 1` is set before
+	it runs so no Pricing Rule is applied even for that first pass, and
+	whatever Item Price it fetches for `rate`/`price_list_rate` is discarded
+	immediately below.  `rate`/`price_list_rate`/`discount_*`/`is_free_item`
+	are then explicitly overwritten from the snapshot's `effective_rate`,
+	and totals are recalculated from that overridden rate.
+
+	Because `rate`/`price_list_rate` are non-None the moment this function
+	returns, ERPNext's own `AccountsController.validate()` - which reruns
+	`set_missing_values(for_validate=True)` on every subsequent `.insert()`/
+	`.save()` of this same document - cannot silently refill them from a
+	current Item Price: `set_missing_item_details()` only ever replaces a
+	line field that is still `None` (confirmed directly against the
+	installed `erpnext/controllers/accounts_controller.py`; `rate` and
+	`price_list_rate` are not in its `force_item_fields` override list).
+	"""
 	sales_order.company = snapshot["company"]
 	sales_order.customer = snapshot["customer"]
 	sales_order.selling_price_list = snapshot["selling_price_list"]
+	sales_order.transaction_date = snapshot["transaction_date"]
 	sales_order.delivery_date = snapshot["delivery_date"]
+	sales_order.ignore_pricing_rule = 1
+	# A pre-existing Draft being re-synced may carry header discount/tax/
+	# shipping configuration from a prior manual Desk edit made between
+	# syncs. apply_discount_amount() (erpnext/controllers/taxes_and_totals.py)
+	# redistributes `discount_amount` across every item's net_amount/net_rate
+	# when it is set, and a Sales Taxes and Charges Template/Shipping Rule
+	# can add further header-level amounts - #85 forbids any of that
+	# silently cutting the merchandise value below the Talabat transaction
+	# total, so every re-sync resets all of it explicitly rather than
+	# trusting whatever the existing Draft happened to have (#85 review
+	# finding #3).
+	sales_order.apply_discount_on = "Grand Total"
+	sales_order.additional_discount_percentage = 0
+	sales_order.discount_amount = 0
+	sales_order.taxes_and_charges = None
+	sales_order.taxes = []
+	sales_order.shipping_rule = None
 	sales_order.items = []
 	for line in snapshot["items"]:
 		sales_order.append(
 			"items",
-			{"item_code": line["item_code"], "qty": line["qty"], "uom": line["uom"]},
+			{
+				"item_code": line["item_code"],
+				"qty": line["qty"],
+				"uom": line["uom"],
+				"warehouse": line["warehouse"],
+			},
 		)
-	# Sales Order's standard controller resolves the Price List, active Pricing
-	# Rules, currency, and item details.  It intentionally receives no Talabat
-	# rate, tax, discount, fee, or transaction timestamp.
 	sales_order.set_missing_values()
+
+	for line, so_item in zip(snapshot["items"], sales_order.items, strict=True):
+		so_item.price_list_rate = line["effective_rate"]
+		so_item.rate = line["effective_rate"]
+		so_item.discount_percentage = 0
+		so_item.discount_amount = 0
+		so_item.is_free_item = 1 if line["effective_rate"] == 0 else 0
+
+	# Recalculates net/grand totals from the rates just overridden above and
+	# the header fields just reset - no Sales Taxes and Charges Template,
+	# Shipping Rule, or additional discount survives from before this call.
+	sales_order.calculate_taxes_and_totals()
+
+
+def _verify_line_amounts(sales_order, snapshot, account):
+	"""Block instead of silently drifting if a line's calculated amount does
+	not reproduce the Talabat fulfilled total within ERPNext's own currency
+	precision for that field (e.g. an effective-rate rounding remainder).
+
+	Precision is resolved from `_amount_precision(account)` - the same single
+	currency source `_rate_precision()` uses for the line rate itself -
+	rather than `so_item.precision("amount")` independently, so the two can
+	never resolve to different currencies (#85 review finding #8).
+	"""
+	precision = _amount_precision(account)
+	for line, so_item in zip(snapshot["items"], sales_order.items, strict=True):
+		expected = flt(line["fulfilled_total_price"], precision)
+		actual = flt(so_item.amount, precision)
+		if expected != actual:
+			raise SyncBlocker(
+				_(
+					"Talabat line {0} ({1}) would post to ERPNext as {2} but the Talabat fulfilled total is {3}. "
+					"This can happen when the fulfilled amount does not divide evenly by the fulfilled quantity "
+					"at ERPNext's currency precision. Please review before retrying."
+				).format(line["external_item_id"], so_item.item_code, actual, expected)
+			)
 
 
 def _snapshot_hash(snapshot):
@@ -317,3 +564,19 @@ def _delivery_date(order):
 	if not order.promised_for:
 		raise SyncBlocker(_("Talabat Promised For is required to set the ERPNext Sales Order Delivery Date."))
 	return getdate(order.promised_for)
+
+
+def _transaction_date(order):
+	# received_on (Talabat order.sys.created_at) is not in openapi.json's
+	# required list for order.OrderSys, and the Marketplace Order field
+	# itself is read-only/non-mandatory - so this is not formally guaranteed
+	# to be set. In practice Talabat's own system stamps every order with a
+	# creation timestamp; this guard exists as the fail-closed, actionable
+	# behavior for the (currently unobserved) case where it is ever blank,
+	# rather than silently defaulting the Sales Order's Transaction Date to
+	# something else (#85 review finding #11).
+	if not order.received_on:
+		raise SyncBlocker(
+			_("Talabat Received On is required to set the ERPNext Sales Order Transaction Date.")
+		)
+	return getdate(order.received_on)

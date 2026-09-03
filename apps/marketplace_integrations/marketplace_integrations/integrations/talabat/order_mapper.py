@@ -122,6 +122,13 @@ def _normalize_item(item):
 		"fulfilled_weighted_pieces": pricing.get("weighted_pieces"),
 		"fulfilled_unit_price": pricing.get("unit_price"),
 		"fulfilled_total_price": pricing.get("total_price"),
+		# Marketplace Order Item.fulfilled_total_price is a Frappe Float column
+		# (NOT NULL DEFAULT 0) - a genuinely absent/null pricing.total_price in
+		# the raw Talabat payload would otherwise be indistinguishable from a
+		# real zero-value line once persisted. Capture that distinction here,
+		# at parse time against the raw dict, before it is lost to the Float
+		# column's implicit None -> 0.0 coercion (see #85, sales_order_sync.py).
+		"fulfilled_total_price_missing": 1 if pricing.get("total_price") is None else 0,
 		"container_deposit": item.get("container_deposit"),
 		"promotions": item.get("promotion"),
 	}

@@ -1,12 +1,19 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
+from types import SimpleNamespace
+
 import frappe
 from frappe.tests import IntegrationTestCase
-from frappe.utils import add_days, nowdate
+from frappe.utils import add_days, getdate, nowdate
 
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
-from marketplace_integrations.services.sales_order_sync import sync_sales_order
+from marketplace_integrations.services.sales_order_sync import (
+	SyncBlocker,
+	_build_sales_order_lines,
+	get_current_sync_status,
+	sync_sales_order,
+)
 
 
 class IntegrationTestSalesOrderSync(IntegrationTestCase):
@@ -15,6 +22,12 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.company = frappe.defaults.get_global_default("company")
 		self.price_list = frappe.get_all(
 			"Price List", filters={"selling": 1, "enabled": 1}, pluck="name", limit=1
+		)[0]
+		self.warehouse = frappe.get_all(
+			"Warehouse",
+			filters={"disabled": 0, "is_group": 0, "company": self.company},
+			pluck="name",
+			limit=1,
 		)[0]
 		self.item = self._make_item()
 		self.account = self._make_account()
@@ -61,6 +74,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 				"connection": connection.name,
 				"erpnext_company": self.company,
 				"erpnext_selling_price_list": self.price_list,
+				"warehouse": self.warehouse,
 			}
 		).insert()
 
@@ -75,32 +89,77 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			}
 		).insert()
 
-	def _make_order(self, sku="SKU-UNIT", pricing_type="UNIT"):
+	def _make_pricing_rule(self):
+		return frappe.get_doc(
+			{
+				"doctype": "Pricing Rule",
+				"title": f"SO Sync Test Rule {self.suffix}",
+				"apply_on": "Item Code",
+				"items": [{"item_code": self.item.name}],
+				"selling": 1,
+				"company": self.company,
+				"currency": frappe.get_cached_value("Company", self.company, "default_currency"),
+				"price_or_product_discount": "Price",
+				"rate_or_discount": "Discount Percentage",
+				"discount_percentage": 50,
+			}
+		).insert()
+
+	def _make_default_sales_taxes_template(self):
+		tax_account = frappe.get_all(
+			"Account",
+			filters={"account_type": "Tax", "company": self.company, "is_group": 0},
+			pluck="name",
+			limit=1,
+		)[0]
+		return frappe.get_doc(
+			{
+				"doctype": "Sales Taxes and Charges Template",
+				"title": f"SO Sync Test Tax {self.suffix}",
+				"company": self.company,
+				"is_default": 1,
+				"taxes": [
+					{
+						"charge_type": "On Net Total",
+						"account_head": tax_account,
+						"description": "Test Tax",
+						"rate": 14,
+					}
+				],
+			}
+		).insert()
+
+	def _make_order(
+		self, sku="SKU-UNIT", pricing_type="UNIT", fulfilled_quantity=2, fulfilled_total_price=999
+	):
 		return upsert_marketplace_order(
 			self.account.name,
 			{
 				"external_order_id": f"sales-order-sync-order-{self.suffix}-{frappe.generate_hash(length=4)}",
 				"latest_payload": {"order_id": "external-order"},
+				"received_on": nowdate(),
 				"promised_for": add_days(nowdate(), 1),
 				"customer_first_name": "Talabat Customer",
 				"customer_phone_number": "masked",
-				"order_total": 999,
+				"order_total": 1200,
 				"items": [
 					{
 						"external_item_id": "line-1",
 						"external_sku": sku,
 						"external_status": "IN_CART",
 						"pricing_type": pricing_type,
-						"fulfilled_quantity": 2,
+						"fulfilled_quantity": fulfilled_quantity,
 						"fulfilled_weight": 1.25 if pricing_type == "KG" else None,
-						"fulfilled_unit_price": 499.5,
-						"fulfilled_total_price": 999,
+						"fulfilled_unit_price": (fulfilled_total_price / fulfilled_quantity)
+						if fulfilled_quantity
+						else None,
+						"fulfilled_total_price": fulfilled_total_price,
 					}
 				],
 			},
 		)
 
-	def test_creates_one_draft_sales_order_with_erpnext_price_list_values(self):
+	def test_creates_one_draft_sales_order_with_talabat_transaction_pricing(self):
 		order = self._make_order()
 
 		result = sync_sales_order(order.name)
@@ -113,13 +172,92 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(sales_order.docstatus, 0)
 		self.assertEqual(sales_order.company, self.company)
 		self.assertEqual(sales_order.selling_price_list, self.price_list)
-		self.assertEqual(str(sales_order.delivery_date), str(order.promised_for)[:10])
+		self.assertEqual(sales_order.transaction_date, getdate(order.received_on))
+		self.assertEqual(sales_order.delivery_date, getdate(order.promised_for))
 		self.assertEqual(sales_order.customer, self.account.erpnext_customer)
+		self.assertEqual(sales_order.ignore_pricing_rule, 1)
 		self.assertEqual(sales_order.items[0].item_code, self.item.name)
 		self.assertEqual(sales_order.items[0].qty, 2)
-		self.assertEqual(sales_order.items[0].rate, 17)
+		self.assertEqual(sales_order.items[0].warehouse, self.warehouse)
+		# effective_rate = fulfilled_total_price / fulfilled_quantity, not the
+		# configured Item Price of 17.
+		self.assertEqual(sales_order.items[0].rate, 499.5)
+		self.assertEqual(sales_order.items[0].price_list_rate, 499.5)
+		self.assertEqual(sales_order.items[0].discount_percentage, 0)
+		self.assertEqual(sales_order.items[0].amount, 999)
+		self.assertEqual(sales_order.grand_total, 999)
 		self.assertNotEqual(sales_order.grand_total, order.order_total)
 		self.assertFalse(frappe.db.get_value("Customer", self.account.erpnext_customer, "mobile_no"))
+
+	def test_zero_value_line_remains_zero_and_is_not_price_list_filled(self):
+		order = self._make_order(fulfilled_total_price=0)
+
+		result = sync_sales_order(order.name)
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+
+		self.assertTrue(result["ok"])
+		self.assertEqual(sales_order.items[0].rate, 0)
+		self.assertEqual(sales_order.items[0].price_list_rate, 0)
+		self.assertEqual(sales_order.items[0].amount, 0)
+		self.assertEqual(sales_order.items[0].is_free_item, 1)
+
+	def test_pricing_rule_cannot_change_the_line_amount(self):
+		self._make_pricing_rule()
+		order = self._make_order()
+
+		result = sync_sales_order(order.name)
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+
+		self.assertTrue(result["ok"])
+		self.assertEqual(sales_order.items[0].rate, 499.5)
+		self.assertEqual(sales_order.items[0].amount, 999)
+
+	def test_automatic_tax_default_does_not_change_the_merchandise_amount(self):
+		self._make_default_sales_taxes_template()
+		order = self._make_order()
+
+		result = sync_sales_order(order.name)
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+
+		self.assertTrue(result["ok"])
+		self.assertEqual(sales_order.items[0].rate, 499.5)
+		self.assertEqual(sales_order.items[0].amount, 999)
+		self.assertEqual(sales_order.net_total, 999)
+
+	def test_item_price_change_after_sync_does_not_affect_the_sales_order_or_hash(self):
+		order = self._make_order()
+		sync_sales_order(order.name)
+		order.reload()
+
+		frappe.db.set_value(
+			"Item Price",
+			{"item_code": self.item.name, "price_list": self.price_list, "selling": 1},
+			"price_list_rate",
+			999,
+		)
+
+		self.assertEqual(get_current_sync_status(order.name), "Synced")
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		self.assertEqual(sales_order.items[0].rate, 499.5)
+
+	def test_fulfilled_total_price_change_dirties_hash_and_updates_the_sales_order(self):
+		order = self._make_order()
+		first = sync_sales_order(order.name)
+		order.reload()
+		order.items[0].fulfilled_total_price = 500
+		order.save()
+		order.reload()
+
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		second = sync_sales_order(order.name)
+		sales_order = frappe.get_doc("Sales Order", first["sales_order"])
+		order.reload()
+
+		self.assertTrue(second["ok"])
+		self.assertEqual(second["sales_order"], first["sales_order"])
+		self.assertEqual(sales_order.items[0].rate, 250)
+		self.assertEqual(sales_order.items[0].amount, 500)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
 
 	def test_retry_does_not_create_a_second_sales_order(self):
 		order = self._make_order()
@@ -136,6 +274,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		first = sync_sales_order(order.name)
 		order.reload()
 		order.items[0].fulfilled_quantity = 3
+		order.items[0].fulfilled_total_price = 1500
 		order.save()
 		order.reload()
 
@@ -147,6 +286,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertTrue(second["ok"])
 		self.assertEqual(second["sales_order"], first["sales_order"])
 		self.assertEqual(sales_order.items[0].qty, 3)
+		self.assertEqual(sales_order.items[0].rate, 500)
 		self.assertEqual(order.erpnext_sync_status, "Synced")
 
 	def test_unmapped_final_line_blocks_without_creating_a_sales_order(self):
@@ -176,6 +316,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		sales_order.submit()
 		order.reload()
 		order.items[0].fulfilled_quantity = 3
+		order.items[0].fulfilled_total_price = 1500
 		order.save()
 
 		result = sync_sales_order(order.name)
@@ -195,3 +336,327 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.reload()
 
 		self.assertEqual(order.erpnext_sync_status, "Synced")
+
+	def test_missing_account_warehouse_blocks_sync(self):
+		self.account.reload()
+		self.account.warehouse = None
+		self.account.save()
+		order = self._make_order()
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		self.assertIn("Warehouse", result["error"])
+
+	def test_warehouse_belonging_to_a_different_company_blocks_sync(self):
+		"""#85 review finding #5: Marketplace Account.warehouse has no company
+		filter and erpnext_company is independently editable - if they diverge,
+		this must be an actionable SyncBlocker, not an unhandled ERPNext throw.
+		"""
+		other_company = frappe.get_all(
+			"Company", filters={"name": ["!=", self.company]}, pluck="name", limit=1
+		)
+		if not other_company:
+			other_company = [
+				frappe.get_doc(
+					{
+						"doctype": "Company",
+						"company_name": f"SO Sync Other Co {self.suffix}",
+						"default_currency": frappe.get_cached_value(
+							"Company", self.company, "default_currency"
+						),
+						"country": frappe.get_cached_value("Company", self.company, "country"),
+					}
+				)
+				.insert()
+				.name
+			]
+		other_warehouse = frappe.get_all(
+			"Warehouse",
+			filters={"disabled": 0, "is_group": 0, "company": other_company[0]},
+			pluck="name",
+			limit=1,
+		)[0]
+
+		self.account.reload()
+		self.account.warehouse = other_warehouse
+		self.account.save()
+		order = self._make_order()
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		self.assertIn("Company", result["error"])
+
+	def test_disabled_warehouse_blocks_sync(self):
+		"""#85 review finding #5: a disabled Warehouse throws the same way a
+		company mismatch does; must be an actionable SyncBlocker."""
+		disabled_warehouse = frappe.get_doc(
+			{
+				"doctype": "Warehouse",
+				"warehouse_name": f"SO Sync Disabled WH {self.suffix}",
+				"company": self.company,
+				"disabled": 1,
+			}
+		).insert()
+		self.account.reload()
+		self.account.warehouse = disabled_warehouse.name
+		self.account.save()
+		order = self._make_order()
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		self.assertIn("disabled", result["error"].lower())
+
+	def test_price_list_currency_mismatch_blocks_sync(self):
+		"""#85 review finding #9: V1 assumes single-currency operation - a
+		Selling Price List whose currency differs from the account's Company
+		default currency must block sync rather than silently copying a
+		Talabat amount as a raw rate into the wrong currency."""
+		company_currency = frappe.get_cached_value("Company", self.company, "default_currency")
+		other_currency = "USD" if company_currency != "USD" else "EUR"
+		other_price_list = frappe.get_doc(
+			{
+				"doctype": "Price List",
+				"price_list_name": f"SO Sync Other Currency {self.suffix}",
+				"currency": other_currency,
+				"selling": 1,
+				"enabled": 1,
+			}
+		).insert()
+
+		self.account.reload()
+		self.account.erpnext_selling_price_list = other_price_list.name
+		self.account.save()
+		order = self._make_order()
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		self.assertIn("currency", result["error"].lower())
+
+	def test_resync_resets_header_discount_tax_and_shipping(self):
+		"""#85 review finding #3: a header-level discount/tax/shipping added by
+		hand to the Draft between syncs must not survive a re-sync and silently
+		cut the merchandise total below the Talabat transaction total."""
+		order = self._make_order()
+		first = sync_sales_order(order.name)
+		sales_order = frappe.get_doc("Sales Order", first["sales_order"])
+		sales_order.apply_discount_on = "Grand Total"
+		sales_order.discount_amount = 500
+		sales_order.save()
+		sales_order.reload()
+		self.assertLess(sales_order.grand_total, 999)
+
+		order.reload()
+		order.items[0].fulfilled_total_price = 1000
+		order.items[0].fulfilled_unit_price = 500
+		order.save()
+
+		result = sync_sales_order(order.name)
+		sales_order.reload()
+
+		self.assertTrue(result["ok"])
+		self.assertEqual(sales_order.discount_amount, 0)
+		self.assertEqual(sales_order.items[0].amount, 1000)
+		self.assertEqual(sales_order.grand_total, 1000)
+
+	def test_null_fulfilled_total_price_blocks_in_the_line_builder(self):
+		"""`fulfilled_total_price` is stored as a `NOT NULL Float` column, so a
+		`None` value never survives a real Marketplace Order save/reload - it is
+		silently coerced to `0.0`, a valid fulfilled amount (confirmed directly
+		against this app's own schema). `_build_sales_order_lines()` therefore
+		checks the separate `fulfilled_total_price_missing` flag (#85 review
+		finding #1), not `fulfilled_total_price is None` - this exercises that
+		guard directly, in memory, as defense-in-depth for a future in-memory
+		caller that has not gone through a real Marketplace Order save/reload.
+		"""
+		order = SimpleNamespace(
+			items=[
+				frappe._dict(
+					external_status="IN_CART",
+					pricing_type="UNIT",
+					external_item_id="line-1",
+					external_sku="SKU-UNIT",
+					fulfilled_quantity=2,
+					fulfilled_total_price=None,
+					fulfilled_total_price_missing=1,
+				)
+			]
+		)
+
+		with self.assertRaises(SyncBlocker):
+			_build_sales_order_lines(order, self.account)
+
+	def test_missing_raw_total_price_is_captured_as_missing_not_zero(self):
+		"""A Talabat payload with `pricing.total_price` entirely absent must not
+		silently become a synced free line: `integrations/talabat/order_mapper.py`
+		must capture that absence as `fulfilled_total_price_missing` at parse
+		time, before the value is coerced to `0.0` by the (NOT NULL) Float
+		column, and `sync_sales_order()` must still block on it through the
+		real DB-backed path (#85 review finding #1).
+		"""
+		from marketplace_integrations.integrations.talabat.order_mapper import normalize_order
+
+		raw_order = {
+			"order_id": f"raw-order-{self.suffix}",
+			"sys": {"created_at": nowdate()},
+			"promised_for": add_days(nowdate(), 1),
+			"customer": {"first_name": "Talabat Customer", "phone_number": "masked"},
+			"payment": {"order_total": 100},
+			"items": [
+				{
+					"_id": "line-1",
+					"sku": "SKU-UNIT",
+					"status": "IN_CART",
+					"original_pricing": {"pricing_type": "UNIT", "quantity": 2},
+					"pricing": {"quantity": 2},
+				}
+			],
+		}
+		normalized = normalize_order(raw_order)
+		order = upsert_marketplace_order(self.account.name, normalized)
+		order.reload()  # the NOT NULL Float coercion is a DB-layer effect, not visible in-memory pre-reload
+
+		self.assertEqual(order.items[0].fulfilled_total_price, 0)
+		self.assertEqual(order.items[0].fulfilled_total_price_missing, 1)
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		self.assertIn("no fulfilled total price", result["error"].lower())
+
+	def test_negative_fulfilled_total_price_blocks_sync(self):
+		"""A negative fulfilled_total_price is never valid (#85 review finding #12)."""
+		order = self._make_order(fulfilled_total_price=-1)
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		self.assertIn("negative fulfilled total price", result["error"].lower())
+
+	def test_zero_fulfilled_total_price_is_valid(self):
+		"""Zero fulfilled_total_price is a valid, final amount."""
+		order = self._make_order(fulfilled_total_price=0)
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"])
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+
+	def test_fulfilled_quantity_must_be_greater_than_zero(self):
+		"""fulfilled_quantity <= 0 blocks sync."""
+		order = self._make_order(fulfilled_quantity=0)
+		order.reload()
+		order.items[0].fulfilled_quantity = 0
+		order.items[0].fulfilled_total_price = 0
+		order.flags.ignore_mandatory = True
+		order.save()
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		self.assertIn("positive fulfilled quantity", result["error"].lower())
+
+	def test_negative_fulfilled_quantity_blocks_sync(self):
+		"""Negative fulfilled_quantity blocks sync."""
+		order = self._make_order(fulfilled_quantity=-1)
+		order.reload()
+		order.items[0].fulfilled_quantity = -1
+		order.flags.ignore_mandatory = True
+		order.save()
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		self.assertIn("positive fulfilled quantity", result["error"].lower())
+
+	def test_only_final_status_lines_are_synced(self):
+		"""IN_CART and ADDITION are synced; NOT_PROCESSED, NOT_FOUND, REPLACED are skipped."""
+		self._make_mapping("SKU-NOTPROCESSED", self.item.name)
+		self._make_mapping("SKU-NOTFOUND", self.item.name)
+		self._make_mapping("SKU-REPLACED", self.item.name)
+
+		order = upsert_marketplace_order(
+			self.account.name,
+			{
+				"external_order_id": f"sales-order-sync-order-{self.suffix}-{frappe.generate_hash(length=4)}",
+				"latest_payload": {"order_id": "external-order"},
+				"received_on": nowdate(),
+				"promised_for": add_days(nowdate(), 1),
+				"customer_first_name": "Talabat Customer",
+				"customer_phone_number": "masked",
+				"order_total": 2000,
+				"items": [
+					{
+						"external_item_id": "line-1-in-cart",
+						"external_sku": "SKU-UNIT",
+						"external_status": "IN_CART",
+						"pricing_type": "UNIT",
+						"fulfilled_quantity": 1,
+						"fulfilled_total_price": 100,
+					},
+					{
+						"external_item_id": "line-2-addition",
+						"external_sku": "SKU-UNIT",
+						"external_status": "ADDITION",
+						"pricing_type": "UNIT",
+						"fulfilled_quantity": 2,
+						"fulfilled_total_price": 200,
+					},
+					{
+						"external_item_id": "line-3-not-processed",
+						"external_sku": "SKU-NOTPROCESSED",
+						"external_status": "NOT_PROCESSED",
+						"pricing_type": "UNIT",
+						"fulfilled_quantity": 1,
+						"fulfilled_total_price": 50,
+					},
+					{
+						"external_item_id": "line-4-not-found",
+						"external_sku": "SKU-NOTFOUND",
+						"external_status": "NOT_FOUND",
+						"pricing_type": "UNIT",
+						"fulfilled_quantity": 1,
+						"fulfilled_total_price": 50,
+					},
+					{
+						"external_item_id": "line-5-replaced",
+						"external_sku": "SKU-REPLACED",
+						"external_status": "REPLACED",
+						"pricing_type": "UNIT",
+						"fulfilled_quantity": 1,
+						"fulfilled_total_price": 50,
+					},
+				],
+			},
+		)
+
+		result = sync_sales_order(order.name)
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+
+		self.assertTrue(result["ok"])
+		# Only IN_CART and ADDITION lines should be synced (2 total)
+		self.assertEqual(len(sales_order.items), 2)
+		self.assertEqual(sales_order.items[0].item_code, self.item.name)
+		self.assertEqual(sales_order.items[0].qty, 1)
+		self.assertEqual(sales_order.items[0].amount, 100)
+		self.assertEqual(sales_order.items[1].item_code, self.item.name)
+		self.assertEqual(sales_order.items[1].qty, 2)
+		self.assertEqual(sales_order.items[1].amount, 200)
+		self.assertEqual(sales_order.grand_total, 300)
+
+	def test_effective_rate_is_derived_from_fulfilled_total_divided_by_quantity(self):
+		"""Test that effective_rate = fulfilled_total_price / fulfilled_quantity."""
+		order = self._make_order(fulfilled_quantity=3, fulfilled_total_price=750)
+
+		result = sync_sales_order(order.name)
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+
+		self.assertTrue(result["ok"])
+		# effective_rate = 750 / 3 = 250
+		self.assertEqual(sales_order.items[0].rate, 250)
+		self.assertEqual(sales_order.items[0].qty, 3)
+		self.assertEqual(sales_order.items[0].amount, 750)

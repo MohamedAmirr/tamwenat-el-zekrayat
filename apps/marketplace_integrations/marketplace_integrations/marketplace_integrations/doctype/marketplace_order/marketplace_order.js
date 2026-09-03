@@ -45,7 +45,16 @@ function add_erpnext_sync_action(frm) {
 			freeze_message: __("Synchronizing with ERPNext..."),
 		}).then((response) => {
 			if (!response.message.ok) {
-				frappe.msgprint({message: response.message.error, indicator: "red", title: __("ERPNext Sync Blocked")});
+				// response.message.error can interpolate Talabat-sourced values
+				// (external_item_id/external_sku, ignore_xss_filter fields never
+				// sanitized server-side) - frappe.msgprint's message renders as
+				// HTML, so escape at the interpolation point per the pattern
+				// already established elsewhere in this codebase (#84).
+				frappe.msgprint({
+					message: frappe.utils.escape_html(response.message.error),
+					indicator: "red",
+					title: __("ERPNext Sync Blocked"),
+				});
 			}
 			frm.reload_doc();
 		});
