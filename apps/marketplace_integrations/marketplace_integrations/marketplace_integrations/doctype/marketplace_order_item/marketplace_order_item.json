@@ -24,6 +24,7 @@
   "fulfilled_weighted_pieces",
   "fulfilled_unit_price",
   "fulfilled_total_price",
+  "fulfilled_total_price_missing",
   "container_deposit",
   "promotions"
  ],
@@ -47,6 +48,7 @@
   {"fieldname": "fulfilled_weighted_pieces", "fieldtype": "Int", "label": "Fulfilled Weighted Pieces"},
   {"fieldname": "fulfilled_unit_price", "fieldtype": "Float", "label": "Fulfilled Unit Price"},
   {"fieldname": "fulfilled_total_price", "fieldtype": "Float", "label": "Fulfilled Total Price"},
+  {"description": "Set when Talabat's item.pricing.total_price was absent/null in the raw payload. A Float column cannot itself store NULL (it silently coerces to 0.0), so this flag is what actually distinguishes a genuinely missing fulfilled total from a real zero-value line - never derive that distinction from fulfilled_total_price alone.", "fieldname": "fulfilled_total_price_missing", "fieldtype": "Check", "label": "Fulfilled Total Price Missing", "read_only": 1},
   {"fieldname": "container_deposit", "fieldtype": "Float", "label": "Container Deposit", "read_only": 1},
   {"description": "Full Talabat item.promotion array (name, type, discount_amount, sponsorships[]), preserved without interpretation.", "fieldname": "promotions", "fieldtype": "JSON", "ignore_xss_filter": 1, "label": "Promotions", "read_only": 1}
  ],

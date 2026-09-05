@@ -69,6 +69,7 @@ ITEM_FIELDS = (
 	"fulfilled_weighted_pieces",
 	"fulfilled_unit_price",
 	"fulfilled_total_price",
+	"fulfilled_total_price_missing",
 	"container_deposit",
 )
 JSON_ITEM_FIELDS = ("barcodes", "promotions")

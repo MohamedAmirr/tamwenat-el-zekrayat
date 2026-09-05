@@ -17,6 +17,7 @@ from frappe import _
 from frappe.utils import cstr, getdate, now_datetime
 
 from marketplace_integrations.integrations.talabat.client import TalabatClient
+from marketplace_integrations.services.account_warehouse import validate_account_warehouse
 
 CATALOG_BATCH_SIZE = 10_000
 REMOTE_ERROR = _("Talabat did not accept the catalog update.")
@@ -35,14 +36,7 @@ def validate_catalog_sync_account(account):
 		frappe.throw(_("Marketplace Account {0} does not use a Talabat Connection.").format(account_doc.name))
 	if not account_doc.enabled:
 		frappe.throw(_("Marketplace Account {0} is disabled.").format(account_doc.name))
-	if not account_doc.warehouse:
-		frappe.throw(
-			_("Marketplace Account {0} requires a Warehouse for catalog sync.").format(account_doc.name)
-		)
-	if frappe.db.get_value("Warehouse", account_doc.warehouse, "is_group"):
-		frappe.throw(
-			_("Marketplace Account {0} requires a leaf Warehouse for catalog sync.").format(account_doc.name)
-		)
+	validate_account_warehouse(account_doc, context=_("catalog sync"))
 	if not account_doc.erpnext_selling_price_list:
 		frappe.throw(
 			_("Marketplace Account {0} requires an ERPNext Selling Price List for catalog sync.").format(
