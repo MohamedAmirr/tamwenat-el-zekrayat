@@ -38,6 +38,44 @@ from marketplace_integrations.services.account_warehouse import validate_account
 
 FINAL_ITEM_STATUSES = {"IN_CART", "ADDITION"}
 
+# `effective_rate = fulfilled_total_price / fulfilled_quantity` is an
+# intermediate value that ERPNext later multiplies back by `qty` and rounds
+# to the Sales Order Item `amount` field's own currency precision
+# (`_amount_precision()`, 2dp on this site). Rounding the division itself
+# down to that SAME 2dp precision before the multiply is a double-rounding
+# bug: e.g. 9.99 / 2 = 4.995, which rounds to 5.00 at 2dp, and 5.00 * 2 =
+# 10.00 != 9.99 - `_verify_line_amounts()` then blocks a routine,
+# non-evenly-divisible discounted line as though it were a real data
+# problem. Rounding the division to 6dp instead (comfortably higher than any
+# realistic currency precision) keeps the rounding remainder from the
+# division below the final amount precision's rounding threshold for any
+# realistic single order-line quantity, so `rate * qty`, rounded once more to
+# `amount`'s precision, reliably reconstructs `fulfilled_total_price` exactly.
+#
+# This alone is not sufficient, though: ERPNext's own
+# `calculate_taxes_and_totals()` unconditionally re-rounds `Sales Order
+# Item.rate`/`price_list_rate` down to their OWN field precision
+# (`round_floats_in()`, called before `calculate_item_rate()`, confirmed
+# directly against the installed `erpnext/controllers/taxes_and_totals.py`)
+# on every `calculate_taxes_and_totals()` call - including the one inside
+# `AccountsController.validate()` that reruns on every `.insert()`/`.save()`.
+# Since neither field has an explicit `precision` in ERPNext's own doctype
+# JSON, both default to the site's `currency_precision` (2dp here) - the
+# SAME precision as `amount` - so a 6dp Python value assigned to
+# `so_item.rate` before calling `calculate_taxes_and_totals()` would
+# otherwise be silently re-truncated back to 2dp regardless of how precisely
+# it was computed, reproducing the exact same bug this rounds to fix.
+# `fixtures/property_setter.json` therefore raises `Sales Order Item.rate`
+# and `.price_list_rate`'s own field precision to `EFFECTIVE_RATE_PRECISION`
+# via two Property Setters (never edit `erpnext`/`frappe` doctype JSON
+# directly), so ERPNext's internal rounding no longer clips them below what
+# this module already computed - verified end-to-end against the real
+# `calculate_taxes_and_totals()` call, not assumed (see
+# `docs/frappe-conventions.md`). `amount` itself is deliberately left at the
+# site's normal `currency_precision` - only the two rate fields need the
+# escape hatch.
+EFFECTIVE_RATE_PRECISION = 6
+
 
 class SyncBlocker(frappe.ValidationError):
 	"""A user-actionable prerequisite that prevents Sales Order synchronization."""
@@ -121,8 +159,10 @@ def _build_sales_order_lines(order, account):
 	The authoritative Talabat line amount is `fulfilled_total_price`: zero is
 	a valid, final amount, a negative amount is never valid, and a genuinely
 	missing (null) amount blocks the line. `effective_rate =
-	fulfilled_total_price / fulfilled_quantity`, rounded to the ERPNext rate
-	precision that the resulting Sales Order Item will itself use.
+	fulfilled_total_price / fulfilled_quantity`, rounded to
+	`EFFECTIVE_RATE_PRECISION` (see the module-level comment above that
+	constant for why this is a fixed 6dp value rather than the resulting
+	Sales Order Item's own currency precision).
 
 	The null-vs-zero distinction cannot be read off `fulfilled_total_price`
 	itself: it is a Frappe Float column (NOT NULL DEFAULT 0), so a genuinely
@@ -132,9 +172,17 @@ def _build_sales_order_lines(order, account):
 	parse time against the raw payload, before that coercion happens (see
 	`integrations/talabat/order_mapper.py`), and is the only reliable signal
 	for "missing" (#85 review finding #1).
+
+	A row with a nonzero `fulfilled_unit_price` but a zero
+	`fulfilled_total_price` is treated as suspicious/likely-missing data, not
+	an honest free item: `fulfilled_total_price` is itself a NOT NULL Float
+	column (see above), so a genuinely-missing Talabat total is
+	indistinguishable from a real zero once persisted - but a nonzero unit
+	price on the same row is strong evidence the total was supposed to be
+	nonzero too. A row where both are genuinely `0` still passes through as a
+	legitimate free item.
 	"""
 
-	rate_precision = _rate_precision(account)
 	lines = []
 	for row in order.items or []:
 		if row.external_status not in FINAL_ITEM_STATUSES:
@@ -176,6 +224,14 @@ def _build_sales_order_lines(order, account):
 					"Talabat line {0} ({1}) has a negative fulfilled total price and cannot be synchronized."
 				).format(row.external_item_id, _line_identifier(row))
 			)
+		if flt(row.fulfilled_total_price) == 0 and flt(row.fulfilled_unit_price) > 0:
+			raise SyncBlocker(
+				_(
+					"Talabat line {0} ({1}) has a nonzero unit price but a zero fulfilled total - this looks "
+					"like missing pricing data, not a free item. Verify the Talabat order data before "
+					"synchronizing."
+				).format(row.external_item_id, _line_identifier(row))
+			)
 
 		mapping = _get_enabled_mapping(account.name, row.external_sku)
 		if not mapping:
@@ -186,7 +242,7 @@ def _build_sales_order_lines(order, account):
 			)
 		item_uom = mapping.sales_uom or frappe.get_cached_value("Item", mapping.item, "stock_uom")
 		fulfilled_total_price = flt(row.fulfilled_total_price)
-		effective_rate = flt(flt(fulfilled_total_price) / flt(row.fulfilled_quantity), rate_precision)
+		effective_rate = flt(fulfilled_total_price / flt(row.fulfilled_quantity), EFFECTIVE_RATE_PRECISION)
 		lines.append(
 			{
 				"external_item_id": cstr(row.external_item_id).strip(),
@@ -228,11 +284,11 @@ def _resolved_currency(account):
 	exists (e.g. while only computing a snapshot for hash/status
 	comparison).
 
-	This is the one shared source both `_rate_precision()` (line rate
-	rounding, used for the real document and the snapshot/hash) and
-	`_amount_precision()` (post-calculation amount verification) resolve
-	their precision from, so the two can never diverge onto different
-	currencies (#85 review finding #8).
+	This is the source `_amount_precision()` (post-calculation amount
+	verification) resolves its precision from (#85 review finding #8). The
+	line rate itself is deliberately NOT resolved from this currency: see
+	`EFFECTIVE_RATE_PRECISION`'s module-level comment for why a fixed 6dp
+	value is used there instead of a currency-derived one.
 	"""
 	price_list_currency = frappe.get_cached_value(
 		"Price List", account.erpnext_selling_price_list, "currency"
@@ -240,11 +296,6 @@ def _resolved_currency(account):
 	return price_list_currency or frappe.get_cached_value(
 		"Company", account.erpnext_company, "default_currency"
 	)
-
-
-def _rate_precision(account):
-	"""Return the ERPNext rate precision the resulting Sales Order Item will use."""
-	return frappe.get_precision("Sales Order Item", "rate", currency=_resolved_currency(account))
 
 
 def _amount_precision(account):
@@ -445,10 +496,26 @@ def _apply_snapshot(sales_order, snapshot):
 	returns, ERPNext's own `AccountsController.validate()` - which reruns
 	`set_missing_values(for_validate=True)` on every subsequent `.insert()`/
 	`.save()` of this same document - cannot silently refill them from a
-	current Item Price: `set_missing_item_details()` only ever replaces a
-	line field that is still `None` (confirmed directly against the
-	installed `erpnext/controllers/accounts_controller.py`; `rate` and
-	`price_list_rate` are not in its `force_item_fields` override list).
+	current Item Price. This is specific to those two fields, not a general
+	property of `set_missing_item_details()`: that function unconditionally
+	overwrites several OTHER child row fields on every call regardless of
+	their current value, via its own hard-coded `force_item_fields` tuple
+	(`item_group`, `brand`, `stock_uom`, `is_fixed_asset`, `pricing_rules`,
+	`weight_per_unit`, `weight_uom`, `total_weight`, `valuation_rate` -
+	confirmed directly against the installed
+	`erpnext/controllers/accounts_controller.py`). `rate` and
+	`price_list_rate` are simply absent from that tuple, so they fall back to
+	its plain `item.get(fieldname) is None` gate instead, which the explicit
+	overwrite below already defeats. A separate `pricing_rule_removed` branch
+	elsewhere in ERPNext resets `rate`/`discount_percentage`/`discount_amount`
+	when a line's stale `pricing_rules` no longer resolve - genuinely
+	unreachable here: `ignore_pricing_rule = 1` (set below) means no line
+	from this function ever carries `pricing_rules` in the first place, and
+	`sales_order.items` is rebuilt from scratch on every call, so no stale
+	`pricing_rules` value can survive from a prior snapshot either.
+
+	See also `docs/frappe-conventions.md`'s note on this same
+	`force_item_fields`/None-check-gate/`ignore_pricing_rule` behavior.
 	"""
 	sales_order.company = snapshot["company"]
 	sales_order.customer = snapshot["customer"]
@@ -503,10 +570,10 @@ def _verify_line_amounts(sales_order, snapshot, account):
 	not reproduce the Talabat fulfilled total within ERPNext's own currency
 	precision for that field (e.g. an effective-rate rounding remainder).
 
-	Precision is resolved from `_amount_precision(account)` - the same single
-	currency source `_rate_precision()` uses for the line rate itself -
-	rather than `so_item.precision("amount")` independently, so the two can
-	never resolve to different currencies (#85 review finding #8).
+	Precision is resolved from `_amount_precision(account)` rather than
+	`so_item.precision("amount")` independently, so this check and the header
+	`_resolved_currency()` source can never resolve to different currencies
+	(#85 review finding #8).
 	"""
 	precision = _amount_precision(account)
 	for line, so_item in zip(snapshot["items"], sales_order.items, strict=True):

@@ -190,6 +190,11 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertFalse(frappe.db.get_value("Customer", self.account.erpnext_customer, "mobile_no"))
 
 	def test_zero_value_line_remains_zero_and_is_not_price_list_filled(self):
+		"""Zero fulfilled_total_price (with a matching zero fulfilled_unit_price,
+		see `_make_order()`) is a valid, final, free-item amount - not
+		treated as missing data (that distinction is #85 review's finding
+		around Fix B: only a zero total paired with a *nonzero* unit price is
+		suspicious - see test_zero_total_with_nonzero_unit_price_blocks_sync)."""
 		order = self._make_order(fulfilled_total_price=0)
 
 		result = sync_sales_order(order.name)
@@ -200,6 +205,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(sales_order.items[0].price_list_rate, 0)
 		self.assertEqual(sales_order.items[0].amount, 0)
 		self.assertEqual(sales_order.items[0].is_free_item, 1)
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Synced")
 
 	def test_pricing_rule_cannot_change_the_line_amount(self):
 		self._make_pricing_rule()
@@ -536,16 +543,6 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertFalse(result["ok"])
 		self.assertIn("negative fulfilled total price", result["error"].lower())
 
-	def test_zero_fulfilled_total_price_is_valid(self):
-		"""Zero fulfilled_total_price is a valid, final amount."""
-		order = self._make_order(fulfilled_total_price=0)
-
-		result = sync_sales_order(order.name)
-
-		self.assertTrue(result["ok"])
-		order.reload()
-		self.assertEqual(order.erpnext_sync_status, "Synced")
-
 	def test_fulfilled_quantity_must_be_greater_than_zero(self):
 		"""fulfilled_quantity <= 0 blocks sync."""
 		order = self._make_order(fulfilled_quantity=0)
@@ -648,15 +645,57 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(sales_order.items[1].amount, 200)
 		self.assertEqual(sales_order.grand_total, 300)
 
-	def test_effective_rate_is_derived_from_fulfilled_total_divided_by_quantity(self):
-		"""Test that effective_rate = fulfilled_total_price / fulfilled_quantity."""
-		order = self._make_order(fulfilled_quantity=3, fulfilled_total_price=750)
+	def test_non_evenly_divisible_fulfilled_amounts_sync_successfully(self):
+		"""#85 review Fix A: every previously-tested value evenly divided by
+		its quantity (999/2, 750/3, 1500/3, 100/1, 200/2, 500/2), leaving the
+		non-evenly-divisible path entirely untested even though it is the
+		routine case for a discounted multi-quantity line. `effective_rate`
+		is rounded to a fixed 6dp (`EFFECTIVE_RATE_PRECISION`), and
+		`fixtures/property_setter.json` raises `Sales Order Item.rate`/
+		`price_list_rate`'s own field precision so ERPNext's
+		`calculate_taxes_and_totals()` does not silently re-round the rate
+		back down to 2dp before computing `amount` - without that fixture,
+		`9.99 / 2 = 4.995` would round to `5.00` at 2dp and `5.00 * 2 = 10.00
+		!= 9.99` would incorrectly block every one of these cases."""
+		cases = [
+			(9.99, 2),
+			(10, 3),
+			(19.99, 3),
+			(7.50, 4),
+			(0.05, 2),
+			(100, 7),  # a much higher denominator, stress-testing 6dp precision
+			(100, 11),
+		]
+		for fulfilled_total_price, fulfilled_quantity in cases:
+			with self.subTest(
+				fulfilled_total_price=fulfilled_total_price, fulfilled_quantity=fulfilled_quantity
+			):
+				order = self._make_order(
+					fulfilled_quantity=fulfilled_quantity, fulfilled_total_price=fulfilled_total_price
+				)
+
+				result = sync_sales_order(order.name)
+
+				self.assertTrue(result["ok"], result.get("error"))
+				sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+				self.assertEqual(sales_order.items[0].amount, frappe.utils.flt(fulfilled_total_price, 2))
+				self.assertEqual(sales_order.grand_total, frappe.utils.flt(fulfilled_total_price, 2))
+				order.reload()
+				self.assertEqual(order.erpnext_sync_status, "Synced")
+
+	def test_zero_total_with_nonzero_unit_price_blocks_sync(self):
+		"""#85 review Fix B: a zero fulfilled_total_price paired with a
+		nonzero fulfilled_unit_price on the same line looks like missing
+		Talabat pricing data, not an honest free item, and must block rather
+		than silently post a zero-value line."""
+		order = self._make_order(fulfilled_total_price=0)
+		order.reload()
+		order.items[0].fulfilled_unit_price = 5
+		order.save()
 
 		result = sync_sales_order(order.name)
-		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+		order.reload()
 
-		self.assertTrue(result["ok"])
-		# effective_rate = 750 / 3 = 250
-		self.assertEqual(sales_order.items[0].rate, 250)
-		self.assertEqual(sales_order.items[0].qty, 3)
-		self.assertEqual(sales_order.items[0].amount, 750)
+		self.assertFalse(result["ok"])
+		self.assertIn("nonzero unit price", result["error"].lower())
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")

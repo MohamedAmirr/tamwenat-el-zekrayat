@@ -209,6 +209,33 @@ required_apps = ["erpnext"]
 
 # ignore_links_on_delete = ["Communication", "ToDo"]
 
+# Fixtures
+# --------
+# Sales Order Item.rate/price_list_rate need more than the site's 2-decimal
+# currency_precision so `sales_order_sync.py`'s effective_rate (#85 fix A:
+# fulfilled_total_price / fulfilled_quantity) survives ERPNext's own
+# `round_floats_in()` inside `calculate_taxes_and_totals()` without being
+# truncated back to 2dp before `amount = rate * qty` is computed - otherwise
+# a fulfilled amount that does not divide evenly by quantity at 2dp (e.g.
+# 9.99 / 2) can never reconstruct exactly, no matter what precision the
+# Python-side division itself uses. See `services/sales_order_sync.py`'s
+# module docstring and `docs/frappe-conventions.md` for the verified detail.
+fixtures = [
+	{
+		"dt": "Property Setter",
+		"filters": [
+			[
+				"name",
+				"in",
+				[
+					"Sales Order Item-rate-precision",
+					"Sales Order Item-price_list_rate-precision",
+				],
+			]
+		],
+	},
+]
+
 # Request Events
 # ----------------
 before_request = [
