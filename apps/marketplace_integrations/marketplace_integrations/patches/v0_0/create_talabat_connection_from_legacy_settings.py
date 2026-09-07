@@ -14,15 +14,17 @@ def execute():
 	Talabat Settings Single doctype (talabat_integration app), when those
 	settings are actually configured.
 
-	Deliberately does NOT touch or delete Talabat Settings itself, and does
-	NOT remove/replace anything talabat_integration owns - both apps coexist
-	until the rest of the Talabat migration (vendor/product mapping, catalog)
-	is complete, per docs/marketplace-integrations/architecture.md's "Talabat
-	migration" section.
+	Deliberately does NOT touch or delete Talabat Settings itself. This patch
+	was written while talabat_integration still coexisted with
+	marketplace_integrations during the Talabat migration (now complete and
+	the legacy app removed, per docs/marketplace-integrations/architecture.md's
+	"Talabat migration" section); it remains registered and must keep running
+	unchanged for any site (e.g. production) that has not yet applied it.
 
 	Idempotent: re-running (e.g. bench migrate re-running a partially-applied
-	patch, or running on a site with no talabat_integration installed at all)
-	must not create a duplicate Talabat Connection or blow up. Guards:
+	patch, or running on a site where the legacy talabat_integration app was
+	never installed) must not create a duplicate Talabat Connection or blow up.
+	Guards:
 	- returns early if the legacy DocType is not installed or this app's own
 	  migration has not created "Talabat Connection" yet. Talabat Settings is
 	  a Single DocType, so its values live in tabSingles rather than a

@@ -2,7 +2,7 @@
 
 Source spec: `openapi.json` (OpenAPI 3.0.3, "Talabat Partner API" v2.0.2), copied from `~/Desktop/talabat-api.json`. Re-copy it here if Talabat publishes an updated spec — don't hand-edit this file.
 
-This will back the `talabat_integration` custom Frappe app (not scaffolded yet — see `CLAUDE.md` "Custom app plan").
+This backed the legacy `talabat_integration` custom Frappe app, which has since been fully migrated and removed; Talabat functionality now lives in `marketplace_integrations` — see `CLAUDE.md` "Custom app strategy".
 
 ## What the API covers
 

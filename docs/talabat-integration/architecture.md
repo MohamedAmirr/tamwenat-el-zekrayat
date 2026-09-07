@@ -1,14 +1,17 @@
 # talabat_integration: code map
 
-> **Migration status**
+> **Frozen historical reference**
 >
-> This file documents the existing legacy `talabat_integration` code as it
-> actually exists. The target shared marketplace architecture is
-> `docs/marketplace-integrations/architecture.md`, and Talabat is being
-> migrated incrementally under GitHub epic #8. Keep this legacy code map accurate
-> until the old app is retired; do not rewrite it to describe the target app.
+> The legacy `talabat_integration` app documented in this file has been fully
+> migrated and removed from this repository (GitHub epic #8). This file is
+> **not maintained** and is kept only as a historical record of what the app's
+> code looked like before removal — proven behavior/security decisions worth
+> preserving when working on Talabat functionality in `marketplace_integrations`,
+> which now owns everything Talabat. Do not update this file for new work, and
+> do not treat it as a live code map; see
+> `docs/marketplace-integrations/architecture.md` for the current app.
 
-What actually exists in the app right now, so an agent can orient without grepping the whole tree. **Keep this current**: any PR that adds/removes/renames a module, doctype, or changes a core pattern described here must update this file in the same PR — see the "Keeping this updated" rule in `frappe-dev.md`/`frappe-review.md`.
+What the legacy app's code looked like at the time it was retired, so an agent can orient without needing git history. This file is frozen — it is no longer kept current, since there is no live `talabat_integration` app left to describe.
 
 ## Doctypes
 
