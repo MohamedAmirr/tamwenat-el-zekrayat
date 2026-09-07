@@ -15,19 +15,17 @@ Versions and site config live in `.env`: `ERPNEXT_VERSION`, `MARIADB_VERSION`, `
 Keep this file short. Load these on demand rather than re-deriving them:
 
 - `docs/docker-ops.md` — every-day commands for the prod-shaped stack: start/stop, running `bench` inside the container, logs, backup/restore, migrations, resetting.
-- `docs/dev-environment.md` — the dev bench stack: bringing it up, `bench new-app`/`new-site`/`install-app`/`bench start`, how host↔container app code syncing works. Reusable for every future custom app, not just `talabat_integration`.
+- `docs/dev-environment.md` — the dev bench stack: bringing it up, `bench new-app`/`new-site`/`install-app`/`bench start`, how host↔container app code syncing works. Reusable for every custom app.
 - `docs/frappe-conventions.md` — Frappe/ERPNext framework conventions to follow for all custom app work: doctype structure, hooks.py, permissions, migrations/patches, whitelisted methods, client scripts, naming, plus hard-won gotchas (XSS-sanitizer field corruption, autoname/`_sync_autoname_field` traps, composite-uniqueness pattern).
 - `docs/marketplace-integrations/architecture.md` — target shared marketplace architecture: connection/account/mapping/inventory boundaries, import shapes, and migration rules. Read this for all new marketplace work.
-- `docs/talabat-integration/architecture.md` — live map of what actually exists in the legacy `talabat_integration` app. Read it for legacy fixes/migration so proven behavior isn't rediscovered or lost.
+- `docs/talabat-integration/architecture.md` — historical map of the now-removed legacy `talabat_integration` app. Closed Talabat issues and this doc remain evidence of proven behavior/security decisions; consult them when touching Talabat code in `marketplace_integrations` so proven behavior isn't rediscovered or lost.
 - `docs/issue-conventions.md` — how features become GitHub issues: epic + ordered sub-issues, the token-efficient body template, label rules.
 
 ## Custom app strategy
 
-Target shared app: **`marketplace_integrations`** — owns cross-marketplace account, product-mapping, inventory-partition, import/export, and future platform integration work. Its agreed architecture is `docs/marketplace-integrations/architecture.md` and its foundation is tracked by #33.
+Single custom app: **`marketplace_integrations`** — owns cross-marketplace account, product-mapping, inventory-partition, import/export, Talabat integration, and future platform integration work. Its agreed architecture is `docs/marketplace-integrations/architecture.md` and its foundation is tracked by #33.
 
-Legacy app: **`talabat_integration`** — the existing, tested Talabat implementation. Keep it installed and functional during the incremental migration tracked by #8. Closed Talabat issues and `docs/talabat-integration/architecture.md` remain evidence of behavior/security decisions that migration work should preserve where applicable.
-
-Do not add new cross-marketplace functionality to `talabat_integration`. New shared functionality belongs in `marketplace_integrations`; change the legacy app only for an explicit legacy fix or migration step. Talabat API behavior continues to come from `docs/talabat-integration/README.md` and the checked-in `openapi.json`, not from the shared architecture document.
+The legacy `talabat_integration` app has been fully migrated and removed (tracked by #8); all Talabat functionality now lives in `marketplace_integrations`. Talabat API behavior still comes from `docs/talabat-integration/README.md` and the checked-in `openapi.json`, not from the shared architecture document.
 
 ## Ground rules
 

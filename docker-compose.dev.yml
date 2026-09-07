@@ -50,7 +50,6 @@ services:
       - dev-bench-data:/home/frappe/bench-workspace
       # Only our own apps' source is bind-mounted host<->container, so
       # edits made on the host show up in the container immediately.
-      - ./apps/talabat_integration:/home/frappe/bench-workspace/frappe-bench/apps/talabat_integration
       - ./apps/marketplace_integrations:/home/frappe/bench-workspace/frappe-bench/apps/marketplace_integrations
     ports:
       - "127.0.0.1:8000-8005:8000-8005"
