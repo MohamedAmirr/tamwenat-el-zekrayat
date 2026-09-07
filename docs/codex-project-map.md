@@ -9,8 +9,8 @@ always-loaded contract; the files below hold the detail.
 | --- | --- | --- |
 | Production stack | `docker-compose.yml`, `.env`, `docs/docker-ops.md` | Prebuilt ERPNext images; no custom-app development here. |
 | Development stack | `docker-compose.dev.yml`, `docs/dev-environment.md` | Separate throwaway Frappe bench; use the explicit `tamwenat-el-zekrayat-dev` Compose project name. |
-| Target marketplace app | `apps/marketplace_integrations/`, `docs/marketplace-integrations/architecture.md` | Shared target architecture; scaffold/migrate incrementally under #33. |
-| Legacy Talabat app | `apps/talabat_integration/`, `docs/talabat-integration/architecture.md` | Existing implementation retained during migration under #8. |
+| Marketplace app (includes Talabat) | `apps/marketplace_integrations/`, `docs/marketplace-integrations/architecture.md` | Single custom app; owns all marketplace/Talabat functionality. |
+| Historical Talabat reference | `docs/talabat-integration/architecture.md` | Frozen code map of the removed legacy `talabat_integration` app (migration complete under #8); consult for proven behavior, not for live code. |
 | Talabat contract | `docs/talabat-integration/openapi.json` | Source API specification for Talabat behavior. |
 
 ## Task routing
@@ -18,7 +18,7 @@ always-loaded contract; the files below hold the detail.
 | Need | Primary docs | Important constraint |
 | --- | --- | --- |
 | Implement shared marketplace doctypes/imports/services | `frappe-conventions.md`, marketplace architecture | New cross-marketplace functionality belongs in `marketplace_integrations`. |
-| Migrate/fix legacy Talabat code | Frappe conventions, both architecture docs | Preserve proven behavior while moving callers/data incrementally. |
+| Legacy Talabat reference/behavior lookup | Frappe conventions, `docs/talabat-integration/architecture.md` (historical), `docs/marketplace-integrations/architecture.md` | The legacy app is removed; implement any Talabat work in `marketplace_integrations`, consulting the historical doc for proven behavior. |
 | Add Talabat API behavior | Talabat README, OpenAPI, marketplace architecture | The checked-in Talabat spec is authoritative; do not infer endpoints/payloads. |
 | Run containers or bench | `docker-ops.md` / `dev-environment.md` | Check `.env`; bound log output; confirm destructive actions. |
 | Add/run tests | `dev-environment.md`, Frappe conventions | Prefer `IntegrationTestCase` or `UnitTestCase`, not deprecated `FrappeTestCase`. |

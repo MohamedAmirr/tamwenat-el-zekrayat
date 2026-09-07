@@ -18,9 +18,9 @@ The target custom integration architecture lives in the new
 `marketplace_integrations` app and is documented in
 [`docs/marketplace-integrations/architecture.md`](docs/marketplace-integrations/architecture.md).
 
-The existing `apps/talabat_integration/` app is the legacy Talabat
-implementation and remains in the repository while its proven behavior and data
-are migrated incrementally. Talabat's checked-in API contract remains under
+The legacy `apps/talabat_integration/` app has been fully migrated and removed
+from this repository; all Talabat functionality now lives in
+`marketplace_integrations`. Talabat's checked-in API contract remains under
 `docs/talabat-integration/`.
 
 See `docs/codex-project-map.md` for task-oriented repository navigation.

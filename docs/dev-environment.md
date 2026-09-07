@@ -1,10 +1,12 @@
 # Dev bench environment
 
-Separate from `docker-compose.yml` (the prod-shaped stack with prebuilt images and no custom-app support). This is a real `bench` you can `bench new-app`/`new-site`/`install-app` in, used to develop custom apps — `talabat_integration` today, any future app the same way.
+Separate from `docker-compose.yml` (the prod-shaped stack with prebuilt images and no custom-app support). This is a real `bench` you can `bench new-app`/`new-site`/`install-app` in, used to develop custom apps — `marketplace_integrations` today, any future app the same way.
 
 ## Why a second compose file
 
 `docker-compose.yml`'s `frappe/erpnext` images can't create new apps. This one (`docker-compose.dev.yml`) runs `frappe/bench:latest`, which has bench itself plus Python/Node tooling, against its own throwaway MariaDB/Redis — it never touches the prod stack's data or `.env`.
+
+Note: the sections below describe the bench setup as it exists today, with only `marketplace_integrations` installed. The legacy `talabat_integration` app has been fully migrated and removed.
 
 ## Always pass an explicit project name
 
@@ -27,10 +29,10 @@ docker exec -u root tamwenat-el-zekrayat-dev-frappe-1 chown -R frappe:frappe /ho
 ## What lives where
 
 - **`dev-bench-data` volume**, mounted at `/home/frappe/bench-workspace`: the actual bench — `frappe-bench/apps/frappe`, `apps/erpnext`, `env/` (Python venv), `node_modules`, `sites/`. Never bind-mounted to host, never committed. It's mounted at the *parent* of `frappe-bench`, not `frappe-bench` itself — `bench init` refuses to target a path that already exists (even empty), which a volume mounted directly at `frappe-bench` would trigger.
-- **`apps/talabat_integration/` and `apps/marketplace_integrations/` bind mounts** → their matching path under `frappe-bench/apps/`: these are the only things shared between host and container (one mount line per custom app). Edit them from your editor on the host; the container sees changes immediately, and vice versa.
+- **`apps/marketplace_integrations/` bind mount** → its matching path under `frappe-bench/apps/`: this is the only thing shared between host and container (one mount line per custom app). Edit it from your editor on the host; the container sees changes immediately, and vice versa.
 - **`dev-mariadb-data` volume**: throwaway dev database, root password `123` (matches the upstream `frappe_docker` dev convention — this is a disposable local dev DB, not reused anywhere else).
 
-## One-time setup (already done for `frappe-bench` + `talabat_integration` — reference for the *next* app)
+## One-time setup (already done for `frappe-bench` + `marketplace_integrations` — reference for the *next* app)
 
 Run inside the container (`docker exec -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekrayat-dev-frappe-1 bash -lc "<cmd>"`, or `docker exec -it ... bash` for an interactive shell):
 
@@ -52,7 +54,7 @@ bench new-site --db-root-password 123 --admin-password admin --mariadb-user-host
 bench --site dev.localhost set-config developer_mode 1
 bench --site dev.localhost clear-cache
 
-# 4. Get ERPNext (talabat_integration's doctypes link to Item, which lives in ERPNext)
+# 4. Get ERPNext (marketplace_integrations' doctypes link to Item, which lives in ERPNext)
 bench get-app --branch version-16 --resolve-deps erpnext
 bench --site dev.localhost install-app erpnext
 ```
@@ -78,7 +80,7 @@ docker cp tamwenat-el-zekrayat-dev-frappe-1:/home/frappe/bench-workspace/frappe-
 rm -rf ./apps/<app_name>/.git
 ```
 
-Then add a bind-mount line to `docker-compose.dev.yml`'s `frappe` service volumes (mirror the `talabat_integration` line) and recreate just that container to pick it up:
+Then add a bind-mount line to `docker-compose.dev.yml`'s `frappe` service volumes (mirror the existing `marketplace_integrations` line) and recreate just that container to pick it up:
 
 ```bash
 docker compose -p tamwenat-el-zekrayat-dev -f docker-compose.dev.yml up -d frappe
@@ -129,7 +131,7 @@ The `-e KEY='...'` on `docker exec` is a single top-level single-quoted shell ar
 
 ## Gotcha: the dev site tracks whichever branch is checked out on the host
 
-Both `apps/talabat_integration` and `apps/marketplace_integrations` are bind-mounted from the host repo, so the container only ever sees whatever git branch is currently checked out on disk — there is no per-branch isolation, for either app. `bench migrate` reconciles the site's schema against *those* files: if you check out a branch that doesn't have a doctype another branch added (e.g. going from a branch with `Talabat Vendor` to one without it) and run `migrate`, Frappe treats the missing doctype as orphaned and **drops its table**. No code is lost (the doctype's JSON/controller are safe in the other branch/git history), but the live dev DB loses that data until you check that branch back out and `migrate` again. This will bite harder as `marketplace_integrations`' doctypes land incrementally across issues — a branch missing one of them and a `migrate` in between is enough to drop it.
+`apps/marketplace_integrations` is bind-mounted from the host repo, so the container only ever sees whatever git branch is currently checked out on disk — there is no per-branch isolation. `bench migrate` reconciles the site's schema against *those* files: if you check out a branch that doesn't have a doctype another branch added and run `migrate`, Frappe treats the missing doctype as orphaned and **drops its table**. No code is lost (the doctype's JSON/controller are safe in the other branch/git history), but the live dev DB loses that data until you check that branch back out and `migrate` again. This will bite harder as `marketplace_integrations`' doctypes land incrementally across issues — a branch missing one of them and a `migrate` in between is enough to drop it.
 
 Practical rule: don't treat the dev site's current schema as a stable baseline across branch switches — only trust it immediately after running `migrate` on the branch you actually care about right now. Before merging multiple feature branches, the real integration check is checking out `main` after they've all landed and running `migrate` there once.
 
@@ -149,7 +151,7 @@ This is purely a dev-iteration wrinkle — a real site installing the app for th
 
 ## Seeding sample product data (dev only)
 
-The dev site starts with zero `Item` records — real products aren't imported into ERPNext until the actual website goes live. To have realistic Items to develop/test Talabat product-mapping work against in the meantime, `scripts/seed_dev_items.py` (repo root, **not** part of `apps/talabat_integration` — this is dev tooling, never shipped) creates 5 sample grocery/snack Items (with a barcode row and a price each) plus the "Snacks"/"Beverages" Item Groups if they don't already exist. It's idempotent — safe to re-run.
+The dev site starts with zero `Item` records — real products aren't imported into ERPNext until the actual website goes live. To have realistic Items to develop/test Talabat product-mapping work against in the meantime, `scripts/seed_dev_items.py` (repo root, **not** part of `apps/marketplace_integrations` — this is dev tooling, never shipped) creates 5 sample grocery/snack Items (with a barcode row and a price each) plus the "Snacks"/"Beverages" Item Groups if they don't already exist. It's idempotent — safe to re-run.
 
 Never run this against a real site.
 

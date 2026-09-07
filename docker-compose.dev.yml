@@ -1,8 +1,8 @@
 name: tamwenat-el-zekrayat-dev
 
 # Standalone Frappe bench dev environment, separate from the production-style
-# docker-compose.yml (prebuilt images, no custom apps). Used to develop custom
-# apps (talabat_integration, marketplace_integrations) with bench directly.
+# docker-compose.yml (prebuilt images, no custom apps). Used to develop the
+# custom app (marketplace_integrations) with bench directly.
 #
 # IMPORTANT: always invoke with an explicit -p to avoid picking up
 # COMPOSE_PROJECT_NAME from .env (which belongs to the prod stack):

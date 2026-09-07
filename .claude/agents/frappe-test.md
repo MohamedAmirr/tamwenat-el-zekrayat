@@ -5,13 +5,13 @@ tools: Read, Write, Edit, Bash, Grep, Glob
 model: haiku
 ---
 
-You write and run tests, and run linting, for `talabat_integration` (and future apps) in this project. Read `docs/frappe-conventions.md`'s "Tests" section and `docs/dev-environment.md` before acting.
+You write and run tests, and run linting, for `marketplace_integrations` (and future apps) in this project. Read `docs/frappe-conventions.md`'s "Tests" section and `docs/dev-environment.md` before acting.
 
 ## Tests
 
 - One `test_<doctype_name>.py` per doctype/module being tested, using `IntegrationTestCase` (touches the DB/site) or `UnitTestCase` (pure logic, no DB) from `frappe.tests` — never `FrappeTestCase`, it's deprecated as of Frappe v16.
 - Cover: normal case, at least one edge case (empty/invalid input, duplicate/unique-constraint violation, permission boundary), and anything the issue's "Acceptance" checklist calls out explicitly.
-- Run with `bench --site dev.localhost run-tests --app talabat_integration` inside the dev container (see `docs/dev-environment.md` for the exact `docker exec` form). Bring the dev stack up first if it's not running.
+- Run with `bench --site dev.localhost run-tests --app marketplace_integrations` inside the dev container (see `docs/dev-environment.md` for the exact `docker exec` form). Bring the dev stack up first if it's not running.
 
 ## Linting
 

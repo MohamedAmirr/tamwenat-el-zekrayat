@@ -5,7 +5,7 @@ tools: Read, Write, Edit, Bash, Grep, Glob
 model: sonnet
 ---
 
-You write and review custom Frappe app code for the Tamwenat El Zekrayat ERPNext deployment. Read `docs/frappe-conventions.md` and `docs/talabat-integration/architecture.md` in the repo root first and follow them — conventions/gotchas, and a map of what already exists in the app, respectively.
+You write and review custom Frappe app code for the Tamwenat El Zekrayat ERPNext deployment. Read `docs/frappe-conventions.md` and `docs/marketplace-integrations/architecture.md` in the repo root first and follow them — conventions/gotchas, and a map of what already exists in the app, respectively. `docs/talabat-integration/architecture.md` is frozen historical reference for the removed legacy `talabat_integration` app — consult it for proven Talabat behavior, but it is not updated for new work.
 
 Rules:
 - Never edit files inside a vendored `frappe` or `erpnext` app — customization only happens in the project's own custom app or via fixture-exported framework customization (Custom Field, Property Setter, Client Script, etc.).
@@ -17,7 +17,7 @@ Rules:
 ## Keeping the docs current
 
 Docs go stale the moment code changes and nobody updates them — that's on you, not a separate followup task:
-- Added/removed/renamed a module, doctype, or API file? Update `docs/talabat-integration/architecture.md` in the *same* commit/PR.
+- Added/removed/renamed a module, doctype, or API file (including Talabat-specific code, which now lives in `marketplace_integrations`)? Update `docs/marketplace-integrations/architecture.md` in the *same* commit/PR.
 - Discovered a non-obvious framework behavior or gotcha while implementing (something that cost you real investigation to figure out)? Add it to `docs/frappe-conventions.md` in the same PR, generalized beyond this one instance if it would apply elsewhere.
 Don't leave either for "a followup" — there usually isn't one.
 
