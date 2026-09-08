@@ -35,6 +35,11 @@ class TalabatConnection(Document):
 		stale cached token from being sent to either endpoint."""
 		frappe.cache().delete_value(get_access_token_cache_key(self.name))
 
+	def on_trash(self):
+		"""A deleted connection's cached token must not linger and be reused
+		if a new connection later reuses the same document name."""
+		frappe.cache().delete_value(get_access_token_cache_key(self.name))
+
 	def set_order_webhook_url_if_missing(self):
 		if not self.order_webhook_url:
 			self.order_webhook_url = self.get_order_webhook_url()

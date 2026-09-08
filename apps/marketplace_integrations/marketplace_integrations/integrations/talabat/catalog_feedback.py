@@ -30,8 +30,8 @@ import frappe
 from frappe import _
 from frappe.utils import cstr
 
+from marketplace_integrations.integrations.http import http_request
 from marketplace_integrations.integrations.talabat.catalog_sync import effective_outbound_sku
-from marketplace_integrations.integrations.talabat.client import http_request
 
 CATALOG_FEEDBACK_STATUS = "COMPLETED"
 SUCCESS_FEEDBACK = "Product Assignment Successful"
@@ -162,9 +162,9 @@ def _download_feedback_csv(download_url):
 
 def _download_request(url):
 	"""Reuse the app's single shared bounded-timeout/network-error request
-	wrapper (``integrations/talabat/client.py``'s ``http_request``) instead of
-	a second ad-hoc ``requests`` call site. No Authorization header is
-	attached - this is not a Talabat Partner API request.
+	wrapper (``integrations/http.py``'s ``http_request``) instead of a second
+	ad-hoc ``requests`` call site. No Authorization header is attached - this
+	is not a Talabat Partner API request.
 
 	Returned as a context manager (``requests.Response`` supports
 	``with``/``__exit__`` natively) so every code path - a redirect hop whose
@@ -173,6 +173,7 @@ def _download_request(url):
 	return http_request(
 		"GET",
 		url,
+		service_name="the Talabat catalog feedback download host",
 		timeout=DOWNLOAD_TIMEOUT_SECONDS,
 		stream=True,
 		allow_redirects=False,

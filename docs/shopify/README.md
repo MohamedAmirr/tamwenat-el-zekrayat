@@ -26,11 +26,22 @@ Apps created before Jan 1 2026 under the old flow keep their static token workin
 
 Shopify marked the REST Admin API as legacy in Oct 2024. Since April 2025, new apps must use the **GraphQL Admin API** exclusively. Any Shopify client built here should be a GraphQL client, not a REST client — this is a structural difference from `TalabatClient`, which is REST-only.
 
-## Open questions before building `Shopify Connection`
+## Open questions
+
+`Shopify Connection` + `ShopifyClient` are now built (#101). What that issue settled and what's still open:
+
+Settled by #101:
+
+- Token refresh trigger: **proactive refresh before expiry**, mirroring `TalabatClient`'s safety-buffer pattern (`ttl = expires_in - EXPIRY_BUFFER_SECONDS`, cached per connection). Reactive refresh on a 401 is deferred to #102, since there's no `request()`/GraphQL call layer yet to retry on. The shared token-fetch/expiry-buffer math itself now lives in `integrations/http.py`'s `fetch_client_credentials_token()`, used by both `ShopifyClient` and `TalabatClient`.
+- `shop_domain` validation: `Shopify Connection.validate()` requires a bare hostname — only `[A-Za-z0-9.-]`, not starting/ending with a dot, no scheme/path/whitespace/port/userinfo/query/fragment. This is stricter than an earlier version that only blocked `://` and `/`, which still let an `@` through and made `get_store_base_url()` (a plain `https://` string prefix) vulnerable to userinfo/host confusion (e.g. `shop.myshopify.com@attacker.example` resolving to `attacker.example`, silently sending the client secret there). Deliberately does **not** hardcode a `.myshopify.com` suffix — see the still-open domain-format question below.
+- `enabled` flag enforcement: `ShopifyClient.get_access_token()` does **not** check `Shopify Connection.enabled` yet. This is currently unreachable (no caller exists in #101), but it is not forgotten — whichever future issue (#102/#103) adds the first real caller (GraphQL `request()`/`execute()`) must add that check at the same time.
+
+Still open:
 
 - Exact scopes needed — depends on which resources later catalog/order work will touch (not decided yet).
-- Whether the store domain format needed is `{store}.myshopify.com` or a custom domain — confirm against the specific store's Shopify admin before hardcoding validation.
-- Token refresh trigger: proactive refresh before expiry (mirroring Talabat's safety-buffer pattern) vs. reactive refresh on a 401 — a design decision for whoever implements `Shopify Connection`'s client, not decided here.
+- Whether the store domain format needed is `{store}.myshopify.com` or a custom domain — confirm against the specific store's Shopify admin before hardcoding validation. `shop_domain` currently accepts either shape.
+- The GraphQL Admin API endpoint path and version to pin against — not yet documented in this repo; blocks #102's `execute()`/query layer.
+- Shopify's webhook registration/verification mechanism — not yet documented in this repo; blocks #104.
 
 ## References
 

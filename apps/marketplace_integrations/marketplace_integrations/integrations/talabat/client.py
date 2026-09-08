@@ -17,51 +17,30 @@ record per site) so a per-environment cache key was sufficient; this app
 supports multiple concurrent Talabat Connections (e.g. two vendors both on
 Production), so two connections in the same environment must not share a
 token.
+
+The bounded-timeout/network-error request wrapper and the client-credentials
+token-fetch/expiry-buffer math are platform-neutral and shared with
+ShopifyClient via ``integrations/http.py`` - see that module for the single
+implementation of both. Only what's genuinely Talabat-specific (the base
+URL/oauth path, the 401-retry request choke point) lives here.
 """
 
 import time
 
 import frappe
-import requests
+
+from marketplace_integrations.integrations.http import fetch_client_credentials_token, http_request
 
 CACHE_KEY_PREFIX = "marketplace_integrations:talabat:access_token"
 # Refresh a bit before actual expiry so a request never races a token that
 # expires mid-flight.
 EXPIRY_BUFFER_SECONDS = 60
-REQUEST_TIMEOUT_SECONDS = 10
+DEFAULT_EXPIRES_IN = 7200
+SERVICE_NAME = "Talabat"
 
 
 def get_access_token_cache_key(connection_name):
 	return f"{CACHE_KEY_PREFIX}:{connection_name}"
-
-
-def http_request(method, url, **kwargs):
-	"""Make an HTTP request, raising a clean frappe error on any network-level
-	failure (connection error, timeout, SSL error, ...).
-
-	Shared by every Talabat call a TalabatClient makes - token fetch and the
-	general `request()` choke point alike - so timeout/network-error handling
-	has exactly one implementation instead of drifting copies. Also the app's
-	one shared bounded-timeout/network-error request wrapper for any other
-	plain (non-Talabat-authenticated) HTTP call, e.g.
-	``integrations/talabat/catalog_feedback.py``'s feedback CSV download -
-	callers outside this module should reuse this rather than opening a
-	second ad-hoc ``requests`` call site. Public (no leading underscore)
-	specifically because it is called across that module boundary.
-	"""
-	kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
-	try:
-		return requests.request(method, url, **kwargs)
-	except requests.exceptions.RequestException as e:
-		frappe.throw(frappe._("Failed to reach Talabat: {0}").format(str(e)))
-
-
-def _error_message(response):
-	try:
-		body = response.json()
-	except ValueError:
-		return response.text
-	return body.get("error_description") or body.get("error") or response.text
 
 
 class TalabatClient:
@@ -130,38 +109,18 @@ class TalabatClient:
 	def _send(self, method, url, access_token, **kwargs):
 		headers = kwargs.pop("headers", {}) or {}
 		headers["Authorization"] = f"Bearer {access_token}"
-		return http_request(method, url, headers=headers, **kwargs)
+		return http_request(method, url, service_name=SERVICE_NAME, headers=headers, **kwargs)
 
 	def _fetch_access_token(self):
 		connection = self.get_connection()
-		response = http_request(
-			"POST",
+		return fetch_client_credentials_token(
 			f"{connection.get_base_url()}/v2/oauth/token",
-			data={
-				"grant_type": "client_credentials",
-				"client_id": connection.client_id,
-				"client_secret": connection.get_password("client_secret"),
-			},
+			connection.client_id,
+			connection.get_password("client_secret"),
+			service_name=SERVICE_NAME,
+			default_expires_in=DEFAULT_EXPIRES_IN,
+			expiry_buffer_seconds=EXPIRY_BUFFER_SECONDS,
 		)
-
-		if not response.ok:
-			frappe.throw(
-				frappe._("Failed to authenticate with Talabat: {0}").format(_error_message(response))
-			)
-
-		try:
-			body = response.json()
-			expires_in = body.get("expires_in", 7200)
-			ttl = max(expires_in - EXPIRY_BUFFER_SECONDS, 1)
-			return {
-				"access_token": body["access_token"],
-				"ttl": ttl,
-				"expires_at": time.time() + ttl,
-			}
-		except (ValueError, KeyError) as e:
-			frappe.throw(
-				frappe._("Failed to authenticate with Talabat: unexpected response ({0})").format(str(e))
-			)
 
 	def _cache_key(self):
 		return get_access_token_cache_key(self.connection_name)
