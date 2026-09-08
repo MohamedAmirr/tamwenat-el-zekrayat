@@ -51,7 +51,7 @@ class IntegrationTestTalabatClient(IntegrationTestCase):
 
 	# -- get_access_token ---------------------------------------------------
 
-	@patch("marketplace_integrations.integrations.talabat.client.requests.request")
+	@patch("marketplace_integrations.integrations.http.requests.request")
 	def test_returns_token_from_successful_fetch(self, mock_request):
 		mock_request.return_value = _mock_token_response("sandbox-token")
 
@@ -64,7 +64,7 @@ class IntegrationTestTalabatClient(IntegrationTestCase):
 		self.assertEqual(kwargs["data"]["client_id"], "test-client-id")
 		self.assertEqual(kwargs["data"]["client_secret"], "test-client-secret")
 
-	@patch("marketplace_integrations.integrations.talabat.client.requests.request")
+	@patch("marketplace_integrations.integrations.http.requests.request")
 	def test_cache_hit_does_not_refetch(self, mock_request):
 		mock_request.return_value = _mock_token_response("sandbox-token")
 
@@ -75,7 +75,7 @@ class IntegrationTestTalabatClient(IntegrationTestCase):
 		self.assertEqual(second, "sandbox-token")
 		mock_request.assert_called_once()
 
-	@patch("marketplace_integrations.integrations.talabat.client.requests.request")
+	@patch("marketplace_integrations.integrations.http.requests.request")
 	def test_two_connections_cache_independent_tokens(self, mock_request):
 		other_connection = make_connection("Test Client Connection Other", client_id="other-client-id")
 		other_client = TalabatClient(other_connection.name)
@@ -112,7 +112,19 @@ class IntegrationTestTalabatClient(IntegrationTestCase):
 
 		self.assertIsNone(frappe.cache().get_value(cache_key))
 
-	@patch("marketplace_integrations.integrations.talabat.client.requests.request")
+	def test_connection_trash_invalidates_cached_token(self):
+		cache_key = self.client._cache_key()
+		frappe.cache().set_value(
+			cache_key,
+			{"access_token": "old-token", "expires_at": time.time() + 3600},
+			expires_in_sec=3600,
+		)
+
+		self.connection.delete()
+
+		self.assertIsNone(frappe.cache().get_value(cache_key))
+
+	@patch("marketplace_integrations.integrations.http.requests.request")
 	def test_auth_failure_raises_clear_error(self, mock_request):
 		response = MagicMock()
 		response.ok = False
@@ -125,14 +137,18 @@ class IntegrationTestTalabatClient(IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			self.client.get_access_token()
 
-	@patch("marketplace_integrations.integrations.talabat.client.requests.request")
-	def test_network_error_raises_clear_error(self, mock_request):
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_network_error_raises_clear_error_not_raw_traceback(self, mock_request):
 		mock_request.side_effect = requests.exceptions.ConnectionError("connection refused")
 
-		with self.assertRaises(frappe.ValidationError):
+		with self.assertRaises(frappe.ValidationError) as ctx:
 			self.client.get_access_token()
 
-	@patch("marketplace_integrations.integrations.talabat.client.requests.request")
+		message = str(ctx.exception)
+		self.assertIn("Talabat", message)
+		self.assertNotIn("Shopify", message)
+
+	@patch("marketplace_integrations.integrations.http.requests.request")
 	def test_malformed_response_raises_clear_error(self, mock_request):
 		response = MagicMock()
 		response.ok = True
@@ -142,10 +158,30 @@ class IntegrationTestTalabatClient(IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			self.client.get_access_token()
 
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_null_expires_in_raises_clear_error_not_raw_traceback(self, mock_request):
+		response = MagicMock()
+		response.ok = True
+		response.json.return_value = {"access_token": "sandbox-token", "expires_in": None}
+		mock_request.return_value = response
+
+		with self.assertRaises(frappe.ValidationError):
+			self.client.get_access_token()
+
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_string_expires_in_raises_clear_error_not_raw_traceback(self, mock_request):
+		response = MagicMock()
+		response.ok = True
+		response.json.return_value = {"access_token": "sandbox-token", "expires_in": "not-a-number"}
+		mock_request.return_value = response
+
+		with self.assertRaises(frappe.ValidationError):
+			self.client.get_access_token()
+
 	# -- request --------------------------------------------------------------
 
 	@patch.object(TalabatClient, "get_access_token")
-	@patch("marketplace_integrations.integrations.talabat.client.requests.request")
+	@patch("marketplace_integrations.integrations.http.requests.request")
 	def test_successful_request_passes_token(self, mock_request, mock_get_token):
 		mock_get_token.return_value = "token-abc"
 		mock_request.return_value = _response(200)
@@ -159,7 +195,7 @@ class IntegrationTestTalabatClient(IntegrationTestCase):
 
 	@patch.object(TalabatClient, "invalidate_access_token")
 	@patch.object(TalabatClient, "get_access_token")
-	@patch("marketplace_integrations.integrations.talabat.client.requests.request")
+	@patch("marketplace_integrations.integrations.http.requests.request")
 	def test_401_triggers_single_retry_with_refreshed_token(
 		self, mock_request, mock_get_token, mock_invalidate
 	):
@@ -176,7 +212,7 @@ class IntegrationTestTalabatClient(IntegrationTestCase):
 
 	@patch.object(TalabatClient, "invalidate_access_token")
 	@patch.object(TalabatClient, "get_access_token")
-	@patch("marketplace_integrations.integrations.talabat.client.requests.request")
+	@patch("marketplace_integrations.integrations.http.requests.request")
 	def test_second_401_raises_clear_error(self, mock_request, mock_get_token, mock_invalidate):
 		mock_get_token.side_effect = ["stale-token", "still-stale-token"]
 		mock_request.side_effect = [_response(401), _response(401)]
@@ -188,7 +224,7 @@ class IntegrationTestTalabatClient(IntegrationTestCase):
 		self.assertEqual(mock_request.call_count, 2)
 
 	@patch.object(TalabatClient, "get_access_token")
-	@patch("marketplace_integrations.integrations.talabat.client.requests.request")
+	@patch("marketplace_integrations.integrations.http.requests.request")
 	def test_network_error_from_request_raises_clear_error(self, mock_request, mock_get_token):
 		mock_get_token.return_value = "token-abc"
 		mock_request.side_effect = requests.exceptions.ConnectionError("connection refused")
@@ -197,7 +233,7 @@ class IntegrationTestTalabatClient(IntegrationTestCase):
 			self.client.request("GET", "/v2/chains/test-chain-id/vendors/v1/status")
 
 	@patch.object(TalabatClient, "get_access_token")
-	@patch("marketplace_integrations.integrations.talabat.client.requests.request")
+	@patch("marketplace_integrations.integrations.http.requests.request")
 	def test_path_without_leading_slash_is_normalized(self, mock_request, mock_get_token):
 		mock_get_token.return_value = "token-abc"
 		mock_request.return_value = _response(200)
