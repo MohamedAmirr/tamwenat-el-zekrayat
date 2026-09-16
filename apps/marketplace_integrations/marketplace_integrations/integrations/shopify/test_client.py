@@ -8,7 +8,12 @@ import frappe
 import requests
 from frappe.tests import IntegrationTestCase
 
-from marketplace_integrations.integrations.shopify.client import ShopifyClient
+from marketplace_integrations.integrations.shopify.client import (
+	DEFAULT_THROTTLE_BACKOFF_SECONDS,
+	MAX_THROTTLE_ATTEMPTS,
+	MAX_THROTTLE_BACKOFF_SECONDS,
+	ShopifyClient,
+)
 
 
 def _mock_token_response(access_token, expires_in=86399):
@@ -20,6 +25,36 @@ def _mock_token_response(access_token, expires_in=86399):
 		"expires_in": expires_in,
 	}
 	return response
+
+
+def _response(status_code):
+	response = MagicMock()
+	response.status_code = status_code
+	response.ok = status_code < 400
+	return response
+
+
+def _mock_graphql_response(data, errors=None):
+	response = MagicMock()
+	response.ok = True
+	response.status_code = 200
+	body = {"data": data}
+	if errors:
+		body["errors"] = errors
+	response.json.return_value = body
+	return response
+
+
+def _mock_throttled_response(retry_after):
+	return _mock_graphql_response(
+		data=None,
+		errors=[
+			{
+				"message": "Throttled",
+				"extensions": {"code": "THROTTLED", "retryAfter": retry_after},
+			}
+		],
+	)
 
 
 def make_connection(connection_name, **kwargs):
@@ -177,3 +212,345 @@ class IntegrationTestShopifyClient(IntegrationTestCase):
 
 		with self.assertRaises(frappe.ValidationError):
 			self.client.get_access_token()
+
+	# -- execute ----------------------------------------------------------
+
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_execute_posts_query_and_variables_with_access_token_header(self, mock_request, mock_get_token):
+		mock_get_token.return_value = "token-abc"
+		mock_request.return_value = _mock_graphql_response({"shop": {"name": "Test Shop"}})
+
+		data = self.client.execute("query { shop { name } }", {"id": "gid://shopify/Shop/1"})
+
+		self.assertEqual(data, {"shop": {"name": "Test Shop"}})
+		mock_request.assert_called_once()
+		args, kwargs = mock_request.call_args
+		self.assertEqual(args[0], "POST")
+		self.assertEqual(args[1], "https://test-shop.myshopify.com/admin/api/2026-07/graphql.json")
+		self.assertEqual(kwargs["headers"]["X-Shopify-Access-Token"], "token-abc")
+		self.assertEqual(kwargs["json"]["query"], "query { shop { name } }")
+		self.assertEqual(kwargs["json"]["variables"], {"id": "gid://shopify/Shop/1"})
+
+	def test_execute_raises_when_connection_disabled(self):
+		self.connection.enabled = 0
+		self.connection.save()
+
+		with self.assertRaises(frappe.ValidationError):
+			self.client.execute("query { shop { name } }")
+
+	@patch.object(ShopifyClient, "invalidate_access_token")
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_execute_401_triggers_single_invalidate_and_retry(
+		self, mock_request, mock_get_token, mock_invalidate
+	):
+		mock_get_token.side_effect = ["stale-token", "fresh-token"]
+		mock_request.side_effect = [
+			_response(401),
+			_mock_graphql_response({"shop": {"name": "Test Shop"}}),
+		]
+
+		data = self.client.execute("query { shop { name } }")
+
+		self.assertEqual(data, {"shop": {"name": "Test Shop"}})
+		mock_invalidate.assert_called_once()
+		self.assertEqual(mock_request.call_count, 2)
+		second_call_kwargs = mock_request.call_args_list[1][1]
+		self.assertEqual(second_call_kwargs["headers"]["X-Shopify-Access-Token"], "fresh-token")
+
+	@patch.object(ShopifyClient, "invalidate_access_token")
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_execute_second_401_raises_without_third_attempt(
+		self, mock_request, mock_get_token, mock_invalidate
+	):
+		mock_get_token.side_effect = ["stale-token", "still-stale-token"]
+		mock_request.side_effect = [_response(401), _response(401)]
+
+		with self.assertRaises(frappe.ValidationError):
+			self.client.execute("query { shop { name } }")
+
+		mock_invalidate.assert_called_once()
+		self.assertEqual(mock_request.call_count, 2)
+
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_execute_raises_on_top_level_errors(self, mock_request, mock_get_token):
+		mock_get_token.return_value = "token-abc"
+		mock_request.return_value = _mock_graphql_response(
+			data=None, errors=[{"message": "Field 'bogus' doesn't exist on type 'Shop'"}]
+		)
+
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self.client.execute("query { shop { bogus } }")
+
+		self.assertIn("bogus", str(ctx.exception))
+
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_execute_returns_mutation_user_errors_without_raising(self, mock_request, mock_get_token):
+		mock_get_token.return_value = "token-abc"
+		mock_request.return_value = _mock_graphql_response(
+			{
+				"someMutation": {
+					"result": None,
+					"userErrors": [{"field": ["input"], "message": "Invalid input"}],
+				}
+			}
+		)
+
+		data = self.client.execute("mutation { someMutation { userErrors { field message } } }")
+
+		self.assertEqual(
+			data["someMutation"]["userErrors"], [{"field": ["input"], "message": "Invalid input"}]
+		)
+
+	@patch("marketplace_integrations.integrations.shopify.client.time.sleep")
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_execute_retries_on_throttle_with_bounded_backoff_then_succeeds(
+		self, mock_request, mock_get_token, mock_sleep
+	):
+		mock_get_token.return_value = "token-abc"
+		mock_request.side_effect = [
+			_mock_throttled_response(retry_after=2),
+			_mock_graphql_response({"shop": {"name": "Test Shop"}}),
+		]
+
+		data = self.client.execute("query { shop { name } }")
+
+		self.assertEqual(data, {"shop": {"name": "Test Shop"}})
+		mock_sleep.assert_called_once_with(2)
+		self.assertEqual(mock_request.call_count, 2)
+
+	@patch("marketplace_integrations.integrations.shopify.client.time.sleep")
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_execute_gives_up_after_fixed_throttle_attempt_cap(
+		self, mock_request, mock_get_token, mock_sleep
+	):
+		mock_get_token.return_value = "token-abc"
+		mock_request.return_value = _mock_throttled_response(retry_after=1)
+
+		with self.assertRaises(frappe.ValidationError):
+			self.client.execute("query { shop { name } }")
+
+		self.assertEqual(mock_request.call_count, MAX_THROTTLE_ATTEMPTS)
+		self.assertEqual(mock_sleep.call_count, MAX_THROTTLE_ATTEMPTS - 1)
+
+	@patch("marketplace_integrations.integrations.shopify.client.time.sleep")
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_throttled_response_missing_retry_after_still_retries_with_default_backoff(
+		self, mock_request, mock_get_token, mock_sleep
+	):
+		mock_get_token.return_value = "token-abc"
+		mock_request.side_effect = [
+			_mock_graphql_response(
+				data=None,
+				errors=[{"message": "Throttled", "extensions": {"code": "THROTTLED"}}],
+			),
+			_mock_graphql_response({"shop": {"name": "Test Shop"}}),
+		]
+
+		data = self.client.execute("query { shop { name } }")
+
+		self.assertEqual(data, {"shop": {"name": "Test Shop"}})
+		mock_sleep.assert_called_once_with(DEFAULT_THROTTLE_BACKOFF_SECONDS)
+		self.assertEqual(mock_request.call_count, 2)
+
+	@patch("marketplace_integrations.integrations.shopify.client.time.sleep")
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_throttled_response_with_retry_after_above_cap_is_capped(
+		self, mock_request, mock_get_token, mock_sleep
+	):
+		mock_get_token.return_value = "token-abc"
+		mock_request.side_effect = [
+			_mock_throttled_response(retry_after=9999),
+			_mock_graphql_response({"shop": {"name": "Test Shop"}}),
+		]
+
+		data = self.client.execute("query { shop { name } }")
+
+		self.assertEqual(data, {"shop": {"name": "Test Shop"}})
+		mock_sleep.assert_called_once_with(MAX_THROTTLE_BACKOFF_SECONDS)
+
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_execute_raises_clean_error_on_non_json_success_response(self, mock_request, mock_get_token):
+		mock_get_token.return_value = "token-abc"
+		response = MagicMock()
+		response.ok = True
+		response.status_code = 200
+		response.json.side_effect = ValueError("not json")
+		response.text = "<html>captive portal</html>"
+		mock_request.return_value = response
+
+		with self.assertRaises(frappe.ValidationError):
+			self.client.execute("query { shop { name } }")
+
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_execute_raises_clean_error_on_list_response_body(self, mock_request, mock_get_token):
+		mock_get_token.return_value = "token-abc"
+		response = MagicMock()
+		response.ok = True
+		response.status_code = 200
+		response.json.return_value = ["unexpected", "list"]
+		response.text = '["unexpected", "list"]'
+		mock_request.return_value = response
+
+		with self.assertRaises(frappe.ValidationError):
+			self.client.execute("query { shop { name } }")
+
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_execute_raises_clean_error_when_body_has_neither_data_nor_errors(
+		self, mock_request, mock_get_token
+	):
+		mock_get_token.return_value = "token-abc"
+		response = MagicMock()
+		response.ok = True
+		response.status_code = 200
+		response.json.return_value = {"extensions": {"cost": {}}}
+		mock_request.return_value = response
+
+		with self.assertRaises(frappe.ValidationError):
+			self.client.execute("query { shop { name } }")
+
+	@patch("marketplace_integrations.integrations.shopify.client.time.sleep")
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_throttled_response_with_non_numeric_string_retry_after_uses_default_backoff(
+		self, mock_request, mock_get_token, mock_sleep
+	):
+		mock_get_token.return_value = "token-abc"
+		mock_request.side_effect = [
+			_mock_throttled_response(retry_after="5"),
+			_mock_graphql_response({"shop": {"name": "Test Shop"}}),
+		]
+
+		data = self.client.execute("query { shop { name } }")
+
+		self.assertEqual(data, {"shop": {"name": "Test Shop"}})
+		mock_sleep.assert_called_once_with(DEFAULT_THROTTLE_BACKOFF_SECONDS)
+
+	@patch("marketplace_integrations.integrations.shopify.client.time.sleep")
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_throttled_response_with_boolean_retry_after_uses_default_backoff(
+		self, mock_request, mock_get_token, mock_sleep
+	):
+		mock_get_token.return_value = "token-abc"
+		mock_request.side_effect = [
+			_mock_throttled_response(retry_after=True),
+			_mock_graphql_response({"shop": {"name": "Test Shop"}}),
+		]
+
+		data = self.client.execute("query { shop { name } }")
+
+		self.assertEqual(data, {"shop": {"name": "Test Shop"}})
+		mock_sleep.assert_called_once_with(DEFAULT_THROTTLE_BACKOFF_SECONDS)
+
+	@patch("marketplace_integrations.integrations.shopify.client.time.sleep")
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_throttled_response_with_negative_retry_after_is_floored_at_zero(
+		self, mock_request, mock_get_token, mock_sleep
+	):
+		mock_get_token.return_value = "token-abc"
+		mock_request.side_effect = [
+			_mock_throttled_response(retry_after=-5),
+			_mock_graphql_response({"shop": {"name": "Test Shop"}}),
+		]
+
+		data = self.client.execute("query { shop { name } }")
+
+		self.assertEqual(data, {"shop": {"name": "Test Shop"}})
+		mock_sleep.assert_called_once_with(0)
+
+	@patch("marketplace_integrations.integrations.shopify.client.time.sleep")
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_throttled_response_retry_after_is_capped_at_ten_seconds_not_thirty(
+		self, mock_request, mock_get_token, mock_sleep
+	):
+		mock_get_token.return_value = "token-abc"
+		mock_request.side_effect = [
+			_mock_throttled_response(retry_after=9999),
+			_mock_graphql_response({"shop": {"name": "Test Shop"}}),
+		]
+
+		data = self.client.execute("query { shop { name } }")
+
+		self.assertEqual(data, {"shop": {"name": "Test Shop"}})
+		self.assertEqual(MAX_THROTTLE_BACKOFF_SECONDS, 10)
+		mock_sleep.assert_called_once_with(10)
+
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_execute_raises_clean_error_on_dict_shaped_errors_field(self, mock_request, mock_get_token):
+		mock_get_token.return_value = "token-abc"
+		response = MagicMock()
+		response.ok = True
+		response.status_code = 200
+		response.json.return_value = {
+			"data": None,
+			"errors": {"message": "Something went wrong"},
+		}
+		mock_request.return_value = response
+
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self.client.execute("query { shop { name } }")
+
+		self.assertIn("Something went wrong", str(ctx.exception))
+
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_execute_raises_clean_error_on_string_shaped_errors_field(self, mock_request, mock_get_token):
+		mock_get_token.return_value = "token-abc"
+		response = MagicMock()
+		response.ok = True
+		response.status_code = 200
+		response.json.return_value = {"data": None, "errors": "Something went wrong"}
+		mock_request.return_value = response
+
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self.client.execute("query { shop { name } }")
+
+		self.assertIn("Something went wrong", str(ctx.exception))
+
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_execute_raises_clean_error_when_data_is_explicitly_null(self, mock_request, mock_get_token):
+		mock_get_token.return_value = "token-abc"
+		response = MagicMock()
+		response.ok = True
+		response.status_code = 200
+		response.json.return_value = {"data": None}
+		mock_request.return_value = response
+
+		with self.assertRaises(frappe.ValidationError):
+			self.client.execute("query { shop { name } }")
+
+	@patch("marketplace_integrations.integrations.shopify.client.time.sleep")
+	@patch.object(ShopifyClient, "invalidate_access_token")
+	@patch.object(ShopifyClient, "get_access_token")
+	@patch("marketplace_integrations.integrations.http.requests.request")
+	def test_execute_spends_only_one_token_refresh_across_throttle_and_401(
+		self, mock_request, mock_get_token, mock_invalidate, mock_sleep
+	):
+		mock_get_token.side_effect = ["stale-token", "fresh-token", "fresh-token"]
+		mock_request.side_effect = [
+			_response(401),
+			_mock_throttled_response(retry_after=1),
+			_response(401),
+		]
+
+		with self.assertRaises(frappe.ValidationError):
+			self.client.execute("query { shop { name } }")
+
+		mock_invalidate.assert_called_once()
+		self.assertEqual(mock_request.call_count, 3)

@@ -55,20 +55,33 @@ def error_message_from_response(response):
 	Falls back to a length-bounded raw body when the response isn't JSON, or
 	is JSON but carries none of the recognized error fields - this never
 	echoes an unbounded remote response body into an operator-facing error
-	message.
+	message. The recognized `error`/`error_description` fields are
+	themselves coerced to a string and run through the same length bound -
+	they are still remote-controlled values (could be an unexpectedly large
+	string, or even a nested object) and must never bypass the bound just
+	because the field name was recognized.
 	"""
 	try:
 		body = response.json()
 	except ValueError:
-		return _truncated(response.text)
+		return truncate_response_text(response.text)
+
+	if not isinstance(body, dict):
+		return truncate_response_text(response.text)
 
 	message = body.get("error_description") or body.get("error")
 	if message:
-		return message
-	return _truncated(response.text)
+		return truncate_response_text(str(message))
+	return truncate_response_text(response.text)
 
 
-def _truncated(text):
+def truncate_response_text(text):
+	"""Bound a raw response body to ``ERROR_BODY_MAX_LENGTH`` characters.
+
+	Public so every marketplace client can reuse the same bound when it needs
+	to surface a raw (non-JSON, or unexpectedly-shaped JSON) response body in
+	a clean error message, instead of each client re-deriving its own bound.
+	"""
 	text = (text or "").strip()
 	if not text:
 		return "no response body"
