@@ -58,10 +58,14 @@ def _mock_throttled_response(retry_after):
 
 
 def make_connection(connection_name, **kwargs):
+	# shop_domain defaults to a call-unique value - it carries a DB-level
+	# unique: 1 constraint, and IntegrationTestCase only rolls back once at
+	# class teardown (see docs/frappe-conventions.md's Tests section), so a
+	# fixed literal default would collide across this class's test methods.
 	doc = {
 		"doctype": "Shopify Connection",
 		"connection_name": connection_name,
-		"shop_domain": "test-shop.myshopify.com",
+		"shop_domain": f"test-shop-{frappe.generate_hash(length=8)}.myshopify.com",
 		"client_id": "test-client-id",
 		"client_secret": "test-client-secret",
 	}
@@ -87,7 +91,7 @@ class IntegrationTestShopifyClient(IntegrationTestCase):
 		mock_request.assert_called_once()
 		args, kwargs = mock_request.call_args
 		self.assertEqual(args[0], "POST")
-		self.assertEqual(args[1], "https://test-shop.myshopify.com/admin/oauth/access_token")
+		self.assertEqual(args[1], f"https://{self.connection.shop_domain}/admin/oauth/access_token")
 		self.assertEqual(kwargs["data"]["grant_type"], "client_credentials")
 		self.assertEqual(kwargs["data"]["client_id"], "test-client-id")
 		self.assertEqual(kwargs["data"]["client_secret"], "test-client-secret")
@@ -227,7 +231,9 @@ class IntegrationTestShopifyClient(IntegrationTestCase):
 		mock_request.assert_called_once()
 		args, kwargs = mock_request.call_args
 		self.assertEqual(args[0], "POST")
-		self.assertEqual(args[1], "https://test-shop.myshopify.com/admin/api/2026-07/graphql.json")
+		self.assertEqual(
+			args[1], f"https://{self.connection.shop_domain}/admin/api/2026-07/graphql.json"
+		)
 		self.assertEqual(kwargs["headers"]["X-Shopify-Access-Token"], "token-abc")
 		self.assertEqual(kwargs["json"]["query"], "query { shop { name } }")
 		self.assertEqual(kwargs["json"]["variables"], {"id": "gid://shopify/Shop/1"})

@@ -142,12 +142,18 @@ class IntegrationTestMarketplaceAccount(IntegrationTestCase):
         if existing:
             return existing
 
+        # shop_domain carries a DB-level unique: 1 constraint - derive it
+        # from connection_name (rather than a fixed literal) so two distinct
+        # connection_name values used in the same test class never collide.
+        # This stays deterministic/idempotent with the existing-lookup above:
+        # the same connection_name always maps to the same shop_domain.
+        domain_slug = connection_name.lower().replace(" ", "-")
         return (
             frappe.get_doc(
                 {
                     "doctype": "Shopify Connection",
                     "connection_name": connection_name,
-                    "shop_domain": "test-shop.myshopify.com",
+                    "shop_domain": f"{domain_slug}.myshopify.com",
                     "client_id": "test-client-id",
                     "client_secret": "test-client-secret",
                 }
