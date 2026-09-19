@@ -14,6 +14,13 @@ acknowledged and recorded only. See
 docs/marketplace-integrations/architecture.md and docs/shopify/README.md's
 "Webhooks (for #104)" section.
 
+Because ``webhook_event()`` (api/shopify_webhooks.py) always responds 200 as
+soon as processing is enqueued - correct, "respond promptly" - Shopify never
+retries a delivery whose ASYNC processing later fails. A scheduled sweep,
+``retry_errored_webhook_deliveries()``, gives an errored delivery an
+automatic path back to "Processed" without waiting on a Shopify-initiated
+redelivery; see its own docstring and ``_process_delivery()``'s.
+
 The GraphQL field/argument names below were verified against
 https://shopify.dev/docs/api/admin-graphql/latest (input-objects/
 WebhookSubscriptionInput, enums/WebhookSubscriptionTopic) on 2026-09-19:
@@ -255,6 +262,12 @@ def _format_user_errors(user_errors):
 	return "; ".join(m for m in messages if m) or "unknown error"
 
 
+# A simple attempt-count cutoff, not a generic backoff/retry framework - see
+# _process_delivery()'s docstring. Shared by both the duplicate-webhook_id
+# reprocess path and the scheduled retry sweep below.
+MAX_WEBHOOK_DELIVERY_ATTEMPTS = 5
+
+
 def process_shopify_webhook(connection_name, topic, webhook_id, shop_domain):
 	"""Idempotently persist and process one authenticated webhook delivery.
 
@@ -280,7 +293,11 @@ def process_shopify_webhook(connection_name, topic, webhook_id, shop_domain):
 	dropped forever - once one attempt errors, the event could never be
 	reprocessed. So a duplicate whose existing row is not yet "Processed" is
 	reprocessed in place, updating that same row rather than inserting a
-	second one.
+	second one - via the same _process_delivery() the scheduled sweep
+	(retry_errored_webhook_deliveries()) also uses, since a webhook whose only
+	failure was e.g. a `webhook_event()` responding 200 before its ASYNC
+	processing later failed (nothing left to trigger a Shopify redelivery)
+	still needs a path back to "Processed".
 	"""
 	frappe.set_user("Administrator")
 
@@ -307,8 +324,40 @@ def process_shopify_webhook(connection_name, topic, webhook_id, shop_domain):
 		delivery = existing
 
 	connection = frappe.get_doc("Shopify Connection", connection_name)
-	connection.db_set("last_webhook_delivery_at", delivery.received_at, update_modified=False)
+	_process_delivery(delivery, connection)
+
+
+def _process_delivery(delivery, connection):
+	"""Process (or reprocess) one Shopify Webhook Delivery row end-to-end:
+	record last-delivery bookkeeping on the connection, run the per-topic
+	handler, and persist the outcome. This is the one shared implementation
+	behind every caller that runs a delivery - a fresh delivery, a
+	Shopify-initiated redelivery of a non-Processed row
+	(process_shopify_webhook()'s UniqueValidationError handling above), and
+	the scheduled retry sweep (retry_errored_webhook_deliveries()) - rather
+	than duplicating this logic per caller.
+
+	``last_webhook_delivery_at`` is always stamped with the CURRENT time
+	(``now_datetime()``), not ``delivery.received_at`` - a reprocess/retry
+	attempt must not make the connection's health fields look stale or move
+	backwards. ``delivery.received_at`` itself is never touched here; it
+	keeps reflecting the delivery's original first-received time.
+
+	Bounded by MAX_WEBHOOK_DELIVERY_ATTEMPTS: a delivery whose
+	``attempt_count`` has already reached the cap is left untouched (still
+	"Error") rather than retried forever, whether the caller is Shopify's own
+	redelivery or the sweep - a simple attempt-count cutoff, not a generic
+	backoff/retry framework, consistent with this project's
+	"don't over-engineer" rule.
+	"""
+	if delivery.attempt_count >= MAX_WEBHOOK_DELIVERY_ATTEMPTS:
+		return
+
+	topic = delivery.topic
+	now = now_datetime()
+	connection.db_set("last_webhook_delivery_at", now, update_modified=False)
 	connection.db_set("last_webhook_delivery_topic", topic, update_modified=False)
+	delivery.db_set("attempt_count", delivery.attempt_count + 1, update_modified=False)
 
 	try:
 		_handle_topic(connection, topic)
@@ -327,6 +376,34 @@ def process_shopify_webhook(connection_name, topic, webhook_id, shop_domain):
 	delivery.db_set("processed_at", processed_at, update_modified=False)
 	connection.db_set("last_webhook_processed_at", processed_at, update_modified=False)
 	connection.db_set("last_webhook_error", "", update_modified=False)
+
+
+def retry_errored_webhook_deliveries():
+	"""Scheduled sweep (hourly, see hooks.py's scheduler_events) for Shopify
+	Webhook Delivery rows stuck at status="Error" with no Shopify-initiated
+	redelivery ever going to retrigger them - e.g. an APP_UNINSTALLED
+	delivery whose _disable_connection() save() failed on a lock timeout,
+	leaving a connection that should have been disabled still enabled
+	indefinitely, since `webhook_event()` already responded 200 before that
+	ASYNC failure happened and Shopify has nothing telling it to redeliver.
+
+	Reuses _process_delivery() - the exact same reprocess logic the
+	duplicate-delivery path above uses - rather than a second copy of it
+	here. The MAX_WEBHOOK_DELIVERY_ATTEMPTS cap is enforced inside
+	_process_delivery() itself, so this sweep's own filter
+	(``attempt_count < MAX_WEBHOOK_DELIVERY_ATTEMPTS``) is a query-level
+	optimization to skip exhausted rows outright, not a second place the cap
+	is decided.
+	"""
+	errored = frappe.get_all(
+		"Shopify Webhook Delivery",
+		filters={"status": "Error", "attempt_count": ["<", MAX_WEBHOOK_DELIVERY_ATTEMPTS]},
+		fields=["name"],
+	)
+	for row in errored:
+		delivery = frappe.get_doc("Shopify Webhook Delivery", row.name)
+		connection = frappe.get_doc("Shopify Connection", delivery.connection)
+		_process_delivery(delivery, connection)
 
 
 def _handle_topic(connection, topic):

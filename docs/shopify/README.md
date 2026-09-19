@@ -39,12 +39,15 @@ Shopify marked the REST Admin API as legacy in Oct 2024. Since April 2025, new a
 
 Source: [GraphQL Admin API reference](https://shopify.dev/docs/api/admin-graphql), [Shopify API rate limits](https://shopify.dev/docs/api/usage/rate-limits), [GraphQL Admin API — example Throttled response](https://community.shopify.com/t/graphql-admin-api-example-throttled-requests-response/8456).
 
-## Webhooks (for #104)
+## Webhooks (#104, implemented)
 
-- Custom apps (client-credentials, no Shopify CLI/`shopify.app.toml`) register webhook subscriptions via the GraphQL Admin API's `webhookSubscriptionCreate` mutation — pointing at any HTTPS URL, including a Frappe whitelisted endpoint. No Partner-app tooling or declarative config file needed.
-- **HMAC verification needs no separate hosted app.** Shopify signs each delivery with `HMAC-SHA256(raw_request_body, client_secret)`, base64-encoded, in the `X-Shopify-Hmac-Sha256` header. Verifying it is a direct computation in Python using the same `client_secret` already stored on `Shopify Connection` — compare against the recomputed digest before parsing the body as JSON.
-- Decision made: **no separate Node/Remix bridge app** for this (a scaffold exploring that shape exists at `github.com/MohamedAmirr/erpnext-shopify-integration` but is not the chosen path — see #104). ERPNext registers its own webhook subscription and verifies HMAC itself, mirroring `api/talabat_webhooks.py`'s pattern but with HMAC instead of Bearer-token auth.
-- Client secret rotation note: Shopify signs webhooks with the app's *oldest unrevoked* client secret — during a rotation, verification must accept both the old and new secret until the old one is revoked.
+- Custom apps (client-credentials, no Shopify CLI/`shopify.app.toml`) register webhook subscriptions via the GraphQL Admin API's `webhookSubscriptionCreate` mutation — pointing at any HTTPS URL, including a Frappe whitelisted endpoint. No Partner-app tooling or declarative config file needed. `Shopify Connection`'s "Sync Webhook Subscriptions" button (`integrations/shopify/webhooks.py`'s `sync_webhook_subscriptions()`) is the explicit, user-triggered mutation that registers/repairs subscriptions for every topic in `SHOPIFY_WEBHOOK_TOPICS` at the site's own callback URL, deleting any stale subscription left at an old URL first.
+- **HMAC verification needs no separate hosted app.** Shopify signs each delivery with `HMAC-SHA256(raw_request_body, client_secret)`, base64-encoded, in the `X-Shopify-Hmac-Sha256` header. `api/shopify_webhooks.py::webhook_event()` verifies it (`verify_shopify_hmac()`) against the RAW request body before any JSON parsing, using the `client_secret` already stored on the resolved `Shopify Connection`.
+- Decision made and implemented: **no separate Node/Remix bridge app** for this (a scaffold exploring that shape exists at `github.com/MohamedAmirr/erpnext-shopify-integration` but is not the chosen path — see #104). ERPNext registers its own webhook subscription and verifies HMAC itself, mirroring `api/talabat_webhooks.py`'s pattern but with HMAC instead of Bearer-token auth.
+- Client secret rotation is handled: Shopify signs webhooks with the app's *oldest unrevoked* client secret, so `verify_shopify_hmac()` checks the connection's current `client_secret` first and, if that fails, its `previous_client_secret` — accepting either until the old secret is revoked and the field cleared.
+- Every subscribed topic shares one endpoint (`webhook_event()`); `X-Shopify-Topic` (delivery header form, e.g. `orders/create`) is mapped to the GraphQL enum form (e.g. `ORDERS_CREATE`, via `SHOPIFY_WEBHOOK_TOPIC_HEADER_TO_ENUM`) to route to `process_shopify_webhook()`. Deduplication is by `X-Shopify-Webhook-Id`, enforced with a DB-level unique index on `Shopify Webhook Delivery.webhook_id`, not a check-then-insert read.
+- The webhook request itself only authenticates, minimally validates shape, and enqueues — canonical order retrieval/ERPNext document creation from webhook payloads is out of scope for #104; every topic other than `APP_UNINSTALLED` (which disables the `Shopify Connection`) is acknowledged and recorded only.
+- Because `webhook_event()` responds 200 as soon as processing is enqueued (correct: "respond promptly"), Shopify never retries a delivery whose async processing later fails. A scheduled hourly sweep (`retry_errored_webhook_deliveries()`, registered in `hooks.py`'s `scheduler_events`) reprocesses any `Shopify Webhook Delivery` still at `status="Error"`, bounded by a simple `attempt_count` cutoff (`MAX_WEBHOOK_DELIVERY_ATTEMPTS`) so a permanently-failing delivery isn't retried forever.
 
 Source: [Manage your app credentials](https://shopify.dev/docs/apps/build/authentication-authorization/client-secrets), [webhookSubscriptionCreate mutation](https://shopify.dev/docs/api/admin-graphql/latest/mutations/webhookSubscriptionCreate).
 
@@ -63,6 +66,14 @@ Settled by #102:
 - `enabled` flag enforcement: `execute()` — the first real caller of `ShopifyClient` — now checks `Shopify Connection.enabled` and throws if disabled, closing the gap #101 deliberately left open.
 - Throttle handling: bounded backoff honoring `errors[0].extensions.retryAfter`, capped at `MAX_THROTTLE_ATTEMPTS = 3` attempts — no bucket-capacity tracking.
 - Error shape handling: a non-empty top-level `errors[]` (non-throttle) raises; per-mutation `userErrors` are returned to the caller inside `data`, never inspected or swallowed.
+
+Settled by #104:
+
+- Webhook transport/auth: a single whitelisted, guest-accessible endpoint (`api/shopify_webhooks.py::webhook_event()`) handles every subscribed topic, authenticated by `X-Shopify-Hmac-Sha256` over the raw body (never the reparsed/reserialized body).
+- Dual-secret rotation handling: `verify_shopify_hmac()` accepts either the connection's current `client_secret` or its `previous_client_secret`, matching Shopify's "signs with the oldest unrevoked secret" behavior during a rotation window — this was an open question above and is now implemented, not just documented.
+- Subscription management is a mutation, so it stays behind an explicit user-triggered action (`sync_webhook_subscriptions()`, the Shopify Connection "Sync Webhook Subscriptions" button) — never run automatically on save, unlike #103's read-only live checks.
+- Deduplication: `Shopify Webhook Delivery.webhook_id` carries a DB-level `unique: 1` index (checked via `UniqueValidationError` on insert, not a check-then-insert read) — Shopify's at-least-once delivery guarantee means the same `webhook_id` can arrive more than once.
+- Retry-ability of a failed delivery: neither a Shopify redelivery nor the "responds 200 immediately" requirement give up on a delivery whose async processing later failed — a non-`Processed` row is reprocessed in place (by a Shopify redelivery hitting the same `webhook_id`, or by the scheduled `retry_errored_webhook_deliveries()` sweep when no redelivery is coming), bounded by a simple `attempt_count` cutoff rather than retried forever.
 
 Still open:
 

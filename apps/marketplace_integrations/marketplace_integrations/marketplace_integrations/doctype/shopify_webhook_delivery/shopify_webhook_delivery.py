@@ -13,6 +13,14 @@ Deliberately does not store the webhook payload itself - canonical order
 retrieval/ERPNext document creation from webhook payloads is out of scope for
 #104 (see docs/marketplace-integrations/architecture.md), so there is nothing
 here worth archiving beyond delivery/processing evidence.
+
+``attempt_count`` tracks how many times ``_process_delivery()``
+(``integrations/shopify/webhooks.py``) has actually run this row - the
+first attempt included, not just retries - and bounds both a Shopify-
+initiated redelivery of a non-``Processed`` row and the scheduled
+``retry_errored_webhook_deliveries()`` sweep at
+``MAX_WEBHOOK_DELIVERY_ATTEMPTS``, so a permanently-failing delivery is not
+retried forever.
 """
 
 from frappe.model.document import Document

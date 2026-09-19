@@ -7,7 +7,9 @@ import frappe
 from frappe.tests import IntegrationTestCase, UnitTestCase
 
 from marketplace_integrations.integrations.shopify.webhooks import (
+	MAX_WEBHOOK_DELIVERY_ATTEMPTS,
 	process_shopify_webhook,
+	retry_errored_webhook_deliveries,
 	sync_webhook_subscriptions,
 	verify_shopify_hmac,
 )
@@ -395,3 +397,109 @@ class IntegrationTestProcessShopifyWebhook(IntegrationTestCase):
 			)
 
 		self.assertEqual(mocked_handle_topic.call_count, 1)
+
+	def test_reprocess_stamps_current_time_not_original_received_at(self):
+		# Review pass finding: last_webhook_delivery_at must reflect the
+		# CURRENT reprocessing time, not the original (now stale) received_at
+		# - otherwise a connection's health field can appear to go backwards
+		# or stay stale during a redelivery/retry.
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		call_count = {"n": 0}
+
+		def flaky_handle_topic(connection, topic):
+			call_count["n"] += 1
+			if call_count["n"] == 1:
+				raise RuntimeError("boom: simulated failure")
+
+		original_received_at = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-3)
+		with patch.object(webhooks_module, "now_datetime", return_value=original_received_at):
+			with patch.object(webhooks_module, "_handle_topic", side_effect=flaky_handle_topic):
+				process_shopify_webhook(
+					self.connection.name, "ORDERS_CREATE", "webhook-ts-1", "test-shop.myshopify.com"
+				)
+
+		delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": "webhook-ts-1"})
+		self.assertEqual(delivery.received_at, original_received_at)
+
+		with patch.object(webhooks_module, "_handle_topic", side_effect=flaky_handle_topic):
+			process_shopify_webhook(
+				self.connection.name, "ORDERS_CREATE", "webhook-ts-1", "test-shop.myshopify.com"
+			)
+
+		delivery.reload()
+		self.connection.reload()
+		# received_at is untouched by the reprocess - still the original time.
+		self.assertEqual(delivery.received_at, original_received_at)
+		# last_webhook_delivery_at, however, must have moved forward to the
+		# reprocess's own current time, not the stale original received_at.
+		self.assertGreater(self.connection.last_webhook_delivery_at, original_received_at)
+
+
+def make_delivery(connection, webhook_id, **kwargs):
+	doc = {
+		"doctype": "Shopify Webhook Delivery",
+		"connection": connection.name,
+		"shop_domain": connection.shop_domain,
+		"topic": "ORDERS_CREATE",
+		"webhook_id": webhook_id,
+		"received_at": frappe.utils.now_datetime(),
+	}
+	doc.update(kwargs)
+	return frappe.get_doc(doc).insert()
+
+
+class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
+	def setUp(self):
+		self.connection = make_connection(f"Retry Sweep {frappe.generate_hash(length=8)}")
+
+	def test_sweep_reprocesses_an_errored_delivery(self):
+		delivery = make_delivery(
+			self.connection, f"webhook-sweep-error-{frappe.generate_hash(length=6)}", status="Error"
+		)
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
+			retry_errored_webhook_deliveries()
+
+		mocked_handle_topic.assert_called_once()
+		delivery.reload()
+		self.assertEqual(delivery.status, "Processed")
+		self.assertEqual(delivery.attempt_count, 1)
+
+	def test_sweep_skips_a_processed_delivery(self):
+		delivery = make_delivery(
+			self.connection, f"webhook-sweep-processed-{frappe.generate_hash(length=6)}", status="Processed"
+		)
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
+			retry_errored_webhook_deliveries()
+
+		mocked_handle_topic.assert_not_called()
+		delivery.reload()
+		self.assertEqual(delivery.status, "Processed")
+		self.assertEqual(delivery.attempt_count, 0)
+
+	def test_sweep_respects_the_max_attempt_bound(self):
+		delivery = make_delivery(
+			self.connection,
+			f"webhook-sweep-exhausted-{frappe.generate_hash(length=6)}",
+			status="Error",
+			attempt_count=MAX_WEBHOOK_DELIVERY_ATTEMPTS,
+		)
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
+			retry_errored_webhook_deliveries()
+
+		# The sweep's own query filter already excludes an exhausted row, and
+		# _process_delivery()'s own cap would no-op it even if that filter
+		# somehow didn't - neither path should ever call _handle_topic again.
+		mocked_handle_topic.assert_not_called()
+		delivery.reload()
+		self.assertEqual(delivery.status, "Error")
+		self.assertEqual(delivery.attempt_count, MAX_WEBHOOK_DELIVERY_ATTEMPTS)
