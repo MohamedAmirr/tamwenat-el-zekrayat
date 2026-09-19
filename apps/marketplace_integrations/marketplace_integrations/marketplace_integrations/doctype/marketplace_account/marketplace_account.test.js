@@ -5,14 +5,58 @@ global.__ = (message) => message;
 
 const {
 	TALABAT_OUTLET_CLOSE_REASONS,
+	TALABAT_OUTLET_FIELDS,
+	SHOPIFY_LOCATION_FIELDS,
+	PLATFORM_CONNECTION_DOCTYPES,
 	build_outlet_status_args,
 	outlet_actions_for_status,
 	should_show_outlet_management,
+	should_show_shopify_location,
+	set_default_connection_doctype,
+	update_connection_doctype_on_platform_change,
+	clear_fields_for_platform_left,
+	configure_outlet_management,
+	configure_shopify_location,
 } = require("./marketplace_account.js");
+
+function make_frm(doc, { is_new = false } = {}) {
+	// Minimal frm stand-in shared by the tests below - set_value mirrors the
+	// real frm.set_value() closely enough for these pure-logic tests: it
+	// writes through to frm.doc so assertions can check frm.doc directly,
+	// same as the real thing does after a round-trip. add_custom_button/
+	// remove_custom_button track button labels in a plain array so tests can
+	// assert on exactly what's currently "on the form".
+	const buttons = [];
+	return {
+		doc,
+		buttons,
+		refresh_field: () => {},
+		toggle_display: () => {},
+		set_df_property: () => {},
+		is_new: () => is_new,
+		set_value(fieldname, value) {
+			this.doc[fieldname] = value;
+		},
+		add_custom_button(label) {
+			buttons.push(label);
+		},
+		remove_custom_button(label) {
+			const index = buttons.indexOf(label);
+			if (index !== -1) buttons.splice(index, 1);
+		},
+	};
+}
 
 test("outlet management is visible only for Talabat accounts", () => {
 	assert.equal(should_show_outlet_management("Talabat"), true);
+	assert.equal(should_show_outlet_management("Shopify"), false);
 	assert.equal(should_show_outlet_management("Noon"), false);
+});
+
+test("Shopify Location section is visible only for Shopify accounts", () => {
+	assert.equal(should_show_shopify_location("Shopify"), true);
+	assert.equal(should_show_shopify_location("Talabat"), false);
+	assert.equal(should_show_shopify_location("Noon"), false);
 });
 
 test("Talabat outlet actions are driven only by the last confirmed status", () => {
@@ -35,6 +79,107 @@ test("Talabat outlet dialogs expose only documented close reasons", () => {
 		"BAD_WEATHER",
 		"HOLIDAY_SPECIAL_DAY",
 	]);
+});
+
+test("setting platform on a new document defaults connection_doctype when blank", () => {
+	const frm = { doc: { platform: "Shopify", connection_doctype: "" }, refresh_field: () => {} };
+	set_default_connection_doctype(frm);
+	assert.equal(frm.doc.connection_doctype, PLATFORM_CONNECTION_DOCTYPES.Shopify);
+});
+
+test("changing platform does not overwrite an already-set connection_doctype", () => {
+	const frm = { doc: { platform: "Shopify", connection_doctype: "Talabat Connection" }, refresh_field: () => {} };
+	set_default_connection_doctype(frm);
+	assert.equal(frm.doc.connection_doctype, "Talabat Connection");
+});
+
+test("changing platform on an existing document overrides a stale connection_doctype (#103 review finding #4)", () => {
+	const frm = make_frm({ platform: "Shopify", connection_doctype: "Talabat Connection" });
+	update_connection_doctype_on_platform_change(frm);
+	assert.equal(frm.doc.connection_doctype, "Shopify Connection");
+
+	frm.doc.platform = "Talabat";
+	update_connection_doctype_on_platform_change(frm);
+	assert.equal(frm.doc.connection_doctype, "Talabat Connection");
+});
+
+test("a real platform change clears the old connection and the fields specific to the platform being left (#103 review finding #5)", () => {
+	const frm = make_frm({
+		platform: "Shopify",
+		connection_doctype: "Talabat Connection",
+		connection: "Some Talabat Connection",
+		external_status: "OPEN",
+		external_status_reason: "stale",
+		shopify_location_gid: null,
+		shopify_location_name: null,
+	});
+	update_connection_doctype_on_platform_change(frm);
+
+	assert.equal(frm.doc.connection_doctype, "Shopify Connection");
+	assert.equal(frm.doc.connection, "");
+	// Leaving Talabat -> Talabat outlet-status fields are cleared.
+	for (const fieldname of TALABAT_OUTLET_FIELDS) {
+		if (fieldname === "outlet_status_section") continue;
+		assert.equal(frm.doc[fieldname], null);
+	}
+
+	frm.doc.platform = "Talabat";
+	frm.doc.connection = "Some Shopify Connection";
+	frm.doc.shopify_location_gid = "gid://shopify/Location/1";
+	frm.doc.shopify_location_name = "Test Location";
+	update_connection_doctype_on_platform_change(frm);
+
+	assert.equal(frm.doc.connection_doctype, "Talabat Connection");
+	assert.equal(frm.doc.connection, "");
+	// Leaving Shopify -> Shopify Location fields are cleared.
+	for (const fieldname of SHOPIFY_LOCATION_FIELDS) {
+		if (fieldname === "shopify_location_section") continue;
+		assert.equal(frm.doc[fieldname], null);
+	}
+});
+
+test("clear_fields_for_platform_left clears Talabat fields when leaving Talabat and Shopify fields when leaving Shopify", () => {
+	const leaving_talabat = make_frm({
+		platform: "Shopify",
+		external_status: "OPEN",
+		external_status_reason: "stale",
+	});
+	clear_fields_for_platform_left(leaving_talabat);
+	assert.equal(leaving_talabat.doc.external_status, null);
+	assert.equal(leaving_talabat.doc.external_status_reason, null);
+
+	const leaving_shopify = make_frm({
+		platform: "Talabat",
+		shopify_location_gid: "gid://shopify/Location/1",
+		shopify_location_name: "Test Location",
+	});
+	clear_fields_for_platform_left(leaving_shopify);
+	assert.equal(leaving_shopify.doc.shopify_location_gid, null);
+	assert.equal(leaving_shopify.doc.shopify_location_name, null);
+});
+
+test("Talabat outlet buttons are removed when platform is switched away from Talabat (#103 review finding #3)", () => {
+	const frm = make_frm({ platform: "Talabat", external_status: "OPEN" }, { is_new: false });
+	configure_outlet_management(frm);
+	assert.ok(frm.buttons.includes("Refresh Status"));
+	assert.ok(frm.buttons.includes("Close Today"));
+	assert.ok(frm.buttons.includes("Close Until"));
+
+	frm.doc.platform = "Shopify";
+	configure_outlet_management(frm);
+
+	assert.deepEqual(frm.buttons, []);
+});
+
+test("Load Shopify Locations button is removed when connection is cleared, even while platform stays Shopify (#103 review finding #4)", () => {
+	const frm = make_frm({ platform: "Shopify", connection: "Some Shopify Connection" });
+	configure_shopify_location(frm);
+	assert.ok(frm.buttons.includes("Load Shopify Locations"));
+
+	frm.doc.connection = "";
+	configure_shopify_location(frm);
+
+	assert.deepEqual(frm.buttons, []);
 });
 
 test("Open sends no close fields and Close Until preserves the local DateTime value", () => {

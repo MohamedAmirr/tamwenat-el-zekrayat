@@ -15,6 +15,11 @@ node_modules/
 apps/*/env/
 apps/*/node_modules/
 apps/*/.git/
+# node_modules can also appear as a symlink inside an app's public/ dir (e.g.
+# apps/marketplace_integrations/marketplace_integrations/public/node_modules)
+# - the slash-suffixed patterns above only match a real directory, not a
+# symlink, so this slashless entry is needed to actually ignore it.
+node_modules
 logs/
 sites/*
 !sites/.gitkeep

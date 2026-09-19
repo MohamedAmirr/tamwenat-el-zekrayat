@@ -13,6 +13,9 @@
   "connection_doctype",
   "connection",
   "warehouse",
+  "shopify_location_section",
+  "shopify_location_gid",
+  "shopify_location_name",
   "outlet_status_section",
   "external_status",
   "external_status_reason",
@@ -39,7 +42,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Platform",
-   "options": "Talabat",
+   "options": "Talabat\nShopify",
    "reqd": 1
   },
   {
@@ -48,7 +51,7 @@
    "ignore_xss_filter": 1,
    "in_list_view": 1,
    "label": "External Account ID",
-   "reqd": 1
+   "mandatory_depends_on": "eval:doc.platform != \"Shopify\""
   },
   {
    "fieldname": "account_identity_key",
@@ -81,6 +84,24 @@
    "fieldtype": "Link",
    "label": "Warehouse",
    "options": "Warehouse"
+  },
+  {
+   "fieldname": "shopify_location_section",
+   "fieldtype": "Section Break",
+   "label": "Shopify Inventory Location"
+  },
+  {
+   "fieldname": "shopify_location_gid",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Shopify Location GID"
+  },
+  {
+   "fieldname": "shopify_location_name",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Shopify Location Name",
+   "read_only": 1
   },
   {
    "fieldname": "outlet_status_section",

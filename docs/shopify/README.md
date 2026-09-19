@@ -66,7 +66,7 @@ Settled by #102:
 
 Still open:
 
-- Exact scopes needed — depends on which resources later catalog/order work will touch (not decided yet). Recommended starting set once #104 needs them: `read_products`/`write_products`, `read_inventory`/`write_inventory`, `read_orders` (not `read_all_orders`, per #99's locked decisions).
+- Exact scopes needed — depends on which resources later catalog/order work will touch (not decided yet). Recommended set: `read_locations` (required by #103's Location-loading query — confirmed via a live "Access denied for name field" error, not something we predicted), `read_products`/`write_products`, `read_inventory`/`write_inventory`, `read_orders` (not `read_all_orders`, per #99's locked decisions).
 - Whether the store domain format needed is `{store}.myshopify.com` or a custom domain — confirm against the specific store's Shopify admin before hardcoding validation. `shop_domain` currently accepts either shape.
 
 Settled (research only, not yet acted on in #100):

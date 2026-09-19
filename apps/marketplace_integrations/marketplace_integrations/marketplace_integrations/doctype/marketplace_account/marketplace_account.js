@@ -18,15 +18,93 @@ const TALABAT_OUTLET_FIELDS = [
 	"external_status_error",
 ];
 
+const SHOPIFY_LOCATION_FIELDS = ["shopify_location_section", "shopify_location_gid", "shopify_location_name"];
+
+// Every custom button configure_outlet_management() can ever add - needed so
+// a platform change away from Talabat can remove all of them (#103 review
+// finding #3, mirroring finding #9's fix for the Shopify Location button).
+const TALABAT_OUTLET_BUTTON_LABELS = ["Refresh Status", "Open Outlet", "Close Today", "Close Until"];
+
+// Must stay in sync with PLATFORM_CONNECTION_DOCTYPES in marketplace_account.py.
+// Duplicated here (rather than round-tripping to the server) because the
+// `connection` Dynamic Link field needs `connection_doctype` filled in on a
+// brand-new, unsaved in-memory doc, before any server call ever happens -
+// the Python-side default in MarketplaceAccount.__init__() only takes effect
+// once the document has round-tripped to the server (e.g. after a save).
+const PLATFORM_CONNECTION_DOCTYPES = {
+	Talabat: "Talabat Connection",
+	Shopify: "Shopify Connection",
+};
+
 if (typeof frappe !== "undefined") {
 	frappe.ui.form.on("Marketplace Account", {
 		refresh(frm) {
 			configure_outlet_management(frm);
+			configure_shopify_location(frm);
 		},
 		platform(frm) {
+			update_connection_doctype_on_platform_change(frm);
 			configure_outlet_management(frm);
+			configure_shopify_location(frm);
+		},
+		connection(frm) {
+			configure_shopify_location(frm);
 		},
 	});
+}
+
+function set_default_connection_doctype(frm) {
+	// Default only - never override a connection_doctype the document
+	// already has (e.g. an existing saved document being edited), mirroring
+	// set_connection_doctype()'s "already set" guard on the Python side.
+	if (frm.doc.connection_doctype) return;
+
+	const expected = PLATFORM_CONNECTION_DOCTYPES[frm.doc.platform];
+	if (!expected) return;
+
+	frm.doc.connection_doctype = expected;
+	frm.refresh_field("connection");
+}
+
+function update_connection_doctype_on_platform_change(frm) {
+	// #103 review finding #4: unlike set_default_connection_doctype() above
+	// (pure default, blank-only), a platform field CHANGE must re-derive
+	// connection_doctype from the new platform too - otherwise switching an
+	// existing account's platform (e.g. Talabat -> Shopify) leaves it stuck
+	// on the old, now-wrong connection_doctype with no way to fix it from
+	// the form (connection_doctype is hidden/read-only). Mirrors
+	// update_connection_doctype_on_platform_change() on the Python side.
+	const expected = PLATFORM_CONNECTION_DOCTYPES[frm.doc.platform];
+	if (!expected) {
+		set_default_connection_doctype(frm);
+		return;
+	}
+	// Review finding #5: a platform change also leaves cross-platform
+	// residue behind if only connection_doctype is touched - `connection`
+	// still references the old platform's document (surfacing a confusing
+	// generic core link error instead of a friendly one), and fields
+	// specific to the platform being left are never cleared. Use
+	// frm.set_value() (not a direct frm.doc.* assignment) so these are
+	// properly tracked as dirty regardless of what else in this handler
+	// already dirties the form.
+	if (frm.doc.connection_doctype !== expected) {
+		frm.set_value("connection_doctype", expected);
+		frm.set_value("connection", "");
+		clear_fields_for_platform_left(frm);
+	}
+	frm.refresh_field("connection");
+}
+
+function clear_fields_for_platform_left(frm) {
+	// Clear whichever platform's fields are no longer relevant after this
+	// platform change - Shopify Location fields when leaving Shopify,
+	// Talabat outlet-status fields when leaving Talabat.
+	const fields_to_clear = frm.doc.platform === "Shopify" ? TALABAT_OUTLET_FIELDS : SHOPIFY_LOCATION_FIELDS;
+	for (const fieldname of fields_to_clear) {
+		const field = frm.fields_dict && frm.fields_dict[fieldname];
+		if (field && field.df && field.df.fieldtype === "Section Break") continue;
+		frm.set_value(fieldname, null);
+	}
 }
 
 function configure_outlet_management(frm) {
@@ -35,7 +113,16 @@ function configure_outlet_management(frm) {
 		frm.toggle_display(fieldname, is_talabat);
 		frm.set_df_property(fieldname, "read_only", 1);
 	}
-	if (!is_talabat || frm.is_new()) return;
+	if (!is_talabat) {
+		// Review finding #3: mirror finding #9's fix for the Shopify Location
+		// button - stale Talabat outlet buttons must not survive a platform
+		// change away from Talabat.
+		for (const label of TALABAT_OUTLET_BUTTON_LABELS) {
+			frm.remove_custom_button(__(label));
+		}
+		return;
+	}
+	if (frm.is_new()) return;
 
 	frm.add_custom_button(__("Refresh Status"), () => refresh_outlet_status(frm));
 	for (const action of outlet_actions_for_status(frm.doc.external_status)) {
@@ -45,6 +132,88 @@ function configure_outlet_management(frm) {
 
 function should_show_outlet_management(platform) {
 	return platform === "Talabat";
+}
+
+function configure_shopify_location(frm) {
+	const is_shopify = should_show_shopify_location(frm.doc.platform);
+	for (const fieldname of SHOPIFY_LOCATION_FIELDS) {
+		frm.toggle_display(fieldname, is_shopify);
+	}
+	// external_account_id is auto-populated from the live-verified Shopify
+	// shop GID for Shopify accounts (see validate_shopify_shop() in
+	// marketplace_account.py) - never manually typed once this ships, unlike
+	// Talabat's own external_account_id which stays editable exactly as
+	// before.
+	frm.set_df_property("external_account_id", "read_only", is_shopify ? 1 : 0);
+	if (!is_shopify) {
+		// Review finding #9: a stale "Load Shopify Locations" button must
+		// not survive a platform change away from Shopify without a full
+		// page refresh.
+		frm.remove_custom_button(__("Load Shopify Locations"));
+		return;
+	}
+	if (!frm.doc.connection) {
+		// Review finding #4: the button also goes stale when platform stays
+		// Shopify but connection is cleared to blank - clicking it would then
+		// post an invalid (empty) connection value.
+		frm.remove_custom_button(__("Load Shopify Locations"));
+		return;
+	}
+
+	frm.add_custom_button(__("Load Shopify Locations"), () => show_shopify_location_picker(frm));
+}
+
+function should_show_shopify_location(platform) {
+	return platform === "Shopify";
+}
+
+function show_shopify_location_picker(frm) {
+	frappe
+		.call({
+			method: "marketplace_integrations.api.shopify_locations.list_active_locations",
+			args: { connection: frm.doc.connection },
+			freeze: true,
+			freeze_message: __("Loading active Shopify Locations..."),
+		})
+		.then((r) => {
+			const locations = r.message || [];
+			if (!locations.length) {
+				frappe.msgprint({
+					title: __("Shopify Locations"),
+					message: __("No active Locations were returned by Shopify."),
+					indicator: "orange",
+				});
+				return;
+			}
+
+			const location_by_label = {};
+			const labels = locations.map((location) => {
+				const label = `${location.name} (${location.id})`;
+				location_by_label[label] = location;
+				return label;
+			});
+
+			const dialog = new frappe.ui.Dialog({
+				title: __("Select Shopify Location"),
+				fields: [
+					{
+						fieldname: "location_label",
+						fieldtype: "Select",
+						label: __("Active Location"),
+						options: labels.join("\n"),
+						reqd: 1,
+					},
+				],
+				primary_action_label: __("Use Location"),
+				primary_action(values) {
+					const location = location_by_label[values.location_label];
+					frm.set_value("shopify_location_gid", location.id);
+					frm.set_value("shopify_location_name", location.name);
+					dialog.hide();
+				},
+			});
+			dialog.show();
+		});
 }
 
 function outlet_actions_for_status(status) {
@@ -146,8 +315,17 @@ function call_outlet_api(frm, method, args) {
 if (typeof module !== "undefined") {
 	module.exports = {
 		TALABAT_OUTLET_CLOSE_REASONS,
+		TALABAT_OUTLET_FIELDS,
+		SHOPIFY_LOCATION_FIELDS,
+		PLATFORM_CONNECTION_DOCTYPES,
 		build_outlet_status_args,
 		outlet_actions_for_status,
 		should_show_outlet_management,
+		should_show_shopify_location,
+		set_default_connection_doctype,
+		update_connection_doctype_on_platform_change,
+		clear_fields_for_platform_left,
+		configure_outlet_management,
+		configure_shopify_location,
 	};
 }
