@@ -8,6 +8,7 @@ from frappe.tests import IntegrationTestCase, UnitTestCase
 
 from marketplace_integrations.integrations.shopify.webhooks import (
 	MAX_WEBHOOK_DELIVERY_ATTEMPTS,
+	STUCK_RECEIVED_THRESHOLD_MINUTES,
 	process_shopify_webhook,
 	retry_errored_webhook_deliveries,
 	sync_webhook_subscriptions,
@@ -398,11 +399,15 @@ class IntegrationTestProcessShopifyWebhook(IntegrationTestCase):
 
 		self.assertEqual(mocked_handle_topic.call_count, 1)
 
-	def test_reprocess_stamps_current_time_not_original_received_at(self):
-		# Review pass finding: last_webhook_delivery_at must reflect the
-		# CURRENT reprocessing time, not the original (now stale) received_at
-		# - otherwise a connection's health field can appear to go backwards
-		# or stay stale during a redelivery/retry.
+	def test_reprocess_does_not_restamp_last_webhook_delivery_at(self):
+		# Per explicit product decision (review pass on PR #117):
+		# last_webhook_delivery_at/last_webhook_delivery_topic mean "has
+		# Shopify stopped delivering to us" - they must only ever be stamped
+		# from the delivery's own received_at/topic on the ORIGINAL
+		# processing attempt, never re-stamped with the current time on a
+		# reprocess/retry (that would make a stale delivery falsely look
+		# fresh). This reverses an earlier version of this test that
+		# asserted the opposite.
 		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
 
 		call_count = {"n": 0}
@@ -422,6 +427,11 @@ class IntegrationTestProcessShopifyWebhook(IntegrationTestCase):
 		delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": "webhook-ts-1"})
 		self.assertEqual(delivery.received_at, original_received_at)
 
+		self.connection.reload()
+		# Original attempt: last_webhook_delivery_at was stamped from the
+		# delivery's own received_at.
+		self.assertEqual(self.connection.last_webhook_delivery_at, original_received_at)
+
 		with patch.object(webhooks_module, "_handle_topic", side_effect=flaky_handle_topic):
 			process_shopify_webhook(
 				self.connection.name, "ORDERS_CREATE", "webhook-ts-1", "test-shop.myshopify.com"
@@ -431,9 +441,12 @@ class IntegrationTestProcessShopifyWebhook(IntegrationTestCase):
 		self.connection.reload()
 		# received_at is untouched by the reprocess - still the original time.
 		self.assertEqual(delivery.received_at, original_received_at)
-		# last_webhook_delivery_at, however, must have moved forward to the
-		# reprocess's own current time, not the stale original received_at.
-		self.assertGreater(self.connection.last_webhook_delivery_at, original_received_at)
+		# last_webhook_delivery_at must NOT have moved - the reprocess is not
+		# an original delivery.
+		self.assertEqual(self.connection.last_webhook_delivery_at, original_received_at)
+		# The reprocess is still tracked via last_webhook_processed_at, which
+		# does update on every attempt.
+		self.assertTrue(self.connection.last_webhook_processed_at)
 
 
 def make_delivery(connection, webhook_id, **kwargs):
@@ -453,6 +466,16 @@ class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
 	def setUp(self):
 		self.connection = make_connection(f"Retry Sweep {frappe.generate_hash(length=8)}")
 
+	@staticmethod
+	def _calls_for(mocked_handle_topic, connection_name):
+		# The sweep runs against the whole site, so other status="Error" (or
+		# stuck "Received") rows left over from other tests/dev-DB state can
+		# legitimately also get processed in the same call - see
+		# docs/frappe-conventions.md's "IntegrationTestCase only rolls back
+		# once at class teardown" gotcha. Scope assertions to only the calls
+		# this test's own connection triggered, rather than a raw call count.
+		return [c for c in mocked_handle_topic.call_args_list if c.args[0].name == connection_name]
+
 	def test_sweep_reprocesses_an_errored_delivery(self):
 		delivery = make_delivery(
 			self.connection, f"webhook-sweep-error-{frappe.generate_hash(length=6)}", status="Error"
@@ -463,7 +486,7 @@ class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
 		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
 			retry_errored_webhook_deliveries()
 
-		mocked_handle_topic.assert_called_once()
+		self.assertEqual(len(self._calls_for(mocked_handle_topic, self.connection.name)), 1)
 		delivery.reload()
 		self.assertEqual(delivery.status, "Processed")
 		self.assertEqual(delivery.attempt_count, 1)
@@ -478,7 +501,7 @@ class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
 		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
 			retry_errored_webhook_deliveries()
 
-		mocked_handle_topic.assert_not_called()
+		self.assertEqual(self._calls_for(mocked_handle_topic, self.connection.name), [])
 		delivery.reload()
 		self.assertEqual(delivery.status, "Processed")
 		self.assertEqual(delivery.attempt_count, 0)
@@ -499,7 +522,123 @@ class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
 		# The sweep's own query filter already excludes an exhausted row, and
 		# _process_delivery()'s own cap would no-op it even if that filter
 		# somehow didn't - neither path should ever call _handle_topic again.
-		mocked_handle_topic.assert_not_called()
+		self.assertEqual(self._calls_for(mocked_handle_topic, self.connection.name), [])
 		delivery.reload()
 		self.assertEqual(delivery.status, "Error")
+		self.assertEqual(delivery.attempt_count, MAX_WEBHOOK_DELIVERY_ATTEMPTS)
+
+	def test_sweep_recovers_a_stuck_received_row_past_the_threshold(self):
+		old_creation = frappe.utils.add_to_date(
+			frappe.utils.now_datetime(), minutes=-(STUCK_RECEIVED_THRESHOLD_MINUTES + 5)
+		)
+		stuck = make_delivery(
+			self.connection,
+			f"webhook-sweep-stuck-{frappe.generate_hash(length=6)}",
+			status="Received",
+		)
+		frappe.db.set_value(
+			"Shopify Webhook Delivery", stuck.name, "creation", old_creation, update_modified=False
+		)
+		frappe.clear_document_cache("Shopify Webhook Delivery", stuck.name)
+
+		fresh = make_delivery(
+			self.connection,
+			f"webhook-sweep-fresh-{frappe.generate_hash(length=6)}",
+			status="Received",
+		)
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
+			retry_errored_webhook_deliveries()
+
+		# Only the old stuck row was picked up - a fresh "Received" row could
+		# still be actively mid-processing by a worker right now and must not
+		# be raced.
+		self.assertEqual(len(self._calls_for(mocked_handle_topic, self.connection.name)), 1)
+		stuck.reload()
+		self.assertEqual(stuck.status, "Processed")
+		fresh.reload()
+		self.assertEqual(fresh.status, "Received")
+		self.assertEqual(fresh.attempt_count, 0)
+
+	def test_poison_row_does_not_block_other_rows_in_the_same_sweep(self):
+		# Savepoint isolation: one row whose processing raises must not roll
+		# back another row already successfully processed earlier in the
+		# same sweep run.
+		good = make_delivery(
+			self.connection, f"webhook-sweep-good-{frappe.generate_hash(length=6)}", status="Error"
+		)
+		poison = make_delivery(
+			self.connection, f"webhook-sweep-poison-{frappe.generate_hash(length=6)}", status="Error"
+		)
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		# Site-wide leftover rows from other tests/dev-DB state can also be
+		# picked up by the same sweep run (see _calls_for()'s docstring
+		# note) - scope the flaky behavior to only this test's own
+		# connection so ordering assumptions below stay deterministic
+		# regardless of what else the sweep happens to touch.
+		call_order = []
+
+		def flaky(connection, topic):
+			if connection.name != self.connection.name:
+				return
+			call_order.append(connection.name)
+			if len(call_order) == 1:
+				return
+			raise RuntimeError("boom: poison row")
+
+		with patch.object(webhooks_module, "_handle_topic", side_effect=flaky):
+			retry_errored_webhook_deliveries()
+
+		good.reload()
+		poison.reload()
+		# Both rows were attempted (creation-ascending order), and whichever
+		# one failed did not roll back the other's already-committed success.
+		statuses = {good.name: good.status, poison.name: poison.status}
+		self.assertIn("Processed", statuses.values())
+		self.assertIn("Error", statuses.values())
+		self.assertEqual(good.attempt_count, 1)
+		self.assertEqual(poison.attempt_count, 1)
+
+
+class UnitTestProcessDeliveryAtomicIncrement(IntegrationTestCase):
+	def test_attempt_count_increment_is_atomic_under_a_simulated_race(self):
+		# Simulates two concurrent callers (e.g. the sweep and a simultaneous
+		# Shopify redelivery) both trying to process the same already-
+		# exhausted-minus-one delivery: only one of the two atomic UPDATEs
+		# should succeed in incrementing attempt_count, the other must bail
+		# out cleanly without double-counting or calling _handle_topic.
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		connection = make_connection(f"Atomic Increment {frappe.generate_hash(length=8)}")
+		delivery = make_delivery(
+			connection,
+			f"webhook-race-{frappe.generate_hash(length=6)}",
+			status="Error",
+			attempt_count=MAX_WEBHOOK_DELIVERY_ATTEMPTS - 1,
+		)
+
+		# Simulate the "loser" of the race by pre-incrementing attempt_count
+		# on the DB directly (as if a concurrent caller's atomic UPDATE won
+		# first), while this in-memory `delivery` object still holds the
+		# pre-race value.
+		frappe.db.set_value(
+			"Shopify Webhook Delivery",
+			delivery.name,
+			"attempt_count",
+			MAX_WEBHOOK_DELIVERY_ATTEMPTS,
+			update_modified=False,
+		)
+
+		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
+			webhooks_module._process_delivery(delivery, connection)
+
+		mocked_handle_topic.assert_not_called()
+		delivery.reload()
+		# The loser's own atomic UPDATE found attempt_count already at the
+		# cap (WHERE attempt_count < %s matched 0 rows) and did not
+		# increment further - still exactly at the cap, not over it.
 		self.assertEqual(delivery.attempt_count, MAX_WEBHOOK_DELIVERY_ATTEMPTS)
