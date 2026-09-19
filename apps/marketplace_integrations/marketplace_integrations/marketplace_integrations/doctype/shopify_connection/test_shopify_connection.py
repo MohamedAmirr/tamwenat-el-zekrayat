@@ -10,10 +10,16 @@ from marketplace_integrations.integrations.shopify.client import get_access_toke
 
 
 def make_connection(connection_name, **kwargs):
+	# shop_domain defaults to a call-unique value - it carries a DB-level
+	# unique: 1 constraint (see shopify_connection.json), and
+	# IntegrationTestCase only rolls back once at class teardown (see
+	# docs/frappe-conventions.md's Tests section), so a fixed literal default
+	# would collide the moment two test methods in the same class both call
+	# this helper without overriding shop_domain themselves.
 	doc = {
 		"doctype": "Shopify Connection",
 		"connection_name": connection_name,
-		"shop_domain": "test-shop.myshopify.com",
+		"shop_domain": f"test-shop-{frappe.generate_hash(length=8)}.myshopify.com",
 		"client_id": "test-client-id",
 		"client_secret": "test-client-secret",
 	}
@@ -23,11 +29,11 @@ def make_connection(connection_name, **kwargs):
 
 class IntegrationTestShopifyConnection(IntegrationTestCase):
 	def test_fields_persist_and_naming_is_expression_based(self):
-		connection = make_connection("Test Connection 1")
+		connection = make_connection("Test Connection 1", shop_domain="test-connection-1.myshopify.com")
 		connection.reload()
 
 		self.assertEqual(connection.connection_name, "Test Connection 1")
-		self.assertEqual(connection.shop_domain, "test-shop.myshopify.com")
+		self.assertEqual(connection.shop_domain, "test-connection-1.myshopify.com")
 		self.assertEqual(connection.client_id, "test-client-id")
 		self.assertEqual(connection.enabled, 1)
 		self.assertTrue(connection.name.startswith("SHOPCONN-"))
@@ -62,8 +68,13 @@ class IntegrationTestShopifyConnection(IntegrationTestCase):
 			)
 
 	def test_get_store_base_url(self):
-		connection = make_connection("Test Base URL", shop_domain="test-shop.myshopify.com")
-		self.assertEqual(connection.get_store_base_url(), "https://test-shop.myshopify.com")
+		connection = make_connection("Test Base URL", shop_domain="base-url-shop.myshopify.com")
+		self.assertEqual(connection.get_store_base_url(), "https://base-url-shop.myshopify.com")
+
+	def test_shop_domain_uniqueness_is_enforced_by_the_db(self):
+		make_connection("Test Unique Domain A", shop_domain="duplicate-shop.myshopify.com")
+		with self.assertRaises(frappe.UniqueValidationError):
+			make_connection("Test Unique Domain B", shop_domain="duplicate-shop.myshopify.com")
 
 	def test_blank_shop_domain_is_rejected(self):
 		with self.assertRaises(frappe.ValidationError):

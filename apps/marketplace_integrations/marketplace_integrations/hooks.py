@@ -155,23 +155,17 @@ required_apps = ["erpnext"]
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-# 	"all": [
-# 		"marketplace_integrations.tasks.all"
-# 	],
-# 	"daily": [
-# 		"marketplace_integrations.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"marketplace_integrations.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"marketplace_integrations.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"marketplace_integrations.tasks.monthly"
-# 	],
-# }
+# Hourly: retry Shopify Webhook Delivery rows stuck at status="Error" that no
+# Shopify-initiated redelivery would ever retrigger (webhook_event() already
+# responded 200 before the later ASYNC failure) - see
+# integrations/shopify/webhooks.py's retry_errored_webhook_deliveries()
+# docstring. Bounded by MAX_WEBHOOK_DELIVERY_ATTEMPTS in that same module, not
+# a cron-level concern.
+scheduler_events = {
+	"hourly": [
+		"marketplace_integrations.integrations.shopify.webhooks.retry_errored_webhook_deliveries",
+	],
+}
 
 # Testing
 # -------

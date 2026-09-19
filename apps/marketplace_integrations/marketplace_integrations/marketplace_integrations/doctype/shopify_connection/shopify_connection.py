@@ -66,3 +66,25 @@ class ShopifyConnection(Document):
 		URL construction - HTTP calls themselves belong in
 		integrations/shopify/client.py's ShopifyClient, not here."""
 		return f"https://{self.shop_domain}"
+
+	@frappe.whitelist()
+	def sync_webhook_subscriptions(self):
+		"""Explicit, user-triggered action (#104): inspect this connection's
+		current Shopify webhook subscriptions, delete any stale ones found
+		registered at a different URI than our current callback URL, and
+		create any of SHOPIFY_WEBHOOK_TOPICS still missing at our callback
+		URL. Idempotent - safe to call repeatedly. Mutating
+		(webhookSubscriptionCreate AND webhookSubscriptionDelete), so this
+		must stay behind an explicit user action, unlike #103's automatic
+		read-only live checks - see integrations/shopify/webhooks.py's
+		module docstring. The delete side can remove a subscription belonging
+		to a sibling environment sharing the same Shopify app (e.g. a
+		different dev tunnel, or another site) if its subscription happens to
+		still be registered at a different URI - see the confirm dialog on
+		this action's Desk button (shopify_connection.js)."""
+		self.check_permission("write")
+		from marketplace_integrations.integrations.shopify.webhooks import (
+			sync_webhook_subscriptions,
+		)
+
+		return sync_webhook_subscriptions(self)

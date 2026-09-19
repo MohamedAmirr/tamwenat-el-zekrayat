@@ -18,10 +18,14 @@ EXECUTE_TARGET = "marketplace_integrations.integrations.shopify.client.ShopifyCl
 
 
 def make_connection(connection_name, **kwargs):
+    # shop_domain defaults to a call-unique value - it carries a DB-level
+    # unique: 1 constraint, and IntegrationTestCase only rolls back once at
+    # class teardown (see docs/frappe-conventions.md's Tests section), so a
+    # fixed literal default would collide across this class's test methods.
     doc = {
         "doctype": "Shopify Connection",
         "connection_name": connection_name,
-        "shop_domain": "test-shop.myshopify.com",
+        "shop_domain": f"test-shop-{frappe.generate_hash(length=8)}.myshopify.com",
         "client_id": "test-client-id",
         "client_secret": "test-client-secret",
     }

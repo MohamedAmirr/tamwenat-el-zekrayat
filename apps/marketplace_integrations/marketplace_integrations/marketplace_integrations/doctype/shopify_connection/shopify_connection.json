@@ -10,7 +10,17 @@
   "shop_domain",
   "client_id",
   "client_secret",
-  "enabled"
+  "previous_client_secret",
+  "enabled",
+  "webhook_section",
+  "webhook_registration_status",
+  "webhook_missing_topics",
+  "webhook_last_checked_on",
+  "webhook_delivery_section",
+  "last_webhook_delivery_at",
+  "last_webhook_delivery_topic",
+  "last_webhook_processed_at",
+  "last_webhook_error"
  ],
  "fields": [
   {
@@ -26,7 +36,8 @@
    "ignore_xss_filter": 1,
    "in_list_view": 1,
    "label": "Shop Domain",
-   "reqd": 1
+   "reqd": 1,
+   "unique": 1
   },
   {
    "fieldname": "client_id",
@@ -43,16 +54,80 @@
    "reqd": 1
   },
   {
+   "description": "Populate during a secret-rotation window - Shopify signs webhook deliveries with the oldest unrevoked secret until rotation completes. Clear once rotation is done.",
+   "fieldname": "previous_client_secret",
+   "fieldtype": "Password",
+   "ignore_xss_filter": 1,
+   "label": "Previous Client Secret"
+  },
+  {
    "default": "1",
    "fieldname": "enabled",
    "fieldtype": "Check",
    "in_list_view": 1,
    "label": "Enabled"
+  },
+  {
+   "fieldname": "webhook_section",
+   "fieldtype": "Section Break",
+   "label": "Webhook Subscriptions"
+  },
+  {
+   "default": "Not Checked",
+   "fieldname": "webhook_registration_status",
+   "fieldtype": "Select",
+   "label": "Registration Status",
+   "options": "Not Checked\nComplete\nIncomplete\nError",
+   "read_only": 1
+  },
+  {
+   "fieldname": "webhook_missing_topics",
+   "fieldtype": "Small Text",
+   "ignore_xss_filter": 1,
+   "label": "Missing Topics",
+   "read_only": 1
+  },
+  {
+   "fieldname": "webhook_last_checked_on",
+   "fieldtype": "Datetime",
+   "label": "Last Checked On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "webhook_delivery_section",
+   "fieldtype": "Section Break",
+   "label": "Webhook Delivery Health"
+  },
+  {
+   "fieldname": "last_webhook_delivery_at",
+   "fieldtype": "Datetime",
+   "label": "Last Delivery At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_webhook_delivery_topic",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Last Delivery Topic",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_webhook_processed_at",
+   "fieldtype": "Datetime",
+   "label": "Last Successful Processing At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_webhook_error",
+   "fieldtype": "Small Text",
+   "ignore_xss_filter": 1,
+   "label": "Last Webhook Error",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-09-08 00:00:00.000000",
+ "modified": "2026-09-19 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Shopify Connection",
