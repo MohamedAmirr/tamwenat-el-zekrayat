@@ -137,6 +137,17 @@ class ShopifyClient:
 		reset per attempt - otherwise throttling and token expiry occurring
 		together could refresh the token once per throttle attempt instead of
 		once total.
+
+		No hard timeout bounds this call's own worst-case blocking time
+		beyond the throttle backoff itself: in the worst case a caller can
+		block synchronously for roughly
+		``MAX_THROTTLE_BACKOFF_SECONDS * MAX_THROTTLE_ATTEMPTS`` seconds (plus
+		normal request/network latency and, on this project, at most one
+		reactive 401 token refresh) before either succeeding or raising. This
+		is a documented tradeoff, not an oversight - see #103's Marketplace
+		Account review finding #3: no enqueue/background-job infrastructure
+		exists to bound this further, and building one is out of scope until
+		a real caller actually needs it.
 		"""
 		connection = self.get_connection()
 		if not connection.enabled:
