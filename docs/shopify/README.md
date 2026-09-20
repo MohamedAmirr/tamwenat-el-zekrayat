@@ -51,6 +51,14 @@ Source: [GraphQL Admin API reference](https://shopify.dev/docs/api/admin-graphql
 
 Source: [Manage your app credentials](https://shopify.dev/docs/apps/build/authentication-authorization/client-secrets), [webhookSubscriptionCreate mutation](https://shopify.dev/docs/api/admin-graphql/latest/mutations/webhookSubscriptionCreate).
 
+## Products and variants (for #105)
+
+- Catalog discovery uses a **flat `productVariants` root query** (single cursor), not nested `products { variants }` - simpler single-cursor pagination, matching `ShopifyClient.execute()`'s existing one-call-site pattern.
+- `productVariants(first: Int, after: String, query: String)` returns a `ProductVariantConnection`: `pageInfo { hasNextPage endCursor }` plus `nodes`.
+- `ProductVariant` fields selected: `id (ID!)`, `sku (String)`, `barcode (String)`, `title (String!)`, `product { id title status }`.
+- Deleted-mapping detection uses the generic `nodes(ids: [ID!]!): [Node]!` root field (`... on ProductVariant { ... }`), the first batched/multi-id lookup in this codebase - a `null` entry at a given position means that id no longer resolves to a live object.
+- Source: [ProductVariant object](https://shopify.dev/docs/api/admin-graphql/latest/objects/ProductVariant), [productVariants query](https://shopify.dev/docs/api/admin-graphql/latest/queries/productVariants), [nodes query](https://shopify.dev/docs/api/admin-graphql/latest/queries/nodes) - all verified against shopify.dev on 2026-09-19 (external source, approved by the user for reliance).
+
 ## Open questions
 
 `Shopify Connection` + `ShopifyClient` are now built (#101), and the Admin GraphQL `execute()` layer on top of it is now built (#102). What those issues settled and what's still open:
