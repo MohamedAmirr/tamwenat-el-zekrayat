@@ -12,10 +12,14 @@ from unittest.mock import patch
 import frappe
 from frappe.tests import IntegrationTestCase
 
+from marketplace_integrations.integrations.shopify import products
 from marketplace_integrations.integrations.shopify.constants import SHOPIFY_NODES_LOOKUP_CHUNK_SIZE
 from marketplace_integrations.integrations.shopify.products import (
 	_is_variant_gid,
+	_sweep_cache_key,
 	get_account,
+	get_sweep_status,
+	queue_catalog_sweep,
 	run_catalog_sweep,
 	upsert_mapping,
 )
@@ -160,9 +164,15 @@ class IntegrationTestRunCatalogSweep(IntegrationTestCase):
 		frappe.delete_doc(
 			"Shopify Connection", self.account.connection, ignore_permissions=True, force=True
 		)
+		# Review finding #7: this class's setUp() creates self.item via
+		# make_item(), same gotcha as above - the commit() reachable from
+		# _refresh_mapping_descriptive_fields() makes it permanent too, and
+		# it's never deleted anywhere else.
+		if frappe.db.exists("Item", self.item):
+			frappe.delete_doc("Item", self.item, ignore_permissions=True, force=True)
 		# The commit() above (if a test reached it) already made this test's
-		# account/connection permanent - these deletes must be committed too,
-		# in the SAME way, or they'd only land in a fresh post-commit
+		# account/connection/item permanent - these deletes must be committed
+		# too, in the SAME way, or they'd only land in a fresh post-commit
 		# transaction that the class-level rollback then undoes right back to
 		# "still present", silently defeating this whole cleanup.
 		frappe.db.commit()
@@ -426,3 +436,108 @@ class IntegrationTestRunCatalogSweep(IntegrationTestCase):
 		self.assertEqual(len(exceptions), 1)
 		self.assertEqual(exceptions[0]["category"], "Deleted")
 		self.assertEqual(exceptions[0]["external_reference"], "gid://shopify/ProductVariant/50")
+
+
+class IntegrationTestQueueCatalogSweep(IntegrationTestCase):
+	"""Review finding #2: dedup-rejection path was previously untested."""
+
+	def setUp(self):
+		self.account = make_shopify_account(f"Test Queue Account {frappe.generate_hash(length=8)}")
+
+	def tearDown(self):
+		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
+		frappe.delete_doc(
+			"Shopify Connection", self.account.connection, ignore_permissions=True, force=True
+		)
+
+	def test_dedup_rejection_throws_and_clears_queued_cache_entry(self):
+		# frappe.enqueue() returns None when it silently skips a deduplicated
+		# enqueue (review finding #5 of the earlier round) - mock that shape
+		# directly rather than racing two real background jobs.
+		with patch("frappe.enqueue", return_value=None) as mocked_enqueue:
+			with self.assertRaisesRegex(frappe.ValidationError, "already running"):
+				queue_catalog_sweep(self.account.name)
+			self.assertEqual(mocked_enqueue.call_count, 1)
+
+		# Review finding #3: a rejected enqueue must not leave the "queued"
+		# cache entry seeded before the enqueue call behind - assert against
+		# the exact job_id the rejected call used (captured from the mocked
+		# frappe.enqueue()'s own kwargs).
+		job_id = mocked_enqueue.call_args.kwargs["job_id_for_result"]
+		self.assertIsNone(frappe.cache().get_value(_sweep_cache_key(job_id)))
+
+	def test_successful_enqueue_seeds_queued_status_before_returning(self):
+		fake_job = object()
+		with patch("frappe.enqueue", return_value=fake_job):
+			result = queue_catalog_sweep(self.account.name)
+
+		self.assertEqual(result["status"], "queued")
+		state = frappe.cache().get_value(_sweep_cache_key(result["job_id"]))
+		self.assertEqual(state["status"], "queued")
+		self.assertEqual(state["processed"], 0)
+
+
+class IntegrationTestMaxExceptionsTruncation(IntegrationTestCase):
+	"""Review finding #2: MAX_EXCEPTIONS_RETURNED truncation was untested."""
+
+	def setUp(self):
+		self.account = make_shopify_account(f"Test Truncate Account {frappe.generate_hash(length=8)}")
+
+	def tearDown(self):
+		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
+		frappe.delete_doc(
+			"Shopify Connection", self.account.connection, ignore_permissions=True, force=True
+		)
+
+	def test_more_than_max_exceptions_are_truncated(self):
+		nodes = [
+			{
+				"id": f"gid://shopify/ProductVariant/{9000 + i}",
+				"sku": f"SKU-{i}",
+				"barcode": None,
+				"product": {"id": f"gid://shopify/Product/{9000 + i}", "title": "Widget"},
+			}
+			for i in range(3)
+		]
+		responses = [
+			{"productVariants": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}},
+			{"nodes": []},
+		]
+		job_id = frappe.generate_hash(length=8)
+		with patch(EXECUTE_TARGET, side_effect=responses), patch.object(products, "MAX_EXCEPTIONS_RETURNED", 2):
+			run_catalog_sweep(job_id, frappe.session.user, self.account.name)
+		state = frappe.cache().get_value(f"marketplace_integrations:shopify:catalog_sweep_job:{job_id}")
+
+		result = state["result"]
+		self.assertEqual(result["total_exceptions"], 3)
+		self.assertEqual(len(result["exceptions"]), 2)
+		self.assertTrue(result["truncated"])
+
+
+class IntegrationTestGetSweepStatusOwnerScoping(IntegrationTestCase):
+	"""Review finding #2: get_sweep_status()'s owner scoping was untested."""
+
+	def test_rejects_status_lookup_for_a_different_owner(self):
+		job_id = frappe.generate_hash(length=8)
+		frappe.cache().set_value(
+			_sweep_cache_key(job_id),
+			{"owner": "someone-else@example.com", "status": "running", "processed": 5},
+			expires_in_sec=60,
+		)
+
+		with self.assertRaises(frappe.PermissionError):
+			get_sweep_status(job_id)
+
+	def test_allows_status_lookup_for_the_owning_user(self):
+		job_id = frappe.generate_hash(length=8)
+		frappe.cache().set_value(
+			_sweep_cache_key(job_id),
+			{"owner": frappe.session.user, "status": "running", "processed": 5},
+			expires_in_sec=60,
+		)
+
+		status = get_sweep_status(job_id)
+
+		self.assertEqual(status["status"], "running")
+		self.assertEqual(status["processed"], 5)
+		self.assertNotIn("owner", status)

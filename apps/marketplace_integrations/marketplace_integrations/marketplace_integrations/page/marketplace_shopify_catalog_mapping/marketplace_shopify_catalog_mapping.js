@@ -155,6 +155,16 @@ frappe.pages["marketplace-shopify-catalog-mapping"].on_page_load = function (wra
 		if (result.truncated) {
 			status_text += " " + __("Showing first {0} of {1}.", [exceptions.length, total_exceptions]);
 		}
+		// Review finding #4: a descriptive-field refresh failure is caught,
+		// rolled back to its own savepoint, and logged server-side
+		// (_refresh_mapping_descriptive_fields()) - it otherwise never surfaces
+		// anywhere. Keep this simple: a count and a pointer to the Error Log,
+		// not a new exception category or per-row detail.
+		if (result.refresh_failures) {
+			status_text +=
+				" " +
+				__("{0} row(s) failed to refresh, see Error Log.", [result.refresh_failures]);
+		}
 		$status.text(status_text);
 		$grid_wrapper.empty();
 

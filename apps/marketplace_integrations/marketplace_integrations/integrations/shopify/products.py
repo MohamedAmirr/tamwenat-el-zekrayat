@@ -101,7 +101,6 @@ query ShopifyProductVariants($first: Int!, $after: String) {
       product {
         id
         title
-        status
       }
     }
   }
@@ -284,6 +283,14 @@ def queue_catalog_sweep(account_name):
 
 	job_id = frappe.generate_hash(length=16)
 	owner = frappe.session.user
+	# Review finding #3: seed the "queued" cache entry BEFORE enqueuing, not
+	# after. frappe.enqueue() hands the job straight to an RQ worker, which on
+	# a fast/idle worker can start running (and publish "running"/progress
+	# status via _update_sweep_status()) before this function got a chance to
+	# write the initial "queued" entry - _update_sweep_status() would then
+	# create its own state dict from scratch, and this later write would
+	# clobber that real progress back down to "queued"/processed=0.
+	_set_sweep_status(job_id, {"owner": owner, "status": "queued", "processed": 0})
 	job = frappe.enqueue(
 		run_catalog_sweep,
 		queue="long",
@@ -295,12 +302,15 @@ def queue_catalog_sweep(account_name):
 		account_name=account.name,
 	)
 	if job is None:
+		# Don't leave a "queued" entry behind for a sweep that was rejected
+		# and will never run - a caller polling this job_id would otherwise
+		# see a permanently stuck "queued" status.
+		frappe.cache().delete_value(_sweep_cache_key(job_id))
 		frappe.throw(
 			frappe._("A catalog sweep is already running for Marketplace Account {0}.").format(
 				account.name
 			)
 		)
-	_set_sweep_status(job_id, {"owner": owner, "status": "queued", "processed": 0})
 	return {"job_id": job_id, "status": "queued"}
 
 
@@ -321,7 +331,7 @@ def run_catalog_sweep(job_id_for_result, owner, account_name):
 		client = ShopifyClient(connection.name)
 
 		unmapped, processed = _find_unmapped_variants(account.name, client, job_id_for_result, owner)
-		deleted, variant_less, processed = _check_saved_mappings(
+		deleted, variant_less, processed, refresh_failures = _check_saved_mappings(
 			account.name, client, job_id_for_result, owner, processed
 		)
 
@@ -343,6 +353,14 @@ def run_catalog_sweep(job_id_for_result, owner, account_name):
 				"exceptions": exceptions,
 				"total_exceptions": total_exceptions,
 				"truncated": truncated,
+				# Review finding #4: a descriptive-field refresh failure is
+				# caught, rolled back to its own savepoint, and logged to the
+				# Error Log (_refresh_mapping_descriptive_fields()) - without
+				# this count, a sweep with failed rows still reports plain
+				# "completed" with no indication anything needs attention.
+				# Deliberately just a count plus a static message on the page,
+				# not a new exception category or per-row detail.
+				"refresh_failures": refresh_failures,
 			},
 		)
 	except Exception as exc:
@@ -422,7 +440,12 @@ def _check_saved_mappings(account_name, client, job_id, owner, processed_so_far)
 	"""Pass 2: walk this account's saved mappings (any enabled state),
 	classify malformed identities as "Variant-less", and batch-check every
 	remaining variant GID via `nodes(ids: [...])`; a null result is
-	"Deleted", a live result refreshes descriptive fields (decision 5)."""
+	"Deleted", a live result refreshes descriptive fields (decision 5).
+
+	Returns ``(deleted, variant_less, processed, refresh_failures)`` - the
+	last is a plain count of rows whose descriptive-field refresh failed and
+	was rolled back (review finding #4), for the caller to surface in the
+	sweep result."""
 	rows = frappe.get_all(
 		MAPPING_DOCTYPE,
 		filters={"marketplace_account": account_name},
@@ -455,6 +478,7 @@ def _check_saved_mappings(account_name, client, job_id, owner, processed_so_far)
 			)
 
 	deleted = []
+	refresh_failures = 0
 	processed = processed_so_far
 	for chunk in _chunked(gid_rows, SHOPIFY_NODES_LOOKUP_CHUNK_SIZE):
 		ids = [row.external_reference for row in chunk]
@@ -489,10 +513,11 @@ def _check_saved_mappings(account_name, client, job_id, owner, processed_so_far)
 					}
 				)
 			else:
-				_refresh_mapping_descriptive_fields(row, node)
+				if not _refresh_mapping_descriptive_fields(row, node):
+					refresh_failures += 1
 		_update_sweep_status(job_id, owner, status="running", processed=processed)
 
-	return deleted, variant_less, processed
+	return deleted, variant_less, processed, refresh_failures
 
 
 def _refresh_mapping_descriptive_fields(row, node):
@@ -511,6 +536,10 @@ def _refresh_mapping_descriptive_fields(row, node):
 	MAX_THROTTLE_ATTEMPTS mid-pass) still propagates out of
 	run_catalog_sweep() and rolls back the whole transaction, discarding
 	every descriptive-field refresh already "committed" earlier in that run.
+
+	Returns False only when a write was attempted and failed (caller counts
+	this into the sweep result's ``refresh_failures``, review finding #4);
+	True for both "nothing needed writing" and "wrote successfully".
 	"""
 	product = node.get("product") or {}
 	new_sku = node.get("sku")
@@ -522,11 +551,22 @@ def _refresh_mapping_descriptive_fields(row, node):
 		and (row.external_barcode or None) == (new_barcode or None)
 		and (row.external_product_id or None) == (new_product_id or None)
 	):
-		return
+		return True
 
 	savepoint = "shopify_catalog_sweep_" + frappe.generate_hash(length=10)
 	frappe.db.savepoint(savepoint)
 	try:
+		# Review finding #1: unlike Talabat's sync-bookkeeping fields
+		# (integrations/talabat/catalog_sync.py's _mark_queued()/_mark_error(),
+		# which legitimately use update_modified=False), these three fields are
+		# services/mapping_import.py's MANAGED_COLUMNS - that importer's ONLY
+		# concurrency guard is comparing an exported __modified timestamp
+		# against the row's current `modified` (_check_not_stale()). Passing
+		# update_modified=False here would let a sweep silently rewrite a
+		# MANAGED_COLUMNS value without moving `modified`, so a stale,
+		# unedited re-upload of a since-refreshed workbook would pass the
+		# staleness check and revert this refresh. Let `modified` update
+		# normally (the default) so that guard actually catches this case.
 		frappe.db.set_value(
 			MAPPING_DOCTYPE,
 			row.name,
@@ -535,7 +575,6 @@ def _refresh_mapping_descriptive_fields(row, node):
 				"external_barcode": new_barcode,
 				"external_product_id": new_product_id,
 			},
-			update_modified=False,
 		)
 	except Exception:
 		frappe.db.rollback(save_point=savepoint)
@@ -543,9 +582,11 @@ def _refresh_mapping_descriptive_fields(row, node):
 			title="Shopify catalog sweep: descriptive field refresh failed",
 			message=frappe.get_traceback(),
 		)
+		return False
 	else:
 		frappe.db.release_savepoint(savepoint)
 		frappe.db.commit()
+		return True
 
 
 def _chunked(items, size):

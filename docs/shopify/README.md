@@ -55,8 +55,8 @@ Source: [Manage your app credentials](https://shopify.dev/docs/apps/build/authen
 
 - Catalog discovery uses a **flat `productVariants` root query** (single cursor), not nested `products { variants }` - simpler single-cursor pagination, matching `ShopifyClient.execute()`'s existing one-call-site pattern.
 - `productVariants(first: Int, after: String, query: String)` returns a `ProductVariantConnection`: `pageInfo { hasNextPage endCursor }` plus `nodes`.
-- `ProductVariant` fields selected: `id (ID!)`, `sku (String)`, `barcode (String)`, `title (String!)`, `product { id title status }`.
-- Deleted-mapping detection uses the generic `nodes(ids: [ID!]!): [Node]!` root field (`... on ProductVariant { ... }`), the first batched/multi-id lookup in this codebase - a `null` entry at a given position means that id no longer resolves to a live object.
+- `ProductVariant` fields selected: `id (ID!)`, `sku (String)`, `barcode (String)`, `product { id title }`. No variant-level `title` is selected - only the parent product's.
+- Deleted-mapping detection uses the generic `nodes(ids: [ID!]!): [Node]!` root field (`... on ProductVariant { ... }`), the first batched/multi-id lookup in this codebase. Each response node is matched back to its saved mapping row by its own `id` field, never by list position - Shopify doesn't guarantee response order matches the requested id order. A deleted variant is one whose id is either missing from the response entirely or present with a `null` node.
 - Source: [ProductVariant object](https://shopify.dev/docs/api/admin-graphql/latest/objects/ProductVariant), [productVariants query](https://shopify.dev/docs/api/admin-graphql/latest/queries/productVariants), [nodes query](https://shopify.dev/docs/api/admin-graphql/latest/queries/nodes) - all verified against shopify.dev on 2026-09-19 (external source, approved by the user for reliance).
 
 ## Open questions
