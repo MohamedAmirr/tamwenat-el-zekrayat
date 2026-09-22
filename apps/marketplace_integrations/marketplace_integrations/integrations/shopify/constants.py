@@ -55,3 +55,17 @@ SHOPIFY_WEBHOOK_TOPIC_HEADER_TO_ENUM = {
 # can never silently drift apart - a topic added to only one of the two would
 # otherwise 200-and-drop every delivery for it with no error anywhere.
 SHOPIFY_WEBHOOK_TOPICS = tuple(SHOPIFY_WEBHOOK_TOPIC_HEADER_TO_ENUM.values())
+
+# Catalog sweep (#105) - see integrations/shopify/products.py.
+#
+# 250 is Shopify's normal max page size for a paginated connection field -
+# same rationale/value as integrations/shopify/locations.py's
+# LOCATIONS_PAGE_SIZE, but here it bounds a cursor-paginated walk of the
+# WHOLE catalog rather than a single page.
+SHOPIFY_VARIANTS_PAGE_SIZE = 250
+
+# Bounded chunk size for the batched `nodes(ids: [...])` deleted-mapping
+# lookup - the first such batched/multi-id lookup in this codebase (#105
+# gap-check #2), so there is no existing chunking helper to reuse. Kept well
+# under any reasonable GraphQL query-complexity/list-argument-length limit.
+SHOPIFY_NODES_LOOKUP_CHUNK_SIZE = 50
