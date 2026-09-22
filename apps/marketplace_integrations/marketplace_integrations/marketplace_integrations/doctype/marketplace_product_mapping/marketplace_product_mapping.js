@@ -2,8 +2,28 @@ if (typeof frappe !== "undefined") {
 	frappe.ui.form.on("Marketplace Product Mapping", {
 		refresh(frm) {
 			if (frm.is_new()) return;
-			frm.add_custom_button(__("Push to Talabat"), () => push_to_talabat(frm));
+			add_platform_push_button(frm);
 		},
+	});
+}
+
+// Fixes a known defect: this button used to show "Push to Talabat"
+// unconditionally on every mapping, including Shopify ones created by #105.
+// Gated client-side by looking up the linked Marketplace Account's platform
+// - no schema change to Marketplace Product Mapping itself (decision 6).
+function add_platform_push_button(frm) {
+	return frappe.db.get_value("Marketplace Account", frm.doc.marketplace_account, "platform").then((r) => {
+		const platform = r && r.message && r.message.platform;
+		if (platform === "Shopify") {
+			frm.add_custom_button(__("Push to Shopify"), () => push_to_shopify(frm));
+		} else if (platform === "Talabat") {
+			frm.add_custom_button(__("Push to Talabat"), () => push_to_talabat(frm));
+		} else {
+			frappe.show_alert({
+				message: __("This mapping's Marketplace Account platform does not support a catalog push."),
+				indicator: "orange",
+			});
+		}
 	});
 }
 
@@ -21,6 +41,35 @@ function push_to_talabat(frm) {
 		});
 }
 
+function push_to_shopify(frm) {
+	frappe
+		.call({
+			method: "marketplace_integrations.api.shopify_catalog_push.queue_catalog_push",
+			args: { mapping_names: [frm.doc.name] },
+			freeze: true,
+			freeze_message: __("Queuing Shopify price push..."),
+		})
+		.then((response) => {
+			const jobs = (response.message && response.message.jobs) || [];
+			const skipped = (response.message && response.message.skipped) || [];
+			if (skipped.length) {
+				frappe.show_alert({
+					message: __("A catalog push is already running for this Marketplace Account."),
+					indicator: "orange",
+				});
+			}
+			if (!jobs.length) return;
+			return frappe
+				.require("/assets/marketplace_integrations/js/shopify_catalog_push_status.js")
+				.then(() => {
+					new frappe.ui.ShopifyCatalogPushStatus({
+						jobs,
+						on_done: () => frm.reload_doc(),
+					});
+				});
+		});
+}
+
 if (typeof module !== "undefined") {
-	module.exports = { push_to_talabat };
+	module.exports = { push_to_talabat, push_to_shopify, add_platform_push_button };
 }

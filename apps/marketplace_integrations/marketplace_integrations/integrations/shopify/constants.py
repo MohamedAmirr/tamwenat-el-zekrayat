@@ -69,3 +69,14 @@ SHOPIFY_VARIANTS_PAGE_SIZE = 250
 # gap-check #2), so there is no existing chunking helper to reuse. Kept well
 # under any reasonable GraphQL query-complexity/list-argument-length limit.
 SHOPIFY_NODES_LOOKUP_CHUNK_SIZE = 50
+
+# Catalog push (#106) - see integrations/shopify/catalog_push.py.
+#
+# Bounded chunk size for the `variants` array passed to one
+# `productVariantsBulkUpdate` call, so a single Shopify product with more
+# mapped variants than this doesn't fail (or silently truncate) as one
+# oversized mutation call. shopify.dev does not clearly document a hard
+# per-call limit for `ProductVariantsBulkInput` arrays as of this writing, so
+# this is a conservative, not a verified, default - re-check against
+# shopify.dev before raising it.
+SHOPIFY_CATALOG_PUSH_VARIANT_CHUNK_SIZE = 100
