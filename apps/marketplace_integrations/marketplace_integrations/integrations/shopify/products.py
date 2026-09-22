@@ -107,10 +107,13 @@ query ShopifyProductVariants($first: Int!, $after: String) {
 }
 """
 
-# Generic `nodes(ids: [ID!]!)` lookup - returns one entry per input id, in
-# the same order, with `null` for any id that no longer resolves to a live
-# object (a deleted variant). `... on ProductVariant` is required because
-# `nodes` is typed to the union `[Node]!`, not `[ProductVariant]!`.
+# Generic `nodes(ids: [ID!]!)` lookup - returns one entry per input id, with
+# `null` for any id that no longer resolves to a live object (a deleted
+# variant). Shopify doesn't guarantee response order matches the requested
+# id order, so callers must match results back to requests by each node's
+# own `id` field, never by position - see the id-keyed lookup below.
+# `... on ProductVariant` is required because `nodes` is typed to the union
+# `[Node]!`, not `[ProductVariant]!`.
 _NODES_QUERY = """
 query ShopifyProductVariantNodes($ids: [ID!]!) {
   nodes(ids: $ids) {
