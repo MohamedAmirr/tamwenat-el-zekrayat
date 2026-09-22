@@ -138,7 +138,7 @@
 					truncated = truncated || !!result.truncated;
 					succeeded += result.succeeded || 0;
 					failed += result.failed || 0;
-					skipped += result.skipped || 0;
+					skipped += result.skipped_mappings || 0;
 				}
 			});
 

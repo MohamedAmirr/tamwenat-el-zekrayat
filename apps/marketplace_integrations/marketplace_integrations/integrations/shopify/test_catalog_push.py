@@ -284,6 +284,16 @@ class IntegrationTestPushCatalog(IntegrationTestCase):
 		# Nothing was attempted, so sync_status is untouched (still whatever
 		# the freshly-inserted mapping's default was).
 		self.assertNotEqual(mapping.sync_status, "Error")
+		# Strengthened per PR #119 review: assert the mapping actually shows up
+		# in the result's skipped-mappings accounting, not just that its
+		# status isn't Error - a regression that silently dropped the mapping
+		# entirely would still pass the weaker assertion above but would be
+		# invisible in the actual dialog UI.
+		status = catalog_push.get_push_status("job-7")
+		skipped_rows = [row for row in status["result"]["results"] if row["mapping_name"] == mapping.name]
+		self.assertEqual(len(skipped_rows), 1)
+		self.assertTrue(skipped_rows[0]["skipped"])
+		self.assertEqual(status["result"]["skipped_mappings"], 1)
 
 	def test_mapping_with_disabled_item_is_skipped_not_errored(self):
 		"""Same as above, but for Talabat's other half of the active
@@ -297,6 +307,11 @@ class IntegrationTestPushCatalog(IntegrationTestCase):
 
 		mapping.reload()
 		self.assertNotEqual(mapping.sync_status, "Error")
+		status = catalog_push.get_push_status("job-8")
+		skipped_rows = [row for row in status["result"]["results"] if row["mapping_name"] == mapping.name]
+		self.assertEqual(len(skipped_rows), 1)
+		self.assertTrue(skipped_rows[0]["skipped"])
+		self.assertEqual(status["result"]["skipped_mappings"], 1)
 
 	def test_group_with_more_variants_than_chunk_size_issues_multiple_mutation_calls(self):
 		"""Review finding #6: a product group larger than
@@ -386,7 +401,7 @@ class IntegrationTestQueueCatalogPush(IntegrationTestCase):
 		self.assertEqual(len(result["jobs"]), 1)
 		self.assertEqual(result["jobs"][0]["account"], self.account.name)
 		self.assertEqual(result["jobs"][0]["mapping_count"], 1)
-		self.assertEqual(result["skipped"], [])
+		self.assertEqual(result["skipped_accounts"], [])
 		mocked_enqueue.assert_called_once()
 		self.assertEqual(mocked_enqueue.call_args.kwargs["account_name"], self.account.name)
 		self.assertEqual(mocked_enqueue.call_args.kwargs["mapping_names"], [self.mapping.name])
@@ -400,8 +415,8 @@ class IntegrationTestQueueCatalogPush(IntegrationTestCase):
 
 		mocked_execute.assert_not_called()
 		self.assertEqual(result["jobs"], [])
-		self.assertEqual(len(result["skipped"]), 1)
-		self.assertEqual(result["skipped"][0]["account"], self.account.name)
+		self.assertEqual(len(result["skipped_accounts"]), 1)
+		self.assertEqual(result["skipped_accounts"][0]["account"], self.account.name)
 
 		job_id = mocked_enqueue.call_args.kwargs["job_id_for_result"]
 		self.assertIsNone(frappe.cache().get_value(catalog_push._push_cache_key(job_id)))
@@ -440,5 +455,5 @@ class IntegrationTestQueueCatalogPush(IntegrationTestCase):
 		mocked_execute.assert_not_called()
 		self.assertEqual(len(result["jobs"]), 1)
 		self.assertEqual(result["jobs"][0]["account"], other_account.name)
-		self.assertEqual(len(result["skipped"]), 1)
-		self.assertEqual(result["skipped"][0]["account"], self.account.name)
+		self.assertEqual(len(result["skipped_accounts"]), 1)
+		self.assertEqual(result["skipped_accounts"][0]["account"], self.account.name)

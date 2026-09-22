@@ -51,8 +51,8 @@ function push_to_shopify(frm) {
 		})
 		.then((response) => {
 			const jobs = (response.message && response.message.jobs) || [];
-			const skipped = (response.message && response.message.skipped) || [];
-			if (skipped.length) {
+			const skipped_accounts = (response.message && response.message.skipped_accounts) || [];
+			if (skipped_accounts.length) {
 				frappe.show_alert({
 					message: __("A catalog push is already running for this Marketplace Account."),
 					indicator: "orange",

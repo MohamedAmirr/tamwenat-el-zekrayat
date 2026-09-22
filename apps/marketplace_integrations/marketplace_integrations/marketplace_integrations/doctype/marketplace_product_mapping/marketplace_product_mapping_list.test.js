@@ -104,6 +104,52 @@ test("Push selected splits a mixed-platform selection into a Talabat push and a 
 	assert.equal(listview.refreshed, true);
 });
 
+test("push_selected warns when get_list returns fewer rows than were selected (permission-filtered or deleted)", async () => {
+	let msgprint_message;
+	global.frappe = {
+		call(options) {
+			if (options.method === "frappe.client.get_list" && options.args.doctype === "Marketplace Product Mapping") {
+				// Only one of the two selected names comes back - the other was
+				// filtered out by read permissions.
+				return Promise.resolve({
+					message: [{ name: "MPM-00001", marketplace_account: "MKTACC-SHOPIFY" }],
+				});
+			}
+			if (options.method === "frappe.client.get_list" && options.args.doctype === "Marketplace Account") {
+				return Promise.resolve({ message: [{ name: "MKTACC-SHOPIFY", platform: "Shopify" }] });
+			}
+			if (options.method === "marketplace_integrations.api.shopify_catalog_push.queue_catalog_push") {
+				return Promise.resolve({
+					message: { jobs: [{ account: "MKTACC-SHOPIFY", job_id: "job-1", mapping_count: 1 }] },
+				});
+			}
+			throw new Error(`Unexpected frappe.call in test: ${options.method}`);
+		},
+		msgprint(message) {
+			msgprint_message = message;
+		},
+		require() {
+			return Promise.resolve();
+		},
+		show_alert() {},
+		ui: {
+			ShopifyCatalogPushStatus: class {
+				constructor(args) {
+					this.args = args;
+				}
+			},
+		},
+	};
+	const listview = make_listview(["MPM-00001", "MPM-00002"]);
+
+	await push_selected(listview);
+	for (let i = 0; i < 5; i++) {
+		await new Promise((resolve) => setImmediate(resolve));
+	}
+
+	assert.ok(msgprint_message, "expected a msgprint warning about the unreadable/missing selected row");
+});
+
 test("route_selected does nothing but warns when no selected mapping resolves to a known platform", async () => {
 	const calls = [];
 	let msgprint_message;
@@ -264,7 +310,7 @@ test("push_selected_to_shopify shows an alert for skipped accounts and does not 
 	global.frappe = {
 		call() {
 			return Promise.resolve({
-				message: { jobs: [], skipped: [{ account: "MKTACC-SHOPIFY", reason: "already running" }] },
+				message: { jobs: [], skipped_accounts: [{ account: "MKTACC-SHOPIFY", reason: "already running" }] },
 			});
 		},
 		show_alert(args) {

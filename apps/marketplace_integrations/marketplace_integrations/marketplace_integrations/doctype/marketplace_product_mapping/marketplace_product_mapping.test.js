@@ -146,7 +146,7 @@ test("push_to_shopify shows an alert for a skipped account and does not open the
 	global.frappe = {
 		call() {
 			return Promise.resolve({
-				message: { jobs: [], skipped: [{ account: "Some Account", reason: "already running" }] },
+				message: { jobs: [], skipped_accounts: [{ account: "Some Account", reason: "already running" }] },
 			});
 		},
 		show_alert(args) {

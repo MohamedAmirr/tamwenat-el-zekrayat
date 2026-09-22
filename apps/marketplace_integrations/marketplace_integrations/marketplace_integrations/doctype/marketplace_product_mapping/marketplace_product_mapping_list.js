@@ -30,6 +30,18 @@ function push_selected(listview) {
 		})
 		.then((r) => {
 			const rows = r.message || [];
+			// frappe.client.get_list applies read permissions - a row the user
+			// selected but cannot read simply isn't returned. Without this
+			// check those rows would silently vanish from the push with no
+			// message at all (review finding #2).
+			if (rows.length < mapping_names.length) {
+				frappe.msgprint(
+					__(
+						"{0} selected Marketplace Product Mapping(s) could not be included: you may not have permission to read them, or they may have been deleted.",
+						[mapping_names.length - rows.length]
+					)
+				);
+			}
 			if (!rows.length) return;
 			const account_names = [...new Set(rows.map((row) => row.marketplace_account))];
 			return frappe
@@ -117,11 +129,11 @@ function push_selected_to_shopify(mapping_names) {
 		})
 		.then((response) => {
 			const jobs = (response.message && response.message.jobs) || [];
-			const skipped = (response.message && response.message.skipped) || [];
-			if (skipped.length) {
+			const skipped_accounts = (response.message && response.message.skipped_accounts) || [];
+			if (skipped_accounts.length) {
 				frappe.show_alert({
 					message: __("A catalog push is already running for {0} Marketplace Account(s); skipped.", [
-						skipped.length,
+						skipped_accounts.length,
 					]),
 					indicator: "orange",
 				});

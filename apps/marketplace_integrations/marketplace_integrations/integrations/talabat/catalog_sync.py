@@ -21,7 +21,7 @@ from urllib.parse import quote
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, getdate, now_datetime
+from frappe.utils import cstr, now_datetime
 
 from marketplace_integrations.integrations.talabat.client import TalabatClient
 from marketplace_integrations.services.account_warehouse import validate_account_warehouse

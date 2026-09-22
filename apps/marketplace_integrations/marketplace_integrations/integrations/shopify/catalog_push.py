@@ -123,6 +123,18 @@ PUSH_PROGRESS_EVENT = "marketplace_shopify_catalog_push_progress"
 # is cached/published/rendered, not what the worker actually processes.
 MAX_PUSH_RESULTS_RETURNED = 500
 
+# How often (in product groups processed) to push a realtime/cache progress
+# update while pushing - same rationale/naming as products.py's
+# PROGRESS_UPDATE_INTERVAL (review finding #1 on this PR): without a
+# throttle, a bulk push spanning ~3,000 distinct Shopify products would
+# rewrite the Redis status cache AND call frappe.publish_realtime() once per
+# product group - pure waste, since nothing in this codebase actually listens
+# for PUSH_PROGRESS_EVENT (the dialog polls get_catalog_push_status on a
+# timer instead). The FINAL update after the loop always runs unconditionally
+# (status="completed"), so the dialog's poll always sees the true final state
+# regardless of this throttle.
+PUSH_PROGRESS_UPDATE_INTERVAL = 50
+
 # Namespaces the RQ-level job id used for deduplication, scoped per Account -
 # same shape as products.py's _SWEEP_RQ_JOB_ID_PREFIX, so two overlapping
 # pushes of the SAME account can't race each other's writes, while pushes of
@@ -309,8 +321,14 @@ def queue_catalog_push(mapping_names):
 	``frappe.throw()`` would otherwise discard the job ids of accounts
 	already enqueued earlier in the same loop, losing the caller's visibility
 	into pushes that are genuinely running. Returns both ``jobs`` (queued,
-	pollable) and ``skipped`` (rejected as already-running) so the caller can
-	show both outcomes together.
+	pollable) and ``skipped_accounts`` (rejected as already-running) so the
+	caller can show both outcomes together.
+
+	Named ``skipped_accounts`` (review finding #3), not ``skipped``, to stay
+	textually distinct from ``_push_result_payload()``'s ``skipped_mappings``
+	- the two mean different things (accounts rejected by RQ dedup here vs.
+	mappings excluded as disabled there) but both flow into the same
+	``ShopifyCatalogPushStatus`` dialog.
 	"""
 	mapping_names = parse_mapping_names(mapping_names)
 	accounts = group_mappings_by_account(mapping_names)
@@ -319,7 +337,7 @@ def queue_catalog_push(mapping_names):
 
 	owner = frappe.session.user
 	jobs = []
-	skipped = []
+	skipped_accounts = []
 	for account_name, selected in accounts.items():
 		job_id = frappe.generate_hash(length=16)
 		# Seed the "queued" cache entry before enqueuing - same reasoning as
@@ -339,7 +357,7 @@ def queue_catalog_push(mapping_names):
 		)
 		if job is None:
 			frappe.cache().delete_value(_push_cache_key(job_id))
-			skipped.append(
+			skipped_accounts.append(
 				{
 					"account": account_name,
 					"reason": _("A catalog push is already running for this Marketplace Account."),
@@ -349,7 +367,7 @@ def queue_catalog_push(mapping_names):
 		jobs.append(
 			{"account": account_name, "job_id": job_id, "mapping_count": len(selected["mapping_names"])}
 		)
-	return {"jobs": jobs, "skipped": skipped}
+	return {"jobs": jobs, "skipped_accounts": skipped_accounts}
 
 
 def get_push_status(job_id):
@@ -380,15 +398,19 @@ def push_catalog(job_id_for_result, owner, account_name, mapping_names):
 			job_id_for_result, owner, status="running", processed=len(results), result=_push_result_payload(results)
 		)
 
-		for product_id, group_mappings in groups.items():
+		for group_index, (product_id, group_mappings) in enumerate(groups.items(), start=1):
 			results.extend(_push_product_group(client, price_list, product_id, group_mappings))
-			_update_push_status(
-				job_id_for_result,
-				owner,
-				status="running",
-				processed=len(results),
-				result=_push_result_payload(results),
-			)
+			# Throttled (review finding #1) - the unconditional "completed"
+			# update right after this loop always reports the true final
+			# state regardless, so skipping intermediate ticks here is safe.
+			if group_index % PUSH_PROGRESS_UPDATE_INTERVAL == 0:
+				_update_push_status(
+					job_id_for_result,
+					owner,
+					status="running",
+					processed=len(results),
+					result=_push_result_payload(results),
+				)
 
 		_update_push_status(
 			job_id_for_result,
@@ -573,15 +595,19 @@ def _mark_error(mapping_name, error):
 
 
 def _push_result_payload(results):
+	"""Named ``skipped_mappings`` (review finding #3), not ``skipped``, to stay
+	textually distinct from ``queue_catalog_push()``'s ``skipped_accounts`` -
+	this one counts MAPPINGS excluded as disabled (or disabled Item), not
+	accounts rejected by RQ dedup."""
 	total = len(results)
 	truncated = total > MAX_PUSH_RESULTS_RETURNED
-	skipped = sum(1 for row in results if row.get("skipped"))
+	skipped_mappings = sum(1 for row in results if row.get("skipped"))
 	return {
 		"results": results[:MAX_PUSH_RESULTS_RETURNED],
 		"total": total,
 		"succeeded": sum(1 for row in results if row["ok"]),
 		"failed": sum(1 for row in results if not row["ok"] and not row.get("skipped")),
-		"skipped": skipped,
+		"skipped_mappings": skipped_mappings,
 		"truncated": truncated,
 	}
 
