@@ -107,6 +107,39 @@ docker exec -it -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekraya
 
 `bench start` serves on `127.0.0.1:8000` (published by the compose file). Add `dev.localhost` to `/etc/hosts` pointing at `127.0.0.1` before browsing to `http://dev.localhost:8000`. Login `Administrator` / `admin`.
 
+## Running tests: use `test.localhost`, never `dev.localhost`
+
+Tests must run on the dedicated `test.localhost` site. Code under test calls `frappe.db.commit()` (per-chunk and per-group commits, `db_set(..., commit=True)`), which defeats `IntegrationTestCase`'s class-level rollback, so **a test run permanently writes to whichever site it runs on**. Running them on `dev.localhost` polluted it with hundreds of leaked rows (by 2026-09-24: 227 test Shopify Connections, 122 accounts, 1359 mappings, 123 Items, 132 Price Lists). An attempt to auto-clean them after each test (a `CleanupTestCase` that deleted "whatever is new", PR #120, closed) made things worse on a live site: its unconditional commit made rows in doctypes outside its list permanent (a leaked test tax template even became the site's default), and deleting "whatever is new" could remove a real row created by another process mid-test. Tests therefore run on a separate site, and `dev.localhost` has `allow_tests` set to `false`, so `run-tests` is refused there ("Testing is disabled for the site!").
+
+```bash
+# Full suite (add --module marketplace_integrations.integrations.shopify.test_products for one module)
+docker exec -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekrayat-dev-frappe-1 bash -lc "bench --site test.localhost run-tests --app marketplace_integrations"
+```
+
+`test.localhost` is a throwaway clone of the dev site, not a fresh site: the tests assume the dev fixtures (Company `Tamwenat El Zekrayat` / abbreviation `TEZ`, its warehouses, the `Standard Selling` Price List, ...). Junk accumulating on it is fine. Recreate it whenever it drifts, or after dev gains fixtures the tests need:
+
+```bash
+# 1. Fresh backup of dev (read-only on dev)
+docker exec -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekrayat-dev-frappe-1 bash -lc "bench --site dev.localhost backup"
+
+# 2. (Re)create the test site with the same apps, then restore the backup over it
+#    If test.localhost already exists: bench drop-site test.localhost --root-password 123 first.
+docker exec -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekrayat-dev-frappe-1 bash -lc "
+bench new-site test.localhost --db-root-password 123 --admin-password admin --mariadb-user-host-login-scope=% --install-app erpnext --install-app marketplace_integrations &&
+bench --site test.localhost restore sites/dev.localhost/private/backups/<the-new>-database.sql.gz --db-root-password 123 &&
+bench --site test.localhost migrate &&
+bench --site test.localhost clear-cache"
+
+# 3. Make it test-capable and inert
+docker exec -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekrayat-dev-frappe-1 bash -lc "
+bench --site test.localhost set-config allow_tests true &&
+bench --site test.localhost set-config developer_mode 1 &&
+bench --site test.localhost scheduler disable &&
+bench --site test.localhost set-config pause_scheduler 1"
+```
+
+Keep the test site's OWN `encryption_key` (a fresh site generates one; do not copy dev's `site_config.json` secrets or `host_name`): the restored Shopify/Talabat credentials are then undecryptable there, and with the scheduler off nothing on the test site can call a real marketplace. `default_site` in `common_site_config.json` stays `dev.localhost`.
+
 ## Running one-off Python against a site
 
 `bench console` is interactive (IPython-style), so feed it a script via `echo | ...`, not a heredoc directly on `docker exec` (that leaves the console waiting on a TTY it doesn't have):
