@@ -226,6 +226,31 @@ class IntegrationTestTalabatCatalogApi(IntegrationTestCase):
 		enqueue.assert_not_called()
 
 	@patch("marketplace_integrations.api.talabat_catalog.frappe.enqueue")
+	def test_queue_mappings_pins_original_per_mapping_error_order_and_text(self, enqueue):
+		"""Pins Talabat's pre-#106 behavior (#106 requires no behavior change):
+		checks run per mapping in order, so a permission failure on the first
+		mapping wins over a later missing one, with Frappe's own message."""
+		user = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": f"order-pin-{frappe.generate_hash(length=10)}@example.com",
+				"first_name": "Order Pin Test User",
+				"send_welcome_email": 0,
+				"roles": [{"role": "All"}],
+			}
+		).insert()
+		enqueue.reset_mock()
+
+		with self.set_user(user.name):
+			frappe.clear_messages()
+			with self.assertRaises(frappe.PermissionError):
+				queue_mappings_catalog_sync([self.mapping.name, "MPM-DOES-NOT-EXIST"])
+			message = frappe.message_log[-1]["message"] if frappe.message_log else ""
+		self.assertIn("permission", message.lower())
+		self.assertIn("Marketplace Product Mapping", message)
+		enqueue.assert_not_called()
+
+	@patch("marketplace_integrations.api.talabat_catalog.frappe.enqueue")
 	def test_queue_mapping_requires_mapping_write_permission(self, enqueue):
 		user = frappe.get_doc(
 			{

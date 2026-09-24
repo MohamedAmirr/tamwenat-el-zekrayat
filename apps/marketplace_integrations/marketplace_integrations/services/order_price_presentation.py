@@ -20,10 +20,10 @@ from frappe import _
 from frappe.utils import cstr
 
 from marketplace_integrations.integrations.talabat.catalog_sync import (
-    CatalogBuildError,
     get_listing_price,
     validate_catalog_sync_account,
 )
+from marketplace_integrations.services.listing_price import CatalogBuildError
 
 
 def not_mapped_reason():

@@ -6,25 +6,37 @@
 This module owns the catalog-update contract only.  It deliberately does not
 poll Talabat's beta job endpoint or mark mappings as ``Synced``: Talabat's
 asynchronous catalog feedback is the authority for that later transition.
+
+Listing-price resolution (``get_listing_price()`` and its helpers) was
+extracted to ``services/listing_price.py`` (#106 decision 4) - a pure
+extraction, no behavior change - so it can be shared with Shopify's
+price-only push (``integrations/shopify/catalog_push.py``). This module keeps
+its own Talabat-specific account/connection/price-list validation
+(``validate_catalog_sync_account()``) and quantity logic (``get_sellable_qty()``),
+neither of which is shared with Shopify.
 """
 
-from datetime import date
-from decimal import ROUND_FLOOR, Decimal, InvalidOperation
+from decimal import ROUND_FLOOR
 from urllib.parse import quote
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, getdate, now_datetime
+from frappe.utils import cstr, now_datetime
 
 from marketplace_integrations.integrations.talabat.client import TalabatClient
 from marketplace_integrations.services.account_warehouse import validate_account_warehouse
+from marketplace_integrations.services.listing_price import (
+	CatalogBuildError,
+	conversion_factor,
+	resolve_listing_price,
+	to_decimal,
+)
+from marketplace_integrations.services.listing_price import (
+	listing_uom as compute_listing_uom,
+)
 
 CATALOG_BATCH_SIZE = 10_000
 REMOTE_ERROR = _("Talabat did not accept the catalog update.")
-
-
-class CatalogBuildError(frappe.ValidationError):
-	"""A local mapping problem that must not prevent other mappings syncing."""
 
 
 def validate_catalog_sync_account(account):
@@ -60,9 +72,9 @@ def get_sellable_qty(item_code, warehouse, listing_uom):
 	"""Return current Bin.actual_qty in listing units, floored at zero."""
 	item = frappe.get_doc("Item", item_code)
 	actual_qty = frappe.db.get_value("Bin", {"item_code": item.name, "warehouse": warehouse}, "actual_qty")
-	qty = max(_decimal(actual_qty or 0), Decimal(0))
-	conversion_factor = _conversion_factor(item, listing_uom)
-	return int((qty / conversion_factor).to_integral_value(rounding=ROUND_FLOOR))
+	qty = max(to_decimal(actual_qty or 0), to_decimal(0))
+	factor = conversion_factor(item, listing_uom)
+	return int((qty / factor).to_integral_value(rounding=ROUND_FLOOR))
 
 
 def get_listing_price(account, mapping, item, on_date=None):
@@ -70,26 +82,8 @@ def get_listing_price(account, mapping, item, on_date=None):
 	_account_doc, _connection, price_list = validate_catalog_sync_account(account)
 	mapping_doc = _as_doc("Marketplace Product Mapping", mapping)
 	item_doc = _as_doc("Item", item)
-	listing_uom = _listing_uom(mapping_doc, item_doc)
-	on_date = getdate(on_date) if on_date else getdate()
-	prices = _current_generic_prices(price_list.name, item_doc.name, on_date)
-
-	price = _pick_price(prices, listing_uom)
-	if price:
-		return _decimal(price.price_list_rate)
-	if not price_list.price_not_uom_dependent:
-		raise CatalogBuildError(
-			_("Item {0} has no current Item Price for listing UOM {1} in Price List {2}.").format(
-				item_doc.name, listing_uom, price_list.name
-			)
-		)
-
-	stock_price = _pick_price(prices, item_doc.stock_uom)
-	if not stock_price:
-		raise CatalogBuildError(
-			_("Item {0} has no current Item Price in Price List {1}.").format(item_doc.name, price_list.name)
-		)
-	return _decimal(stock_price.price_list_rate) * _conversion_factor(item_doc, listing_uom)
+	listing_uom_value = compute_listing_uom(mapping_doc, item_doc)
+	return resolve_listing_price(price_list, item_doc, listing_uom_value, on_date)
 
 
 def effective_outbound_sku(external_sku, external_reference):
@@ -120,12 +114,12 @@ def build_catalog_product(account, mapping):
 			_("Marketplace Product Mapping {0} requires a Talabat SKU.").format(mapping_doc.name)
 		)
 
-	listing_uom = _listing_uom(mapping_doc, item)
+	listing_uom_value = compute_listing_uom(mapping_doc, item)
 	active = bool(mapping_doc.enabled) and not bool(item.disabled)
 	product = {
 		"sku": sku,
 		"active": active,
-		"quantity": get_sellable_qty(item.name, account_doc.warehouse, listing_uom) if active else 0,
+		"quantity": get_sellable_qty(item.name, account_doc.warehouse, listing_uom_value) if active else 0,
 		"price": float(get_listing_price(account_doc, mapping_doc, item)),
 	}
 	if barcode := _first_barcode(item.name):
@@ -227,64 +221,6 @@ def _mappings_for_account(account_name, mapping_names):
 	]
 
 
-def _listing_uom(mapping, item):
-	listing_uom = cstr(mapping.sales_uom).strip() or cstr(item.stock_uom).strip()
-	if not listing_uom:
-		raise CatalogBuildError(_("Item {0} requires a stock UOM.").format(item.name))
-	return listing_uom
-
-
-def _conversion_factor(item, listing_uom):
-	if listing_uom == item.stock_uom:
-		return Decimal(1)
-	factor = frappe.db.get_value(
-		"UOM Conversion Detail", {"parent": item.name, "uom": listing_uom}, "conversion_factor"
-	)
-	if not factor or _decimal(factor) <= 0:
-		raise CatalogBuildError(
-			_("Item {0} requires a positive conversion factor for listing UOM {1}.").format(
-				item.name, listing_uom
-			)
-		)
-	return _decimal(factor)
-
-
-def _current_generic_prices(price_list, item_code, on_date):
-	rows = frappe.get_all(
-		"Item Price",
-		filters={"price_list": price_list, "item_code": item_code, "selling": 1},
-		fields=[
-			"name",
-			"uom",
-			"price_list_rate",
-			"valid_from",
-			"valid_upto",
-			"creation",
-			"customer",
-			"supplier",
-		],
-		order_by="creation desc",
-	)
-	return [
-		row
-		for row in rows
-		if not cstr(row.customer).strip()
-		and not cstr(row.supplier).strip()
-		and (not row.valid_from or getdate(row.valid_from) <= on_date)
-		and (not row.valid_upto or getdate(row.valid_upto) >= on_date)
-	]
-
-
-def _pick_price(prices, uom):
-	candidates = [row for row in prices if cstr(row.uom).strip() == uom]
-	if not candidates:
-		return None
-	return max(
-		candidates,
-		key=lambda row: (getdate(row.valid_from) if row.valid_from else date.min, cstr(row.creation)),
-	)
-
-
 def _first_barcode(item_code):
 	barcode = frappe.db.get_value(
 		"Item Barcode", {"parent": item_code, "parenttype": "Item"}, "barcode", order_by="idx asc"
@@ -339,10 +275,3 @@ def _build_error(mapping, error):
 	return _(
 		"Marketplace Product Mapping {0} could not be built from its ERPNext Item configuration."
 	).format(mapping.name)
-
-
-def _decimal(value):
-	try:
-		return Decimal(str(value))
-	except (InvalidOperation, TypeError, ValueError) as error:
-		raise CatalogBuildError(_("A catalog price or quantity is not numeric.")) from error

@@ -6,7 +6,7 @@ from unittest.mock import patch
 import frappe
 from frappe.tests import UnitTestCase
 
-from marketplace_integrations.integrations.talabat.catalog_sync import CatalogBuildError
+from marketplace_integrations.services.listing_price import CatalogBuildError
 from marketplace_integrations.services.order_price_presentation import (
     current_catalog_price,
     not_mapped_reason,
