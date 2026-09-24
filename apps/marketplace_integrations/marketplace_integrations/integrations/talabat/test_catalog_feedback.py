@@ -6,13 +6,13 @@ import io
 from unittest.mock import MagicMock, patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.integrations.talabat import catalog_feedback
 from marketplace_integrations.integrations.talabat.catalog_feedback import (
 	CatalogFeedbackError,
 	process_catalog_feedback,
 )
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 CSV_COLUMNS = [
 	"vendorId",
@@ -64,7 +64,7 @@ def _download_response(rows, status_code=200, headers=None, redirect_to=None):
 	return response
 
 
-class IntegrationTestTalabatCatalogFeedback(IntegrationTestCase):
+class IntegrationTestTalabatCatalogFeedback(CleanupTestCase):
 	def setUp(self):
 		self.suffix = frappe.generate_hash(length=8)
 		self.connection = frappe.get_doc(

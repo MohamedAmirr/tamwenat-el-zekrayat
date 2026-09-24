@@ -7,10 +7,10 @@ import hmac
 from unittest.mock import MagicMock, patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api import shopify_webhooks
 from marketplace_integrations.integrations.shopify.webhooks import process_shopify_webhook
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
 def make_connection(connection_name, **kwargs):
@@ -30,7 +30,7 @@ def _sign(body, secret):
 	return base64.b64encode(digest).decode("utf-8")
 
 
-class IntegrationTestShopifyWebhookEvent(IntegrationTestCase):
+class IntegrationTestShopifyWebhookEvent(CleanupTestCase):
 	def setUp(self):
 		suffix = frappe.generate_hash(length=8)
 		self.connection = make_connection(

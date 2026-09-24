@@ -5,9 +5,9 @@ from unittest.mock import MagicMock, patch
 from urllib.parse import quote
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.integrations.talabat import outlet
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
 def _response(body, status_code=200):
@@ -46,7 +46,7 @@ def _make_account(account_name, connection, **kwargs):
 	return frappe.get_doc(doc).insert()
 
 
-class IntegrationTestTalabatOutletStatus(IntegrationTestCase):
+class IntegrationTestTalabatOutletStatus(CleanupTestCase):
 	def setUp(self):
 		suffix = frappe.generate_hash(length=8)
 		self.connection = _make_connection(f"Outlet Connection {suffix}")

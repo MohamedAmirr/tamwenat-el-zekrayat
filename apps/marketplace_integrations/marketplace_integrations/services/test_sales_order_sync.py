@@ -4,7 +4,6 @@
 from types import SimpleNamespace
 
 import frappe
-from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, getdate, nowdate
 
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
@@ -14,9 +13,10 @@ from marketplace_integrations.services.sales_order_sync import (
 	get_current_sync_status,
 	sync_sales_order,
 )
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
-class IntegrationTestSalesOrderSync(IntegrationTestCase):
+class IntegrationTestSalesOrderSync(CleanupTestCase):
 	def setUp(self):
 		self.suffix = frappe.generate_hash(length=8)
 		self.company = frappe.defaults.get_global_default("company")

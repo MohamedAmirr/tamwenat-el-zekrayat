@@ -4,7 +4,7 @@
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase, UnitTestCase
+from frappe.tests import UnitTestCase
 
 from marketplace_integrations.integrations.shopify.webhooks import (
 	MAX_WEBHOOK_DELIVERY_ATTEMPTS,
@@ -14,6 +14,7 @@ from marketplace_integrations.integrations.shopify.webhooks import (
 	sync_webhook_subscriptions,
 	verify_shopify_hmac,
 )
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 EXECUTE_TARGET = "marketplace_integrations.integrations.shopify.client.ShopifyClient.execute"
 
@@ -100,7 +101,7 @@ class UnitTestVerifyShopifyHmac(UnitTestCase):
 		)
 
 
-class IntegrationTestSyncWebhookSubscriptions(IntegrationTestCase):
+class IntegrationTestSyncWebhookSubscriptions(CleanupTestCase):
 	def setUp(self):
 		self.connection = make_connection(f"Sync Webhooks {frappe.generate_hash(length=8)}")
 
@@ -312,7 +313,7 @@ class IntegrationTestSyncWebhookSubscriptions(IntegrationTestCase):
 		self.assertEqual(self.connection.webhook_registration_status, "Error")
 
 
-class IntegrationTestProcessShopifyWebhook(IntegrationTestCase):
+class IntegrationTestProcessShopifyWebhook(CleanupTestCase):
 	def setUp(self):
 		self.connection = make_connection(f"Process Webhook {frappe.generate_hash(length=8)}")
 
@@ -462,7 +463,7 @@ def make_delivery(connection, webhook_id, **kwargs):
 	return frappe.get_doc(doc).insert()
 
 
-class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
+class IntegrationTestRetryErroredWebhookDeliveries(CleanupTestCase):
 	def setUp(self):
 		self.connection = make_connection(f"Retry Sweep {frappe.generate_hash(length=8)}")
 
@@ -604,7 +605,7 @@ class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
 		self.assertEqual(poison.attempt_count, 1)
 
 
-class UnitTestProcessDeliveryAtomicIncrement(IntegrationTestCase):
+class UnitTestProcessDeliveryAtomicIncrement(CleanupTestCase):
 	def test_attempt_count_increment_is_atomic_under_a_simulated_race(self):
 		# Simulates two concurrent callers (e.g. the sweep and a simultaneous
 		# Shopify redelivery) both trying to process the same already-

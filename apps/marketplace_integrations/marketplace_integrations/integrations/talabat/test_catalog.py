@@ -4,7 +4,6 @@
 from unittest.mock import MagicMock, patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.integrations.talabat.catalog import (
 	disable_mapping,
@@ -12,6 +11,7 @@ from marketplace_integrations.integrations.talabat.catalog import (
 	get_mapped_items,
 	upsert_mapping,
 )
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
 def _response(body, status_code=200):
@@ -22,7 +22,7 @@ def _response(body, status_code=200):
 	return response
 
 
-class IntegrationTestTalabatCatalog(IntegrationTestCase):
+class IntegrationTestTalabatCatalog(CleanupTestCase):
 	def setUp(self):
 		suffix = frappe.generate_hash(length=10)
 		self.item = self._make_item(f"TEST-MKT-CATALOG-{suffix}")

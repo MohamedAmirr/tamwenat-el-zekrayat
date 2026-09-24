@@ -6,9 +6,9 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 import requests
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.integrations.talabat.client import TalabatClient
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
 def _mock_token_response(access_token, expires_in=7200):
@@ -41,7 +41,7 @@ def make_connection(connection_name, **kwargs):
 	return frappe.get_doc(doc).insert()
 
 
-class IntegrationTestTalabatClient(IntegrationTestCase):
+class IntegrationTestTalabatClient(CleanupTestCase):
 	def setUp(self):
 		self.connection = make_connection("Test Client Connection")
 		self.client = TalabatClient(self.connection.name)

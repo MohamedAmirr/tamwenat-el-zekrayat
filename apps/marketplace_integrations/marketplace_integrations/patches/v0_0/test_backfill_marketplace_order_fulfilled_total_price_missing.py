@@ -2,15 +2,15 @@
 # For license information, please see license.txt
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.patches.v0_0.backfill_marketplace_order_fulfilled_total_price_missing import (
 	execute,
 )
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
-class IntegrationTestBackfillMarketplaceOrderFulfilledTotalPriceMissing(IntegrationTestCase):
+class IntegrationTestBackfillMarketplaceOrderFulfilledTotalPriceMissing(CleanupTestCase):
 	def make_account(self):
 		suffix = frappe.generate_hash(length=8)
 		connection = frappe.get_doc(

@@ -9,10 +9,11 @@ from decimal import Decimal
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase, UnitTestCase
+from frappe.tests import UnitTestCase
 
 from marketplace_integrations.integrations.shopify import catalog_push
 from marketplace_integrations.integrations.shopify.test_products import make_item, make_shopify_account
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 EXECUTE_TARGET = "marketplace_integrations.integrations.shopify.client.ShopifyClient.execute"
 
@@ -45,7 +46,7 @@ def _currency_only_dispatcher(currency="USD"):
 	return _side_effect
 
 
-class IntegrationTestValidatePushAccount(IntegrationTestCase):
+class IntegrationTestValidatePushAccount(CleanupTestCase):
 	def setUp(self):
 		self.suffix = frappe.generate_hash(length=8)
 		self.price_list = (
@@ -96,7 +97,7 @@ class IntegrationTestValidatePushAccount(IntegrationTestCase):
 		self.assertEqual(price_list.name, self.price_list)
 
 
-class UnitTestGroupByProduct(IntegrationTestCase):
+class UnitTestGroupByProduct(CleanupTestCase):
 	def test_splits_valid_and_invalid_identities(self):
 		valid = frappe._dict(
 			name="MPM-1",
@@ -117,7 +118,7 @@ class UnitTestGroupByProduct(IntegrationTestCase):
 		self.assertEqual({row[0].name for row in local_errors}, {"MPM-2", "MPM-3"})
 
 
-class IntegrationTestPushCatalog(IntegrationTestCase):
+class IntegrationTestPushCatalog(CleanupTestCase):
 	def setUp(self):
 		self.suffix = frappe.generate_hash(length=8)
 		self.price_list = (
@@ -436,7 +437,7 @@ class UnitTestFormatMoney(UnitTestCase):
 		self.assertEqual(formatted, "123456789.123456789")
 
 
-class IntegrationTestQueueCatalogPush(IntegrationTestCase):
+class IntegrationTestQueueCatalogPush(CleanupTestCase):
 	"""Mirrors integrations/shopify/test_products.py's
 	IntegrationTestQueueCatalogSweep - same dedup-rejection shape, adapted for
 	one job PER ACCOUNT rather than a single account-scoped sweep job."""

@@ -6,16 +6,16 @@ from unittest.mock import patch
 
 import frappe
 import frappe.share
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api.talabat_catalog import (
 	queue_catalog_sync,
 	queue_mapping_catalog_sync,
 	queue_mappings_catalog_sync,
 )
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
-class IntegrationTestTalabatCatalogApi(IntegrationTestCase):
+class IntegrationTestTalabatCatalogApi(CleanupTestCase):
 	def setUp(self):
 		suffix = frappe.generate_hash(length=8)
 		warehouse = frappe.get_all(

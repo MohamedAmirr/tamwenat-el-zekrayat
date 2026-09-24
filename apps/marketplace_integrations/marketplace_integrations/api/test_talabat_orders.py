@@ -4,7 +4,6 @@
 from unittest.mock import MagicMock, patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api.talabat_orders import (
 	import_vendor_orders,
@@ -12,6 +11,7 @@ from marketplace_integrations.api.talabat_orders import (
 	update_order,
 )
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
 def _response(body, status_code=200):
@@ -97,7 +97,7 @@ def _sample_normalized_order(order_id="order-001", **overrides):
 	return order
 
 
-class IntegrationTestRefreshOrder(IntegrationTestCase):
+class IntegrationTestRefreshOrder(CleanupTestCase):
 	"""Tests for refresh_order API."""
 
 	def setUp(self):
@@ -310,7 +310,7 @@ class IntegrationTestRefreshOrder(IntegrationTestCase):
 		self.assertEqual(self.order.external_status, "READY_FOR_PICKUP")
 
 
-class IntegrationTestImportVendorOrders(IntegrationTestCase):
+class IntegrationTestImportVendorOrders(CleanupTestCase):
 	"""Tests for import_vendor_orders API."""
 
 	def setUp(self):

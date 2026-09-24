@@ -5,12 +5,12 @@ from unittest.mock import MagicMock, patch
 from urllib.parse import quote
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.integrations.talabat import orders as talabat_orders
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
-class TestOrderUpdatePayloadValidation(IntegrationTestCase):
+class TestOrderUpdatePayloadValidation(CleanupTestCase):
 	def test_not_found_requires_only_pricing_type(self):
 		talabat_orders.validate_order_update(
 			{
@@ -129,7 +129,7 @@ def _make_account(account_name, connection, **kwargs):
 	return frappe.get_doc(doc).insert()
 
 
-class IntegrationTestTalabatOrdersAccountResolution(IntegrationTestCase):
+class IntegrationTestTalabatOrdersAccountResolution(CleanupTestCase):
 	"""Tests for account resolution and authorization."""
 
 	def test_get_account_resolves_valid_talabat_account_and_connection(self):
@@ -203,7 +203,7 @@ class IntegrationTestTalabatOrdersAccountResolution(IntegrationTestCase):
 				talabat_orders.get_account(account.name)
 
 
-class IntegrationTestTalabatOrdersRetrieval(IntegrationTestCase):
+class IntegrationTestTalabatOrdersRetrieval(CleanupTestCase):
 	"""Tests for order retrieval functions."""
 
 	def setUp(self):

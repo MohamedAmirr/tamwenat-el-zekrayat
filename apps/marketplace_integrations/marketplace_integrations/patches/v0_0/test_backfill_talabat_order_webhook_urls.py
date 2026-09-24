@@ -4,12 +4,12 @@
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.patches.v0_0.backfill_talabat_order_webhook_urls import execute
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
-class IntegrationTestBackfillTalabatOrderWebhookUrls(IntegrationTestCase):
+class IntegrationTestBackfillTalabatOrderWebhookUrls(CleanupTestCase):
 	def test_backfills_blank_urls_without_replacing_existing_values(self):
 		suffix = frappe.generate_hash(length=8)
 		blank = frappe.get_doc(

@@ -4,10 +4,10 @@
 from unittest.mock import MagicMock, patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, nowdate
 
 from marketplace_integrations.integrations.talabat import catalog_sync
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
 def _response(body, status_code=202):
@@ -17,7 +17,7 @@ def _response(body, status_code=202):
 	return response
 
 
-class IntegrationTestTalabatCatalogSync(IntegrationTestCase):
+class IntegrationTestTalabatCatalogSync(CleanupTestCase):
 	def setUp(self):
 		self.suffix = frappe.generate_hash(length=8)
 		self.warehouse = frappe.get_all(

@@ -4,14 +4,14 @@
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api.marketplace_order_presentation import get_item_presentation
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 from marketplace_integrations.services.order_price_presentation import not_mapped_reason
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
-class IntegrationTestMarketplaceOrderPresentation(IntegrationTestCase):
+class IntegrationTestMarketplaceOrderPresentation(CleanupTestCase):
     def setUp(self):
         self.suffix = frappe.generate_hash(length=8)
         self.warehouse = frappe.get_all(

@@ -2,7 +2,8 @@
 # For license information, please see license.txt
 
 import frappe
-from frappe.tests import IntegrationTestCase
+
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
 def make_connection(connection_name, **kwargs):
@@ -34,7 +35,7 @@ def make_delivery(connection, webhook_id, **kwargs):
 	return frappe.get_doc(doc).insert()
 
 
-class IntegrationTestShopifyWebhookDelivery(IntegrationTestCase):
+class IntegrationTestShopifyWebhookDelivery(CleanupTestCase):
 	def setUp(self):
 		self.connection = make_connection(f"Delivery Connection {frappe.generate_hash(length=8)}")
 

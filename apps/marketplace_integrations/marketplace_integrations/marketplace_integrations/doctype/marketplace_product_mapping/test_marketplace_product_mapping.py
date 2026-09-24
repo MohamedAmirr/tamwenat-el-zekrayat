@@ -2,12 +2,12 @@
 # For license information, please see license.txt
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_product_mapping.marketplace_product_mapping import (
 	compute_mapping_identity_key,
 )
 from marketplace_integrations.services.mappings import resolve_item, resolve_mapping
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 # No platform-specific "Connection" DocType exists yet (Talabat Connection
 # lands under #37/#38) - same stand-in rationale as
@@ -51,7 +51,7 @@ TEST_ITEM = "TEST-MPM-ITEM"
 TEST_ITEM_2 = "TEST-MPM-ITEM-2"
 
 
-class IntegrationTestMarketplaceProductMapping(IntegrationTestCase):
+class IntegrationTestMarketplaceProductMapping(CleanupTestCase):
 	def setUp(self):
 		for item_code in (TEST_ITEM, TEST_ITEM_2):
 			if not frappe.db.exists("Item", item_code):

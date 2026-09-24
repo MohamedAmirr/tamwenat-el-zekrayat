@@ -4,11 +4,11 @@
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_account.marketplace_account import (
     compute_account_identity_key,
 )
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 # #103's Shopify shop-GID / Location cross-checks call
 # integrations/shopify/locations.py's fetch_shop_and_active_locations(), which
@@ -61,7 +61,7 @@ OTHER_DOCTYPE_RECORD = "Products"
 IGNORE_TEST_RECORD_DEPENDENCIES = ["Warehouse", "Company", "Price List", "Customer"]
 
 
-class IntegrationTestMarketplaceAccount(IntegrationTestCase):
+class IntegrationTestMarketplaceAccount(CleanupTestCase):
     def make_warehouse(self, warehouse_name):
         # Use the site's actual configured company rather than a hardcoded
         # "_Test Company" - this dev site was bootstrapped with its own real

@@ -4,9 +4,9 @@
 import time
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.integrations.shopify.client import get_access_token_cache_key
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
 def make_connection(connection_name, **kwargs):
@@ -27,7 +27,7 @@ def make_connection(connection_name, **kwargs):
 	return frappe.get_doc(doc).insert()
 
 
-class IntegrationTestShopifyConnection(IntegrationTestCase):
+class IntegrationTestShopifyConnection(CleanupTestCase):
 	def test_fields_persist_and_naming_is_expression_based(self):
 		connection = make_connection("Test Connection 1", shop_domain="test-connection-1.myshopify.com")
 		connection.reload()

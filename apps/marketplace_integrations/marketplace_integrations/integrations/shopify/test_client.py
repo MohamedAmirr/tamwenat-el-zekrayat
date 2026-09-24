@@ -6,7 +6,6 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 import requests
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.integrations.shopify.client import (
 	DEFAULT_THROTTLE_BACKOFF_SECONDS,
@@ -14,6 +13,7 @@ from marketplace_integrations.integrations.shopify.client import (
 	MAX_THROTTLE_BACKOFF_SECONDS,
 	ShopifyClient,
 )
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
 def _mock_token_response(access_token, expires_in=86399):
@@ -73,7 +73,7 @@ def make_connection(connection_name, **kwargs):
 	return frappe.get_doc(doc).insert()
 
 
-class IntegrationTestShopifyClient(IntegrationTestCase):
+class IntegrationTestShopifyClient(CleanupTestCase):
 	def setUp(self):
 		self.connection = make_connection("Test Client Connection")
 		self.client = ShopifyClient(self.connection.name)

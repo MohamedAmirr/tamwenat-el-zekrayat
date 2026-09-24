@@ -4,9 +4,9 @@
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api.talabat_outlet import refresh_outlet_status, set_outlet_status
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
 def _make_connection(connection_name):
@@ -37,7 +37,7 @@ def _make_account(account_name, connection):
 	).insert()
 
 
-class IntegrationTestTalabatOutletApi(IntegrationTestCase):
+class IntegrationTestTalabatOutletApi(CleanupTestCase):
 	def setUp(self):
 		suffix = frappe.generate_hash(length=8)
 		connection = _make_connection(f"Outlet API Connection {suffix}")

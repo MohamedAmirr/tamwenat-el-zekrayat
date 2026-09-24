@@ -4,9 +4,9 @@
 from unittest import mock
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.services import item_import_jobs
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
 class MemoryCache:
@@ -20,7 +20,7 @@ class MemoryCache:
 		self.values[key] = value
 
 
-class IntegrationTestItemImportJobs(IntegrationTestCase):
+class IntegrationTestItemImportJobs(CleanupTestCase):
 	def test_queue_export_stores_an_owner_scoped_result_and_uses_the_long_queue(self):
 		cache = MemoryCache()
 		with (

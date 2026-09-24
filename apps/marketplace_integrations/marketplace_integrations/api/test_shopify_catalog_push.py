@@ -10,12 +10,12 @@ and whitelisting metadata, mirroring api/test_shopify_products.py's shape.
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api.shopify_catalog_push import get_catalog_push_status, queue_catalog_push
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
-class IntegrationTestShopifyCatalogPushApi(IntegrationTestCase):
+class IntegrationTestShopifyCatalogPushApi(CleanupTestCase):
 	def test_queue_catalog_push_delegates(self):
 		with patch(
 			"marketplace_integrations.integrations.shopify.catalog_push.queue_catalog_push",

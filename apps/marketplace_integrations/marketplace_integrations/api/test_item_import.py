@@ -5,11 +5,11 @@ from io import BytesIO
 from unittest import mock
 
 import frappe
-from frappe.tests import IntegrationTestCase
 from frappe.utils.xlsxutils import make_xlsx
 from openpyxl import load_workbook
 
 from marketplace_integrations.api import item_import
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 # This test module lives outside any doctype/ folder, so
 # UnitTestCase.setUpClass() can't derive a doctype from its path
@@ -22,7 +22,7 @@ ITEM_GROUP = "Products"
 UOM = "Nos"
 
 
-class IntegrationTestItemImport(IntegrationTestCase):
+class IntegrationTestItemImport(CleanupTestCase):
 	def setUp(self):
 		self._counter = 0
 

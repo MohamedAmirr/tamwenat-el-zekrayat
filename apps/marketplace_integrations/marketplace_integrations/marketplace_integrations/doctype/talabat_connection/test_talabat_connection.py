@@ -4,7 +4,8 @@
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
+
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
 def make_connection(connection_name, **kwargs):
@@ -20,7 +21,7 @@ def make_connection(connection_name, **kwargs):
 	return frappe.get_doc(doc).insert()
 
 
-class IntegrationTestTalabatConnection(IntegrationTestCase):
+class IntegrationTestTalabatConnection(CleanupTestCase):
 	def test_fields_persist_and_naming_is_expression_based(self):
 		connection = make_connection("Test Connection 1")
 		connection.reload()

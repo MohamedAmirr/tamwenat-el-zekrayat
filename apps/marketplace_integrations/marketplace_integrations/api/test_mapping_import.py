@@ -4,18 +4,18 @@
 from io import BytesIO
 
 import frappe
-from frappe.tests import IntegrationTestCase
 from frappe.utils.xlsxutils import make_xlsx
 from openpyxl import load_workbook
 
 from marketplace_integrations.api import mapping_import
 from marketplace_integrations.services import mapping_import as mapping_import_service
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 UOM = "Nos"
 ITEM_GROUP = "Products"
 
 
-class IntegrationTestMappingImport(IntegrationTestCase):
+class IntegrationTestMappingImport(CleanupTestCase):
 	def setUp(self):
 		self._counter = 0
 

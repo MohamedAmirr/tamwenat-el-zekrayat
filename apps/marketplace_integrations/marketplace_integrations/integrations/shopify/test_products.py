@@ -10,7 +10,6 @@ marketplace_account/test_marketplace_account.py for the same pattern."""
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.integrations.shopify import products
 from marketplace_integrations.integrations.shopify.constants import SHOPIFY_NODES_LOOKUP_CHUNK_SIZE
@@ -23,6 +22,7 @@ from marketplace_integrations.integrations.shopify.products import (
 	run_catalog_sweep,
 	upsert_mapping,
 )
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 EXECUTE_TARGET = "marketplace_integrations.integrations.shopify.client.ShopifyClient.execute"
 FETCH_SHOP_AND_ACTIVE_LOCATIONS = (
@@ -88,7 +88,7 @@ def make_item(item_code):
 	return item_code
 
 
-class IntegrationTestGetAccount(IntegrationTestCase):
+class IntegrationTestGetAccount(CleanupTestCase):
 	def test_rejects_non_shopify_account(self):
 		account = make_shopify_account("Test Non-Shopify Account")
 		account.db_set("platform", "Talabat", update_modified=False)
@@ -97,7 +97,7 @@ class IntegrationTestGetAccount(IntegrationTestCase):
 			get_account(account.name)
 
 
-class IntegrationTestIsVariantGid(IntegrationTestCase):
+class IntegrationTestIsVariantGid(CleanupTestCase):
 	def test_valid_gid(self):
 		self.assertTrue(_is_variant_gid("gid://shopify/ProductVariant/123"))
 
@@ -109,7 +109,7 @@ class IntegrationTestIsVariantGid(IntegrationTestCase):
 		self.assertFalse(_is_variant_gid("SKU-001"))
 
 
-class IntegrationTestUpsertMapping(IntegrationTestCase):
+class IntegrationTestUpsertMapping(CleanupTestCase):
 	def setUp(self):
 		self.account = make_shopify_account("Test Upsert Account")
 		self.item = make_item("Test Shopify Upsert Item")
@@ -146,36 +146,10 @@ class IntegrationTestUpsertMapping(IntegrationTestCase):
 		self.assertEqual(mapping.item, other_item)
 
 
-class IntegrationTestRunCatalogSweep(IntegrationTestCase):
+class IntegrationTestRunCatalogSweep(CleanupTestCase):
 	def setUp(self):
 		self.account = make_shopify_account(f"Test Sweep Account {frappe.generate_hash(length=8)}")
 		self.item = make_item("Test Shopify Sweep Item")
-
-	def tearDown(self):
-		# Review finding #2's frappe.db.commit() (added to
-		# _refresh_mapping_descriptive_fields()) is reachable from several
-		# tests in this class - per docs/frappe-conventions.md's commit/test
-		# transaction gotcha, that permanently persists this test's rows past
-		# IntegrationTestCase's normal class-scoped rollback. Explicitly clean
-		# up here rather than relying on that rollback, which a commit()
-		# already defeats for whatever was in the transaction at that point.
-		frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": self.account.name})
-		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
-		frappe.delete_doc(
-			"Shopify Connection", self.account.connection, ignore_permissions=True, force=True
-		)
-		# Review finding #7: this class's setUp() creates self.item via
-		# make_item(), same gotcha as above - the commit() reachable from
-		# _refresh_mapping_descriptive_fields() makes it permanent too, and
-		# it's never deleted anywhere else.
-		if frappe.db.exists("Item", self.item):
-			frappe.delete_doc("Item", self.item, ignore_permissions=True, force=True)
-		# The commit() above (if a test reached it) already made this test's
-		# account/connection/item permanent - these deletes must be committed
-		# too, in the SAME way, or they'd only land in a fresh post-commit
-		# transaction that the class-level rollback then undoes right back to
-		# "still present", silently defeating this whole cleanup.
-		frappe.db.commit()
 
 	def _run(self, side_effect):
 		job_id = frappe.generate_hash(length=8)
@@ -438,17 +412,11 @@ class IntegrationTestRunCatalogSweep(IntegrationTestCase):
 		self.assertEqual(exceptions[0]["external_reference"], "gid://shopify/ProductVariant/50")
 
 
-class IntegrationTestQueueCatalogSweep(IntegrationTestCase):
+class IntegrationTestQueueCatalogSweep(CleanupTestCase):
 	"""Review finding #2: dedup-rejection path was previously untested."""
 
 	def setUp(self):
 		self.account = make_shopify_account(f"Test Queue Account {frappe.generate_hash(length=8)}")
-
-	def tearDown(self):
-		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
-		frappe.delete_doc(
-			"Shopify Connection", self.account.connection, ignore_permissions=True, force=True
-		)
 
 	def test_dedup_rejection_throws_and_clears_queued_cache_entry(self):
 		# frappe.enqueue() returns None when it silently skips a deduplicated
@@ -477,17 +445,11 @@ class IntegrationTestQueueCatalogSweep(IntegrationTestCase):
 		self.assertEqual(state["processed"], 0)
 
 
-class IntegrationTestMaxExceptionsTruncation(IntegrationTestCase):
+class IntegrationTestMaxExceptionsTruncation(CleanupTestCase):
 	"""Review finding #2: MAX_EXCEPTIONS_RETURNED truncation was untested."""
 
 	def setUp(self):
 		self.account = make_shopify_account(f"Test Truncate Account {frappe.generate_hash(length=8)}")
-
-	def tearDown(self):
-		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
-		frappe.delete_doc(
-			"Shopify Connection", self.account.connection, ignore_permissions=True, force=True
-		)
 
 	def test_more_than_max_exceptions_are_truncated(self):
 		nodes = [
@@ -514,7 +476,7 @@ class IntegrationTestMaxExceptionsTruncation(IntegrationTestCase):
 		self.assertTrue(result["truncated"])
 
 
-class IntegrationTestGetSweepStatusOwnerScoping(IntegrationTestCase):
+class IntegrationTestGetSweepStatusOwnerScoping(CleanupTestCase):
 	"""Review finding #2: get_sweep_status()'s owner scoping was untested."""
 
 	def test_rejects_status_lookup_for_a_different_owner(self):

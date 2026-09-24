@@ -2,12 +2,12 @@
 # For license information, please see license.txt
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_order.marketplace_order import (
     compute_order_identity_key,
 )
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 # Marketplace Account has a required Dynamic Link that generic test-record
 # generation cannot satisfy. Sales Order is intentionally only a future Link
@@ -15,7 +15,7 @@ from marketplace_integrations.services.marketplace_orders import upsert_marketpl
 IGNORE_TEST_RECORD_DEPENDENCIES = ["Marketplace Account", "Sales Order"]
 
 
-class IntegrationTestMarketplaceOrder(IntegrationTestCase):
+class IntegrationTestMarketplaceOrder(CleanupTestCase):
     def make_account(self):
         suffix = frappe.generate_hash(length=8)
         connection = frappe.get_doc(

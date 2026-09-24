@@ -4,11 +4,11 @@
 from unittest.mock import MagicMock, patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api import talabat_webhooks
 from marketplace_integrations.integrations.talabat.catalog_feedback import process_catalog_feedback
 from marketplace_integrations.integrations.talabat.order_events import process_order_event
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
 def _make_connection(connection_name, **kwargs):
@@ -55,7 +55,7 @@ def _payload(account, order_id="webhook-order-001", **overrides):
 	return payload
 
 
-class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
+class IntegrationTestTalabatOrderWebhook(CleanupTestCase):
 	def setUp(self):
 		suffix = frappe.generate_hash(length=8)
 		self.connection = _make_connection(f"Webhook Connection {suffix}")
@@ -235,7 +235,7 @@ def _catalog_payload(account, job_id="job-001", **overrides):
 	return payload
 
 
-class IntegrationTestTalabatCatalogFeedbackWebhook(IntegrationTestCase):
+class IntegrationTestTalabatCatalogFeedbackWebhook(CleanupTestCase):
 	def setUp(self):
 		suffix = frappe.generate_hash(length=8)
 		self.connection = _make_connection(f"Catalog Webhook Connection {suffix}")

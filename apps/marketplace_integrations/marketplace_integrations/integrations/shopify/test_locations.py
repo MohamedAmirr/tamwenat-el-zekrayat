@@ -10,9 +10,9 @@ GraphQL call."""
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.integrations.shopify.locations import fetch_shop_and_active_locations
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 EXECUTE_TARGET = "marketplace_integrations.integrations.shopify.client.ShopifyClient.execute"
 
@@ -33,7 +33,7 @@ def make_connection(connection_name, **kwargs):
     return frappe.get_doc(doc).insert()
 
 
-class IntegrationTestFetchShopAndActiveLocations(IntegrationTestCase):
+class IntegrationTestFetchShopAndActiveLocations(CleanupTestCase):
     def setUp(self):
         self.connection = make_connection("Test Locations Connection")
 

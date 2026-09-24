@@ -16,7 +16,6 @@ that permission enforcement itself is reachable from here."""
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api.shopify_products import (
 	get_catalog_sweep_status,
@@ -24,9 +23,10 @@ from marketplace_integrations.api.shopify_products import (
 	upsert_mapping,
 )
 from marketplace_integrations.integrations.shopify.test_products import make_shopify_account
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
-class IntegrationTestShopifyProductsApi(IntegrationTestCase):
+class IntegrationTestShopifyProductsApi(CleanupTestCase):
 	def test_queue_catalog_sweep_delegates(self):
 		with patch(
 			"marketplace_integrations.integrations.shopify.products.queue_catalog_sweep",
@@ -92,7 +92,7 @@ def _make_role_only_user(email_prefix):
 	).insert()
 
 
-class IntegrationTestShopifyProductsApiPermissions(IntegrationTestCase):
+class IntegrationTestShopifyProductsApiPermissions(CleanupTestCase):
 	"""Exercises actual permission rejection through the real (unmocked)
 	api.shopify_products.queue_catalog_sweep() boundary - see this module's
 	docstring."""

@@ -13,13 +13,13 @@ calls without any Talabat-specific account validation.
 from decimal import Decimal
 
 import frappe
-from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, nowdate
 
 from marketplace_integrations.services import listing_price
+from marketplace_integrations.testing_utils import CleanupTestCase
 
 
-class IntegrationTestListingPrice(IntegrationTestCase):
+class IntegrationTestListingPrice(CleanupTestCase):
 	def setUp(self):
 		self.suffix = frappe.generate_hash(length=8)
 		self.price_list = (

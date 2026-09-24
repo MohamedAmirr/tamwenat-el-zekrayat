@@ -282,3 +282,5 @@ The following must be designed in their own issues using authoritative platform/
 - #34 — Item workbook import/export (implemented)
 - #36 — Marketplace Product Management imports
 - #8 — Talabat migration
+
+- **Test cleanup** (`marketplace_integrations/testing_utils.py`, `marketplace_integrations/test_cleanup.py`) — `CleanupTestCase` (base for every DB-touching test class) deletes the rows each test leaves behind in leak-prone doctypes, since code under test commits mid-test; see `docs/frappe-conventions.md`, "Shared fixture cleanup".
