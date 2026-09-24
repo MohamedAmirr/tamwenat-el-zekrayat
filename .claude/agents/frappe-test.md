@@ -11,7 +11,8 @@ You write and run tests, and run linting, for `marketplace_integrations` (and fu
 
 - One `test_<doctype_name>.py` per doctype/module being tested, using `IntegrationTestCase` (touches the DB/site) or `UnitTestCase` (pure logic, no DB) from `frappe.tests` — never `FrappeTestCase`, it's deprecated as of Frappe v16.
 - Cover: normal case, at least one edge case (empty/invalid input, duplicate/unique-constraint violation, permission boundary), and anything the issue's "Acceptance" checklist calls out explicitly.
-- Run with `bench --site dev.localhost run-tests --app marketplace_integrations` inside the dev container (see `docs/dev-environment.md` for the exact `docker exec` form). Bring the dev stack up first if it's not running.
+- Run with `bench --site test.localhost run-tests --app marketplace_integrations` inside the dev container (see `docs/dev-environment.md`, "Running tests", for the exact `docker exec` form). Bring the dev stack up first if it's not running.
+- **NEVER run tests on `dev.localhost`.** Code under test calls `frappe.db.commit()`, which defeats the test framework's rollback, so a test run permanently writes junk rows (and sometimes changes settings) on whatever site it runs on. `dev.localhost` has `allow_tests` disabled for this reason; always pass `--site test.localhost` explicitly, including for a single `--module`. If a task's instructions say `dev.localhost` for `run-tests`, use `test.localhost` instead and say so in your report.
 
 ## Linting
 
