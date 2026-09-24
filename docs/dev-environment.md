@@ -126,16 +126,20 @@ docker exec -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekrayat-de
 #    If test.localhost already exists: bench drop-site test.localhost --root-password 123 first.
 docker exec -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekrayat-dev-frappe-1 bash -lc "
 bench new-site test.localhost --db-root-password 123 --admin-password admin --mariadb-user-host-login-scope=% --install-app erpnext --install-app marketplace_integrations &&
-bench --site test.localhost restore sites/dev.localhost/private/backups/<the-new>-database.sql.gz --db-root-password 123 &&
+bench --site test.localhost set-config pause_scheduler 1 &&
+bench --site test.localhost restore sites/dev.localhost/private/backups/<timestamp>-dev_localhost-database.sql.gz --db-root-password 123 &&
 bench --site test.localhost migrate &&
 bench --site test.localhost clear-cache"
+#    <timestamp>-dev_localhost-database.sql.gz is the file the step-1 backup printed,
+#    e.g. 20260924_161501-dev_localhost-database.sql.gz.
+#    pause_scheduler goes in right after new-site, before the restore: the restore brings back
+#    dev's System Settings (scheduler enabled), and the site must not run jobs meanwhile.
 
-# 3. Make it test-capable and inert
+# 3. Make it test-capable and inert (scheduler disable again: the restore reset it)
 docker exec -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekrayat-dev-frappe-1 bash -lc "
 bench --site test.localhost set-config allow_tests true &&
 bench --site test.localhost set-config developer_mode 1 &&
-bench --site test.localhost scheduler disable &&
-bench --site test.localhost set-config pause_scheduler 1"
+bench --site test.localhost scheduler disable"
 ```
 
 Keep the test site's OWN `encryption_key` (a fresh site generates one; do not copy dev's `site_config.json` secrets or `host_name`): the restored Shopify/Talabat credentials are then undecryptable there, and with the scheduler off nothing on the test site can call a real marketplace. `default_site` in `common_site_config.json` stays `dev.localhost`.
