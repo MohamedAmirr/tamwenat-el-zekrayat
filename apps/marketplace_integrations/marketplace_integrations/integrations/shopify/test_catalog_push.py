@@ -5,10 +5,11 @@
 Shopify call - mirroring integrations/shopify/test_products.py's pattern.
 """
 
+from decimal import Decimal
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
+from frappe.tests import IntegrationTestCase, UnitTestCase
 
 from marketplace_integrations.integrations.shopify import catalog_push
 from marketplace_integrations.integrations.shopify.test_products import make_item, make_shopify_account
@@ -350,6 +351,90 @@ class IntegrationTestPushCatalog(IntegrationTestCase):
 		for mapping_name in mapping_names:
 			self.assertEqual(frappe.db.get_value(catalog_push.MAPPING_DOCTYPE, mapping_name, "sync_status"), "Synced")
 
+	def test_pushed_variables_carry_the_correct_resolved_price_and_allow_partial_updates(self):
+		"""Review finding #4: assert the exact price string placed into the
+		mutation's own variables, and that allowPartialUpdates: True is
+		present - not just sync_status/last_error as the tests above check.
+		Includes a distractor Item Price on a DIFFERENT Price List, to prove
+		the pushed price is the account's own configured Price List's price,
+		not the distractor's."""
+		other_price_list = (
+			frappe.get_doc(
+				{
+					"doctype": "Price List",
+					"price_list_name": f"Distractor Price List {self.suffix}",
+					"currency": "USD",
+					"selling": 1,
+					"enabled": 1,
+				}
+			)
+			.insert()
+			.name
+		)
+		# Distractor: same Item, correct uom, WRONG Price List.
+		frappe.get_doc(
+			{
+				"doctype": "Item Price",
+				"price_list": other_price_list,
+				"item_code": self.item,
+				"uom": "Nos",
+				"price_list_rate": 999.99,
+				"selling": 1,
+			}
+		).insert()
+		# The correct price: this account's own Price List, at the Item's
+		# stock UOM ("Nos" - see test_products.py's make_item()).
+		self._make_price(19.99)
+		mapping = self._make_mapping("gid://shopify/ProductVariant/50", "gid://shopify/Product/50")
+
+		captured_variables = []
+
+		def _side_effect(query, variables=None):
+			if "currencyCode" in query:
+				return {"shop": {"currencyCode": "USD"}}
+			if "productVariantsBulkUpdate" in query:
+				captured_variables.append(variables)
+				returned = [{"id": variant["id"]} for variant in variables["variants"]]
+				return {"productVariantsBulkUpdate": {"productVariants": returned, "userErrors": []}}
+			raise AssertionError(f"Unexpected query in test: {query}")
+
+		with patch(EXECUTE_TARGET, side_effect=_side_effect):
+			catalog_push.push_catalog("job-price", "Administrator", self.account.name, [mapping.name])
+
+		self.assertEqual(len(captured_variables), 1)
+		variables = captured_variables[0]
+		self.assertIs(variables["allowPartialUpdates"], True)
+		self.assertEqual(len(variables["variants"]), 1)
+		self.assertEqual(variables["variants"][0]["id"], "gid://shopify/ProductVariant/50")
+		self.assertEqual(variables["variants"][0]["price"], "19.99")
+
+		mapping.reload()
+		self.assertEqual(mapping.sync_status, "Synced")
+
+
+class UnitTestFormatMoney(UnitTestCase):
+	"""Direct coverage for _format_money() (review finding #4) - see
+	docs/frappe-conventions.md's Decimal-formatting-for-external-payloads
+	entry for why str(Decimal(...)) is unsafe for a very small/precisely
+	scaled value."""
+
+	def test_plain_values_render_as_fixed_point(self):
+		self.assertEqual(catalog_push._format_money(Decimal("19.99")), "19.99")
+		self.assertEqual(catalog_push._format_money(Decimal("100")), "100")
+		self.assertEqual(catalog_push._format_money(Decimal("0")), "0")
+
+	def test_very_small_value_never_renders_as_scientific_notation(self):
+		# Decimal("0.0000001")'s default str() form is "1E-7" - exactly the
+		# footgun _format_money() exists to avoid.
+		formatted = catalog_push._format_money(Decimal("0.0000001"))
+		self.assertEqual(formatted, "0.0000001")
+		self.assertNotIn("E", formatted.upper())
+
+	def test_large_precisely_scaled_value_never_renders_as_scientific_notation(self):
+		formatted = catalog_push._format_money(Decimal("123456789.123456789"))
+		self.assertNotIn("E", formatted.upper())
+		self.assertEqual(formatted, "123456789.123456789")
+
 
 class IntegrationTestQueueCatalogPush(IntegrationTestCase):
 	"""Mirrors integrations/shopify/test_products.py's
@@ -457,3 +542,41 @@ class IntegrationTestQueueCatalogPush(IntegrationTestCase):
 		self.assertEqual(result["jobs"][0]["account"], other_account.name)
 		self.assertEqual(len(result["skipped_accounts"]), 1)
 		self.assertEqual(result["skipped_accounts"][0]["account"], self.account.name)
+
+	def test_misconfigured_account_is_skipped_but_does_not_block_a_valid_account(self):
+		"""Review finding #2: a per-account tolerant validation loop - one
+		misconfigured account (here: no Selling Price List) must not prevent
+		another, validly configured account in the same request from being
+		queued. Previously a single misconfigured account's frappe.throw()
+		aborted the whole request, queuing zero accounts."""
+		self.account.db_set("erpnext_selling_price_list", None, update_modified=False)
+
+		other_account = make_shopify_account(f"Queue Push Valid Account {self.suffix}")
+		other_account.db_set("erpnext_selling_price_list", self.price_list, update_modified=False)
+		other_account.reload()
+		other_item = make_item(f"Queue Push Valid Item {self.suffix}")
+		other_mapping = frappe.get_doc(
+			{
+				"doctype": "Marketplace Product Mapping",
+				"marketplace_account": other_account.name,
+				"item": other_item,
+				"external_reference": "gid://shopify/ProductVariant/300",
+				"external_product_id": "gid://shopify/Product/300",
+			}
+		).insert()
+
+		fake_job = object()
+		with (
+			patch(EXECUTE_TARGET) as mocked_execute,
+			patch("frappe.enqueue", return_value=fake_job) as mocked_enqueue,
+		):
+			result = catalog_push.queue_catalog_push([self.mapping.name, other_mapping.name])
+
+		mocked_execute.assert_not_called()
+		self.assertEqual(len(result["jobs"]), 1)
+		self.assertEqual(result["jobs"][0]["account"], other_account.name)
+		self.assertEqual(len(result["skipped_accounts"]), 1)
+		self.assertEqual(result["skipped_accounts"][0]["account"], self.account.name)
+		self.assertIn("Selling Price List", result["skipped_accounts"][0]["reason"])
+		mocked_enqueue.assert_called_once()
+		self.assertEqual(mocked_enqueue.call_args.kwargs["account_name"], other_account.name)

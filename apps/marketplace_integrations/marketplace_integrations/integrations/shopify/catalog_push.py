@@ -77,11 +77,19 @@ this is Shopify's own confirmation of what actually got written, not a
 best-effort inference. ``userErrors[].field`` is used only to build a nicer
 message for whichever variants did NOT come back in that list; if no
 ``userErrors`` are present at all, every variant missing from the response
-falls back to one static, generic error (never echoing a raw remote error
-body). This sidesteps the unverified ``userErrors[].field`` -> variant
-attribution shape flagged in the issue: variant identification always uses
-the documented ``id`` field on the payload's own ``productVariants`` list,
-which needs no positional/field-path guessing.
+falls back to one static, generic error. This "never echo a raw remote error
+body" rule is scoped specifically to THIS per-mapping/per-variant error path
+(``_format_user_errors()``/``REMOTE_ERROR``) - it is not a blanket rule the
+rest of this module follows. The whole-job failure path (``push_catalog()``'s
+own ``except Exception as exc: _update_push_status(..., error=str(exc))``)
+can include a length-bounded slice of Shopify's own raw response body via
+``ShopifyClient``'s exception message - matching the existing precedent in
+``products.py`` - which is fine (it is Shopify's own response, not internal
+data), just a different rule for a different failure surface. This sidesteps
+the unverified ``userErrors[].field`` -> variant attribution shape flagged in
+the issue: variant identification always uses the documented ``id`` field on
+the payload's own ``productVariants`` list, which needs no positional/field-path
+guessing.
 
 External GraphQL research citation: ``productVariantsBulkUpdate``'s
 ``productId``/``variants``/``allowPartialUpdates`` arguments and
@@ -316,29 +324,46 @@ def queue_catalog_push(mapping_names):
 	``validate_push_account()`` call), so a throttled shop can't block this
 	Desk request.
 
-	Enqueues every account that can proceed even if another account in the
-	same request is rejected as already-running (RQ dedup) - a mid-loop
+	Per-account tolerant, not all-or-nothing (review finding #2): a
+	misconfigured account (missing/disabled Price List, disabled Connection,
+	...) is added to ``skipped_accounts`` with a reason distinguishing it
+	from an "already running" rejection, while every other, validly
+	configured account in the same request still gets queued and pushed
+	normally - a single misconfigured account out of several selected can no
+	longer cause zero accounts to be pushed. Enqueues every account that can
+	proceed even if another account in the same request is rejected (either
+	as misconfigured or as already-running via RQ dedup) - a mid-loop
 	``frappe.throw()`` would otherwise discard the job ids of accounts
 	already enqueued earlier in the same loop, losing the caller's visibility
 	into pushes that are genuinely running. Returns both ``jobs`` (queued,
-	pollable) and ``skipped_accounts`` (rejected as already-running) so the
-	caller can show both outcomes together.
+	pollable) and ``skipped_accounts`` (misconfigured or already-running) so
+	the caller can show both outcomes together.
 
 	Named ``skipped_accounts`` (review finding #3), not ``skipped``, to stay
 	textually distinct from ``_push_result_payload()``'s ``skipped_mappings``
-	- the two mean different things (accounts rejected by RQ dedup here vs.
-	mappings excluded as disabled there) but both flow into the same
+	- the two mean different things (accounts rejected here vs. mappings
+	excluded as disabled there) but both flow into the same
 	``ShopifyCatalogPushStatus`` dialog.
 	"""
 	mapping_names = parse_mapping_names(mapping_names)
 	accounts = group_mappings_by_account(mapping_names)
-	for selected in accounts.values():
-		_validate_push_account_local(selected["account"])
 
 	owner = frappe.session.user
 	jobs = []
 	skipped_accounts = []
+	valid_accounts = {}
 	for account_name, selected in accounts.items():
+		try:
+			_validate_push_account_local(selected["account"])
+		except frappe.ValidationError as error:
+			frappe.clear_last_message()
+			skipped_accounts.append(
+				{"account": account_name, "reason": _config_error_message(error, account_name)}
+			)
+			continue
+		valid_accounts[account_name] = selected
+
+	for account_name, selected in valid_accounts.items():
 		job_id = frappe.generate_hash(length=16)
 		# Seed the "queued" cache entry before enqueuing - same reasoning as
 		# products.py's queue_catalog_sweep(): a fast worker could otherwise
@@ -388,7 +413,8 @@ def push_catalog(job_id_for_result, owner, account_name, mapping_names):
 		client = ShopifyClient(connection.name)
 
 		mappings = _mappings_for_push(account_doc.name, mapping_names)
-		mappings, results = _split_active_mappings(mappings)
+		item_by_name = _fetch_items({mapping.item for mapping in mappings if mapping.item})
+		mappings, results = _split_active_mappings(mappings, item_by_name)
 		groups, local_errors = group_by_product(mappings)
 
 		for mapping, message in local_errors:
@@ -399,7 +425,7 @@ def push_catalog(job_id_for_result, owner, account_name, mapping_names):
 		)
 
 		for group_index, (product_id, group_mappings) in enumerate(groups.items(), start=1):
-			results.extend(_push_product_group(client, price_list, product_id, group_mappings))
+			results.extend(_push_product_group(client, price_list, product_id, group_mappings, item_by_name))
 			# Throttled (review finding #1) - the unconditional "completed"
 			# update right after this loop always reports the true final
 			# state regardless, so skipping intermediate ticks here is safe.
@@ -424,11 +450,16 @@ def push_catalog(job_id_for_result, owner, account_name, mapping_names):
 		raise
 
 
-def _push_product_group(client, price_list, product_id, group_mappings):
+def _push_product_group(client, price_list, product_id, group_mappings, item_by_name):
 	"""Push price for one Shopify product's mapped variants and persist every
 	result (local build errors plus remote outcome) together, under one
 	savepoint/commit for the whole group - a later group's failure in the
 	same run can't roll back this group's already-finished writes.
+
+	``item_by_name`` is the caller's already-bulk-fetched
+	``{item_name: frappe._dict(name, disabled, stock_uom)}`` map (review
+	finding #1) - this function never issues its own per-mapping ``Item``
+	document load.
 
 	Variants are sent to ``productVariantsBulkUpdate`` in chunks of
 	``SHOPIFY_CATALOG_PUSH_VARIANT_CHUNK_SIZE`` (one call per chunk) so a
@@ -439,10 +470,15 @@ def _push_product_group(client, price_list, product_id, group_mappings):
 	valid_variants = []
 	mapping_by_variant_id = {}
 	for mapping in group_mappings:
+		item = item_by_name.get(mapping.item)
+		if item is None:
+			local_results.append(
+				(mapping, False, _build_error_message(_("Item {0} does not exist.").format(mapping.item)))
+			)
+			continue
 		try:
-			item = frappe.get_doc("Item", mapping.item)
 			price = resolve_listing_price(price_list, item, item.stock_uom)
-		except (CatalogBuildError, frappe.DoesNotExistError) as error:
+		except CatalogBuildError as error:
 			local_results.append((mapping, False, _build_error_message(error)))
 			continue
 		variant_id = mapping.external_reference
@@ -514,14 +550,37 @@ def _push_product_group(client, price_list, product_id, group_mappings):
 
 
 def _mappings_for_push(account_name, mapping_names):
+	"""Return the pushable fields for every selected mapping in ONE query
+	(review finding #1) - only ``name``/``item``/``enabled``/
+	``external_reference``/``external_product_id`` are ever read anywhere in
+	this module's push path, so a full ``frappe.get_doc()`` per row (which
+	also materializes every child table - barcodes, UOM conversions, taxes -
+	that nothing here uses) is unnecessary."""
 	filters = {"marketplace_account": account_name, "name": ["in", list(mapping_names)]}
-	return [
-		frappe.get_doc(MAPPING_DOCTYPE, row.name)
-		for row in frappe.get_all(MAPPING_DOCTYPE, filters=filters, fields=["name"], order_by="name asc")
-	]
+	return frappe.get_all(
+		MAPPING_DOCTYPE,
+		filters=filters,
+		fields=["name", "item", "enabled", "external_reference", "external_product_id"],
+		order_by="name asc",
+	)
 
 
-def _split_active_mappings(mappings):
+def _fetch_items(item_names):
+	"""Return ``{item_name: frappe._dict(name, disabled, stock_uom)}`` for every
+	given Item name in ONE query (review finding #1) - only ``name`` and
+	``stock_uom`` are ever used by ``resolve_listing_price()``/
+	``_push_product_group()``, and ``disabled`` by ``_split_active_mappings()``,
+	so a full per-mapping ``frappe.get_doc("Item", ...)`` (materializing every
+	child table) is unnecessary."""
+	if not item_names:
+		return {}
+	rows = frappe.get_all(
+		"Item", filters={"name": ["in", list(item_names)]}, fields=["name", "disabled", "stock_uom"]
+	)
+	return {row.name: row for row in rows}
+
+
+def _split_active_mappings(mappings, item_by_name):
 	"""Return ``(active_mappings, skipped_results)``, excluding from the push
 	any mapping that is disabled or whose linked Item is disabled - matching
 	Talabat's own active semantics
@@ -529,11 +588,19 @@ def _split_active_mappings(mappings):
 	``active = bool(mapping_doc.enabled) and not bool(item.disabled)``).
 	Nothing is attempted for a skipped mapping (no network call, no local
 	build, no sync_status write) - it is reported as ``skipped`` in the
-	result, distinguishable from an actual push failure."""
+	result, distinguishable from an actual push failure.
+
+	``item_by_name`` is the caller's already-bulk-fetched Item map (review
+	finding #1); a mapping whose ``item`` isn't in that map (e.g. a stale
+	link to a deleted Item) is treated as not-disabled here, same as the
+	prior per-row ``frappe.db.get_value()`` lookup returning ``None`` - the
+	missing Item itself still surfaces as a local build error later, in
+	``_push_product_group()``."""
 	active = []
 	skipped_results = []
 	for mapping in mappings:
-		item_disabled = frappe.db.get_value("Item", mapping.item, "disabled")
+		item = item_by_name.get(mapping.item)
+		item_disabled = item.disabled if item else 0
 		if mapping.enabled and not item_disabled:
 			active.append(mapping)
 		else:
@@ -544,6 +611,16 @@ def _split_active_mappings(mappings):
 def _build_error_message(error):
 	message = cstr(error).strip()
 	return message or REMOTE_ERROR
+
+
+def _config_error_message(error, account_name):
+	"""Return a misconfiguration error's own message, or a generic fallback
+	when that message is blank - used by ``queue_catalog_push()``'s
+	per-account tolerant validation (review finding #2)."""
+	message = cstr(error).strip()
+	return message or _("Marketplace Account {0} is not configured for Shopify catalog push.").format(
+		account_name
+	)
 
 
 def _format_money(price):

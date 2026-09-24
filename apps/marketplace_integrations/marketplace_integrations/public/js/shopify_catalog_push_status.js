@@ -54,19 +54,38 @@
 		}
 	}
 
+	// Bounded consecutive-poll-error retry budget (review finding #3): a
+	// single transient poll error (network blip, brief cache unavailability)
+	// must not permanently abandon a job the server-side worker is very
+	// likely still running - only give up after this many CONSECUTIVE
+	// failures for the same job. Reset to 0 on any successful poll.
+	const MAX_CONSECUTIVE_POLL_ERRORS = 3;
+
 	frappe.ui.ShopifyCatalogPushStatus = class ShopifyCatalogPushStatus {
 		constructor({ jobs, on_done, poll_interval = 1500 }) {
 			this.jobs = jobs || [];
 			this.on_done = on_done;
 			this.poll_interval = poll_interval;
 			this.job_states = {};
+			this.poll_error_counts = {};
 			this.finished = false;
+			this.stopped = false;
 
 			this.dialog = new frappe.ui.Dialog({
 				title: __("Pushing to Shopify"),
 				fields: [{ fieldtype: "HTML", fieldname: "status_html" }],
 			});
 			this.$status = this.dialog.fields_dict.status_html.$wrapper;
+			// Stop polling once the dialog is hidden/closed (Esc, navigating
+			// away, ...) - without this, closing the dialog left the poll loop
+			// running indefinitely against a detached DOM wrapper, issuing a
+			// get_catalog_push_status call every poll_interval per job for as
+			// long as that job hadn't reached a terminal state (review finding
+			// #3). frappe.ui.Dialog's own "hide.bs.modal" handler calls this
+			// onhide hook, so this doesn't need its own bootstrap event binding.
+			this.dialog.onhide = () => {
+				this.stopped = true;
+			};
 
 			if (!this.jobs.length) {
 				this.dialog.show();
@@ -81,18 +100,32 @@
 
 		poll(job) {
 			const check = () => {
+				if (this.stopped) return;
 				frappe
 					.call({
 						method: "marketplace_integrations.api.shopify_catalog_push.get_catalog_push_status",
 						args: { job_id: job.job_id },
 					})
 					.then((r) => {
+						if (this.stopped) return;
+						this.poll_error_counts[job.job_id] = 0;
 						this.job_states[job.job_id] = r.message || {};
 						this.render();
 						this.maybe_finish();
 						if (!this.finished) setTimeout(check, this.poll_interval);
 					})
 					.catch(() => {
+						if (this.stopped) return;
+						const error_count = (this.poll_error_counts[job.job_id] || 0) + 1;
+						this.poll_error_counts[job.job_id] = error_count;
+						if (error_count < MAX_CONSECUTIVE_POLL_ERRORS) {
+							// Transient error - retry rather than giving up on the
+							// first failure, since the push job is very likely
+							// still running server-side and will still write
+							// results.
+							setTimeout(check, this.poll_interval);
+							return;
+						}
 						this.job_states[job.job_id] = {
 							status: "failed",
 							error: __("Could not retrieve the catalog push status."),

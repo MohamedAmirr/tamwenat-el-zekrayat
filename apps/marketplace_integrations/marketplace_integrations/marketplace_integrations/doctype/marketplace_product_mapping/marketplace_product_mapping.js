@@ -12,18 +12,26 @@ if (typeof frappe !== "undefined") {
 // Gated client-side by looking up the linked Marketplace Account's platform
 // - no schema change to Marketplace Product Mapping itself (decision 6).
 function add_platform_push_button(frm) {
+	// Consistent with the List View's bulk action, which gates on
+	// frappe.model.can_write() before even offering the action (review
+	// finding #7) - low priority today since only System Manager has any
+	// permission on this doctype, but kept aligned for when that changes.
+	if (!frappe.model.can_write("Marketplace Product Mapping")) return;
+
 	return frappe.db.get_value("Marketplace Account", frm.doc.marketplace_account, "platform").then((r) => {
 		const platform = r && r.message && r.message.platform;
 		if (platform === "Shopify") {
 			frm.add_custom_button(__("Push to Shopify"), () => push_to_shopify(frm));
 		} else if (platform === "Talabat") {
 			frm.add_custom_button(__("Push to Talabat"), () => push_to_talabat(frm));
-		} else {
-			frappe.show_alert({
-				message: __("This mapping's Marketplace Account platform does not support a catalog push."),
-				indicator: "orange",
-			});
 		}
+		// No `else` warning here (review finding #7): a lookup returning
+		// nothing here means the linked Marketplace Account was deleted, or
+		// the user can read this Mapping but not the Account - a
+		// permission/deleted-record edge case, not "this platform doesn't
+		// support a catalog push". Silently showing no push button (and no
+		// message) is fine for that edge case rather than guessing at a
+		// misleading explanation on every form load.
 	});
 }
 
