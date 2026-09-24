@@ -131,10 +131,15 @@ function push_selected_to_shopify(mapping_names) {
 			const jobs = (response.message && response.message.jobs) || [];
 			const skipped_accounts = (response.message && response.message.skipped_accounts) || [];
 			if (skipped_accounts.length) {
-				frappe.show_alert({
-					message: __("A catalog push is already running for {0} Marketplace Account(s); skipped.", [
-						skipped_accounts.length,
-					]),
+				// Show each account's own server-provided reason (already
+				// running OR a config error), not an assumed one.
+				const lines = skipped_accounts.map(
+					(skipped) =>
+						`${frappe.utils.escape_html(skipped.account)}: ${frappe.utils.escape_html(skipped.reason)}`
+				);
+				frappe.msgprint({
+					title: __("Marketplace Accounts skipped"),
+					message: lines.join("<br>"),
 					indicator: "orange",
 				});
 			}

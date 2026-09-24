@@ -45,55 +45,19 @@ def group_mappings_by_account(mapping_names):
 	Price List, Connection, currency, ...) - that stays the caller's own
 	responsibility, since it differs per platform.
 
-	Bulk-fetches mapping rows and loads each distinct Marketplace Account
-	document at most once (review finding #1), rather than the previous
-	per-mapping ``frappe.get_doc()`` shape - which not only issued one query
-	per mapping for the mapping itself, but also re-loaded the SAME Account
-	document once per mapping that pointed at it (e.g. loading one Account
-	3,000 times for 3,000 mappings on it). Permission checks use
-	``frappe.has_permission(doctype, "write", doc=name)`` rather than a full
-	``Document.check_permission()`` - Frappe's own permission layer
-	(``frappe.permissions.has_permission()``) already avoids loading child
-	tables for this (``frappe.get_lazy_doc()``), so passing a bare name is
-	strictly cheaper than loading a full document just to check permission
-	on it.
+	Deliberately the original per-mapping ``frappe.get_doc()`` +
+	``check_permission("write")`` flow, unchanged from Talabat's pre-#106
+	``_queue_mapping_catalog_syncs()``: the issue requires no user-visible
+	behavior change for Talabat (error text, which error wins, ordering), and
+	``check_permission()`` is what produces Frappe's own permission messages.
 	"""
-	mapping_names = list(mapping_names)
-	mapping_rows = frappe.get_all(
-		"Marketplace Product Mapping",
-		filters={"name": ["in", mapping_names]},
-		fields=["name", "marketplace_account"],
-	)
-	rows_by_name = {row.name: row for row in mapping_rows}
-	missing = [name for name in mapping_names if name not in rows_by_name]
-	if missing:
-		frappe.throw(
-			frappe._("Marketplace Product Mapping {0} does not exist.").format(missing[0]),
-			frappe.DoesNotExistError,
-		)
-
-	for mapping_name in mapping_names:
-		if not frappe.has_permission("Marketplace Product Mapping", "write", doc=mapping_name):
-			frappe.throw(
-				frappe._("Not permitted to modify Marketplace Product Mapping {0}").format(mapping_name),
-				frappe.PermissionError,
-			)
-
-	account_names = {row.marketplace_account for row in mapping_rows if row.marketplace_account}
-	account_docs = {}
-	for account_name in account_names:
-		if not frappe.has_permission("Marketplace Account", "write", doc=account_name):
-			frappe.throw(
-				frappe._("Not permitted to modify Marketplace Account {0}").format(account_name),
-				frappe.PermissionError,
-			)
-		account_docs[account_name] = frappe.get_doc("Marketplace Account", account_name)
-
 	accounts = {}
 	for mapping_name in mapping_names:
-		row = rows_by_name[mapping_name]
-		account_doc = account_docs[row.marketplace_account]
+		mapping_doc = frappe.get_doc("Marketplace Product Mapping", mapping_name)
+		mapping_doc.check_permission("write")
+		account_doc = frappe.get_doc("Marketplace Account", mapping_doc.marketplace_account)
+		account_doc.check_permission("write")
 		accounts.setdefault(account_doc.name, {"account": account_doc, "mapping_names": []})[
 			"mapping_names"
-		].append(mapping_name)
+		].append(mapping_doc.name)
 	return accounts

@@ -313,9 +313,10 @@ test("push_selected_to_shopify shows an alert for skipped accounts and does not 
 				message: { jobs: [], skipped_accounts: [{ account: "MKTACC-SHOPIFY", reason: "already running" }] },
 			});
 		},
-		show_alert(args) {
+		msgprint(args) {
 			alert_args = args;
 		},
+		utils: { escape_html: (text) => text },
 		require() {
 			dialog_opened = true;
 			return Promise.resolve();
@@ -324,6 +325,35 @@ test("push_selected_to_shopify shows an alert for skipped accounts and does not 
 
 	await push_selected_to_shopify(["MPM-00002"]);
 
-	assert.ok(alert_args, "expected a show_alert call for the skipped account");
+	assert.ok(alert_args, "expected a msgprint call for the skipped account");
 	assert.equal(dialog_opened, false);
+});
+
+test("push_selected_to_shopify lists each skipped account's real reason", async () => {
+	let msg_args;
+	global.frappe = {
+		call() {
+			return Promise.resolve({
+				message: {
+					jobs: [],
+					skipped_accounts: [
+						{ account: "ACC-A", reason: "Marketplace Account ACC-A requires an ERPNext Selling Price List." },
+						{ account: "ACC-B", reason: "A catalog push is already running for this Marketplace Account." },
+					],
+				},
+			});
+		},
+		msgprint(args) {
+			msg_args = args;
+		},
+		utils: { escape_html: (text) => text },
+		require: () => Promise.resolve(),
+	};
+
+	await push_selected_to_shopify(["MPM-1"]);
+
+	assert.equal(
+		msg_args.message,
+		"ACC-A: Marketplace Account ACC-A requires an ERPNext Selling Price List.<br>ACC-B: A catalog push is already running for this Marketplace Account."
+	);
 });

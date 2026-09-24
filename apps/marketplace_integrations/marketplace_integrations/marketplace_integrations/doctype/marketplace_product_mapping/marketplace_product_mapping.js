@@ -62,7 +62,9 @@ function push_to_shopify(frm) {
 			const skipped_accounts = (response.message && response.message.skipped_accounts) || [];
 			if (skipped_accounts.length) {
 				frappe.show_alert({
-					message: __("A catalog push is already running for this Marketplace Account."),
+					// Show the server's own reason as-is (already running OR a
+					// config error) rather than assuming which one it was.
+					message: frappe.utils.escape_html(skipped_accounts[0].reason),
 					indicator: "orange",
 				});
 			}

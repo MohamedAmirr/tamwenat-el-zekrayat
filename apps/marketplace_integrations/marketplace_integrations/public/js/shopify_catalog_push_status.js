@@ -112,7 +112,13 @@
 						this.job_states[job.job_id] = r.message || {};
 						this.render();
 						this.maybe_finish();
-						if (!this.finished) setTimeout(check, this.poll_interval);
+						// Stop THIS job's own loop once it is terminal, independent
+						// of other jobs - otherwise a finished job keeps being
+						// polled (and a later transient error or an expired cache
+						// entry could overwrite its completed result).
+						if (!["completed", "failed"].includes(this.job_states[job.job_id].status)) {
+							setTimeout(check, this.poll_interval);
+						}
 					})
 					.catch(() => {
 						if (this.stopped) return;
