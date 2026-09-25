@@ -780,26 +780,28 @@ def _mappings_for_sync(account_name, mapping_names):
 
 
 def _fetch_items(item_names):
-	"""``{item_name: row(name, disabled, is_stock_item)}`` for every Item in ONE
-	query."""
+	"""``{item_name: row(name, disabled, is_stock_item, has_variants)}`` for
+	every Item in ONE query."""
 	if not item_names:
 		return {}
 	rows = frappe.get_all(
 		"Item",
 		filters={"name": ["in", list(item_names)]},
-		fields=["name", "disabled", "is_stock_item"],
+		fields=["name", "disabled", "is_stock_item", "has_variants"],
 	)
 	return {row.name: row for row in rows}
 
 
 def _split_active_mappings(mappings, item_by_name):
 	"""Return ``(active_mappings, skipped_results)``. A disabled mapping, one
-	whose Item is disabled, or one whose Item is not a stock Item
+	whose Item is disabled, one whose Item is not a stock Item
 	(``is_stock_item = 0`` - a missing Bin would read 0 and enable tracking /
-	sell out a deliberately untracked variant) gets no mutation and no status
-	write, and is reported as skipped (never Error) - in explicit selections and
-	full reconciliation alike. A mapping whose Item no longer exists is kept - it
-	surfaces as a local error."""
+	sell out a deliberately untracked variant), or one whose Item is a template
+	(``has_variants = 1`` - ERPNext defaults ``is_stock_item`` to 1 even for a
+	template and refuses to post stock against it directly, so it has no Bin
+	either) gets no mutation and no status write, and is reported as skipped
+	(never Error) - in explicit selections and full reconciliation alike. A
+	mapping whose Item no longer exists is kept - it surfaces as a local error."""
 	active = []
 	skipped_results = []
 	for mapping in mappings:
@@ -811,6 +813,8 @@ def _split_active_mappings(mappings, item_by_name):
 			reason = _("Item is disabled.")
 		elif item and not item.is_stock_item:
 			reason = _("Item is not a stock Item.")
+		elif item and item.has_variants:
+			reason = _("Item is a template (has variants).")
 		if reason:
 			skipped_results.append(
 				{"mapping_name": mapping.name, "ok": False, "skipped": True, "error": cstr(reason)}

@@ -188,21 +188,24 @@ class InventoryFixtureMixin:
 		account.reload()
 		return account
 
-	def _make_item(self, marker, qty=None, disabled=0, is_stock_item=1):
+	def _make_item(self, marker, qty=None, disabled=0, is_stock_item=1, has_variants=0):
 		# Own helper: test_products.make_item() creates non-stock Items, which the
 		# sync (correctly) skips.
 		item_code = f"Inventory {marker} Item {self.suffix}"
 		if not frappe.db.exists("Item", item_code):
-			frappe.get_doc(
-				{
-					"doctype": "Item",
-					"item_code": item_code,
-					"item_name": item_code,
-					"item_group": "Products",
-					"stock_uom": "Nos",
-					"is_stock_item": is_stock_item,
-				}
-			).insert()
+			doc = {
+				"doctype": "Item",
+				"item_code": item_code,
+				"item_name": item_code,
+				"item_group": "Products",
+				"stock_uom": "Nos",
+				"is_stock_item": is_stock_item,
+				"has_variants": has_variants,
+			}
+			if has_variants:
+				# A template Item requires at least one attribute row.
+				doc["attributes"] = [{"attribute": "Size"}]
+			frappe.get_doc(doc).insert()
 		if disabled:
 			frappe.db.set_value("Item", item_code, "disabled", 1)
 		if qty is not None:
@@ -238,9 +241,11 @@ class InventoryFixtureMixin:
 		):
 			return inventory_sync.sync_account_inventory(self.account.name, mapping_names, **kwargs)
 
-	def _one(self, qty, shopify_on_hand=0, is_stock_item=1, **shopify_state):
+	def _one(self, qty, shopify_on_hand=0, is_stock_item=1, has_variants=0, **shopify_state):
 		shopify_state.setdefault("on_hand", shopify_on_hand)
-		item = self._make_item(f"One{random.randint(0, 10**6)}", qty=qty, is_stock_item=is_stock_item)
+		item = self._make_item(
+			f"One{random.randint(0, 10**6)}", qty=qty, is_stock_item=is_stock_item, has_variants=has_variants
+		)
 		mapping = self._make_mapping(item)
 		self.shopify.add(mapping.external_reference, **shopify_state)
 		return mapping
@@ -675,6 +680,36 @@ class IntegrationTestNonStockItems(InventoryFixtureMixin, IntegrationTestCase):
 
 		self.assertEqual(payload["succeeded"], 1)
 		self.assertEqual(self.shopify.variants[mapping.external_reference]["on_hand"], 4)
+
+
+class IntegrationTestTemplateItems(InventoryFixtureMixin, IntegrationTestCase):
+	def test_template_item_is_skipped_with_no_shopify_change(self):
+		mapping = self._one(None, has_variants=1, tracked=False, has_level=False, on_hand=None)
+
+		payload = self._sync([mapping.name])
+
+		# No read either: nothing was sent, so no mutation and no store change.
+		self.assertEqual(self.shopify.calls, [])
+		self.assertEqual((payload["skipped_mappings"], payload["failed"], payload["succeeded"]), (1, 0, 0))
+		self.assertTrue(payload["results"][0]["skipped"])
+		self.assertIn("template", payload["results"][0]["error"])
+		state = self.shopify.variants[mapping.external_reference]
+		self.assertFalse(state["tracked"])
+		self.assertFalse(state["has_level"])
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Not Synced")
+
+	def test_full_reconciliation_skips_template_and_still_syncs_stock_items(self):
+		stock = self._one(5, shopify_on_hand=1)
+		template = self._one(None, has_variants=1, tracked=False, has_level=False, on_hand=None)
+
+		payload = self._sync(None)
+
+		self.assertEqual((payload["succeeded"], payload["skipped_mappings"], payload["failed"]), (1, 1, 0))
+		self.assertEqual(self.shopify.calls_of("read")[0]["ids"], [stock.external_reference])
+		self.assertEqual(self.shopify.kinds().count("track"), 0)
+		self.assertEqual(self.shopify.variants[stock.external_reference]["on_hand"], 5)
+		self.assertFalse(self.shopify.variants[template.external_reference]["tracked"])
 
 
 class IntegrationTestJobResilience(InventoryFixtureMixin, IntegrationTestCase):
