@@ -17,6 +17,9 @@ const {
 	clear_fields_for_platform_left,
 	configure_outlet_management,
 	configure_shopify_location,
+	configure_shopify_inventory,
+	reconcile_shopify_inventory,
+	RECONCILE_INVENTORY_LABEL,
 } = require("./marketplace_account.js");
 
 function make_frm(doc, { is_new = false } = {}) {
@@ -193,4 +196,112 @@ test("Open sends no close fields and Close Until preserves the local DateTime va
 		closed_reason: "OTHER",
 		closed_until: "2026-09-02 15:30:00",
 	});
+});
+
+test("Reconcile Shopify Inventory appears only on a saved, enabled Shopify account with write permission", () => {
+	global.frappe = { model: { can_write: () => true } };
+	let frm = make_frm({ platform: "Shopify", enabled: 1 });
+	configure_shopify_inventory(frm);
+	assert.deepEqual(frm.buttons, [RECONCILE_INVENTORY_LABEL]);
+
+	frm = make_frm({ platform: "Shopify", enabled: 1 }, { is_new: true });
+	configure_shopify_inventory(frm);
+	assert.deepEqual(frm.buttons, []);
+
+	frm = make_frm({ platform: "Shopify", enabled: 0 });
+	configure_shopify_inventory(frm);
+	assert.deepEqual(frm.buttons, []);
+
+	frm = make_frm({ platform: "Talabat", enabled: 1 });
+	configure_shopify_inventory(frm);
+	assert.deepEqual(frm.buttons, []);
+
+	global.frappe = { model: { can_write: () => false } };
+	frm = make_frm({ platform: "Shopify", enabled: 1 });
+	configure_shopify_inventory(frm);
+	assert.deepEqual(frm.buttons, []);
+});
+
+test("Reconcile Shopify Inventory button is removed when the platform changes away from Shopify", () => {
+	global.frappe = { model: { can_write: () => true } };
+	const frm = make_frm({ platform: "Shopify", enabled: 1 });
+	configure_shopify_inventory(frm);
+	assert.equal(frm.buttons.length, 1);
+
+	frm.doc.platform = "Talabat";
+	configure_shopify_inventory(frm);
+
+	assert.deepEqual(frm.buttons, []);
+});
+
+test("reconcile_shopify_inventory confirms, queues the account and opens the inventory dialog", async () => {
+	let call_options;
+	let dialog_args;
+	global.frappe = {
+		confirm(_message, on_yes) {
+			on_yes();
+		},
+		call(options) {
+			call_options = options;
+			return Promise.resolve({
+				message: { jobs: [{ account: "MKTACC-1", job_id: "job-5", mapping_count: null }] },
+			});
+		},
+		require: () => Promise.resolve(),
+		ui: {
+			ShopifyCatalogPushStatus: class {
+				static INVENTORY_OPTIONS = { status_method: "inventory.status" };
+				constructor(args) {
+					dialog_args = args;
+				}
+			},
+		},
+	};
+
+	reconcile_shopify_inventory({ doc: { name: "MKTACC-1" } });
+	for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(
+		call_options.method,
+		"marketplace_integrations.api.shopify_inventory.queue_account_reconciliation"
+	);
+	assert.deepEqual(call_options.args, { account: "MKTACC-1" });
+	assert.equal(dialog_args.status_method, "inventory.status");
+});
+
+test("reconcile_shopify_inventory makes no call when the confirmation is declined", () => {
+	let called = false;
+	global.frappe = {
+		confirm() {},
+		call() {
+			called = true;
+		},
+	};
+
+	reconcile_shopify_inventory({ doc: { name: "MKTACC-1" } });
+
+	assert.equal(called, false);
+});
+
+test("reconcile_shopify_inventory shows the skipped account's real reason, escaped", async () => {
+	let msgprint_args;
+	global.frappe = {
+		confirm(_message, on_yes) {
+			on_yes();
+		},
+		call() {
+			return Promise.resolve({
+				message: { jobs: [], skipped_accounts: [{ account: "MKTACC-1", reason: "Warehouse <b>x</b>" }] },
+			});
+		},
+		msgprint(args) {
+			msgprint_args = args;
+		},
+		utils: { escape_html: (text) => text.replace(/</g, "&lt;") },
+	};
+
+	reconcile_shopify_inventory({ doc: { name: "MKTACC-1" } });
+	for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve));
+
+	assert.match(msgprint_args.message, /Warehouse &lt;b>x&lt;\/b>/);
 });

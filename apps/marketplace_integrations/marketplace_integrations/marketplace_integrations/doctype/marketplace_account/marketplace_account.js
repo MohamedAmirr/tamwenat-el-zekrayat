@@ -18,6 +18,8 @@ const TALABAT_OUTLET_FIELDS = [
 	"external_status_error",
 ];
 
+const RECONCILE_INVENTORY_LABEL = "Reconcile Shopify Inventory";
+
 const SHOPIFY_LOCATION_FIELDS = ["shopify_location_section", "shopify_location_gid", "shopify_location_name"];
 
 // Every custom button configure_outlet_management() can ever add - needed so
@@ -41,11 +43,13 @@ if (typeof frappe !== "undefined") {
 		refresh(frm) {
 			configure_outlet_management(frm);
 			configure_shopify_location(frm);
+			configure_shopify_inventory(frm);
 		},
 		platform(frm) {
 			update_connection_doctype_on_platform_change(frm);
 			configure_outlet_management(frm);
 			configure_shopify_location(frm);
+			configure_shopify_inventory(frm);
 		},
 		connection(frm) {
 			configure_shopify_location(frm);
@@ -165,6 +169,66 @@ function configure_shopify_location(frm) {
 
 function should_show_shopify_location(platform) {
 	return platform === "Shopify";
+}
+
+// #107: "Reconcile Shopify Inventory" - only on a saved, enabled Shopify
+// account and only for a user who can write Marketplace Accounts (the server
+// re-checks write permission on the account and on its mappings). A stale
+// button must not survive a platform/enabled change without a page refresh.
+function configure_shopify_inventory(frm) {
+	frm.remove_custom_button(__(RECONCILE_INVENTORY_LABEL));
+	if (frm.is_new()) return;
+	if (!should_show_shopify_location(frm.doc.platform) || !frm.doc.enabled) return;
+	if (!frappe.model.can_write("Marketplace Account")) return;
+	frm.add_custom_button(__(RECONCILE_INVENTORY_LABEL), () => reconcile_shopify_inventory(frm));
+}
+
+function reconcile_shopify_inventory(frm) {
+	frappe.confirm(
+		__(
+			"Push ERPNext stock for every enabled mapping of this account to Shopify inventory? This writes to your live Shopify store."
+		),
+		() => {
+			frappe
+				.call({
+					method: "marketplace_integrations.api.shopify_inventory.queue_account_reconciliation",
+					args: { account: frm.doc.name },
+					freeze: true,
+					freeze_message: __("Queuing Shopify inventory reconciliation..."),
+				})
+				.then((response) => {
+					const jobs = (response.message && response.message.jobs) || [];
+					const skipped_accounts =
+						(response.message && response.message.skipped_accounts) || [];
+					if (skipped_accounts.length) {
+						// The server's own reason, escaped verbatim.
+						frappe.msgprint({
+							title: __("Marketplace Accounts skipped"),
+							message: skipped_accounts
+								.map(
+									(skipped) =>
+										`${frappe.utils.escape_html(
+											skipped.account
+										)}: ${frappe.utils.escape_html(skipped.reason)}`
+								)
+								.join("<br>"),
+							indicator: "orange",
+						});
+					}
+					if (!jobs.length) return;
+					return frappe
+						.require(
+							"/assets/marketplace_integrations/js/shopify_catalog_push_status.js"
+						)
+						.then(() => {
+							new frappe.ui.ShopifyCatalogPushStatus({
+								jobs,
+								...frappe.ui.ShopifyCatalogPushStatus.INVENTORY_OPTIONS,
+							});
+						});
+				});
+		}
+	);
 }
 
 function show_shopify_location_picker(frm) {
@@ -327,5 +391,8 @@ if (typeof module !== "undefined") {
 		clear_fields_for_platform_left,
 		configure_outlet_management,
 		configure_shopify_location,
+		configure_shopify_inventory,
+		reconcile_shopify_inventory,
+		RECONCILE_INVENTORY_LABEL,
 	};
 }

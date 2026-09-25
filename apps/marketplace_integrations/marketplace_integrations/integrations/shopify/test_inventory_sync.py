@@ -1,0 +1,1097 @@
+# Copyright (c) 2026, Tamwenat El Zekrayat and contributors
+# For license information, please see license.txt
+
+"""Every test here mocks ShopifyClient.execute() with a small in-memory fake
+store (FakeShopify) - never a real Shopify call - and mocks the Location
+use-time re-check separately. Fixtures use unique suffixes because the worker
+commits per chunk (class-scoped rollback does not cover committed rows)."""
+
+import random
+import uuid
+from unittest.mock import patch
+
+import frappe
+from frappe.tests import IntegrationTestCase
+
+from marketplace_integrations.integrations.shopify import inventory_sync
+from marketplace_integrations.integrations.shopify.constants import (
+	SHOPIFY_INVENTORY_MAX_STALE_RETRIES,
+	SHOPIFY_WEBHOOK_TOPIC_HEADER_TO_ENUM,
+	SHOPIFY_WEBHOOK_TOPICS,
+)
+from marketplace_integrations.integrations.shopify.test_products import make_shopify_account
+
+EXECUTE_TARGET = "marketplace_integrations.integrations.shopify.client.ShopifyClient.execute"
+FETCH_LOCATIONS_TARGET = (
+	"marketplace_integrations.integrations.shopify.inventory_sync.fetch_shop_and_active_locations"
+)
+LOCATION = "gid://shopify/Location/1"
+
+
+class FakeShopify:
+	"""In-memory Shopify inventory: dispatches on the query text and enforces
+	compare-and-set the way the real API is expected to (a mismatching
+	changeFromQuantity returns COMPARE_FAILED and applies nothing).
+
+	CAUTION - circular validation: by default this fake bakes in the SAME
+	assumptions the code under test makes (userErrors apply nothing, a freshly
+	activated level starts at on_hand 0, the stale code is COMPARE_FAILED, and
+	reads always carry an on_hand entry). The switches below (partial_apply,
+	activate_starts_at, stale_code, error injection) make it behave differently
+	so the tests are not only agreeing with the code's own guesses."""
+
+	def __init__(self):
+		self.variants = {}  # variant gid -> state dict
+		self.calls = []  # (kind, variables)
+		self.before_set = []  # callables run before the next set is evaluated
+		self.bad_item_ids = set()
+		self.fail_next_reads = 0
+		self.partial_apply = False  # on a userError, still apply the OK items
+		self.activate_starts_at = 0  # on_hand of a freshly activated level
+		self.stale_code = "COMPARE_FAILED"
+		self.extra_errors = []  # userErrors appended to the next stale response
+		self.track_errors = set()  # item ids whose inventoryItemUpdate returns userErrors
+		self.track_raises = set()  # item ids whose inventoryItemUpdate raises
+		self.activate_errors = set()  # item ids whose inventoryActivate returns userErrors
+
+	def add(self, variant_gid, tracked=True, has_level=True, on_hand=0):
+		self.variants[variant_gid] = {
+			"item_id": variant_gid.replace("ProductVariant", "InventoryItem"),
+			"tracked": tracked,
+			"has_level": has_level,
+			"on_hand": on_hand,
+		}
+
+	def kinds(self):
+		return [kind for kind, _variables in self.calls]
+
+	def calls_of(self, kind):
+		return [variables for call_kind, variables in self.calls if call_kind == kind]
+
+	def by_item_id(self, item_id):
+		for state in self.variants.values():
+			if state["item_id"] == item_id:
+				return state
+		raise KeyError(item_id)
+
+	def __call__(self, query, variables=None):
+		variables = variables or {}
+		if "inventorySetQuantities" in query:
+			self.calls.append(("set", variables))
+			assert "@idempotent(key: $idempotencyKey)" in query
+			for hook in self.before_set[:1]:
+				self.before_set.pop(0)
+				hook()
+			quantities = variables["input"]["quantities"]
+			if any(q["inventoryItemId"] in self.bad_item_ids for q in quantities):
+				if self.partial_apply:
+					for q in quantities:
+						state = self.by_item_id(q["inventoryItemId"])
+						if (
+							q["inventoryItemId"] not in self.bad_item_ids
+							and state["on_hand"] == q["changeFromQuantity"]
+						):
+							state["on_hand"] = q["quantity"]
+				return {
+					"inventorySetQuantities": {
+						"userErrors": [{"code": "INVALID_QUANTITY", "field": ["x"], "message": "Bad item."}]
+					}
+				}
+			for q in quantities:
+				if self.by_item_id(q["inventoryItemId"])["on_hand"] != q["changeFromQuantity"]:
+					return {
+						"inventorySetQuantities": {
+							"userErrors": [
+								{"code": self.stale_code, "field": None, "message": "stale"},
+								*self.extra_errors,
+							]
+						}
+					}
+			for q in quantities:
+				self.by_item_id(q["inventoryItemId"])["on_hand"] = q["quantity"]
+			return {"inventorySetQuantities": {"inventoryAdjustmentGroup": {"id": "g"}, "userErrors": []}}
+		if "inventoryActivate" in query:
+			self.calls.append(("activate", variables))
+			assert "@idempotent(key: $idempotencyKey)" in query
+			if variables["inventoryItemId"] in self.activate_errors:
+				return {
+					"inventoryActivate": {
+						"inventoryLevel": None,
+						"userErrors": [{"field": ["x"], "message": "Cannot activate."}],
+					}
+				}
+			state = self.by_item_id(variables["inventoryItemId"])
+			state["has_level"] = True
+			state["on_hand"] = self.activate_starts_at
+			return {"inventoryActivate": {"inventoryLevel": {"id": "l"}, "userErrors": []}}
+		if "inventoryItemUpdate" in query:
+			self.calls.append(("track", variables))
+			if variables["id"] in self.track_raises:
+				frappe.throw("track boom")
+			if variables["id"] in self.track_errors:
+				return {
+					"inventoryItemUpdate": {
+						"inventoryItem": None,
+						"userErrors": [{"field": ["x"], "message": "Cannot track."}],
+					}
+				}
+			self.by_item_id(variables["id"])["tracked"] = True
+			return {"inventoryItemUpdate": {"inventoryItem": {"id": variables["id"]}, "userErrors": []}}
+		if "nodes(ids" in query:
+			self.calls.append(("read", variables))
+			if self.fail_next_reads:
+				self.fail_next_reads -= 1
+				frappe.throw("boom")
+			nodes = []
+			for gid in variables["ids"]:
+				state = self.variants.get(gid)
+				if state is None:
+					nodes.append(None)
+					continue
+				level = None
+				if state["has_level"]:
+					quantities = []
+					if state["on_hand"] is not None:
+						quantities = [{"name": "on_hand", "quantity": state["on_hand"]}]
+					level = {"quantities": quantities}
+				nodes.append(
+					{
+						"id": gid,
+						"inventoryItem": {
+							"id": state["item_id"],
+							"tracked": state["tracked"],
+							"inventoryLevel": level,
+						},
+					}
+				)
+			return {"nodes": nodes}
+		raise AssertionError(f"Unexpected query in test: {query}")
+
+
+def _variant_gid():
+	return f"gid://shopify/ProductVariant/{random.randint(10**8, 10**9)}"
+
+
+class InventoryFixtureMixin:
+	def setUp(self):
+		self.suffix = frappe.generate_hash(length=8)
+		self.warehouse = frappe.get_all(
+			"Warehouse", filters={"disabled": 0, "is_group": 0}, pluck="name", limit=1
+		)[0]
+		self.account = self._make_account("Main")
+		self.shopify = FakeShopify()
+
+	def _make_account(self, marker):
+		account = make_shopify_account(f"Inventory {marker} Account {self.suffix}")
+		account.db_set("warehouse", self.warehouse, update_modified=False)
+		account.db_set("shopify_location_gid", LOCATION, update_modified=False)
+		account.reload()
+		return account
+
+	def _make_item(self, marker, qty=None, disabled=0, is_stock_item=1, has_variants=0):
+		# Own helper: test_products.make_item() creates non-stock Items, which the
+		# sync (correctly) skips.
+		item_code = f"Inventory {marker} Item {self.suffix}"
+		if not frappe.db.exists("Item", item_code):
+			doc = {
+				"doctype": "Item",
+				"item_code": item_code,
+				"item_name": item_code,
+				"item_group": "Products",
+				"stock_uom": "Nos",
+				"is_stock_item": is_stock_item,
+				"has_variants": has_variants,
+			}
+			if has_variants:
+				# A template Item requires at least one attribute row.
+				doc["attributes"] = [{"attribute": "Size"}]
+			frappe.get_doc(doc).insert()
+		if disabled:
+			frappe.db.set_value("Item", item_code, "disabled", 1)
+		if qty is not None:
+			bin_name = frappe.db.get_value(
+				"Bin", {"item_code": item_code, "warehouse": self.warehouse}, "name"
+			)
+			if bin_name:
+				frappe.db.set_value("Bin", bin_name, "actual_qty", qty)
+			else:
+				frappe.get_doc(
+					{"doctype": "Bin", "item_code": item_code, "warehouse": self.warehouse, "actual_qty": qty}
+				).insert()
+		return item_code
+
+	def _make_mapping(self, item, variant_gid=None, account=None, **fields):
+		variant_gid = variant_gid or _variant_gid()
+		doc = {
+			"doctype": "Marketplace Product Mapping",
+			"marketplace_account": (account or self.account).name,
+			"item": item,
+			"external_reference": variant_gid,
+			"external_variant_id": variant_gid,
+			"external_product_id": "gid://shopify/Product/1",
+		}
+		doc.update(fields)
+		return frappe.get_doc(doc).insert()
+
+	def _sync(self, mapping_names=None, **kwargs):
+		locations = {"shop_id": "s", "active_locations": [{"id": LOCATION, "name": "Main"}]}
+		with (
+			patch(EXECUTE_TARGET, side_effect=self.shopify),
+			patch(FETCH_LOCATIONS_TARGET, return_value=locations),
+		):
+			return inventory_sync.sync_account_inventory(self.account.name, mapping_names, **kwargs)
+
+	def _one(self, qty, shopify_on_hand=0, is_stock_item=1, has_variants=0, **shopify_state):
+		shopify_state.setdefault("on_hand", shopify_on_hand)
+		item = self._make_item(
+			f"One{random.randint(0, 10**6)}", qty=qty, is_stock_item=is_stock_item, has_variants=has_variants
+		)
+		mapping = self._make_mapping(item)
+		self.shopify.add(mapping.external_reference, **shopify_state)
+		return mapping
+
+
+class IntegrationTestQuantityMapping(InventoryFixtureMixin, IntegrationTestCase):
+	def test_negative_stock_sends_zero(self):
+		mapping = self._one(-5, shopify_on_hand=4)
+
+		self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.variants[mapping.external_reference]["on_hand"], 0)
+		self.assertEqual(self.shopify.calls_of("set")[0]["input"]["quantities"][0]["quantity"], 0)
+
+	def test_fractional_stock_is_floored_to_an_int(self):
+		mapping = self._one(7.9)
+
+		self._sync([mapping.name])
+
+		sent = self.shopify.calls_of("set")[0]["input"]["quantities"][0]["quantity"]
+		self.assertEqual(sent, 7)
+		self.assertIsInstance(sent, int)
+
+	def test_sends_on_hand_with_location_reason_reference_and_change_from_quantity(self):
+		mapping = self._one(10, shopify_on_hand=3)
+
+		self._sync([mapping.name])
+
+		set_input = self.shopify.calls_of("set")[0]["input"]
+		self.assertEqual(set_input["name"], "on_hand")
+		self.assertTrue(set_input["reason"])
+		self.assertTrue(set_input["referenceDocumentUri"])
+		self.assertNotIn("ignoreCompareQuantity", set_input)
+		quantity = set_input["quantities"][0]
+		self.assertEqual(quantity["locationId"], LOCATION)
+		self.assertEqual(quantity["changeFromQuantity"], 3)
+		self.assertNotIn("compareQuantity", quantity)
+
+	def test_stock_uom_only_sales_uom_is_ignored(self):
+		other_uom = frappe.get_all("UOM", filters={"name": ["!=", "Nos"]}, pluck="name", limit=1)[0]
+		item = self._make_item("Uom", qty=24)
+		mapping = self._make_mapping(item, sales_uom=other_uom)
+		self.shopify.add(mapping.external_reference)
+
+		self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.calls_of("set")[0]["input"]["quantities"][0]["quantity"], 24)
+
+	def test_success_writes_only_the_inventory_status_fields(self):
+		mapping = self._one(5)
+
+		self._sync([mapping.name])
+
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Synced")
+		self.assertTrue(mapping.inventory_last_synced_on)
+		self.assertFalse(mapping.inventory_last_error)
+		# The shared price-push status fields are untouched (decision 4).
+		self.assertEqual(mapping.sync_status, "Not Synced")
+		self.assertFalse(mapping.last_synced_on)
+		self.assertFalse(mapping.last_error)
+
+	def test_error_does_not_touch_the_shared_price_push_status(self):
+		mapping = self._one(5)
+		self.shopify.bad_item_ids.add(self.shopify.variants[mapping.external_reference]["item_id"])
+		mapping.db_set("sync_status", "Synced", update_modified=False)
+
+		self._sync([mapping.name])
+
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Error")
+		self.assertEqual(mapping.inventory_last_error, "Bad item.")
+		self.assertEqual(mapping.sync_status, "Synced")
+
+
+class IntegrationTestSkipIfEqual(InventoryFixtureMixin, IntegrationTestCase):
+	def test_equal_quantity_sends_no_mutation_and_counts_as_synced(self):
+		mapping = self._one(5, shopify_on_hand=5)
+
+		payload = self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.kinds(), ["read"])
+		self.assertEqual(payload["succeeded"], 1)
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Synced")
+
+	def test_stock_ledger_entry_count_is_unchanged_across_a_full_reconciliation(self):
+		for qty, on_hand in ((5, 1), (0, 3), (8, 8), (-2, 4)):
+			self._one(qty, shopify_on_hand=on_hand)
+		before = frappe.db.count("Stock Ledger Entry")
+
+		payload = self._sync(None)
+
+		self.assertEqual(payload["total"], 4)
+
+		self.assertEqual(frappe.db.count("Stock Ledger Entry"), before)
+
+	def test_no_inventory_webhook_topic_is_registered(self):
+		for header, topic in SHOPIFY_WEBHOOK_TOPIC_HEADER_TO_ENUM.items():
+			self.assertFalse(topic.startswith("INVENTORY_"), topic)
+			self.assertFalse(header.startswith("inventory_levels/"), header)
+			self.assertFalse(header.startswith("inventory_items/"), header)
+		self.assertFalse(any(topic.startswith("INVENTORY_") for topic in SHOPIFY_WEBHOOK_TOPICS))
+
+
+class IntegrationTestStaleCompare(InventoryFixtureMixin, IntegrationTestCase):
+	def test_stale_compare_rereads_and_retries_with_the_new_value(self):
+		mapping = self._one(9, shopify_on_hand=2)
+		state = self.shopify.variants[mapping.external_reference]
+		self.shopify.before_set.append(lambda: state.update(on_hand=4))
+
+		payload = self._sync([mapping.name])
+
+		sets = self.shopify.calls_of("set")
+		self.assertEqual(len(sets), 2)
+		self.assertEqual(sets[0]["input"]["quantities"][0]["changeFromQuantity"], 2)
+		self.assertEqual(sets[1]["input"]["quantities"][0]["changeFromQuantity"], 4)
+		self.assertEqual(self.shopify.kinds().count("read"), 2)
+		self.assertEqual(state["on_hand"], 9)
+		self.assertEqual(payload["succeeded"], 1)
+
+	def test_stale_compare_gives_up_after_bounded_retries_and_marks_error(self):
+		mapping = self._one(9, shopify_on_hand=2)
+		state = self.shopify.variants[mapping.external_reference]
+		self.shopify.before_set.extend(
+			[
+				lambda n=n: state.update(on_hand=100 + n)
+				for n in range(SHOPIFY_INVENTORY_MAX_STALE_RETRIES + 5)
+			]
+		)
+
+		payload = self._sync([mapping.name])
+
+		self.assertEqual(len(self.shopify.calls_of("set")), 1 + SHOPIFY_INVENTORY_MAX_STALE_RETRIES)
+		self.assertEqual(payload["failed"], 1)
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Error")
+		self.assertIn("kept changing", mapping.inventory_last_error)
+
+	def test_whole_chunk_is_retried_on_stale_compare(self):
+		first = self._one(9, shopify_on_hand=2)
+		second = self._one(8, shopify_on_hand=1)
+		state = self.shopify.variants[first.external_reference]
+		self.shopify.before_set.append(lambda: state.update(on_hand=4))
+
+		self._sync([first.name, second.name])
+
+		sets = self.shopify.calls_of("set")
+		self.assertEqual(len(sets), 2)
+		self.assertEqual(len(sets[0]["input"]["quantities"]), 2)
+		self.assertEqual(len(sets[1]["input"]["quantities"]), 2)
+
+	def test_non_stale_user_error_falls_back_to_per_item_and_isolates_the_bad_item(self):
+		good = self._one(6, shopify_on_hand=1)
+		bad = self._one(7, shopify_on_hand=1)
+		self.shopify.bad_item_ids.add(self.shopify.variants[bad.external_reference]["item_id"])
+
+		payload = self._sync([good.name, bad.name])
+
+		sets = self.shopify.calls_of("set")
+		self.assertEqual([len(call["input"]["quantities"]) for call in sets], [2, 1, 1])
+		self.assertEqual(self.shopify.variants[good.external_reference]["on_hand"], 6)
+		self.assertEqual(self.shopify.variants[bad.external_reference]["on_hand"], 1)
+		good.reload()
+		bad.reload()
+		self.assertEqual(good.inventory_sync_status, "Synced")
+		self.assertEqual(bad.inventory_sync_status, "Error")
+		self.assertEqual(bad.inventory_last_error, "Bad item.")
+		self.assertEqual((payload["succeeded"], payload["failed"]), (1, 1))
+
+	def test_one_failing_chunk_does_not_abort_the_run(self):
+		with patch.object(inventory_sync, "SHOPIFY_INVENTORY_SYNC_CHUNK_SIZE", 1):
+			first = self._one(3)
+			second = self._one(4)
+			self.shopify.fail_next_reads = 1
+
+			payload = self._sync([first.name, second.name])
+
+		self.assertEqual((payload["succeeded"], payload["failed"]), (1, 1))
+		first.reload()
+		second.reload()
+		self.assertEqual(first.inventory_sync_status, "Error")
+		self.assertEqual(second.inventory_sync_status, "Synced")
+
+
+class IntegrationTestStaleAndErrorMix(InventoryFixtureMixin, IntegrationTestCase):
+	def test_stale_error_alongside_another_user_error_retries_the_whole_chunk(self):
+		first = self._one(9, shopify_on_hand=2)
+		second = self._one(8, shopify_on_hand=1)
+		state = self.shopify.variants[first.external_reference]
+		self.shopify.before_set.append(lambda: state.update(on_hand=4))
+		self.shopify.extra_errors = [{"code": "INVALID_QUANTITY", "field": ["x"], "message": "Other."}]
+
+		payload = self._sync([first.name, second.name])
+
+		sets = self.shopify.calls_of("set")
+		# Stale wins: whole-chunk retry (2 items again), never the per-item fallback.
+		self.assertEqual([len(call["input"]["quantities"]) for call in sets], [2, 2])
+		self.assertEqual(payload["succeeded"], 2)
+
+	def test_unrecognised_stale_code_falls_back_per_item_and_still_converges(self):
+		first = self._one(9, shopify_on_hand=2)
+		second = self._one(8, shopify_on_hand=1)
+		self.shopify.stale_code = "SOMETHING_ELSE"
+		state = self.shopify.variants[first.external_reference]
+		self.shopify.before_set.append(lambda: state.update(on_hand=4))
+
+		payload = self._sync([first.name, second.name])
+
+		self.assertEqual(payload["succeeded"], 2)
+		self.assertEqual(state["on_hand"], 9)
+		self.assertEqual(self.shopify.variants[second.external_reference]["on_hand"], 8)
+
+	def test_partly_applied_request_then_per_item_fallback_converges(self):
+		# Unlike the default fake, a userError here still APPLIES the good item.
+		self.shopify.partial_apply = True
+		good = self._one(6, shopify_on_hand=1)
+		bad = self._one(7, shopify_on_hand=1)
+		self.shopify.bad_item_ids.add(self.shopify.variants[bad.external_reference]["item_id"])
+
+		payload = self._sync([good.name, bad.name])
+
+		self.assertEqual(self.shopify.variants[good.external_reference]["on_hand"], 6)
+		self.assertEqual(self.shopify.variants[bad.external_reference]["on_hand"], 1)
+		# The good item was already at target on the fallback's re-read: no re-send.
+		self.assertEqual([len(call["input"]["quantities"]) for call in self.shopify.calls_of("set")], [2, 1])
+		good.reload()
+		bad.reload()
+		self.assertEqual(good.inventory_sync_status, "Synced")
+		self.assertEqual(bad.inventory_sync_status, "Error")
+		self.assertEqual((payload["succeeded"], payload["failed"]), (1, 1))
+
+
+class IntegrationTestAlreadyChangedErrors(InventoryFixtureMixin, IntegrationTestCase):
+	TRACKING_CLAUSE = "tracking was already enabled"
+	ACTIVATION_CLAUSE = "already activated"
+
+	def _item_id(self, mapping):
+		return self.shopify.variants[mapping.external_reference]["item_id"]
+
+	def test_activate_user_error_after_tracking_says_tracking_was_changed_and_sets_nothing(self):
+		mapping = self._one(6, tracked=False, has_level=False, on_hand=None)
+		self.shopify.activate_errors.add(self._item_id(mapping))
+
+		payload = self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.kinds(), ["read", "track", "activate"])
+		self.assertEqual(payload["failed"], 1)
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Error")
+		self.assertIn("Cannot activate.", mapping.inventory_last_error)
+		self.assertIn(self.TRACKING_CLAUSE, mapping.inventory_last_error)
+		self.assertNotIn(self.ACTIVATION_CLAUSE, mapping.inventory_last_error)
+		self.assertIn(self.TRACKING_CLAUSE, payload["results"][0]["error"])
+		self.assertLessEqual(len(mapping.inventory_last_error), inventory_sync.ERROR_MESSAGE_MAX_LENGTH)
+
+	def test_track_user_error_sets_nothing_and_has_no_already_changed_clause(self):
+		mapping = self._one(6, tracked=False, has_level=False, on_hand=None)
+		self.shopify.track_errors.add(self._item_id(mapping))
+
+		self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.kinds(), ["read", "track"])
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Error")
+		self.assertIn("Cannot track.", mapping.inventory_last_error)
+		self.assertNotIn("already", mapping.inventory_last_error)
+
+	def test_track_exception_sets_nothing_and_reports_a_generic_error(self):
+		mapping = self._one(6, tracked=False, has_level=False, on_hand=None)
+		self.shopify.track_raises.add(self._item_id(mapping))
+
+		self._sync([mapping.name])
+
+		self.assertNotIn("set", self.shopify.kinds())
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Error")
+		self.assertNotIn("track boom", mapping.inventory_last_error)
+
+	def test_activation_then_compare_failed_recovers_via_reread(self):
+		# Shopify's new level starts at 5 (not the assumed 0): the first set is
+		# COMPARE_FAILED, the re-read supplies the real value and the retry wins.
+		self.shopify.activate_starts_at = 5
+		mapping = self._one(6, has_level=False, on_hand=None)
+
+		payload = self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.kinds(), ["read", "activate", "set", "read", "set"])
+		compares = [c["input"]["quantities"][0]["changeFromQuantity"] for c in self.shopify.calls_of("set")]
+		self.assertEqual(compares, [0, 5])
+		self.assertEqual(self.shopify.variants[mapping.external_reference]["on_hand"], 6)
+		self.assertEqual(payload["succeeded"], 1)
+
+	def test_stale_exhaustion_after_activation_and_tracking_mentions_both_changes(self):
+		mapping = self._one(9, tracked=False, has_level=False, on_hand=None)
+		state = self.shopify.variants[mapping.external_reference]
+		# Always stale, so retries are exhausted.
+		self.shopify.before_set.extend(
+			[
+				lambda n=n: state.update(on_hand=100 + n)
+				for n in range(SHOPIFY_INVENTORY_MAX_STALE_RETRIES + 5)
+			]
+		)
+
+		self._sync([mapping.name])
+
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Error")
+		self.assertIn("kept changing", mapping.inventory_last_error)
+		self.assertIn(self.TRACKING_CLAUSE, mapping.inventory_last_error)
+		self.assertIn(self.ACTIVATION_CLAUSE, mapping.inventory_last_error)
+		self.assertLessEqual(len(mapping.inventory_last_error), inventory_sync.ERROR_MESSAGE_MAX_LENGTH)
+
+	def test_set_failure_after_tracking_says_tracking_was_changed(self):
+		mapping = self._one(6, shopify_on_hand=1, tracked=False)
+		self.shopify.bad_item_ids.add(self._item_id(mapping))
+
+		self._sync([mapping.name])
+
+		mapping.reload()
+		self.assertIn("Bad item.", mapping.inventory_last_error)
+		self.assertIn(self.TRACKING_CLAUSE, mapping.inventory_last_error)
+
+	def test_long_message_is_truncated_so_the_clause_survives(self):
+		note = inventory_sync._with_applied_note("x" * 2000, [inventory_sync.APPLIED_TRACKING])
+
+		self.assertLessEqual(len(note), inventory_sync.ERROR_MESSAGE_MAX_LENGTH)
+		self.assertTrue(note.endswith("before this error."))
+
+
+class IntegrationTestStockingEdgeCases(InventoryFixtureMixin, IntegrationTestCase):
+	def test_variant_not_stocked_at_location_is_activated_then_set(self):
+		mapping = self._one(6, has_level=False, on_hand=None)
+
+		self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.kinds(), ["read", "activate", "set"])
+		activate = self.shopify.calls_of("activate")[0]
+		self.assertEqual(activate["locationId"], LOCATION)
+		self.assertEqual(self.shopify.calls_of("set")[0]["input"]["quantities"][0]["changeFromQuantity"], 0)
+		self.assertEqual(self.shopify.variants[mapping.external_reference]["on_hand"], 6)
+
+	def test_untracked_item_is_tracked_then_activated_if_needed_then_set(self):
+		mapping = self._one(6, tracked=False, has_level=False, on_hand=None)
+
+		self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.kinds(), ["read", "track", "activate", "set"])
+		track = self.shopify.calls_of("track")[0]
+		self.assertEqual(track["input"], {"tracked": True})
+		self.assertTrue(self.shopify.variants[mapping.external_reference]["tracked"])
+
+	def test_untracked_item_with_a_level_is_tracked_then_set_without_activate(self):
+		mapping = self._one(6, shopify_on_hand=6, tracked=False)
+
+		self._sync([mapping.name])
+
+		# Never skipped as "equal" right after flipping tracking - the compare
+		# value read before the flip can't be trusted.
+		self.assertEqual(self.shopify.kinds(), ["read", "track", "set"])
+
+	def test_tracked_stocked_variant_uses_neither_prep_mutation(self):
+		mapping = self._one(6)
+
+		self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.kinds(), ["read", "set"])
+
+	def test_unreadable_current_quantity_is_an_error_not_a_blind_write(self):
+		mapping = self._one(6, on_hand=None)
+
+		self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.kinds(), ["read"])
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Error")
+
+	def test_variant_missing_in_shopify_is_an_error(self):
+		item = self._make_item("Gone", qty=1)
+		mapping = self._make_mapping(item)
+
+		self._sync([mapping.name])
+
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Error")
+		self.assertIn("not found", mapping.inventory_last_error)
+
+	def test_malformed_variant_gid_is_a_local_error_with_no_network_call(self):
+		item = self._make_item("BadGid", qty=1)
+		mapping = self._make_mapping(item, variant_gid="not-a-gid")
+
+		self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.calls, [])
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Error")
+
+
+class IntegrationTestNonStockItems(InventoryFixtureMixin, IntegrationTestCase):
+	def test_non_stock_item_is_skipped_with_no_shopify_change(self):
+		mapping = self._one(None, is_stock_item=0, tracked=False, has_level=False, on_hand=None)
+
+		payload = self._sync([mapping.name])
+
+		# No read either: nothing was sent, so no mutation and no store change.
+		self.assertEqual(self.shopify.calls, [])
+		self.assertEqual((payload["skipped_mappings"], payload["failed"], payload["succeeded"]), (1, 0, 0))
+		self.assertTrue(payload["results"][0]["skipped"])
+		self.assertIn("not a stock Item", payload["results"][0]["error"])
+		state = self.shopify.variants[mapping.external_reference]
+		self.assertFalse(state["tracked"])
+		self.assertFalse(state["has_level"])
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Not Synced")
+
+	def test_full_reconciliation_skips_non_stock_and_still_syncs_stock_items(self):
+		stock = self._one(5, shopify_on_hand=1)
+		non_stock = self._one(None, is_stock_item=0, tracked=False, has_level=False, on_hand=None)
+
+		payload = self._sync(None)
+
+		self.assertEqual((payload["succeeded"], payload["skipped_mappings"], payload["failed"]), (1, 1, 0))
+		self.assertEqual(self.shopify.calls_of("read")[0]["ids"], [stock.external_reference])
+		self.assertEqual(self.shopify.kinds().count("track"), 0)
+		self.assertEqual(self.shopify.variants[stock.external_reference]["on_hand"], 5)
+		self.assertFalse(self.shopify.variants[non_stock.external_reference]["tracked"])
+
+	def test_stock_item_still_syncs(self):
+		mapping = self._one(4, shopify_on_hand=0)
+
+		payload = self._sync([mapping.name])
+
+		self.assertEqual(payload["succeeded"], 1)
+		self.assertEqual(self.shopify.variants[mapping.external_reference]["on_hand"], 4)
+
+
+class IntegrationTestTemplateItems(InventoryFixtureMixin, IntegrationTestCase):
+	def test_template_item_is_skipped_with_no_shopify_change(self):
+		mapping = self._one(None, has_variants=1, tracked=False, has_level=False, on_hand=None)
+
+		payload = self._sync([mapping.name])
+
+		# No read either: nothing was sent, so no mutation and no store change.
+		self.assertEqual(self.shopify.calls, [])
+		self.assertEqual((payload["skipped_mappings"], payload["failed"], payload["succeeded"]), (1, 0, 0))
+		self.assertTrue(payload["results"][0]["skipped"])
+		self.assertIn("template", payload["results"][0]["error"])
+		state = self.shopify.variants[mapping.external_reference]
+		self.assertFalse(state["tracked"])
+		self.assertFalse(state["has_level"])
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Not Synced")
+
+	def test_full_reconciliation_skips_template_and_still_syncs_stock_items(self):
+		stock = self._one(5, shopify_on_hand=1)
+		template = self._one(None, has_variants=1, tracked=False, has_level=False, on_hand=None)
+
+		payload = self._sync(None)
+
+		self.assertEqual((payload["succeeded"], payload["skipped_mappings"], payload["failed"]), (1, 1, 0))
+		self.assertEqual(self.shopify.calls_of("read")[0]["ids"], [stock.external_reference])
+		self.assertEqual(self.shopify.kinds().count("track"), 0)
+		self.assertEqual(self.shopify.variants[stock.external_reference]["on_hand"], 5)
+		self.assertFalse(self.shopify.variants[template.external_reference]["tracked"])
+
+
+class IntegrationTestJobResilience(InventoryFixtureMixin, IntegrationTestCase):
+	def test_mappings_missing_at_run_time_get_an_error_row_so_totals_reconcile(self):
+		kept = self._one(5)
+		gone = self._one(5)
+		gone_name = gone.name
+		other_account = self._make_account("Moved")
+		moved = self._make_mapping(self._make_item("Moved", qty=1), account=other_account)
+		frappe.delete_doc("Marketplace Product Mapping", gone_name, force=True)
+
+		payload = self._sync([kept.name, gone_name, moved.name])
+
+		self.assertEqual(payload["total"], 3)
+		self.assertEqual((payload["succeeded"], payload["failed"]), (1, 2))
+		by_name = {row["mapping_name"]: row for row in payload["results"]}
+		for name in (gone_name, moved.name):
+			self.assertIn("no longer exists or was moved", by_name[name]["error"])
+
+	def test_error_log_entries_are_capped_per_job_with_one_summary(self):
+		inventory_sync.frappe.flags.shopify_inventory_logged_failures = 0
+		inventory_sync.frappe.flags.shopify_inventory_suppressed_failures = 0
+		cap = inventory_sync.MAX_ERROR_LOG_ENTRIES_PER_JOB
+		with patch.object(inventory_sync.frappe, "log_error") as mocked_log:
+			for _n in range(cap + 5):
+				inventory_sync._log_failure("read")
+			self.assertEqual(mocked_log.call_count, cap)
+			inventory_sync._log_suppressed_failures()
+
+		self.assertEqual(mocked_log.call_count, cap + 1)
+		self.assertIn("5 more failures suppressed", mocked_log.call_args.kwargs["message"])
+
+	def test_status_writes_do_not_change_modified(self):
+		mapping = self._one(5)
+		before = frappe.db.get_value("Marketplace Product Mapping", mapping.name, "modified")
+
+		self._sync([mapping.name])
+
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Synced")
+		self.assertEqual(mapping.modified, before)
+
+
+class IntegrationTestNoMutationWhenDisabled(InventoryFixtureMixin, IntegrationTestCase):
+	def test_disabled_mapping_is_skipped_not_error_and_sends_nothing(self):
+		mapping = self._one(5)
+		mapping.db_set("enabled", 0, update_modified=False)
+
+		payload = self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.calls, [])
+		self.assertEqual((payload["skipped_mappings"], payload["failed"], payload["succeeded"]), (1, 0, 0))
+		self.assertTrue(payload["results"][0]["skipped"])
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Not Synced")
+
+	def test_disabled_item_is_skipped_not_error_and_sends_nothing(self):
+		item = self._make_item("Disabled", qty=5, disabled=1)
+		mapping = self._make_mapping(item)
+		self.shopify.add(mapping.external_reference)
+
+		payload = self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.calls, [])
+		self.assertEqual(payload["skipped_mappings"], 1)
+		self.assertEqual(payload["failed"], 0)
+
+	def test_disabled_account_sends_nothing(self):
+		mapping = self._one(5)
+		self.account.db_set("enabled", 0, update_modified=False)
+
+		with self.assertRaisesRegex(frappe.ValidationError, "disabled"):
+			self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.calls, [])
+
+	def test_disabled_connection_sends_nothing(self):
+		mapping = self._one(5)
+		frappe.db.set_value("Shopify Connection", self.account.connection, "enabled", 0)
+
+		with self.assertRaisesRegex(frappe.ValidationError, "disabled"):
+			self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.calls, [])
+
+	def test_reconciliation_only_touches_enabled_mappings(self):
+		enabled = self._one(5)
+		disabled = self._one(5)
+		disabled.db_set("enabled", 0, update_modified=False)
+
+		payload = self._sync(None)
+
+		self.assertEqual(payload["total"], 1)
+		self.assertEqual(self.shopify.calls_of("read")[0]["ids"], [enabled.external_reference])
+
+
+class IntegrationTestLocationRecheck(InventoryFixtureMixin, IntegrationTestCase):
+	def test_location_no_longer_active_fails_the_job_before_any_shopify_call(self):
+		mapping = self._one(5)
+		other_locations = {
+			"shop_id": "s",
+			"active_locations": [{"id": "gid://shopify/Location/2", "name": "x"}],
+		}
+
+		with (
+			patch(EXECUTE_TARGET, side_effect=self.shopify),
+			patch(FETCH_LOCATIONS_TARGET, return_value=other_locations),
+			self.assertRaisesRegex(frappe.ValidationError, "no longer an active Location"),
+		):
+			inventory_sync.sync_account_inventory(self.account.name, [mapping.name])
+
+		self.assertEqual(self.shopify.calls, [])
+
+	def test_location_is_rechecked_once_per_job_not_per_chunk(self):
+		with patch.object(inventory_sync, "SHOPIFY_INVENTORY_SYNC_CHUNK_SIZE", 1):
+			first = self._one(5)
+			second = self._one(6)
+			locations = {"shop_id": "s", "active_locations": [{"id": LOCATION, "name": "Main"}]}
+			with (
+				patch(EXECUTE_TARGET, side_effect=self.shopify),
+				patch(FETCH_LOCATIONS_TARGET, return_value=locations) as mocked_fetch,
+			):
+				inventory_sync.sync_account_inventory(self.account.name, [first.name, second.name])
+
+		mocked_fetch.assert_called_once()
+
+	def test_missing_location_or_warehouse_fails_local_validation(self):
+		self.account.db_set("shopify_location_gid", None, update_modified=False)
+		with self.assertRaisesRegex(frappe.ValidationError, "Shopify Location"):
+			inventory_sync._validate_inventory_account_local(self.account.name)
+
+		self.account.db_set("shopify_location_gid", LOCATION, update_modified=False)
+		self.account.db_set("warehouse", None, update_modified=False)
+		with self.assertRaisesRegex(frappe.ValidationError, "Warehouse"):
+			inventory_sync._validate_inventory_account_local(self.account.name)
+
+
+class IntegrationTestIdempotency(InventoryFixtureMixin, IntegrationTestCase):
+	def _keys(self):
+		keys = []
+		for _kind, variables in self.shopify.calls:
+			if "idempotencyKey" in variables:
+				keys.append(variables["idempotencyKey"])
+		return keys
+
+	def test_every_inventory_mutation_carries_a_fresh_uuid_key(self):
+		mapping = self._one(6, has_level=False, on_hand=None)
+
+		self._sync([mapping.name])
+
+		keys = self._keys()
+		self.assertEqual(len(keys), 2)  # activate + set
+		for key in keys:
+			self.assertEqual(str(uuid.UUID(key)), key)
+		self.assertEqual(len(set(keys)), 2)
+
+	def test_stale_retry_uses_a_new_key_for_the_new_logical_mutation(self):
+		mapping = self._one(9, shopify_on_hand=2)
+		state = self.shopify.variants[mapping.external_reference]
+		self.shopify.before_set.append(lambda: state.update(on_hand=4))
+
+		self._sync([mapping.name])
+
+		keys = [call["idempotencyKey"] for call in self.shopify.calls_of("set")]
+		self.assertEqual(len(keys), 2)
+		self.assertNotEqual(keys[0], keys[1])
+
+	def test_same_change_repeated_later_gets_a_different_key(self):
+		mapping = self._one(6, shopify_on_hand=1)
+		self._sync([mapping.name])
+		self.shopify.variants[mapping.external_reference]["on_hand"] = 1
+		self._sync([mapping.name])
+
+		keys = [call["idempotencyKey"] for call in self.shopify.calls_of("set")]
+		self.assertEqual(len(keys), 2)
+		self.assertNotEqual(keys[0], keys[1])
+
+
+class IntegrationTestJobStatus(InventoryFixtureMixin, IntegrationTestCase):
+	def test_status_is_owner_scoped_and_reports_results(self):
+		mapping = self._one(5)
+		job_id = frappe.generate_hash(length=16)
+		inventory_sync._set_status(job_id, {"owner": "Administrator", "status": "queued", "processed": 0})
+
+		self._sync([mapping.name], job_id_for_result=job_id, owner="Administrator")
+
+		status = inventory_sync.get_sync_status(job_id)
+		self.assertEqual(status["status"], "completed")
+		self.assertEqual(status["result"]["succeeded"], 1)
+		self.assertNotIn("owner", status)
+		frappe.set_user("Guest")
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				inventory_sync.get_sync_status(job_id)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_failed_job_records_failed_status(self):
+		mapping = self._one(5)
+		self.account.db_set("enabled", 0, update_modified=False)
+		job_id = frappe.generate_hash(length=16)
+		inventory_sync._set_status(job_id, {"owner": "Administrator", "status": "queued"})
+
+		with self.assertRaises(frappe.ValidationError):
+			self._sync([mapping.name], job_id_for_result=job_id, owner="Administrator")
+
+		self.assertEqual(inventory_sync.get_sync_status(job_id)["status"], "failed")
+
+	def test_results_returned_are_capped_but_counts_are_not(self):
+		results = [
+			{"mapping_name": f"M{i}", "ok": True}
+			for i in range(inventory_sync.MAX_INVENTORY_RESULTS_RETURNED + 3)
+		]
+
+		payload = inventory_sync._result_payload(results)
+
+		self.assertEqual(len(payload["results"]), inventory_sync.MAX_INVENTORY_RESULTS_RETURNED)
+		self.assertEqual(payload["total"], len(results))
+		self.assertEqual(payload["succeeded"], len(results))
+		self.assertTrue(payload["truncated"])
+
+	def test_progress_writes_are_throttled(self):
+		with patch.object(inventory_sync, "SHOPIFY_INVENTORY_SYNC_CHUNK_SIZE", 1):
+			mappings = [self._one(i) for i in range(3)]
+			with patch.object(inventory_sync, "_report") as mocked_report:
+				self._sync(
+					[mapping.name for mapping in mappings], job_id_for_result="j", owner="Administrator"
+				)
+
+		statuses = [call.kwargs.get("status") for call in mocked_report.call_args_list]
+		# initial running, after-local running, and the final completed - the 3
+		# chunks are below INVENTORY_PROGRESS_UPDATE_INTERVAL so no tick between.
+		self.assertEqual(statuses, ["running", "running", "completed"])
+
+
+class IntegrationTestQueueInventorySync(InventoryFixtureMixin, IntegrationTestCase):
+	def _queue(self, names, enqueue_return="enqueued"):
+		with (
+			patch(EXECUTE_TARGET) as mocked_execute,
+			patch(FETCH_LOCATIONS_TARGET) as mocked_fetch,
+			patch("frappe.enqueue", return_value=enqueue_return) as mocked_enqueue,
+		):
+			result = inventory_sync.queue_inventory_sync(names)
+		# The Desk request path must never call Shopify.
+		mocked_execute.assert_not_called()
+		mocked_fetch.assert_not_called()
+		return result, mocked_enqueue
+
+	def test_queues_one_job_per_account_with_no_shopify_call(self):
+		mapping = self._one(5)
+
+		result, mocked_enqueue = self._queue([mapping.name])
+
+		self.assertEqual(len(result["jobs"]), 1)
+		self.assertEqual(result["jobs"][0]["account"], self.account.name)
+		self.assertEqual(result["jobs"][0]["mapping_count"], 1)
+		self.assertEqual(result["skipped_accounts"], [])
+		kwargs = mocked_enqueue.call_args.kwargs
+		self.assertEqual(kwargs["account_name"], self.account.name)
+		self.assertEqual(kwargs["mapping_names"], [mapping.name])
+		self.assertEqual(kwargs["job_id"], f"marketplace-shopify-inventory-sync-{self.account.name}")
+		self.assertTrue(kwargs["deduplicate"])
+		# Owner-scoped "queued" entry seeded before enqueue.
+		state = frappe.cache().get_value(inventory_sync._status_cache_key(kwargs["job_id_for_result"]))
+		self.assertEqual(state["owner"], frappe.session.user)
+		self.assertEqual(state["status"], "queued")
+
+	def test_dedup_rejection_reports_the_reason_and_clears_the_seeded_entry(self):
+		mapping = self._one(5)
+
+		result, mocked_enqueue = self._queue([mapping.name], enqueue_return=None)
+
+		self.assertEqual(result["jobs"], [])
+		self.assertEqual(result["skipped_accounts"][0]["account"], self.account.name)
+		self.assertIn("already running", result["skipped_accounts"][0]["reason"])
+		job_id = mocked_enqueue.call_args.kwargs["job_id_for_result"]
+		self.assertIsNone(frappe.cache().get_value(inventory_sync._status_cache_key(job_id)))
+
+	def test_misconfigured_account_is_skipped_with_its_real_reason_while_a_valid_one_queues(self):
+		bad_mapping = self._one(5)
+		self.account.db_set("shopify_location_gid", None, update_modified=False)
+		other_account = self._make_account("Other")
+		other_item = self._make_item("OtherAcct", qty=1)
+		other_mapping = self._make_mapping(other_item, account=other_account)
+
+		result, mocked_enqueue = self._queue([bad_mapping.name, other_mapping.name])
+
+		self.assertEqual([job["account"] for job in result["jobs"]], [other_account.name])
+		self.assertEqual(len(result["skipped_accounts"]), 1)
+		self.assertEqual(result["skipped_accounts"][0]["account"], self.account.name)
+		self.assertIn("Shopify Location", result["skipped_accounts"][0]["reason"])
+		mocked_enqueue.assert_called_once()
+
+	def test_dedup_for_one_account_does_not_block_another(self):
+		first = self._one(5)
+		other_account = self._make_account("Other2")
+		other_mapping = self._make_mapping(self._make_item("Other2", qty=1), account=other_account)
+
+		def enqueue(*args, **kwargs):
+			return None if kwargs["account_name"] == self.account.name else object()
+
+		with patch("frappe.enqueue", side_effect=enqueue), patch(EXECUTE_TARGET) as mocked_execute:
+			result = inventory_sync.queue_inventory_sync([first.name, other_mapping.name])
+
+		mocked_execute.assert_not_called()
+		self.assertEqual([job["account"] for job in result["jobs"]], [other_account.name])
+		self.assertEqual([skip["account"] for skip in result["skipped_accounts"]], [self.account.name])
+
+	def test_reconciliation_queues_the_whole_account(self):
+		with (
+			patch(EXECUTE_TARGET) as mocked_execute,
+			patch(FETCH_LOCATIONS_TARGET) as mocked_fetch,
+			patch("frappe.enqueue", return_value=object()) as mocked_enqueue,
+		):
+			result = inventory_sync.queue_account_reconciliation(self.account.name)
+
+		mocked_execute.assert_not_called()
+		mocked_fetch.assert_not_called()
+		self.assertEqual(result["jobs"][0]["mapping_count"], None)
+		self.assertIsNone(mocked_enqueue.call_args.kwargs["mapping_names"])
+
+	def test_reconciliation_of_a_misconfigured_account_reports_its_reason(self):
+		self.account.db_set("warehouse", None, update_modified=False)
+
+		with patch("frappe.enqueue") as mocked_enqueue:
+			result = inventory_sync.queue_account_reconciliation(self.account.name)
+
+		mocked_enqueue.assert_not_called()
+		self.assertEqual(result["jobs"], [])
+		self.assertIn("Warehouse", result["skipped_accounts"][0]["reason"])
+
+	def test_a_talabat_mapping_is_skipped_as_not_a_shopify_account(self):
+		talabat_account = self._make_account("Talabat")
+		talabat_account.db_set("platform", "Talabat", update_modified=False)
+		mapping = self._make_mapping(self._make_item("TalabatMap", qty=1), account=talabat_account)
+
+		result, mocked_enqueue = self._queue([mapping.name])
+
+		mocked_enqueue.assert_not_called()
+		self.assertEqual(result["jobs"], [])
+		self.assertIn("not a Shopify account", result["skipped_accounts"][0]["reason"])
+
+	def test_requires_write_permission_on_the_mapping(self):
+		# A real user with READ but no WRITE on the account and mapping.
+		mapping = self._one(5)
+		email = f"inv-reader-{self.suffix}@example.com"
+		role = f"Inv Reader {self.suffix}"
+		frappe.get_doc({"doctype": "Role", "role_name": role}).insert()
+		for doctype in ("Marketplace Account", "Marketplace Product Mapping"):
+			frappe.get_doc(
+				{
+					"doctype": "Custom DocPerm",
+					"parent": doctype,
+					"parenttype": "DocType",
+					"parentfield": "permissions",
+					"role": role,
+					"permlevel": 0,
+					"read": 1,
+				}
+			).insert()
+		frappe.clear_cache(doctype="Marketplace Account")
+		frappe.clear_cache(doctype="Marketplace Product Mapping")
+		user = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": "Reader",
+				"send_welcome_email": 0,
+				"roles": [{"role": role}],
+			}
+		).insert()
+		frappe.set_user(user.name)
+		try:
+			self.assertTrue(frappe.has_permission("Marketplace Account", "read", self.account.name))
+			self.assertFalse(frappe.has_permission("Marketplace Account", "write", self.account.name))
+			with self.assertRaises(frappe.PermissionError):
+				inventory_sync.queue_inventory_sync([mapping.name])
+			with self.assertRaises(frappe.PermissionError):
+				inventory_sync.queue_account_reconciliation(self.account.name)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_rejects_an_empty_selection(self):
+		with self.assertRaises(frappe.ValidationError):
+			inventory_sync.queue_inventory_sync([])

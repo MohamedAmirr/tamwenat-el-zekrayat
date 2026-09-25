@@ -5,6 +5,9 @@ if (typeof frappe !== "undefined") {
 			listview.page.add_actions_menu_item(__("Push selected"), () => {
 				push_selected(listview);
 			});
+			listview.page.add_actions_menu_item(__("Sync Shopify Inventory"), () => {
+				push_selected(listview, "inventory");
+			});
 		},
 	};
 }
@@ -14,7 +17,11 @@ if (typeof frappe !== "undefined") {
 // automatically, rather than rejected outright. Uses only the standard
 // whitelisted frappe.client.get_list - no new server-side endpoint is needed
 // just to resolve which platform each selected mapping's account is on.
-function push_selected(listview) {
+//
+// #107: `action` is "push" (default - the catalog/price push above) or
+// "inventory" (Shopify inventory sync; Talabat mappings are reported as
+// skipped, since inventory sync is Shopify-only).
+function push_selected(listview, action = "push") {
 	const mapping_names = listview.get_checked_items(true);
 	if (!mapping_names.length) return;
 
@@ -59,12 +66,12 @@ function push_selected(listview) {
 					(account_response.message || []).forEach((account) => {
 						platform_by_account[account.name] = account.platform;
 					});
-					return route_selected(listview, rows, platform_by_account);
+					return route_selected(listview, rows, platform_by_account, action);
 				});
 		});
 }
 
-function route_selected(listview, rows, platform_by_account) {
+function route_selected(listview, rows, platform_by_account, action = "push") {
 	const talabat_names = [];
 	const shopify_names = [];
 	let unknown_count = 0;
@@ -78,6 +85,23 @@ function route_selected(listview, rows, platform_by_account) {
 			unknown_count += 1;
 		}
 	});
+
+	if (action === "inventory") {
+		const skipped_count = unknown_count + talabat_names.length;
+		if (skipped_count) {
+			frappe.msgprint(
+				__(
+					"Skipped {0} selected Marketplace Product Mapping(s): Shopify inventory sync only applies to Shopify Marketplace Accounts.",
+					[skipped_count]
+				)
+			);
+		}
+		if (!shopify_names.length) return;
+		return Promise.allSettled([sync_selected_inventory(shopify_names)]).then(() => {
+			listview.clear_checked_items();
+			listview.refresh();
+		});
+	}
 
 	if (unknown_count) {
 		frappe.msgprint(
@@ -152,8 +176,46 @@ function push_selected_to_shopify(mapping_names) {
 		});
 }
 
+function sync_selected_inventory(mapping_names) {
+	return frappe
+		.call({
+			method: "marketplace_integrations.api.shopify_inventory.queue_inventory_sync",
+			args: { mapping_names },
+			freeze: true,
+			freeze_message: __("Queuing Shopify inventory syncs..."),
+		})
+		.then((response) => {
+			const jobs = (response.message && response.message.jobs) || [];
+			const skipped_accounts = (response.message && response.message.skipped_accounts) || [];
+			if (skipped_accounts.length) {
+				// Each account's own server-provided reason, escaped verbatim.
+				const lines = skipped_accounts.map(
+					(skipped) =>
+						`${frappe.utils.escape_html(skipped.account)}: ${frappe.utils.escape_html(
+							skipped.reason
+						)}`
+				);
+				frappe.msgprint({
+					title: __("Marketplace Accounts skipped"),
+					message: lines.join("<br>"),
+					indicator: "orange",
+				});
+			}
+			if (!jobs.length) return;
+			return frappe
+				.require("/assets/marketplace_integrations/js/shopify_catalog_push_status.js")
+				.then(() => {
+					new frappe.ui.ShopifyCatalogPushStatus({
+						jobs,
+						...frappe.ui.ShopifyCatalogPushStatus.INVENTORY_OPTIONS,
+					});
+				});
+		});
+}
+
 if (typeof module !== "undefined") {
 	module.exports = {
+		sync_selected_inventory,
 		push_selected,
 		route_selected,
 		push_selected_to_talabat,

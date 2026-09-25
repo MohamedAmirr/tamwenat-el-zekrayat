@@ -7,6 +7,7 @@ global.__ = (message, values) =>
 const {
 	push_to_talabat,
 	push_to_shopify,
+	sync_shopify_inventory,
 	add_platform_push_button,
 } = require("./marketplace_product_mapping.js");
 
@@ -91,7 +92,7 @@ test("add_platform_push_button adds only the Shopify button for a Shopify accoun
 	await add_platform_push_button(frm);
 
 	assert.deepEqual(get_value_args, ["Marketplace Account", "MKTACC-00001", "platform"]);
-	assert.deepEqual(added_buttons, ["Push to Shopify"]);
+	assert.deepEqual(added_buttons, ["Push to Shopify", "Sync Shopify Inventory"]);
 });
 
 test("add_platform_push_button adds only the Talabat button for a Talabat account", async () => {
@@ -216,4 +217,66 @@ test("push_to_shopify shows the skipped account's real config-error reason, not 
 
 	assert.equal(alert_args.message, reason);
 	assert.ok(!/already running/.test(alert_args.message));
+});
+
+test("Sync Shopify Inventory queues only the current mapping and opens the dialog with the inventory options", async () => {
+	let call_options;
+	let required_asset;
+	let dialog_args;
+	const inventory_options = { status_method: "inventory.status", labels: {} };
+	global.frappe = {
+		call(options) {
+			call_options = options;
+			return Promise.resolve({
+				message: { jobs: [{ account: "Some Account", job_id: "job-9", mapping_count: 1 }] },
+			});
+		},
+		require(asset) {
+			required_asset = asset;
+			return Promise.resolve();
+		},
+		ui: {
+			ShopifyCatalogPushStatus: class {
+				static INVENTORY_OPTIONS = inventory_options;
+				constructor(args) {
+					dialog_args = args;
+				}
+			},
+		},
+	};
+
+	sync_shopify_inventory({ doc: { name: "MPM-00007" }, reload_doc() {} });
+	await new Promise((resolve) => setImmediate(resolve));
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(call_options.method, "marketplace_integrations.api.shopify_inventory.queue_inventory_sync");
+	assert.deepEqual(call_options.args, { mapping_names: ["MPM-00007"] });
+	assert.equal(required_asset, "/assets/marketplace_integrations/js/shopify_catalog_push_status.js");
+	assert.deepEqual(dialog_args.jobs, [{ account: "Some Account", job_id: "job-9", mapping_count: 1 }]);
+	assert.equal(dialog_args.status_method, "inventory.status");
+});
+
+test("Sync Shopify Inventory shows the skipped account's real reason (escaped) and opens no dialog", async () => {
+	let alert_args;
+	let dialog_opened = false;
+	const reason = "Marketplace Account X requires a Shopify Location for inventory sync.";
+	global.frappe = {
+		call() {
+			return Promise.resolve({ message: { jobs: [], skipped_accounts: [{ account: "X", reason }] } });
+		},
+		show_alert(args) {
+			alert_args = args;
+		},
+		utils: { escape_html: (text) => `esc(${text})` },
+		require() {
+			dialog_opened = true;
+			return Promise.resolve();
+		},
+	};
+
+	sync_shopify_inventory({ doc: { name: "MPM-00007" }, reload_doc() {} });
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(alert_args.message, `esc(${reason})`);
+	assert.equal(dialog_opened, false);
 });

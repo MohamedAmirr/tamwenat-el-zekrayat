@@ -22,6 +22,8 @@ function add_platform_push_button(frm) {
 		const platform = r && r.message && r.message.platform;
 		if (platform === "Shopify") {
 			frm.add_custom_button(__("Push to Shopify"), () => push_to_shopify(frm));
+			// #107: same Shopify + can_write gate as the price push above.
+			frm.add_custom_button(__("Sync Shopify Inventory"), () => sync_shopify_inventory(frm));
 		} else if (platform === "Talabat") {
 			frm.add_custom_button(__("Push to Talabat"), () => push_to_talabat(frm));
 		}
@@ -80,6 +82,42 @@ function push_to_shopify(frm) {
 		});
 }
 
+function sync_shopify_inventory(frm) {
+	frappe
+		.call({
+			method: "marketplace_integrations.api.shopify_inventory.queue_inventory_sync",
+			args: { mapping_names: [frm.doc.name] },
+			freeze: true,
+			freeze_message: __("Queuing Shopify inventory sync..."),
+		})
+		.then((response) => {
+			const jobs = (response.message && response.message.jobs) || [];
+			const skipped_accounts = (response.message && response.message.skipped_accounts) || [];
+			if (skipped_accounts.length) {
+				frappe.show_alert({
+					// The server's own reason (config error OR already running).
+					message: frappe.utils.escape_html(skipped_accounts[0].reason),
+					indicator: "orange",
+				});
+			}
+			if (!jobs.length) return;
+			return frappe
+				.require("/assets/marketplace_integrations/js/shopify_catalog_push_status.js")
+				.then(() => {
+					new frappe.ui.ShopifyCatalogPushStatus({
+						jobs,
+						on_done: () => frm.reload_doc(),
+						...frappe.ui.ShopifyCatalogPushStatus.INVENTORY_OPTIONS,
+					});
+				});
+		});
+}
+
 if (typeof module !== "undefined") {
-	module.exports = { push_to_talabat, push_to_shopify, add_platform_push_button };
+	module.exports = {
+		push_to_talabat,
+		push_to_shopify,
+		sync_shopify_inventory,
+		add_platform_push_button,
+	};
 }
