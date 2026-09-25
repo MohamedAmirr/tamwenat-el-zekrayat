@@ -80,3 +80,40 @@ SHOPIFY_NODES_LOOKUP_CHUNK_SIZE = 50
 # this is a conservative, not a verified, default - re-check against
 # shopify.dev before raising it.
 SHOPIFY_CATALOG_PUSH_VARIANT_CHUNK_SIZE = 100
+
+# Inventory sync (#107) - see integrations/shopify/inventory_sync.py. Every
+# value below marked "unverified" could not be checked against a live store;
+# see that module's docstring and docs/shopify/README.md "Inventory (#107)".
+#
+# Mappings per read/`inventorySetQuantities` call. shopify.dev did not
+# document a maximum `quantities` length per call in what was fetched
+# (unverified), so this is a conservative default equal to the `nodes(ids:)`
+# lookup chunk above - re-check before raising it.
+SHOPIFY_INVENTORY_SYNC_CHUNK_SIZE = SHOPIFY_NODES_LOOKUP_CHUNK_SIZE
+
+# Bounded retries after a stale-compare (`COMPARE_FAILED`) rejection: re-read
+# the whole chunk and resend it, at most this many times, then mark the chunk's
+# mappings Error (#107 decision 8).
+SHOPIFY_INVENTORY_MAX_STALE_RETRIES = 3
+
+# The quantity name written. `on_hand` (not `available`) so Shopify derives
+# `available = on_hand - committed` itself (#107 decision 3). Verified as a
+# valid `InventorySetQuantitiesInput.name` value on shopify.dev 2026-09-24.
+SHOPIFY_INVENTORY_QUANTITY_NAME = "on_hand"
+
+# `InventorySetQuantitiesInput.reason` (String!). VERIFIED 2026-09-24
+# (shopify.dev `mutations/inventorySetQuantities`): "correction" is a documented
+# example value; the full list of accepted values is not stated there.
+SHOPIFY_INVENTORY_REASON = "correction"
+
+# `InventorySetQuantitiesInput.referenceDocumentUri` (String!). VERIFIED
+# 2026-09-24 (same page): the documented example style is
+# `logistics://some.warehouse/take/<timestamp>`; no format rules are stated and
+# the URI below matches that style.
+SHOPIFY_INVENTORY_REFERENCE_DOCUMENT_URI = "logistics://marketplace-integrations/erpnext-stock-sync"
+
+# The stale-compare userError code. UNVERIFIED: seen in one shopify.dev fetch on
+# 2026-09-24, while a later fetch said the code enum is not listed. A wrong
+# guess is bounded: a non-matching code takes the per-item fallback, which
+# skip-if-equals on its own re-read.
+SHOPIFY_INVENTORY_STALE_COMPARE_CODE = "COMPARE_FAILED"

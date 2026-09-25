@@ -12,11 +12,11 @@ extracted to ``services/listing_price.py`` (#106 decision 4) - a pure
 extraction, no behavior change - so it can be shared with Shopify's
 price-only push (``integrations/shopify/catalog_push.py``). This module keeps
 its own Talabat-specific account/connection/price-list validation
-(``validate_catalog_sync_account()``) and quantity logic (``get_sellable_qty()``),
-neither of which is shared with Shopify.
+(``validate_catalog_sync_account()``). ``get_sellable_qty()`` was likewise
+extracted to ``services/listing_quantity.py`` (#107 decision 11) - a pure
+move, re-imported here so Talabat's call path is unchanged.
 """
 
-from decimal import ROUND_FLOOR
 from urllib.parse import quote
 
 import frappe
@@ -27,13 +27,12 @@ from marketplace_integrations.integrations.talabat.client import TalabatClient
 from marketplace_integrations.services.account_warehouse import validate_account_warehouse
 from marketplace_integrations.services.listing_price import (
 	CatalogBuildError,
-	conversion_factor,
 	resolve_listing_price,
-	to_decimal,
 )
 from marketplace_integrations.services.listing_price import (
 	listing_uom as compute_listing_uom,
 )
+from marketplace_integrations.services.listing_quantity import get_sellable_qty
 
 CATALOG_BATCH_SIZE = 10_000
 REMOTE_ERROR = _("Talabat did not accept the catalog update.")
@@ -66,15 +65,6 @@ def validate_catalog_sync_account(account):
 	if not price_list.selling:
 		frappe.throw(_("Price List {0} is not a selling price list.").format(price_list.name))
 	return account_doc, connection, price_list
-
-
-def get_sellable_qty(item_code, warehouse, listing_uom):
-	"""Return current Bin.actual_qty in listing units, floored at zero."""
-	item = frappe.get_doc("Item", item_code)
-	actual_qty = frappe.db.get_value("Bin", {"item_code": item.name, "warehouse": warehouse}, "actual_qty")
-	qty = max(to_decimal(actual_qty or 0), to_decimal(0))
-	factor = conversion_factor(item, listing_uom)
-	return int((qty / factor).to_integral_value(rounding=ROUND_FLOOR))
 
 
 def get_listing_price(account, mapping, item, on_date=None):

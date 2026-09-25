@@ -19,7 +19,11 @@
   "sync_status",
   "last_sync_reference",
   "last_synced_on",
-  "last_error"
+  "last_error",
+  "inventory_section",
+  "inventory_sync_status",
+  "inventory_last_synced_on",
+  "inventory_last_error"
  ],
  "fields": [
   {
@@ -120,11 +124,37 @@
    "fieldtype": "Small Text",
    "label": "Last Error",
    "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "inventory_section",
+   "fieldtype": "Section Break",
+   "label": "Shopify Inventory Sync"
+  },
+  {
+   "default": "Not Synced",
+   "fieldname": "inventory_sync_status",
+   "fieldtype": "Select",
+   "label": "Inventory Sync Status",
+   "options": "Not Synced\nSynced\nError",
+   "read_only": 1
+  },
+  {
+   "fieldname": "inventory_last_synced_on",
+   "fieldtype": "Datetime",
+   "label": "Inventory Last Synced On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "inventory_last_error",
+   "fieldtype": "Small Text",
+   "label": "Inventory Last Error",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-08-30 00:00:00.000000",
+ "modified": "2026-09-24 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Marketplace Product Mapping",

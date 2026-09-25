@@ -2,9 +2,12 @@
 // For license information, please see license.txt
 
 // Shared job-status + results dialog for the Shopify price-only catalog push
-// (#106 decision 7). Loaded on demand via frappe.require() from both
-// marketplace_product_mapping.js (single-mapping "Push to Shopify" button)
-// and marketplace_product_mapping_list.js (bulk "Push selected"), so the
+// (#106 decision 7) and, generalized via the optional `status_method`/`labels`
+// constructor options (`labels.title` included), the Shopify inventory sync (#107 decision 12).
+// Every option defaults to the original price-push behavior/wording. Loaded
+// on demand via frappe.require() from marketplace_product_mapping.js
+// (single-mapping buttons), marketplace_product_mapping_list.js (bulk
+// actions) and marketplace_account.js (Reconcile), so the
 // polling/rendering logic exists in exactly one place - Desk loads each
 // doctype's own .js file independently, so it can't be shared by ordinary
 // module import the way the two Node test files share a require().
@@ -61,8 +64,26 @@
 	// failures for the same job. Reset to 0 on any successful poll.
 	const MAX_CONSECUTIVE_POLL_ERRORS = 3;
 
+	const DEFAULT_STATUS_METHOD =
+		"marketplace_integrations.api.shopify_catalog_push.get_catalog_push_status";
+
+	// Wording defaults (the price push). Callers may override any subset via
+	// the `labels` option. Functions so __() is evaluated at render time.
+	const DEFAULT_LABELS = {
+		title: () => __("Pushing to Shopify"),
+		nothing: () => __("Nothing to push."),
+		running: (counts) =>
+			__("Pushing... {0} succeeded, {1} failed, {2} skipped so far.", counts),
+		complete: (counts) => __("Push complete: {0} succeeded, {1} failed, {2} skipped.", counts),
+		account_failed: (account, error) =>
+			__("Push failed for account {0}: {1}", [account, error]),
+		poll_failed: () => __("Could not retrieve the catalog push status."),
+	};
+
 	frappe.ui.ShopifyCatalogPushStatus = class ShopifyCatalogPushStatus {
-		constructor({ jobs, on_done, poll_interval = 1500 }) {
+		constructor({ jobs, on_done, poll_interval = 1500, status_method, labels }) {
+			this.status_method = status_method || DEFAULT_STATUS_METHOD;
+			this.labels = Object.assign({}, DEFAULT_LABELS, labels || {});
 			this.jobs = jobs || [];
 			this.on_done = on_done;
 			this.poll_interval = poll_interval;
@@ -72,7 +93,7 @@
 			this.stopped = false;
 
 			this.dialog = new frappe.ui.Dialog({
-				title: __("Pushing to Shopify"),
+				title: this.labels.title(),
 				fields: [{ fieldtype: "HTML", fieldname: "status_html" }],
 			});
 			this.$status = this.dialog.fields_dict.status_html.$wrapper;
@@ -89,7 +110,7 @@
 
 			if (!this.jobs.length) {
 				this.dialog.show();
-				$('<p class="text-muted"></p>').text(__("Nothing to push.")).appendTo(this.$status);
+				$('<p class="text-muted"></p>').text(this.labels.nothing()).appendTo(this.$status);
 				return;
 			}
 
@@ -103,7 +124,7 @@
 				if (this.stopped) return;
 				frappe
 					.call({
-						method: "marketplace_integrations.api.shopify_catalog_push.get_catalog_push_status",
+						method: this.status_method,
 						args: { job_id: job.job_id },
 					})
 					.then((r) => {
@@ -134,7 +155,7 @@
 						}
 						this.job_states[job.job_id] = {
 							status: "failed",
-							error: __("Could not retrieve the catalog push status."),
+							error: this.labels.poll_failed(),
 						};
 						this.render();
 						this.maybe_finish();
@@ -184,18 +205,37 @@
 			$("<p></p>")
 				.text(
 					any_running
-						? __("Pushing... {0} succeeded, {1} failed, {2} skipped so far.", [succeeded, failed, skipped])
-						: __("Push complete: {0} succeeded, {1} failed, {2} skipped.", [succeeded, failed, skipped])
+						? this.labels.running([succeeded, failed, skipped])
+						: this.labels.complete([succeeded, failed, skipped])
 				)
 				.appendTo(this.$status);
 
 			failed_jobs.forEach((entry) => {
 				$('<p class="text-danger"></p>')
-					.text(__("Push failed for account {0}: {1}", [entry.account, entry.error || ""]))
+					.text(this.labels.account_failed(entry.account, entry.error || ""))
 					.appendTo(this.$status);
 			});
 
 			build_results_table(this.$status, results, truncated, total);
 		}
+	};
+
+	// Constructor options for the Shopify inventory sync (#107), kept here so
+	// the three callers (mapping form, mapping list, Marketplace Account) share
+	// one definition: `new frappe.ui.ShopifyCatalogPushStatus({ jobs,
+	// ...frappe.ui.ShopifyCatalogPushStatus.INVENTORY_OPTIONS })`.
+	frappe.ui.ShopifyCatalogPushStatus.INVENTORY_OPTIONS = {
+		status_method: "marketplace_integrations.api.shopify_inventory.get_inventory_sync_status",
+		labels: {
+			title: () => __("Syncing Shopify inventory"),
+			nothing: () => __("Nothing to sync."),
+			running: (counts) =>
+				__("Syncing... {0} succeeded, {1} failed, {2} skipped so far.", counts),
+			complete: (counts) =>
+				__("Sync complete: {0} succeeded, {1} failed, {2} skipped.", counts),
+			account_failed: (account, error) =>
+				__("Sync failed for account {0}: {1}", [account, error]),
+			poll_failed: () => __("Could not retrieve the inventory sync status."),
+		},
 	};
 })();

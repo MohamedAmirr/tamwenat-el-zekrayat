@@ -9,6 +9,7 @@ const {
 	route_selected,
 	push_selected_to_talabat,
 	push_selected_to_shopify,
+	sync_selected_inventory,
 } = require("./marketplace_product_mapping_list.js");
 
 function make_listview(checked_names) {
@@ -356,4 +357,105 @@ test("push_selected_to_shopify lists each skipped account's real reason", async 
 		msg_args.message,
 		"ACC-A: Marketplace Account ACC-A requires an ERPNext Selling Price List.<br>ACC-B: A catalog push is already running for this Marketplace Account."
 	);
+});
+
+test("route_selected with the inventory action syncs only Shopify mappings and warns about the rest", async () => {
+	const calls = [];
+	let msgprint_message;
+	global.frappe = {
+		call(options) {
+			calls.push(options);
+			return Promise.resolve({
+				message: { jobs: [{ account: "MKTACC-SHOPIFY", job_id: "job-1", mapping_count: 1 }] },
+			});
+		},
+		msgprint(message) {
+			msgprint_message = message;
+		},
+		require: () => Promise.resolve(),
+		ui: { ShopifyCatalogPushStatus: class {} },
+	};
+	const listview = make_listview([]);
+	const rows = [
+		{ name: "MPM-1", marketplace_account: "MKTACC-TALABAT" },
+		{ name: "MPM-2", marketplace_account: "MKTACC-SHOPIFY" },
+		{ name: "MPM-3", marketplace_account: "MKTACC-OTHER" },
+	];
+
+	await route_selected(
+		listview,
+		rows,
+		{ "MKTACC-TALABAT": "Talabat", "MKTACC-SHOPIFY": "Shopify" },
+		"inventory"
+	);
+
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].method, "marketplace_integrations.api.shopify_inventory.queue_inventory_sync");
+	assert.deepEqual(calls[0].args, { mapping_names: ["MPM-2"] });
+	assert.match(msgprint_message, /Skipped 2 selected/);
+	assert.equal(listview.refreshed, true);
+});
+
+test("route_selected with the inventory action makes no call when nothing is Shopify", async () => {
+	let called = false;
+	global.frappe = {
+		call() {
+			called = true;
+			return Promise.resolve({});
+		},
+		msgprint() {},
+	};
+
+	await route_selected(make_listview([]), [{ name: "MPM-1", marketplace_account: "T" }], { T: "Talabat" }, "inventory");
+
+	assert.equal(called, false);
+});
+
+test("sync_selected_inventory renders every skipped account's own escaped reason", async () => {
+	let msgprint_args;
+	global.frappe = {
+		call() {
+			return Promise.resolve({
+				message: {
+					jobs: [],
+					skipped_accounts: [
+						{ account: "A", reason: "Warehouse missing" },
+						{ account: "B", reason: "An inventory sync is already running for this Marketplace Account." },
+					],
+				},
+			});
+		},
+		msgprint(args) {
+			msgprint_args = args;
+		},
+		utils: { escape_html: (text) => `[${text}]` },
+	};
+
+	await sync_selected_inventory(["MPM-1"]);
+
+	assert.match(msgprint_args.message, /\[A\]: \[Warehouse missing\]/);
+	assert.match(msgprint_args.message, /\[B\]: \[An inventory sync is already running/);
+});
+
+test("sync_selected_inventory opens the dialog with the inventory options for queued jobs", async () => {
+	let dialog_args;
+	global.frappe = {
+		call() {
+			return Promise.resolve({ message: { jobs: [{ account: "A", job_id: "j", mapping_count: 1 }] } });
+		},
+		require: () => Promise.resolve(),
+		ui: {
+			ShopifyCatalogPushStatus: class {
+				static INVENTORY_OPTIONS = { status_method: "inventory.status" };
+				constructor(args) {
+					dialog_args = args;
+				}
+			},
+		},
+	};
+
+	await sync_selected_inventory(["MPM-1"]);
+
+	assert.equal(dialog_args.status_method, "inventory.status");
+	assert.deepEqual(dialog_args.jobs, [{ account: "A", job_id: "j", mapping_count: 1 }]);
 });
