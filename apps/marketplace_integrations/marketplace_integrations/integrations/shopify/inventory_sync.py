@@ -1,15 +1,20 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-"""ERPNext-authoritative Shopify inventory synchronization (#107, PR1).
+"""ERPNext-authoritative Shopify inventory synchronization (#107, PR1 + PR2).
 
 PR1 = the sync service plus MANUAL actions (per-mapping / bulk "Sync Shopify
-Inventory" and per-account "Reconcile Shopify Inventory"). There is
-deliberately NO automatic trigger here - no ``hooks.py`` entry, no
-``scheduler_events``, no ``doc_events``, no watermark. PR2 adds a changed-Bin
-sweep and a scheduled full reconciliation that only *enqueue* per-account jobs
-through ``enqueue_account_sync()`` below (the same helper the manual actions
-use), so the sync worker needs no rework.
+Inventory" and per-account "Reconcile Shopify Inventory").
+
+PR2 (this module's ``sweep_changed_bins()`` / ``reconcile_all_accounts()``,
+registered in ``hooks.py``'s ``scheduler_events``) adds the only two automatic
+triggers: a changed-Bin sweep (every
+``constants.SHOPIFY_INVENTORY_SWEEP_CRON``) and a daily full reconciliation.
+Both are scheduler-callback-cheap - they only read Bins/mappings/the per-
+account watermark and call ``enqueue_account_sync()`` below (the same helper
+the manual actions use); every actual Shopify read/mutation still happens
+only in the worker, ``sync_account_inventory()``. Still **no `doc_events`
+anywhere** - both triggers are polling/cron, never a document hook.
 
 Locked decisions this implements (see the issue's "Implementation plan"):
 
@@ -125,7 +130,7 @@ import uuid
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, now_datetime
+from frappe.utils import add_to_date, cstr, now_datetime
 
 from marketplace_integrations.integrations.shopify.client import ShopifyClient
 from marketplace_integrations.integrations.shopify.constants import (
@@ -134,6 +139,7 @@ from marketplace_integrations.integrations.shopify.constants import (
 	SHOPIFY_INVENTORY_REASON,
 	SHOPIFY_INVENTORY_REFERENCE_DOCUMENT_URI,
 	SHOPIFY_INVENTORY_STALE_COMPARE_CODE,
+	SHOPIFY_INVENTORY_SWEEP_OVERLAP_MINUTES,
 	SHOPIFY_INVENTORY_SYNC_CHUNK_SIZE,
 )
 from marketplace_integrations.integrations.shopify.locations import fetch_shop_and_active_locations
@@ -938,6 +944,234 @@ def _log_suppressed_failures():
 		message=f"...and {suppressed} more failures suppressed (only the first "
 		f"{MAX_ERROR_LOG_ENTRIES_PER_JOB} are logged in detail per job).",
 	)
+
+
+# --- PR2: automatic triggers (scheduled sweep + full reconciliation) --------
+#
+# Both entry points below are the ONLY things hooks.py's scheduler_events
+# calls for #107. Neither makes a Shopify HTTP call - they only read Bins /
+# Marketplace Product Mappings / the per-account watermark (frappe.cache())
+# and call enqueue_account_sync() (this module's single enqueue choke point).
+# All actual Shopify reads/mutations happen only in sync_account_inventory(),
+# exactly as for the manual actions.
+#
+# Watermark: one frappe.cache() key per account, holding the wall-clock time
+# (a python datetime - RedisWrapper pickles values, same as the job-status
+# dicts cached above) up to which sweep_changed_bins() has already looked for
+# Bin changes on that account. Deliberately no TTL - an account's watermark
+# is meant to persist indefinitely, not expire like the short-lived
+# per-job-run status cache entries above; a lost/evicted entry (e.g. a
+# redis-cache restart/flush) is handled by the missing-watermark fallback
+# below, not by TTL tuning.
+#
+# Missing-watermark fallback (design decision the issue leaves open - see the
+# PR2 report): treat a missing watermark (first-ever sweep tick for that
+# account, or a lost/evicted cache entry) as "look back
+# SHOPIFY_INVENTORY_SWEEP_OVERLAP_MINUTES from now", NOT as "run one full
+# account sync". A full sync triggered by every cache eviction would make the
+# sweep's own Shopify write volume depend on Redis eviction behavior rather
+# than on real ERPNext stock changes, and reconcile_all_accounts() (decision
+# 2) already exists as the "watermark lost/drifted" recovery path - a second,
+# sweep-triggered full sync would duplicate that safety net for no benefit.
+
+
+def _watermark_cache_key(account_name):
+	return f"marketplace_integrations:shopify:inventory_sweep_watermark:{account_name}"
+
+
+def _sweep_since(account_name, tick_time):
+	"""Return the ``Bin.modified`` lower bound to sweep from for this
+	account: the stored watermark, or (missing watermark) ``tick_time``
+	itself - either way minus the overlap window (decision 1's "start at
+	10" minutes)."""
+	watermark = frappe.cache().get_value(_watermark_cache_key(account_name))
+	base = watermark or tick_time
+	return add_to_date(base, minutes=-SHOPIFY_INVENTORY_SWEEP_OVERLAP_MINUTES)
+
+
+def _advance_watermark(account_name, tick_time):
+	frappe.cache().set_value(_watermark_cache_key(account_name), tick_time)
+
+
+def _enabled_shopify_accounts():
+	"""Bulk-filtered Marketplace Accounts a scheduled job may enqueue for,
+	without a per-account query or a per-account ``frappe.get_doc()`` +
+	throw: Shopify platform, enabled, using an enabled Shopify Connection,
+	with both a Warehouse and a Shopify Location configured, AND a Warehouse
+	that would actually pass ``validate_account_warehouse()`` (not a group /
+	disabled Warehouse, and not one belonging to a different Company than the
+	account's own ``erpnext_company``). This last check mirrors the worker's
+	own validation (``sync_account_inventory()`` -> ``validate_inventory_account()``
+	-> ``validate_account_warehouse()``) so a misconfigured account is
+	excluded HERE, before any enqueue, rather than getting enqueued by every
+	sweep tick and failing in the worker every time (previously a real gap:
+	this filter only checked "Warehouse is set", not "Warehouse is usable").
+	A disabled/misconfigured account is silently excluded (never reported -
+	unlike the manual Desk actions, a scheduled tick has no user to show a
+	skip reason to). Deliberately no result-count limit - see
+	constants.py's note next to SHOPIFY_INVENTORY_SWEEP_OVERLAP_MINUTES on
+	why an ``ORDER BY ... LIMIT`` here would starve accounts rather than
+	bound a backlog.
+	"""
+	accounts = frappe.get_all(
+		"Marketplace Account",
+		filters={"platform": "Shopify", "enabled": 1, "connection_doctype": "Shopify Connection"},
+		fields=["name", "warehouse", "shopify_location_gid", "connection"],
+	)
+	accounts = [
+		account
+		for account in accounts
+		if account.warehouse and cstr(account.shopify_location_gid).strip() and account.connection
+	]
+	if not accounts:
+		return []
+
+	enabled_connections = set(
+		frappe.get_all(
+			"Shopify Connection",
+			filters={"name": ["in", [account.connection for account in accounts]], "enabled": 1},
+			pluck="name",
+		)
+	)
+	accounts = [account for account in accounts if account.connection in enabled_connections]
+	return [account for account in accounts if _has_usable_warehouse(account)]
+
+
+def _has_usable_warehouse(account):
+	"""Wrap the shared ``validate_account_warehouse()`` check (never
+	duplicated) as a bool for a scheduler callback, which has no user to
+	``frappe.throw()`` an error message at. Does one extra
+	``frappe.get_doc()`` per candidate account - acceptable since this
+	project's Shopify accounts are expected to stay a handful (see
+	constants.py's note on why the sweep/reconcile account list has no
+	result-count limit either)."""
+	try:
+		validate_account_warehouse(_as_account(account.name), context=_("Shopify inventory sync"))
+	except frappe.ValidationError:
+		return False
+	return True
+
+
+def sweep_changed_bins():
+	"""Scheduled sweep (``constants.SHOPIFY_INVENTORY_SWEEP_CRON``, see
+	hooks.py's ``scheduler_events["cron"]``) that coalesces relevant ERPNext
+	stock changes by account and variant (decision 1): for every enabled
+	Shopify Marketplace Account, find Bins in its Warehouse whose
+	``modified`` is newer than that account's watermark (minus the overlap
+	window) AND whose Item is an enabled mapping on that account, and
+	enqueue ONE deduplicated inventory-sync job per account scoped to just
+	those mappings' names.
+
+	Cheap by construction: only Bin / Marketplace Product Mapping /
+	watermark reads plus ``enqueue_account_sync()`` (itself just an RQ
+	enqueue) - no Shopify HTTP call happens anywhere in this function or
+	anything it calls. The per-account RQ dedup job id
+	(``_SYNC_RQ_JOB_ID_PREFIX-{account}``) means a tick for an account whose
+	previous job is still running is a no-op, not a pile-up - confirmed by
+	``enqueue_account_sync()``'s own ``deduplicate=True`` call.
+
+	The watermark is advanced to this tick's own start time for every
+	account whose Bin query succeeded AND whose enqueue (if one was
+	attempted) was accepted - i.e. whenever nothing changed, or a change was
+	found and ``enqueue_account_sync()`` returned ``enqueued=True``. It is
+	deliberately NOT advanced when ``enqueue_account_sync()`` rejects the
+	enqueue (RQ dedup: a sync for this account is already queued/running) -
+	advancing it anyway would let a change that occurred while the account
+	was busy fall outside the next tick's overlap window and go stale until
+	the next scheduled full reconciliation. Held back this way, the next
+	tick naturally re-reads from the old watermark and re-discovers the same
+	change once the busy job finishes.
+
+	One account's failure (a bad Warehouse row, a DB error) is isolated
+	(logged, not raised) so it can't stop every other account's tick.
+	"""
+	tick_time = now_datetime()
+	for account in _enabled_shopify_accounts():
+		try:
+			_sweep_account(account, tick_time)
+		except Exception:
+			frappe.log_error(
+				title="Shopify inventory sweep: account failed", message=frappe.get_traceback()
+			)
+
+
+def _sweep_account(account, tick_time):
+	since = _sweep_since(account.name, tick_time)
+	mappings = frappe.get_all(
+		"Marketplace Product Mapping",
+		filters={"marketplace_account": account.name, "enabled": 1},
+		fields=["name", "item"],
+	)
+	should_advance = True
+	if mappings:
+		mapping_names_by_item = {}
+		for mapping in mappings:
+			mapping_names_by_item.setdefault(mapping.item, []).append(mapping.name)
+
+		changed_items = frappe.get_all(
+			"Bin",
+			filters={
+				"warehouse": account.warehouse,
+				"item_code": ["in", list(mapping_names_by_item.keys())],
+				"modified": [">", since],
+			},
+			pluck="item_code",
+		)
+		affected_mapping_names = sorted(
+			{name for item_code in set(changed_items) for name in mapping_names_by_item.get(item_code, [])}
+		)
+		if affected_mapping_names:
+			enqueued, _job_id = enqueue_account_sync(account.name, affected_mapping_names)
+			# Dedup rejection (a sync for this account is already
+			# queued/running): hold the watermark back so the next tick
+			# re-covers this same span instead of losing the change - see
+			# this function's own docstring.
+			should_advance = enqueued
+
+	# Advance whenever nothing changed, or a change was found and its
+	# enqueue was accepted - never on a dedup-rejected enqueue. See the
+	# module-level note on why this is safe.
+	if should_advance:
+		_advance_watermark(account.name, tick_time)
+
+
+def reconcile_all_accounts():
+	"""Scheduled daily full reconciliation (decision 2): enqueue one full (no
+	``mapping_names`` filter) inventory sync for every enabled Shopify
+	Marketplace Account, via the same ``enqueue_account_sync()`` the sweep
+	and the manual "Reconcile Shopify Inventory" button use. Same
+	no-Shopify-HTTP-in-this-function guarantee as ``sweep_changed_bins()`` -
+	only the bulk account read plus an enqueue.
+
+	Recovers from anything the sweep could miss: a lost/evicted watermark, a
+	change whose Bin write never showed up within the overlap window, or a
+	mapping created/enabled after its Item's Bin last changed (the sweep
+	only reacts to a NEW ``Bin.modified``, so a freshly-mapped Item whose
+	stock hasn't moved since would otherwise never be pushed).
+
+	A dedup-rejected enqueue (a sync for that account is already
+	queued/running) is not retried or tracked for a later run - this is the
+	one daily "catch everything" pass, so a skip here is written to the
+	Error Log (never silently dropped) rather than given its own
+	retry/pending-flag mechanism, which is out of scope.
+	"""
+	for account in _enabled_shopify_accounts():
+		try:
+			enqueued, _job_id = enqueue_account_sync(account.name)
+			if not enqueued:
+				frappe.log_error(
+					title="Shopify daily inventory reconciliation skipped",
+					message=(
+						f"Marketplace Account {account.name}: enqueue rejected because a Shopify "
+						"inventory sync job for this account was already queued/running "
+						"(RQ dedup). Not retried by this reconciliation run."
+					),
+				)
+		except Exception:
+			frappe.log_error(
+				title="Shopify inventory reconciliation: account failed",
+				message=frappe.get_traceback(),
+			)
 
 
 # --- Job status -------------------------------------------------------------
