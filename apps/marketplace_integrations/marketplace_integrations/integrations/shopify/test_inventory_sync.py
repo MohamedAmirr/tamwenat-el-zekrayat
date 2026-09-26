@@ -754,6 +754,72 @@ class IntegrationTestJobResilience(InventoryFixtureMixin, IntegrationTestCase):
 		self.assertEqual(mapping.inventory_sync_status, "Synced")
 		self.assertEqual(mapping.modified, before)
 
+	def test_whole_job_setup_failure_marks_every_selected_mapping_as_error(self):
+		# validate_inventory_account() (or the Location re-check, or any other
+		# whole-job setup step) throwing BEFORE per-mapping processing starts
+		# must not leave the mappings' inventory_sync_status untouched/stale -
+		# see this module's _record_whole_job_failure().
+		first = self._one(5)
+		first.db_set("inventory_sync_status", "Synced", update_modified=False)
+		second = self._one(6)
+		second.db_set("inventory_sync_status", "Synced", update_modified=False)
+
+		with patch.object(
+			inventory_sync, "validate_inventory_account", side_effect=RuntimeError("Location deactivated")
+		):
+			with self.assertRaises(RuntimeError):
+				inventory_sync.sync_account_inventory(self.account.name, [first.name, second.name])
+
+		for mapping in (first, second):
+			mapping.reload()
+			self.assertEqual(mapping.inventory_sync_status, "Error")
+			self.assertIn("Location deactivated", mapping.inventory_last_error)
+		self.assertEqual(self.shopify.calls, [])
+
+	def test_whole_job_setup_failure_during_full_reconciliation_marks_every_enabled_mapping(self):
+		enabled = self._one(5)
+		disabled = self._one(5)
+		disabled.db_set("enabled", 0, update_modified=False)
+
+		with patch.object(
+			inventory_sync, "validate_inventory_account", side_effect=RuntimeError("boom")
+		):
+			with self.assertRaises(RuntimeError):
+				inventory_sync.sync_account_inventory(self.account.name, None)
+
+		enabled.reload()
+		disabled.reload()
+		self.assertEqual(enabled.inventory_sync_status, "Error")
+		self.assertIn("boom", enabled.inventory_last_error)
+		# A disabled mapping is never touched by the full-account fallback either
+		# - matching the ordinary reconciliation's own enabled-only scope.
+		self.assertNotEqual(disabled.inventory_sync_status, "Error")
+
+	def test_a_failure_after_per_mapping_processing_started_does_not_overwrite_earlier_outcomes(self):
+		# A later chunk's exception must not retroactively blanket-overwrite an
+		# earlier chunk's already-persisted (correct) outcome - the whole-job
+		# fallback only applies before mapping_processing_started flips True.
+		with patch.object(inventory_sync, "SHOPIFY_INVENTORY_SYNC_CHUNK_SIZE", 1):
+			first = self._one(5)
+			second = self._one(6)
+			real_sync_chunk = inventory_sync._sync_chunk
+
+			def flaky_sync_chunk(client, account_doc, location_id, chunk, item_by_name):
+				if chunk[0].name == second.name:
+					raise RuntimeError("chunk boom")
+				return real_sync_chunk(client, account_doc, location_id, chunk, item_by_name)
+
+			with (
+				patch(EXECUTE_TARGET, side_effect=self.shopify),
+				patch(FETCH_LOCATIONS_TARGET, return_value={"shop_id": "s", "active_locations": [{"id": LOCATION, "name": "Main"}]}),
+				patch.object(inventory_sync, "_sync_chunk", side_effect=flaky_sync_chunk),
+			):
+				with self.assertRaises(RuntimeError):
+					inventory_sync.sync_account_inventory(self.account.name, [first.name, second.name])
+
+		first.reload()
+		self.assertEqual(first.inventory_sync_status, "Synced")
+
 
 class IntegrationTestNoMutationWhenDisabled(InventoryFixtureMixin, IntegrationTestCase):
 	def test_disabled_mapping_is_skipped_not_error_and_sends_nothing(self):

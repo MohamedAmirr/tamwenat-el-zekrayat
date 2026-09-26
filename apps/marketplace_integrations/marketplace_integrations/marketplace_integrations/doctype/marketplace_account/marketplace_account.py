@@ -220,7 +220,11 @@ class MarketplaceAccount(Document):
 		Both `shop { id }` and `locations { ... }` are read-only queries, so
 		running this automatically inside validate()/save() is safe under this
 		project's read-vs-write rule - unlike any future Shopify *mutation*,
-		which must stay behind an explicit user-triggered action instead.
+		which must stay behind an explicit user-triggered action instead. (#107's
+		automatic inventory sync - the scheduled changed-Bin sweep and daily
+		reconciliation, in integrations/shopify/inventory_sync.py - IS such a
+		mutation with no explicit user action; it is a deliberate, user-approved
+		exception to this rule, not a contradiction of it.)
 
 		This is a no-op for every non-Shopify account (in particular, existing
 		Talabat accounts save exactly as before).

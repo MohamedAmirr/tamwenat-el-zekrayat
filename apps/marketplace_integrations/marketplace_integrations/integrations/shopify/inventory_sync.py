@@ -57,7 +57,12 @@ Locked decisions this implements (see the issue's "Implementation plan"):
   ``inventory_last_synced_on`` / ``inventory_last_error`` via
   ``frappe.db.set_value(..., update_modified=False)``. The shared
   ``sync_status`` / ``last_synced_on`` / ``last_error`` (written by #106's price
-  push) are never touched.
+  push) are never touched. A **whole-job setup failure** (before the
+  per-mapping/per-chunk loop starts - e.g. the Location re-check throwing
+  because the bound Location was deactivated) also writes ``Error`` +
+  ``inventory_last_error`` to every mapping this job would have touched, via
+  ``_record_whole_job_failure()`` - otherwise those rows would silently keep
+  showing a stale prior status forever, visible only in the Error Log.
 - **No inbound path**: this module never creates a Stock Entry / Stock
   Reconciliation / Stock Ledger Entry, and ``SHOPIFY_WEBHOOK_TOPICS`` has no
   inventory topic.
@@ -413,9 +418,9 @@ def enqueue_account_sync(account_name, mapping_names=None, owner=None):
 	when there is no ``owner``).
 
 	The only place a sync job is enqueued - the manual actions call it, and
-	PR2's ``sweep_changed_bins()`` / ``reconcile_all_accounts()`` are meant to
-	call it too (they only enqueue). ``owner`` is the Desk user for
-	owner-scoped status; without one no status entry/realtime event is created.
+	PR2's ``sweep_changed_bins()`` / ``reconcile_all_accounts()`` call it too
+	(they only enqueue). ``owner`` is the Desk user for owner-scoped status;
+	without one no status entry/realtime event is created.
 	"""
 	job_id = frappe.generate_hash(length=16) if owner else None
 	if job_id:
@@ -459,6 +464,14 @@ def sync_account_inventory(account_name, mapping_names=None, job_id_for_result=N
 	"""
 	frappe.flags.shopify_inventory_logged_failures = 0
 	frappe.flags.shopify_inventory_suppressed_failures = 0
+	# Flips to True right before the first per-mapping/per-chunk outcome could
+	# ever be persisted. An exception raised while this is still False (e.g.
+	# validate_inventory_account()'s Location re-check hitting a deactivated
+	# Location or a connection/network error) means no mapping has its own
+	# outcome recorded anywhere - without the except-block fallback below,
+	# every mapping this job would have touched would silently keep showing
+	# its previous (possibly stale) inventory_sync_status forever.
+	mapping_processing_started = False
 	try:
 		_report(job_id_for_result, owner, status="running", processed=0, result=_result_payload([]))
 		account_doc, connection = validate_inventory_account(account_name)
@@ -483,6 +496,7 @@ def sync_account_inventory(account_name, mapping_names=None, job_id_for_result=N
 		# Commit before any HTTP call so no write lock is held across it.
 		frappe.db.commit()
 
+		mapping_processing_started = True
 		# Local (non-network) problems first, persisted as one batch.
 		syncable = []
 		local_outcomes = {}
@@ -521,9 +535,50 @@ def sync_account_inventory(account_name, mapping_names=None, job_id_for_result=N
 		return payload
 	except Exception as exc:
 		_report(job_id_for_result, owner, status="failed", error=str(exc))
+		if not mapping_processing_started:
+			_record_whole_job_failure(account_name, mapping_names, exc)
 		raise
 	finally:
 		_log_suppressed_failures()
+
+
+def _record_whole_job_failure(account_name, mapping_names, exc):
+	"""Bulk-write a job-level error onto every mapping this job would have
+	touched, for the one failure mode nothing else covers: a whole-job setup
+	step (``validate_inventory_account()``, the Location re-check, ...)
+	raising BEFORE the per-mapping/per-chunk loop starts - so no mapping
+	already got its own outcome recorded via ``_mark_error()``/``_persist_chunk()``
+	(see ``sync_account_inventory()``'s ``mapping_processing_started`` guard,
+	which ensures this is never called once real per-mapping processing has
+	begun). Without this, those mappings would keep showing whatever
+	``inventory_sync_status`` they already had - often ``Synced``, with an
+	aging ``inventory_last_synced_on`` - drifting silently except for the
+	Error Log entry the caller's own ``except`` block already produces.
+
+	One bulk ``frappe.db.set_value()`` UPDATE (matched by name, or by account +
+	enabled for a full reconciliation), never a ``frappe.get_doc()`` per
+	mapping - same style as ``_mark_error()``/``_mark_synced()``. Explicitly
+	committed here since this runs inside the worker's own ``except`` block,
+	right before re-raising - ``frappe.utils.background_jobs.execute_job()``
+	rolls back the transaction on an unhandled exception, which would
+	otherwise silently discard this write too."""
+	if mapping_names is not None:
+		names = list(dict.fromkeys(mapping_names))
+		if not names:
+			return
+		filters = {"name": ["in", names]}
+	else:
+		filters = {"marketplace_account": account_name, "enabled": 1}
+	frappe.db.set_value(
+		MAPPING_DOCTYPE,
+		filters,
+		{
+			"inventory_sync_status": "Error",
+			"inventory_last_error": cstr(exc).strip()[:ERROR_MESSAGE_MAX_LENGTH],
+		},
+		update_modified=False,
+	)
+	frappe.db.commit()
 
 
 def _sync_chunk(client, account_doc, location_id, mappings, item_by_name):
