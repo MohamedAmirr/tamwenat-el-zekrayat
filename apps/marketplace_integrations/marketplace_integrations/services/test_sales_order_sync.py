@@ -699,3 +699,41 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertFalse(result["ok"])
 		self.assertIn("nonzero unit price", result["error"].lower())
 		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+
+	def test_non_talabat_platform_blocks_sync_without_creating_a_sales_order(self):
+		"""#108: ERPNext Sales Order synchronization does not exist yet for
+		any platform other than Talabat (#110 owns building it). A stray
+		sync attempt on a Shopify order must be rejected cleanly rather than
+		attempting a Talabat-shaped line build against data that was never
+		normalized that way. Decision 7 also forbids persisting a misleading
+		"Sync Error" status for an order that was never eligible for sync in
+		the first place - this must be a pure no-op on the stored document:
+		no status change, no save (asserted via `modified` being unchanged)."""
+		order = self._make_order()
+		frappe.db.set_value("Marketplace Order", order.name, "platform", "Shopify", update_modified=False)
+		frappe.clear_document_cache("Marketplace Order", order.name)
+		order.reload()
+		original_status = order.erpnext_sync_status
+		original_modified = order.modified
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertIn("Talabat", result["error"])
+		self.assertFalse(order.erpnext_sales_order)
+		self.assertEqual(order.erpnext_sync_status, original_status)
+		self.assertNotEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertEqual(order.modified, original_modified)
+
+	def test_blank_platform_is_treated_as_talabat_not_blocked(self):
+		"""A pre-#108 order whose platform backfill has not run yet must not
+		suddenly lose the ability to sync - every existing Marketplace Order
+		today really is a Talabat order."""
+		order = self._make_order()
+		frappe.db.set_value("Marketplace Order", order.name, "platform", "", update_modified=False)
+		frappe.clear_document_cache("Marketplace Order", order.name)
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))

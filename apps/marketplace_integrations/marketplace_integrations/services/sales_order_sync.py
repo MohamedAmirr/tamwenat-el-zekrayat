@@ -92,6 +92,19 @@ def sync_sales_order(marketplace_order):
 	frappe.db.get_value("Marketplace Order", marketplace_order, "name", for_update=True)
 	order = frappe.get_doc("Marketplace Order", marketplace_order)
 
+	# Platform support is checked BEFORE the try/except SyncBlocker block
+	# below, deliberately: decision 7 forbids persisting a misleading "Sync
+	# Error" status for an order that was never eligible for Talabat-shaped
+	# sync in the first place. If this raised inside the try block instead,
+	# `except SyncBlocker` would call `_save_failure()` and write/save a
+	# "Sync Error" status + Version row for a Shopify order that nothing
+	# ever attempted to sync. No status write, no save, for this specific
+	# blocker.
+	try:
+		_validate_platform_supported(order)
+	except SyncBlocker as exc:
+		return {"ok": False, "status": order.erpnext_sync_status, "error": str(exc)}
+
 	try:
 		account = _get_account(order)
 		_validate_sync_permissions(order, account)
@@ -346,6 +359,24 @@ def get_current_sync_status(marketplace_order):
 		order.flags.skip_sync_status_update = True
 		order.save()
 	return order.erpnext_sync_status
+
+
+def _validate_platform_supported(order):
+	"""Block ERPNext Sales Order synchronization for any platform other than
+	Talabat (#108). Real Shopify order sync does not exist yet (#110) - a
+	stray sync attempt on a Shopify order must not persist a misleading
+	"Sync Error" status, and must fail with a clear, actionable message
+	instead. A blank ``platform`` (e.g. a pre-#108 order whose backfill
+	patch has not yet run) is treated as Talabat, matching every existing
+	Marketplace Order's real origin today - it is never a Shopify order.
+	"""
+	if order.platform and order.platform != "Talabat":
+		raise SyncBlocker(
+			_(
+				"ERPNext Sales Order synchronization is only available for Talabat orders. "
+				"Marketplace Order {0} is a {1} order."
+			).format(order.name, order.platform)
+		)
 
 
 def _get_account(order):

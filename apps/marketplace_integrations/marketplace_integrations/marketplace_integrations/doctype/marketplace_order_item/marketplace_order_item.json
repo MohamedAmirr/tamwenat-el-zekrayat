@@ -7,6 +7,7 @@
  "field_order": [
   "external_item_id",
   "external_sku",
+  "external_variant_id",
   "product_name",
   "instructions",
   "barcodes",
@@ -31,10 +32,11 @@
  "fields": [
   {"fieldname": "external_item_id", "fieldtype": "Data", "ignore_xss_filter": 1, "in_list_view": 1, "label": "External Item ID", "reqd": 1},
   {"fieldname": "external_sku", "fieldtype": "Data", "ignore_xss_filter": 1, "in_list_view": 1, "label": "External SKU"},
+  {"fieldname": "external_variant_id", "fieldtype": "Data", "ignore_xss_filter": 1, "label": "External Variant ID", "read_only": 1},
   {"fieldname": "product_name", "fieldtype": "Data", "ignore_xss_filter": 1, "in_list_view": 1, "label": "Product Name"},
   {"fieldname": "instructions", "fieldtype": "Small Text", "ignore_xss_filter": 1, "label": "Instructions"},
   {"fieldname": "barcodes", "fieldtype": "JSON", "ignore_xss_filter": 1, "label": "Barcodes"},
-  {"fieldname": "external_status", "fieldtype": "Select", "in_list_view": 1, "label": "Talabat Item Status", "options": "NOT_PROCESSED\nIN_CART\nNOT_FOUND\nREPLACED\nADDITION"},
+  {"fieldname": "external_status", "fieldtype": "Select", "in_list_view": 1, "label": "External Item Status", "options": "NOT_PROCESSED\nIN_CART\nNOT_FOUND\nREPLACED\nADDITION"},
   {"fieldname": "replaced_external_item_id", "fieldtype": "Data", "ignore_xss_filter": 1, "label": "Replaced External Item ID"},
   {"fieldname": "pricing_type", "fieldtype": "Select", "label": "Pricing Type", "options": "UNIT\nKG"},
   {"fieldname": "original_quantity", "fieldtype": "Float", "label": "Original Quantity"},

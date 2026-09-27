@@ -20,6 +20,8 @@ ORDER_FIELDS = (
 	"platform_order_reference",
 	"order_code",
 	"external_status",
+	"external_financial_status",
+	"external_fulfillment_status",
 	"order_type",
 	"transport_type",
 	"promotion_status",
@@ -39,6 +41,7 @@ ORDER_FIELDS = (
 	"customer_city",
 	"customer_latitude",
 	"customer_longitude",
+	"customer_email",
 	"payment_type",
 	"sub_total",
 	"discount",
@@ -49,10 +52,21 @@ ORDER_FIELDS = (
 	"container_charge",
 	"difference_to_minimum",
 	"collect_at_pickup",
+	"shop_currency",
+	"presentment_currency",
 )
-JSON_ORDER_FIELDS = ("discounts", "additional_fees", "latest_payload")
+JSON_ORDER_FIELDS = (
+	"discounts",
+	"additional_fees",
+	"latest_payload",
+	"billing_address",
+	"shipping_address",
+	"payment_transactions",
+	"refunds",
+)
 ITEM_FIELDS = (
 	"external_sku",
+	"external_variant_id",
 	"product_name",
 	"instructions",
 	"external_status",

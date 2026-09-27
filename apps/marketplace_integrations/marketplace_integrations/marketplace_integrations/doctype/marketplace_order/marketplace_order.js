@@ -1,26 +1,123 @@
+// #108: this doctype is now shared with Shopify (and future platforms), not
+// Talabat-only. Every Talabat-specific control (Refresh from Talabat, cart/
+// dispatch/cancel actions, the Talabat dashboard indicator, item price/
+// mapping presentation, and the ERPNext sync button) must keep running
+// verbatim for a Talabat order, none of it must ever run for a Shopify
+// order, and a blank/unrecognized platform must fail closed - show none of
+// it - mirroring marketplace_product_mapping.js's platform gating (#106).
+const JSON_EVIDENCE_FIELDS = ["billing_address", "shipping_address", "payment_transactions", "refunds"];
+
 if (typeof frappe !== "undefined") {
+	// Registered once, at doctype-client-script load time - i.e. before the
+	// very first refresh_fields() call ever renders these fields for this
+	// doctype in this browser session (Frappe fetches DocType meta and its
+	// client script together, and evaluates the script only after the meta
+	// is already cached - frappe.meta.docfield_map["Marketplace Order"] is
+	// already populated by the time this line runs). Registering the
+	// formatter later, inside the "refresh" form event, would be too late:
+	// script_manager.trigger("refresh") always fires AFTER refresh_fields()
+	// has already rendered the field once with the framework's own
+	// (unescaped) default formatter for this same refresh pass - by then any
+	// injected markup would already have had a chance to execute.
+	render_json_evidence_fields_as_escaped_text();
+
 	frappe.ui.form.on("Marketplace Order", {
+		// frappe.meta.sync() can reload/replace this doctype's cached field
+		// objects (e.g. after a metadata refresh), which silently drops the
+		// formatter set once above at script-load time. onload fires before
+		// this form instance's own refresh_fields() render (per form.js), so
+		// re-asserting the formatter here is idempotent and keeps every
+		// form-open in this session covered even after such a reload. This
+		// still does not cover Report View, which renders these fields
+		// without ever opening this form/onload at all - that gap is
+		// tracked on the separate, pre-existing JSON-field-escaping issue,
+		// not fixed here.
+		onload(frm) {
+			render_json_evidence_fields_as_escaped_text();
+		},
 		refresh(frm) {
 			if (frm.is_new()) return;
 			frm.set_df_property("items", "read_only", 1);
 			frm.set_df_property("external_status", "read_only", 1);
 			frm.set_df_property("transport_type", "read_only", 1);
-			add_status_indicators(frm);
-			load_erpnext_sync_status(frm);
-
-			frm.add_custom_button(__("Refresh from Talabat"), () => {
-				frappe.call({
-					method: "marketplace_integrations.api.talabat_orders.refresh_order",
-					args: { marketplace_order: frm.doc.name },
-					freeze: true,
-					freeze_message: __("Refreshing from Talabat..."),
-				}).then(() => frm.reload_doc());
-			});
-			add_order_actions(frm);
-
-			load_item_presentation(frm);
+			apply_platform_gating(frm);
 		},
 	});
+}
+
+// #108 decision 9: Talabat keeps every existing control verbatim (Refresh
+// from Talabat, cart/dispatch/cancel actions, the Talabat + ERPNext status
+// indicators, item price/mapping presentation, Send to ERPNext). Shopify
+// gets none of that - no Talabat indicator, no item presentation, no
+// ERPNext sync button (#108 decision 7 blocks the sync itself server-side
+// too) - and shows the Financial/Fulfillment status indicator pair instead.
+// Any other value
+// (blank/unrecognized platform) shows none of the above at all, failing
+// closed rather than guessing which control set applies - the same pattern
+// marketplace_product_mapping.js uses (#106).
+function apply_platform_gating(frm) {
+	const platform = frm.doc.platform;
+	if (platform === "Talabat") {
+		add_status_indicators(frm);
+		load_erpnext_sync_status(frm);
+
+		frm.add_custom_button(__("Refresh from Talabat"), () => {
+			frappe.call({
+				method: "marketplace_integrations.api.talabat_orders.refresh_order",
+				args: { marketplace_order: frm.doc.name },
+				freeze: true,
+				freeze_message: __("Refreshing from Talabat..."),
+			}).then(() => frm.reload_doc());
+		});
+		add_order_actions(frm);
+
+		load_item_presentation(frm);
+	} else if (platform === "Shopify") {
+		add_generic_status_indicator(frm);
+	}
+}
+
+// Read-only JSON-fieldtype fields are not HTML-escaped by Frappe's default
+// Desk formatter (confirmed live against this Frappe version's installed
+// base_input.js/formatters.js: set_disp_area()'s escape whitelist covers
+// Data/Long Text/Small Text/Text/Password/MultiSelect only, and the JSON
+// fieldtype has no entry in frappe.form.formatters, so it silently falls
+// back to the Data formatter - which returns the raw value unescaped - and
+// is inserted via jQuery .html(). Only <script>/<style>/a few other
+// specific tags are stripped afterwards (frappe.dom.remove_script_and_style)
+// - an payload like `<img src=x onerror=...>` survives that and would
+// execute. This already affects Talabat's own latest_payload/discounts/
+// additional_fees/promotions/barcodes fields too (tracked separately, out of
+// scope here per the locked plan) - the four fields #108 adds are escaped
+// here explicitly rather than inheriting the same gap.
+// Sets `formatter` directly on this doctype's cached meta docfields (not a
+// per-form-instance control) - frappe.form.formatters.Data's own
+// _apply_custom_formatter() (formatters.js) always re-reads
+// frappe.meta.docfield_map[doctype][fieldname].formatter fresh, by name, on
+// every single render, regardless of when it was set or which control
+// instance is currently rendering - so setting it once here, globally,
+// covers every Marketplace Order form render for these four fields for the
+// rest of this browser session, since this registration runs from this form
+// script. It does NOT cover the List View - that only loads
+// marketplace_order_list.js, which never runs this registration, so a JSON
+// column shown there still falls through to the unescaped Data formatter in
+// list_view.js - nor does it cover Report View: that renderer does not go
+// through frappe.form.formatters at all, so a Report View or List View built
+// against one of these fields before any Marketplace Order form has ever
+// been opened is not covered by this fix - both gaps (shared with Talabat's
+// own pre-existing latest_payload/discounts/additional_fees/promotions/
+// barcodes JSON fields) are tracked separately, not closed here. Re-applied
+// again from an "onload" form handler below so
+// a frappe.meta.sync() reload of this doctype's cached field objects can't
+// silently drop it either.
+function render_json_evidence_fields_as_escaped_text() {
+	const docfield_map = frappe.meta && frappe.meta.docfield_map && frappe.meta.docfield_map["Marketplace Order"];
+	if (!docfield_map) return;
+	for (const fieldname of JSON_EVIDENCE_FIELDS) {
+		const df = docfield_map[fieldname];
+		if (!df) continue;
+		df.formatter = (value) => (value ? `<pre>${frappe.utils.escape_html(value)}</pre>` : "");
+	}
 }
 
 function load_erpnext_sync_status(frm) {
@@ -90,11 +187,44 @@ function get_status_indicator(status, color_by_status) {
 	};
 }
 
+// A status VALUE (external_status/erpnext_sync_status/external_financial_status/
+// external_fulfillment_status) is rendered into a dashboard indicator label
+// below. frm.dashboard.add_indicator()/__() do no HTML escaping of their own
+// - the label is inserted as markup - so any value that can carry arbitrary
+// external text (external_status/the two new fields are plain Data fields,
+// not a closed Select, specifically so an unrecognized future platform value
+// persists instead of failing validation - see #108/this fix) must be run
+// through frappe.utils.escape_html() at the interpolation point. This is a
+// real Talabat behavior change: an out-of-range/malicious external_status
+// string used to be REJECTED at save time back when this was a closed
+// Select, and now persists (since #108 converted it to Data) - it is at
+// least safely escaped on display after this fix, not silently rendered as
+// markup.
 function add_status_indicators(frm) {
 	const talabat_status = get_status_indicator(frm.doc.external_status, TALABAT_STATUS_COLORS);
 	const erpnext_sync_status = get_status_indicator(frm.doc.erpnext_sync_status, ERPNEXT_SYNC_STATUS_COLORS);
-	frm.dashboard.add_indicator(__("Talabat: {0}", [talabat_status.label]), talabat_status.color);
-	frm.dashboard.add_indicator(__("ERPNext: {0}", [erpnext_sync_status.label]), erpnext_sync_status.color);
+	frm.dashboard.add_indicator(__("Talabat: {0}", [frappe.utils.escape_html(talabat_status.label)]), talabat_status.color);
+	frm.dashboard.add_indicator(__("ERPNext: {0}", [frappe.utils.escape_html(erpnext_sync_status.label)]), erpnext_sync_status.color);
+}
+
+// Non-Talabat platforms (Shopify, for now) get the Financial/Fulfillment
+// status indicator pair #108's locked plan (decision 9) originally
+// envisioned, sourced from the two generic status fields this fix adds
+// (external_financial_status/external_fulfillment_status) - blank for
+// Talabat, populated by #109 for Shopify. Same escaping requirement as
+// add_status_indicators() above: these are plain Data fields carrying
+// unvalidated external text.
+function add_generic_status_indicator(frm) {
+	const financial_status = get_status_indicator(frm.doc.external_financial_status, {});
+	const fulfillment_status = get_status_indicator(frm.doc.external_fulfillment_status, {});
+	frm.dashboard.add_indicator(
+		__("Financial: {0}", [frappe.utils.escape_html(financial_status.label)]),
+		financial_status.color
+	);
+	frm.dashboard.add_indicator(
+		__("Fulfillment: {0}", [frappe.utils.escape_html(fulfillment_status.label)]),
+		fulfillment_status.color
+	);
 }
 
 function load_item_presentation(frm) {
@@ -202,6 +332,11 @@ if (typeof module !== "undefined") {
 		parse_promotions,
 		catalog_price_cell_text,
 		price_difference_text,
+		render_json_evidence_fields_as_escaped_text,
+		add_generic_status_indicator,
+		add_status_indicators,
+		apply_platform_gating,
+		JSON_EVIDENCE_FIELDS,
 	};
 }
 
