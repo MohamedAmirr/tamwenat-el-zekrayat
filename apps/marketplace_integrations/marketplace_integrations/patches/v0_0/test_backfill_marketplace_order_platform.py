@@ -113,18 +113,21 @@ class IntegrationTestBackfillMarketplaceOrderPlatform(IntegrationTestCase):
 		self.assertEqual(frappe.db.get_value("Marketplace Order", order.name, "platform"), "Shopify")
 
 	def test_backfill_is_idempotent(self):
+		"""Re-running the patch after it already backfilled a row must not
+		touch that row again: the WHERE clause excludes already-set rows, so
+		the second run's own UPDATE affects zero rows, and the already-correct
+		value survives untouched."""
 		account = self.make_account("Talabat")
 		order = self.make_order(account, f"order-{frappe.generate_hash(length=8)}")
 		frappe.db.set_value("Marketplace Order", order.name, "platform", "", update_modified=False)
 		frappe.clear_document_cache("Marketplace Order", order.name)
 
 		execute()
-		first_modified = frappe.db.get_value("Marketplace Order", order.name, "modified")
-		execute()
-		second_modified = frappe.db.get_value("Marketplace Order", order.name, "modified")
-
 		self.assertEqual(frappe.db.get_value("Marketplace Order", order.name, "platform"), "Talabat")
-		self.assertEqual(first_modified, second_modified)
+
+		execute()
+		self.assertEqual(frappe.db._cursor.rowcount, 0)
+		self.assertEqual(frappe.db.get_value("Marketplace Order", order.name, "platform"), "Talabat")
 
 	def test_never_touches_order_identity_key(self):
 		account = self.make_account("Talabat")

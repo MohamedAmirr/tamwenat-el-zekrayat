@@ -97,14 +97,17 @@ function apply_platform_gating(frm) {
 // every single render, regardless of when it was set or which control
 // instance is currently rendering - so setting it once here, globally,
 // covers every Marketplace Order form render for these four fields for the
-// rest of this browser session, plus every list view (frappe.listview
-// generally reuses the same formatter lookup). It does NOT cover Report
-// View: that renderer does not go through frappe.form.formatters at all, so
-// a Report View built against one of these fields before any Marketplace
-// Order form has ever been opened is not covered by this fix - that gap
-// (shared with Talabat's own pre-existing latest_payload/discounts/
-// additional_fees/promotions/barcodes JSON fields) is tracked separately,
-// not closed here. Re-applied again from an "onload" form handler below so
+// rest of this browser session, since this registration runs from this form
+// script. It does NOT cover the List View - that only loads
+// marketplace_order_list.js, which never runs this registration, so a JSON
+// column shown there still falls through to the unescaped Data formatter in
+// list_view.js - nor does it cover Report View: that renderer does not go
+// through frappe.form.formatters at all, so a Report View or List View built
+// against one of these fields before any Marketplace Order form has ever
+// been opened is not covered by this fix - both gaps (shared with Talabat's
+// own pre-existing latest_payload/discounts/additional_fees/promotions/
+// barcodes JSON fields) are tracked separately, not closed here. Re-applied
+// again from an "onload" form handler below so
 // a frappe.meta.sync() reload of this doctype's cached field objects can't
 // silently drop it either.
 function render_json_evidence_fields_as_escaped_text() {

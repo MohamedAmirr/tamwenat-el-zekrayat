@@ -1,11 +1,12 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-from unittest.mock import patch
-
 import frappe
 from frappe.tests import IntegrationTestCase
 
+from marketplace_integrations.marketplace_integrations.doctype.marketplace_account.test_marketplace_account import (
+    mock_shopify_verification,
+)
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_order.marketplace_order import (
     compute_order_identity_key,
 )
@@ -438,11 +439,7 @@ class IntegrationTestMarketplaceOrder(IntegrationTestCase):
                 "client_secret": "shopify-order-test-secret",
             }
         ).insert()
-        with patch(
-            "marketplace_integrations.marketplace_integrations.doctype.marketplace_account."
-            "marketplace_account.fetch_shop_and_active_locations",
-            return_value={"shop_id": shop_gid, "active_locations": []},
-        ):
+        with mock_shopify_verification(shop_id=shop_gid, active_locations=[]):
             return frappe.get_doc(
                 {
                     "doctype": "Marketplace Account",
