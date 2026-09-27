@@ -265,6 +265,13 @@ def reconcile_all_accounts_orders():
 			)
 		else:
 			frappe.db.release_savepoint(savepoint)
+			# Committed per-account, mirroring webhooks.py's
+			# retry_errored_webhook_deliveries() sweep: this account's imported
+			# orders and advanced watermark must survive a later account's
+			# failure in this same scheduled run, rather than relying solely on
+			# the RQ worker's end-of-job commit (which a later account's
+			# exception could otherwise roll back before it ever happens).
+			frappe.db.commit()
 
 
 def queue_order_import(account_name, start, end):

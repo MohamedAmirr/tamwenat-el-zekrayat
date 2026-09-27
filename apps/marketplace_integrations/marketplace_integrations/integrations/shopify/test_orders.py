@@ -239,3 +239,50 @@ class IntegrationTestImportOrdersUpdatedBetween(IntegrationTestCase):
 		self.assertEqual(len(errors), 1)
 		self.assertEqual(errors[0]["order_gid"], bad_gid)
 		self.assertEqual(len(imported), 1)
+
+
+class IntegrationTestReconcileAllAccountsOrders(IntegrationTestCase):
+	"""Review finding #3: reconcile_all_accounts_orders() must isolate one
+	account's failure (an unresolvable/throwing connection) from every other
+	account's run in the same scheduled sweep - account B's orders must still
+	be imported and its watermark still advance despite account A's failure."""
+
+	def setUp(self):
+		self.account_a = make_shopify_account(f"Reconcile Fails {frappe.generate_hash(length=8)}")
+		self.account_b = make_shopify_account(f"Reconcile Succeeds {frappe.generate_hash(length=8)}")
+
+	def test_one_accounts_failure_does_not_stop_another_accounts_import_or_watermark(self):
+		order_gid_b = _order_gid(frappe.generate_hash(length=8))
+		payload_b = make_order_payload(order_gid_b)
+
+		def fake_execute(client_self, query, variables=None):
+			if client_self.connection_name == self.account_a.connection:
+				raise frappe.ValidationError("boom: account A connection unreachable")
+			if client_self.connection_name == self.account_b.connection:
+				if "ShopifyOrderIds" in query:
+					return {
+						"orders": {
+							"pageInfo": {"hasNextPage": False},
+							"nodes": [{"id": order_gid_b, "updatedAt": "2026-09-27T10:01:00Z"}],
+						}
+					}
+				return {"order": payload_b}
+			return {"orders": {"pageInfo": {"hasNextPage": False}, "nodes": []}}
+
+		with patch(EXECUTE_TARGET, autospec=True, side_effect=fake_execute):
+			orders.reconcile_all_accounts_orders()
+
+		self.account_a.reload()
+		self.account_b.reload()
+
+		self.assertFalse(self.account_a.shopify_orders_reconciled_through)
+		self.assertTrue(self.account_b.shopify_orders_reconciled_through)
+
+		imported = frappe.get_all(
+			"Marketplace Order",
+			filters={"marketplace_account": self.account_b.name, "external_order_id": order_gid_b},
+		)
+		self.assertEqual(len(imported), 1)
+		self.assertEqual(
+			frappe.db.count("Marketplace Order", {"marketplace_account": self.account_a.name}), 0
+		)
