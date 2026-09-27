@@ -83,6 +83,12 @@ class IntegrationTestShopifyWebhookEvent(IntegrationTestCase):
 			topic="ORDERS_CREATE",
 			webhook_id="webhook-id-1",
 			shop_domain=self.connection.shop_domain,
+			# ORDERS_CREATE is always an order topic (#109 decision 4) - even
+			# with no admin_graphql_api_id in the payload (order_gid=None
+			# here), the job kwarg is still always included for every order
+			# topic so process_shopify_webhook()/_handle_topic() can
+			# distinguish "genuinely no id" from "not an order topic at all".
+			order_gid=None,
 		)
 
 	@patch.object(shopify_webhooks.frappe, "enqueue")

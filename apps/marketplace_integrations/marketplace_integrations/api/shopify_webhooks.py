@@ -16,8 +16,10 @@ import frappe
 from frappe import _
 
 from marketplace_integrations.integrations.shopify.constants import (
+	SHOPIFY_ORDER_WEBHOOK_TOPICS,
 	SHOPIFY_WEBHOOK_TOPIC_HEADER_TO_ENUM,
 )
+
 from marketplace_integrations.integrations.shopify.webhooks import (
 	process_shopify_webhook,
 	verify_shopify_hmac,
@@ -75,14 +77,21 @@ def webhook_event():
 		# before a topic list change.
 		return {"accepted": True}
 
+	order_gid = _extract_order_gid(topic, payload)
+
+	job_kwargs = {
+		"queue": "default",
+		"timeout": 300,
+		"connection_name": connection.name,
+		"topic": topic,
+		"webhook_id": webhook_id,
+		"shop_domain": shop_domain,
+	}
+	if order_gid is not None or topic in SHOPIFY_ORDER_WEBHOOK_TOPICS:
+		job_kwargs["order_gid"] = order_gid
 	frappe.enqueue(
 		process_shopify_webhook,
-		queue="default",
-		timeout=300,
-		connection_name=connection.name,
-		topic=topic,
-		webhook_id=webhook_id,
-		shop_domain=shop_domain,
+		**job_kwargs,
 	)
 	return {"accepted": True}
 
@@ -102,3 +111,13 @@ def _resolve_connection(shop_domain):
 
 def _invalid_webhook():
 	frappe.throw(_("Invalid Shopify webhook."), frappe.PermissionError)
+
+
+def _extract_order_gid(topic, payload):
+	"""Extract only the stable order identity; payload remains non-canonical."""
+	if topic not in SHOPIFY_ORDER_WEBHOOK_TOPICS:
+		return None
+	value = payload.get("admin_graphql_api_id")
+	if topic == "REFUNDS_CREATE":
+		value = f"gid://shopify/Order/{payload.get('order_id')}" if payload.get("order_id") else None
+	return str(value).strip() if value else None

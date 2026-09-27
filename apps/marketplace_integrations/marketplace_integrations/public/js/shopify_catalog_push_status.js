@@ -22,22 +22,23 @@
 		return frappe.utils.escape_html(value == null ? "" : String(value));
 	}
 
-	function build_results_table($el, results, truncated, total) {
+	function build_results_table($el, results, truncated, total, result_link_route, result_column_label) {
 		$el.empty();
 		if (!results.length) return;
 
 		const $table = $('<table class="table table-bordered"></table>').appendTo($el);
 		const $thead = $("<thead><tr></tr></thead>").appendTo($table);
-		[__("Mapping"), __("Status"), __("Error")].forEach((label) => {
+		[result_column_label || __("Mapping"), __("Status"), __("Error")].forEach((label) => {
 			$("<th></th>").text(label).appendTo($thead.find("tr"));
 		});
 		const $tbody = $("<tbody></tbody>").appendTo($table);
+		const route = result_link_route || "marketplace-product-mapping";
 		results.forEach((row) => {
 			const $tr = $("<tr></tr>").appendTo($tbody);
 			$("<td></td>")
 				.append(
 					$("<a target=\"_blank\"></a>")
-						.attr("href", `/app/marketplace-product-mapping/${encodeURIComponent(row.mapping_name)}`)
+						.attr("href", `/app/${route}/${encodeURIComponent(row.mapping_name)}`)
 						.html(escape(row.mapping_name))
 				)
 				.appendTo($tr);
@@ -81,9 +82,17 @@
 	};
 
 	frappe.ui.ShopifyCatalogPushStatus = class ShopifyCatalogPushStatus {
-		constructor({ jobs, on_done, poll_interval = 1500, status_method, labels }) {
+		constructor({ jobs, on_done, poll_interval = 1500, status_method, labels, result_link_route, result_column_label }) {
 			this.status_method = status_method || DEFAULT_STATUS_METHOD;
 			this.labels = Object.assign({}, DEFAULT_LABELS, labels || {});
+			// Both default to the original price-push/inventory-sync behavior:
+			// a link into Marketplace Product Mapping under a "Mapping" column.
+			// A caller whose result rows are a different doctype (e.g. #109's
+			// order import, whose rows are Marketplace Order names) overrides
+			// both so the table links/labels correctly instead of pointing at a
+			// nonexistent Marketplace Product Mapping document.
+			this.result_link_route = result_link_route;
+			this.result_column_label = result_column_label;
 			this.jobs = jobs || [];
 			this.on_done = on_done;
 			this.poll_interval = poll_interval;
@@ -216,7 +225,7 @@
 					.appendTo(this.$status);
 			});
 
-			build_results_table(this.$status, results, truncated, total);
+			build_results_table(this.$status, results, truncated, total, this.result_link_route, this.result_column_label);
 		}
 	};
 
@@ -236,6 +245,26 @@
 			account_failed: (account, error) =>
 				__("Sync failed for account {0}: {1}", [account, error]),
 			poll_failed: () => __("Could not retrieve the inventory sync status."),
+		},
+	};
+
+	// Constructor options for the Shopify order import (#109 review finding
+	// #7 - get_order_import_status() was never wired to any UI). Result rows
+	// here are Marketplace Order names, not Marketplace Product Mapping
+	// names, hence the overridden result_link_route/result_column_label.
+	frappe.ui.ShopifyCatalogPushStatus.ORDER_IMPORT_OPTIONS = {
+		status_method: "marketplace_integrations.api.shopify_orders.get_order_import_status",
+		result_link_route: "marketplace-order",
+		result_column_label: __("Order"),
+		labels: {
+			title: () => __("Retrieving Shopify orders"),
+			nothing: () => __("Nothing to retrieve."),
+			running: (counts) =>
+				__("Retrieving... {0} succeeded, {1} failed, {2} skipped so far.", counts),
+			complete: (counts) => __("Retrieval complete: {0} succeeded, {1} failed, {2} skipped.", counts),
+			account_failed: (account, error) =>
+				__("Retrieval failed for account {0}: {1}", [account, error]),
+			poll_failed: () => __("Could not retrieve the order import status."),
 		},
 	};
 })();

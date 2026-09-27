@@ -54,6 +54,8 @@ ORDER_FIELDS = (
 	"collect_at_pickup",
 	"shop_currency",
 	"presentment_currency",
+	"shipping_total",
+	"duties_total",
 )
 JSON_ORDER_FIELDS = (
 	"discounts",
@@ -84,12 +86,14 @@ ITEM_FIELDS = (
 	"fulfilled_unit_price",
 	"fulfilled_total_price",
 	"fulfilled_total_price_missing",
+	"current_quantity",
+	"net_amount",
 	"container_deposit",
 )
 JSON_ITEM_FIELDS = ("barcodes", "promotions")
 
 
-def upsert_marketplace_order(marketplace_account, normalized_order):
+def upsert_marketplace_order(marketplace_account, normalized_order, is_stale=None):
 	"""Create or update one Marketplace Order and its Talabat line rows.
 
 	``normalized_order`` is the platform adapter's canonical result. It must
@@ -107,8 +111,15 @@ def upsert_marketplace_order(marketplace_account, normalized_order):
 	marketplace_account = cstr(marketplace_account).strip()
 	external_order_id = cstr(normalized_order.get("external_order_id")).strip()
 	identity_key = compute_order_identity_key(marketplace_account, external_order_id)
-	name = frappe.db.get_value("Marketplace Order", {"order_identity_key": identity_key}, "name")
+	name = frappe.db.get_value(
+		"Marketplace Order",
+		{"order_identity_key": identity_key},
+		"name",
+		for_update=bool(is_stale),
+	)
 	doc = frappe.get_doc("Marketplace Order", name) if name else frappe.new_doc("Marketplace Order")
+	if name and is_stale and is_stale(doc):
+		return doc
 	doc.marketplace_account = marketplace_account
 	doc.external_order_id = external_order_id
 	_apply_order_fields(doc, normalized_order)
@@ -124,7 +135,15 @@ def upsert_marketplace_order(marketplace_account, normalized_order):
 			name = frappe.db.get_value("Marketplace Order", {"order_identity_key": identity_key}, "name")
 			if not name:
 				raise
+			# Lock the winner before comparing the incoming platform timestamp;
+			# otherwise an older concurrent fetch could overwrite it immediately
+			# after the first insert commits.
+			frappe.db.get_value(
+				"Marketplace Order", {"order_identity_key": identity_key}, "name", for_update=True
+			)
 			doc = frappe.get_doc("Marketplace Order", name)
+			if is_stale and is_stale(doc):
+				return doc
 			_apply_order_fields(doc, normalized_order)
 			_upsert_order_items(doc, normalized_order.get("items") or [])
 			doc.save()

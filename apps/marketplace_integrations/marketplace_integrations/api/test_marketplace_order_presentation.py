@@ -7,6 +7,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api.marketplace_order_presentation import get_item_presentation
+from marketplace_integrations.integrations.shopify.test_products import make_shopify_account
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 from marketplace_integrations.services.order_price_presentation import not_mapped_reason
 
@@ -345,3 +346,118 @@ class IntegrationTestMarketplaceOrderPresentation(IntegrationTestCase):
         for forbidden_key in ("paid", "settled", "cash_received", "settlement_status"):
             self.assertNotIn(forbidden_key, result)
             self.assertNotIn(forbidden_key, result["items"][0])
+
+
+class IntegrationTestShopifyItemPresentation(IntegrationTestCase):
+    """#109 decision 9's Shopify branch of get_item_presentation()
+    (_resolve_shopify_item()) - previously had zero test coverage."""
+
+    def setUp(self):
+        self.suffix = frappe.generate_hash(length=8)
+        self.account = make_shopify_account(f"Shopify Presentation {self.suffix}")
+
+    def _make_item(self, marker):
+        return frappe.get_doc(
+            {
+                "doctype": "Item",
+                "item_code": f"TEST-SHOPIFY-PRESENTATION-{marker}-{self.suffix}",
+                "item_group": "Products",
+                "stock_uom": "Nos",
+                "is_stock_item": 1,
+            }
+        ).insert()
+
+    def _make_mapping(self, account, item, variant_gid):
+        return frappe.get_doc(
+            {
+                "doctype": "Marketplace Product Mapping",
+                "marketplace_account": account.name,
+                "item": item.name,
+                "external_reference": variant_gid,
+                "sales_uom": item.stock_uom,
+                "enabled": 1,
+            }
+        ).insert()
+
+    def _make_order(self, account, items):
+        return upsert_marketplace_order(
+            account.name,
+            {
+                "external_order_id": f"shopify-presentation-order-{frappe.generate_hash(length=6)}",
+                "latest_payload": {},
+                "items": items,
+            },
+        )
+
+    def test_mapped_variant_resolves_to_its_item(self):
+        item = self._make_item("mapped")
+        variant_gid = f"gid://shopify/ProductVariant/{self.suffix}"
+        self._make_mapping(self.account, item, variant_gid)
+        order = self._make_order(
+            self.account,
+            [{"external_item_id": "line-1", "external_variant_id": variant_gid}],
+        )
+
+        result = get_item_presentation(order.name)
+
+        self.assertEqual(
+            result["items"],
+            [
+                {
+                    "external_item_id": "line-1",
+                    "external_variant_id": variant_gid,
+                    "mapped_item": item.name,
+                }
+            ],
+        )
+
+    def test_unmapped_variant_reports_none_not_an_error(self):
+        variant_gid = f"gid://shopify/ProductVariant/{self.suffix}-unmapped"
+        order = self._make_order(
+            self.account,
+            [{"external_item_id": "line-1", "external_variant_id": variant_gid}],
+        )
+
+        result = get_item_presentation(order.name)
+
+        self.assertEqual(result["items"][0]["mapped_item"], None)
+
+    def test_mapping_with_disabled_marketplace_account_is_treated_as_no_mapping(self):
+        # Round-1 finding #5: resolve_item() must fail closed when the
+        # mapping's OWN Marketplace Account is disabled, not just when the
+        # mapping row itself is disabled - a hand-rolled {"enabled": 1}
+        # filter on the mapping alone would miss this.
+        item = self._make_item("disabled-account")
+        variant_gid = f"gid://shopify/ProductVariant/{self.suffix}-disabled"
+        mapping_account = make_shopify_account(f"Shopify Presentation Disabled {self.suffix}")
+        self._make_mapping(mapping_account, item, variant_gid)
+        mapping_account.enabled = 0
+        mapping_account.save()
+
+        # The order itself belongs to the now-disabled account, so
+        # get_item_presentation() resolves against the exact
+        # (marketplace_account, external_reference) pair whose account is
+        # disabled.
+        order = self._make_order(
+            mapping_account,
+            [{"external_item_id": "line-1", "external_variant_id": variant_gid}],
+        )
+
+        result = get_item_presentation(order.name)
+
+        self.assertIsNone(result["items"][0]["mapped_item"])
+
+    def test_custom_line_with_null_variant_is_distinct_from_unmapped(self):
+        # Round-1 finding #8: a variant: null custom line must render the
+        # distinct "No Shopify variant" case client-side - here that means
+        # external_variant_id comes back blank/None, never concatenated with
+        # an "Unmapped" mapped_item lookup attempt.
+        order = self._make_order(
+            self.account,
+            [{"external_item_id": "line-1", "external_variant_id": None}],
+        )
+
+        result = get_item_presentation(order.name)
+
+        self.assertIsNone(result["items"][0]["external_variant_id"])
+        self.assertIsNone(result["items"][0]["mapped_item"])

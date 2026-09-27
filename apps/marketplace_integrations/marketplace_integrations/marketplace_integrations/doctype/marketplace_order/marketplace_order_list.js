@@ -4,8 +4,47 @@ if (typeof frappe !== "undefined") {
 			listview.page.add_inner_button(__("Retrieve from Talabat"), () => {
 				show_talabat_retrieval_dialog(listview);
 			});
+			listview.page.add_inner_button(__("Retrieve from Shopify"), () => {
+				show_shopify_retrieval_dialog(listview);
+			});
 		},
 	};
+}
+
+function show_shopify_retrieval_dialog(listview) {
+	const dialog = new frappe.ui.Dialog({
+		title: __("Retrieve Shopify Orders"),
+		fields: [
+			{ fieldname: "account", fieldtype: "Link", label: __("Marketplace Account"), options: "Marketplace Account", get_query: () => ({ filters: { platform: "Shopify", enabled: 1 } }), reqd: 1 },
+			{ fieldname: "start_date", fieldtype: "Date", label: __("Start Date"), reqd: 1 },
+			{ fieldname: "end_date", fieldtype: "Date", label: __("End Date"), reqd: 1 },
+		],
+		primary_action_label: __("Retrieve"),
+		primary_action(values) {
+			const range = build_utc_range(values);
+			if (range.error) { frappe.msgprint(range.error); return; }
+			dialog.hide();
+			frappe.call({
+				method: "marketplace_integrations.api.shopify_orders.queue_order_import",
+				args: { account: values.account, start: range.start, end: range.end },
+			}).then((response) => {
+				const job_id = response.message.job_id;
+				frappe.show_alert({ message: __("Shopify order import queued: {0}", [job_id]), indicator: "blue" });
+				// Review finding #7: get_order_import_status() was never wired to
+				// any UI beyond this one-shot "queued" toast - reuse the same
+				// job-status polling dialog #106/#107 already built for the
+				// catalog push/inventory sync jobs, rather than a new one.
+				frappe.require("/assets/marketplace_integrations/js/shopify_catalog_push_status.js").then(() => {
+					new frappe.ui.ShopifyCatalogPushStatus({
+						jobs: [{ job_id, account: values.account }],
+						on_done: () => listview.refresh(),
+						...frappe.ui.ShopifyCatalogPushStatus.ORDER_IMPORT_OPTIONS,
+					});
+				});
+			});
+		},
+	});
+	dialog.show();
 }
 
 function show_talabat_retrieval_dialog(listview) {

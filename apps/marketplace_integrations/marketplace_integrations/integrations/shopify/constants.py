@@ -118,6 +118,36 @@ SHOPIFY_INVENTORY_REFERENCE_DOCUMENT_URI = "logistics://marketplace-integrations
 # skip-if-equals on its own re-read.
 SHOPIFY_INVENTORY_STALE_COMPARE_CODE = "COMPARE_FAILED"
 
+# Order retrieval (#109). These page sizes are deliberately bounded; an
+# order whose relevant connection reports another page is marked Error by
+# the mapper instead of silently persisting incomplete evidence.
+SHOPIFY_ORDERS_PAGE_SIZE = 100
+SHOPIFY_ORDER_LINE_ITEMS_PAGE_SIZE = 100
+SHOPIFY_ORDER_TRANSACTIONS_PAGE_SIZE = 50
+SHOPIFY_ORDER_REFUNDS_PAGE_SIZE = 50
+
+# The 5 order/refund webhook topics that trigger a canonical refetch
+# (#109 decision 4) - a subset of SHOPIFY_WEBHOOK_TOPICS above. Single source
+# of truth for every call site that needs to know "is this an order topic"
+# (api/shopify_webhooks.py, integrations/shopify/webhooks.py), so the set
+# can't drift out of sync between them.
+SHOPIFY_ORDER_WEBHOOK_TOPICS = {
+	"ORDERS_CREATE",
+	"ORDERS_UPDATED",
+	"ORDERS_CANCELLED",
+	"ORDERS_PAID",
+	"REFUNDS_CREATE",
+}
+
+# Reconciliation overlap window (#109 decision 8, mirroring
+# SHOPIFY_INVENTORY_SWEEP_OVERLAP_MINUTES's #107 reasoning above): the
+# persisted shopify_orders_reconciled_through watermark is advanced to
+# (run-start time - this many minutes), not the exact run-start time, so a
+# narrow race at the boundary of one run and the next (an order updated just
+# before this run started but not yet visible to its listing query) is still
+# covered by the next run instead of being silently missed forever.
+SHOPIFY_ORDER_RECONCILE_OVERLAP_MINUTES = 10
+
 # Automatic triggers (#107 PR2, decisions 1/2) - see
 # integrations/shopify/inventory_sync.py's sweep_changed_bins() /
 # reconcile_all_accounts().

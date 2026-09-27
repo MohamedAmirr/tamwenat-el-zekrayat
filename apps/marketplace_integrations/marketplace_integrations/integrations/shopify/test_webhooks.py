@@ -6,6 +6,8 @@ from unittest.mock import patch
 import frappe
 from frappe.tests import IntegrationTestCase, UnitTestCase
 
+from marketplace_integrations.integrations.shopify.constants import SHOPIFY_ORDER_WEBHOOK_TOPICS
+from marketplace_integrations.integrations.shopify.test_products import make_shopify_account
 from marketplace_integrations.integrations.shopify.webhooks import (
 	MAX_WEBHOOK_DELIVERY_ATTEMPTS,
 	STUCK_RECEIVED_THRESHOLD_MINUTES,
@@ -326,7 +328,18 @@ class IntegrationTestProcessShopifyWebhook(IntegrationTestCase):
 		self.assertEqual(count, 1)
 
 	def test_non_uninstall_topic_is_recorded_processed(self):
-		process_shopify_webhook(self.connection.name, "ORDERS_CREATE", "webhook-order-1", "test-shop.myshopify.com")
+		# ORDERS_CREATE is an order topic (#109 decision 4) - it requires an
+		# order_gid; account_for_connection() resolves to None here (no
+		# Marketplace Account exists for this connection), so this is still a
+		# silent Processed no-op end-to-end, same as before #109's order
+		# handling existed.
+		process_shopify_webhook(
+			self.connection.name,
+			"ORDERS_CREATE",
+			"webhook-order-1",
+			"test-shop.myshopify.com",
+			order_gid="gid://shopify/Order/1",
+		)
 
 		delivery = frappe.get_doc(
 			"Shopify Webhook Delivery", {"webhook_id": "webhook-order-1"}
@@ -360,7 +373,7 @@ class IntegrationTestProcessShopifyWebhook(IntegrationTestCase):
 
 		call_count = {"n": 0}
 
-		def flaky_handle_topic(connection, topic):
+		def flaky_handle_topic(connection, topic, order_gid=None):
 			call_count["n"] += 1
 			if call_count["n"] == 1:
 				raise RuntimeError("boom: simulated failure")
@@ -389,7 +402,7 @@ class IntegrationTestProcessShopifyWebhook(IntegrationTestCase):
 	def test_previously_processed_delivery_is_not_reprocessed_on_retry(self):
 		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
 
-		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
+		with patch.object(webhooks_module, "_handle_topic", return_value=None) as mocked_handle_topic:
 			process_shopify_webhook(
 				self.connection.name, "ORDERS_CREATE", "webhook-processed-1", "test-shop.myshopify.com"
 			)
@@ -412,7 +425,7 @@ class IntegrationTestProcessShopifyWebhook(IntegrationTestCase):
 
 		call_count = {"n": 0}
 
-		def flaky_handle_topic(connection, topic):
+		def flaky_handle_topic(connection, topic, order_gid=None):
 			call_count["n"] += 1
 			if call_count["n"] == 1:
 				raise RuntimeError("boom: simulated failure")
@@ -483,7 +496,7 @@ class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
 
 		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
 
-		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
+		with patch.object(webhooks_module, "_handle_topic", return_value=None) as mocked_handle_topic:
 			retry_errored_webhook_deliveries()
 
 		self.assertEqual(len(self._calls_for(mocked_handle_topic, self.connection.name)), 1)
@@ -498,7 +511,7 @@ class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
 
 		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
 
-		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
+		with patch.object(webhooks_module, "_handle_topic", return_value=None) as mocked_handle_topic:
 			retry_errored_webhook_deliveries()
 
 		self.assertEqual(self._calls_for(mocked_handle_topic, self.connection.name), [])
@@ -516,7 +529,7 @@ class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
 
 		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
 
-		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
+		with patch.object(webhooks_module, "_handle_topic", return_value=None) as mocked_handle_topic:
 			retry_errored_webhook_deliveries()
 
 		# The sweep's own query filter already excludes an exhausted row, and
@@ -549,7 +562,7 @@ class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
 
 		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
 
-		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
+		with patch.object(webhooks_module, "_handle_topic", return_value=None) as mocked_handle_topic:
 			retry_errored_webhook_deliveries()
 
 		# Only the old stuck row was picked up - a fresh "Received" row could
@@ -582,7 +595,7 @@ class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
 		# regardless of what else the sweep happens to touch.
 		call_order = []
 
-		def flaky(connection, topic):
+		def flaky(connection, topic, order_gid=None):
 			if connection.name != self.connection.name:
 				return
 			call_order.append(connection.name)
@@ -633,7 +646,7 @@ class UnitTestProcessDeliveryAtomicIncrement(IntegrationTestCase):
 			update_modified=False,
 		)
 
-		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
+		with patch.object(webhooks_module, "_handle_topic", return_value=None) as mocked_handle_topic:
 			webhooks_module._process_delivery(delivery, connection)
 
 		mocked_handle_topic.assert_not_called()
@@ -642,3 +655,86 @@ class UnitTestProcessDeliveryAtomicIncrement(IntegrationTestCase):
 		# cap (WHERE attempt_count < %s matched 0 rows) and did not
 		# increment further - still exactly at the cap, not over it.
 		self.assertEqual(delivery.attempt_count, MAX_WEBHOOK_DELIVERY_ATTEMPTS)
+
+
+class IntegrationTestHandleTopicRealOrderRouting(IntegrationTestCase):
+	"""Review finding #4: _handle_topic()'s real order-topic routing logic
+	(#109 decision 4/5) was never exercised - every existing test above mocks
+	_handle_topic itself away. These go through process_shopify_webhook()
+	end-to-end so the REAL _handle_topic() runs; only import_order()/
+	ShopifyClient are mocked, never _handle_topic."""
+
+	def setUp(self):
+		self.connection = make_connection(f"Handle Topic Routing {frappe.generate_hash(length=8)}")
+
+	def test_missing_order_gid_is_marked_error_for_every_order_topic(self):
+		for topic in SHOPIFY_ORDER_WEBHOOK_TOPICS:
+			with self.subTest(topic=topic):
+				webhook_id = f"webhook-missing-gid-{topic}-{frappe.generate_hash(length=6)}"
+				process_shopify_webhook(
+					self.connection.name, topic, webhook_id, self.connection.shop_domain, order_gid=None
+				)
+				delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": webhook_id})
+				self.assertEqual(delivery.status, "Error")
+				self.assertIn("order id", delivery.error.lower())
+
+	def test_malformed_blank_order_gid_is_also_marked_error(self):
+		# _handle_topic()'s own check is `if not order_gid`, so an empty
+		# string (a malformed/blank id, distinct from the None case above -
+		# e.g. api/shopify_webhooks.py's _extract_order_gid() found no usable
+		# admin_graphql_api_id/order_id) hits the exact same guard.
+		webhook_id = f"webhook-blank-gid-{frappe.generate_hash(length=6)}"
+		process_shopify_webhook(
+			self.connection.name, "ORDERS_CREATE", webhook_id, self.connection.shop_domain, order_gid=""
+		)
+		delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": webhook_id})
+		self.assertEqual(delivery.status, "Error")
+		self.assertIn("order id", delivery.error.lower())
+
+	def test_no_resolvable_marketplace_account_is_a_silent_processed_noop(self):
+		# No Marketplace Account exists for this connection at all -
+		# account_for_connection() naturally returns None. #109 decision 5,
+		# edge case 2: a silent Processed no-op, not an Error - an Error here
+		# would just burn through the 5-attempt retry budget for nothing
+		# actionable.
+		webhook_id = f"webhook-no-account-{frappe.generate_hash(length=6)}"
+		process_shopify_webhook(
+			self.connection.name,
+			"ORDERS_CREATE",
+			webhook_id,
+			self.connection.shop_domain,
+			order_gid="gid://shopify/Order/12345",
+		)
+		delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": webhook_id})
+		self.assertEqual(delivery.status, "Processed")
+		self.assertEqual(delivery.error, "")
+
+	def test_import_order_returning_none_is_processed_with_a_distinguishing_note(self):
+		# #109 decision 5, edge case 3: order(id:) returned null (older than
+		# the 60-day read_orders window, or genuinely deleted). Only
+		# import_order() itself is mocked - _handle_topic()'s own routing
+		# (resolving the account, calling import_order(), branching on its
+		# None result) runs for real.
+		make_shopify_account(
+			f"Handle Topic Routing Account {frappe.generate_hash(length=8)}",
+			connection=self.connection.name,
+		)
+		webhook_id = f"webhook-null-order-{frappe.generate_hash(length=6)}"
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with patch.object(webhooks_module, "import_order", return_value=None) as mocked_import_order:
+			process_shopify_webhook(
+				self.connection.name,
+				"ORDERS_CREATE",
+				webhook_id,
+				self.connection.shop_domain,
+				order_gid="gid://shopify/Order/12345",
+			)
+
+		mocked_import_order.assert_called_once()
+		delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": webhook_id})
+		self.assertEqual(delivery.status, "Processed")
+		# The distinguishing note - present here, unlike the silent no-op
+		# above, and unlike a genuine success (which also leaves error blank).
+		self.assertTrue(delivery.error)
