@@ -117,3 +117,31 @@ SHOPIFY_INVENTORY_REFERENCE_DOCUMENT_URI = "logistics://marketplace-integrations
 # guess is bounded: a non-matching code takes the per-item fallback, which
 # skip-if-equals on its own re-read.
 SHOPIFY_INVENTORY_STALE_COMPARE_CODE = "COMPARE_FAILED"
+
+# Automatic triggers (#107 PR2, decisions 1/2) - see
+# integrations/shopify/inventory_sync.py's sweep_changed_bins() /
+# reconcile_all_accounts().
+#
+# Changed-Bin sweep interval: every 2 minutes, registered via hooks.py's
+# scheduler_events["cron"] (Frappe has no built-in "every_n_minutes" bucket
+# like "hourly"/"daily", so cron syntax is required for a 2-minute cadence).
+SHOPIFY_INVENTORY_SWEEP_CRON = "*/2 * * * *"
+
+# Overlap window (decision 1's "start at 10"): each sweep tick re-reads Bins
+# back to (watermark - this many minutes), not just since the watermark
+# itself - re-scanning a bit of already-covered time is cheap (a Bin query)
+# and is what makes a missed/failed enqueue on one tick recoverable on a
+# later tick within this window, without a second retry mechanism.
+SHOPIFY_INVENTORY_SWEEP_OVERLAP_MINUTES = 10
+
+# Deliberately NO account-count limit on the sweep/reconciliation account
+# list (unlike integrations/shopify/webhooks.py's SWEEP_BATCH_LIMIT): this
+# project's Shopify Connection is scoped to a single store (see
+# docs/marketplace-integrations/architecture.md), so the number of enabled
+# Shopify Marketplace Accounts is expected to stay tiny. Unlike the webhook
+# retry sweep (which processes a bounded batch and drains any remainder over
+# subsequent hourly runs because handled ROWS leave the query's WHERE
+# clause), every enabled Shopify Marketplace Account matches this query on
+# EVERY tick forever - an `ORDER BY ... LIMIT N` here would silently starve
+# any account sorted past position N rather than "drain" anything. Revisit if
+# this project ever manages more than a handful of Shopify accounts.

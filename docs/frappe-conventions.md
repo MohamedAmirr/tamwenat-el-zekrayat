@@ -52,6 +52,8 @@ apps/<app_name>/
 - `fixtures` to export/version Custom Field, Property Setter, Client Script, Custom DocPerm, Workflow, etc. so `bench migrate` on a fresh site reproduces them.
 - `override_doctype_class` / `override_whitelisted_methods` are last resorts — prefer `doc_events` first.
 
+- A `hooks.py` `scheduler_events` entry is only a Python-side declaration — it does not itself create the Scheduled Job Type record Frappe actually runs. Confirmed directly against this app's own #107 Shopify inventory sweep/reconcile jobs: the corresponding `Scheduled Job Type` documents are created/updated only by `bench migrate` (Frappe's own scheduled-job sync reading `hooks.py`), so a code deploy alone (without a migrate) leaves the old registration in place or missing the job entirely. Even once the `Scheduled Job Type` record exists, nothing actually runs unless the *site's* scheduler is enabled (`bench --site <site> scheduler enable`/`resume`, or Desk's System Settings) — a disabled scheduler silently no-ops every registered job, not just newly-added ones. Any change to `scheduler_events` (new job, changed cron, removed job) needs both a `bench migrate` and a scheduler-enabled check confirmed after deploy, not just after the first time the feature is added.
+
 ## Permissions
 
 - Default to the Role Permission Manager (exported as a fixture), not hardcoded permission checks, unless the rule is dynamic (e.g. "only the owning branch can see this").

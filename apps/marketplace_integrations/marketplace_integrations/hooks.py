@@ -1,3 +1,5 @@
+from marketplace_integrations.integrations.shopify.constants import SHOPIFY_INVENTORY_SWEEP_CRON
+
 app_name = "marketplace_integrations"
 app_title = "Marketplace Integrations"
 app_publisher = "Tamwenat El Zekrayat"
@@ -161,9 +163,33 @@ required_apps = ["erpnext"]
 # integrations/shopify/webhooks.py's retry_errored_webhook_deliveries()
 # docstring. Bounded by MAX_WEBHOOK_DELIVERY_ATTEMPTS in that same module, not
 # a cron-level concern.
+#
+# Every 2 minutes (cron, since there is no built-in "every_n_minutes" bucket):
+# the Shopify inventory changed-Bin sweep (#107 decision 1) -
+# integrations/shopify/inventory_sync.py's sweep_changed_bins(). Cheap by
+# construction (no Shopify HTTP call, only Bin/mapping/watermark reads plus
+# an enqueue) - see that function's own docstring.
+#
+# Daily: the Shopify inventory full reconciliation (#107 decision 2) -
+# integrations/shopify/inventory_sync.py's reconcile_all_accounts(). Same
+# no-Shopify-HTTP-call guarantee; recovers anything the sweep's watermark
+# could miss.
+#
+# Neither of these two is a doc_events entry - both are cron/interval
+# polling, never a document hook. api/test_talabat_catalog.py's
+# test_no_catalog_document_events_are_registered depends on doc_events
+# staying empty for every app; do not add one here.
 scheduler_events = {
 	"hourly": [
 		"marketplace_integrations.integrations.shopify.webhooks.retry_errored_webhook_deliveries",
+	],
+	"cron": {
+		SHOPIFY_INVENTORY_SWEEP_CRON: [
+			"marketplace_integrations.integrations.shopify.inventory_sync.sweep_changed_bins",
+		],
+	},
+	"daily": [
+		"marketplace_integrations.integrations.shopify.inventory_sync.reconcile_all_accounts",
 	],
 }
 
