@@ -10,6 +10,7 @@
   "shop_domain",
   "topic",
   "webhook_id",
+  "order_gid",
   "status",
   "attempt_count",
   "received_at",
@@ -49,6 +50,13 @@
    "reqd": 1,
    "search_index": 1,
    "unique": 1
+  },
+  {
+   "fieldname": "order_gid",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Order GID",
+   "read_only": 1
   },
   {
    "default": "Received",

@@ -16,6 +16,7 @@
   "shopify_location_section",
   "shopify_location_gid",
   "shopify_location_name",
+  "shopify_orders_reconciled_through",
   "outlet_status_section",
   "external_status",
   "external_status_reason",
@@ -101,6 +102,12 @@
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
    "label": "Shopify Location Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "shopify_orders_reconciled_through",
+   "fieldtype": "Datetime",
+   "label": "Shopify Orders Reconciled Through",
    "read_only": 1
   },
   {

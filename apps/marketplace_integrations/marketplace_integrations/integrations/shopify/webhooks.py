@@ -41,9 +41,11 @@ from frappe.utils import add_to_date, cstr, escape_html, now_datetime
 from marketplace_integrations.integrations.http import truncate_response_text
 from marketplace_integrations.integrations.shopify.client import ShopifyClient
 from marketplace_integrations.integrations.shopify.constants import (
+	SHOPIFY_ORDER_WEBHOOK_TOPICS,
 	SHOPIFY_WEBHOOK_PATH,
 	SHOPIFY_WEBHOOK_TOPICS,
 )
+from marketplace_integrations.integrations.shopify.orders import account_for_connection, import_order
 
 _WEBHOOK_SUBSCRIPTIONS_QUERY = """
 query webhookSubscriptions($first: Int!, $topics: [WebhookSubscriptionTopic!]) {
@@ -285,7 +287,7 @@ STUCK_RECEIVED_THRESHOLD_MINUTES = 15
 SWEEP_BATCH_LIMIT = 200
 
 
-def process_shopify_webhook(connection_name, topic, webhook_id, shop_domain):
+def process_shopify_webhook(connection_name, topic, webhook_id, shop_domain, order_gid=None):
 	"""Idempotently persist and process one authenticated webhook delivery.
 
 	The public webhook request (api/shopify_webhooks.py::webhook_event()) is
@@ -323,6 +325,7 @@ def process_shopify_webhook(connection_name, topic, webhook_id, shop_domain):
 	delivery.shop_domain = shop_domain
 	delivery.topic = topic
 	delivery.webhook_id = webhook_id
+	delivery.order_gid = order_gid
 	delivery.received_at = now_datetime()
 	try:
 		delivery.insert(ignore_permissions=True)
@@ -409,7 +412,10 @@ def _process_delivery(delivery, connection):
 		connection.db_set("last_webhook_delivery_topic", topic, update_modified=False)
 
 	try:
-		_handle_topic(connection, topic)
+		if topic in SHOPIFY_ORDER_WEBHOOK_TOPICS:
+			note = _handle_topic(connection, topic, delivery.order_gid)
+		else:
+			note = _handle_topic(connection, topic)
 	except Exception as e:
 		error_message = truncate_response_text(str(e))
 		delivery.db_set("status", "Error", update_modified=False)
@@ -423,6 +429,14 @@ def _process_delivery(delivery, connection):
 	processed_at = now_datetime()
 	delivery.db_set("status", "Processed", update_modified=False)
 	delivery.db_set("processed_at", processed_at, update_modified=False)
+	# `note` (decision 5's third edge case: order(id:) returned null - a
+	# genuinely deleted order, or one outside the 60-day read_orders window)
+	# reuses the same `error` field the Error status uses, but WITHOUT
+	# changing status away from "Processed" - this is what makes the outcome
+	# distinguishable from both a genuine success (blank error) and a real
+	# Error status, without adding a new field. Blank clears any stale note
+	# from an earlier attempt on the same delivery row.
+	delivery.db_set("error", note or "", update_modified=False)
 	connection.db_set("last_webhook_processed_at", processed_at, update_modified=False)
 	connection.db_set("last_webhook_error", "", update_modified=False)
 
@@ -523,15 +537,40 @@ def retry_errored_webhook_deliveries():
 			frappe.db.commit()
 
 
-def _handle_topic(connection, topic):
+def _handle_topic(connection, topic, order_gid=None):
 	"""Per-topic side effects. Every topic other than APP_UNINSTALLED is
 	acknowledged and recorded only - canonical order retrieval and ERPNext
 	Sales Order/document creation from webhook payloads are explicitly out of
-	scope for #104."""
+	scope for #104.
+
+	Returns an optional note string for the caller to persist alongside a
+	"Processed" status (see _process_delivery()) - used only for decision 5's
+	null-order edge case below. Every other path returns None (a plain,
+	silent "Processed")."""
 	if topic == "APP_UNINSTALLED":
 		_disable_connection(connection)
-	# ORDERS_CREATE / ORDERS_UPDATED / ORDERS_CANCELLED / ORDERS_PAID /
-	# REFUNDS_CREATE / APP_SCOPES_UPDATE: no further action in this issue.
+		return None
+	if topic in SHOPIFY_ORDER_WEBHOOK_TOPICS:
+		if not order_gid:
+			frappe.throw(frappe._("Shopify webhook is missing order id."))
+		account = account_for_connection(connection.name)
+		if not account:
+			# #109 decision 5, edge case 2: no enabled account/connection
+			# resolvable for the shop - a silent Processed no-op. An Error
+			# here would just burn through the 5-attempt retry budget for
+			# nothing actionable.
+			return None
+		order = import_order(account, order_gid)
+		if order is None:
+			# #109 decision 5, edge case 3: order(id:) returned null (older
+			# than the 60-day read_orders window, or genuinely deleted).
+			# Retrying cannot succeed, so this stays Processed - but WITH a
+			# visible note, unlike the silent no-op above - see
+			# _process_delivery()'s use of this return value.
+			return frappe._("Shopify order {0} could not be refetched (not found or outside the read_orders window).").format(order_gid)
+		return None
+	# APP_SCOPES_UPDATE remains an acknowledged no-op.
+	return None
 
 
 def _disable_connection(connection):

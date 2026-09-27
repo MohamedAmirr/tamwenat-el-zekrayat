@@ -6,7 +6,7 @@
 import frappe
 from frappe import _
 
-from marketplace_integrations.services.mappings import resolve_mapping_and_item
+from marketplace_integrations.services.mappings import resolve_item, resolve_mapping_and_item
 from marketplace_integrations.services.order_price_presentation import (
     current_catalog_price,
     resolve_catalog_sync_account,
@@ -43,6 +43,17 @@ def get_item_presentation(marketplace_order: str):
     order.check_permission("read")
     if not frappe.has_permission("Marketplace Product Mapping", ptype="read"):
         frappe.throw(_("Not permitted"), frappe.PermissionError)
+    if order.platform == "Shopify":
+        return {
+            "items": [
+                {
+                    "external_item_id": row.external_item_id,
+                    "external_variant_id": row.external_variant_id,
+                    "mapped_item": _resolve_shopify_item(order.marketplace_account, row.external_variant_id),
+                }
+                for row in order.items or []
+            ]
+        }
     if not frappe.has_permission("Item Price", ptype="read"):
         frappe.throw(_("Not permitted"), frappe.PermissionError)
 
@@ -80,3 +91,22 @@ def get_item_presentation(marketplace_order: str):
     return {
         "items": items,
     }
+
+
+def _resolve_shopify_item(account, variant_gid):
+    """Resolve a Shopify line's mapped Item via the shared resolve_item()
+    (#109 decision 9), not a hand-rolled query - resolve_item()'s documented
+    contract also fails closed when the mapping's OWN Marketplace Account is
+    disabled, not just when the mapping row itself is disabled, which a
+    hand-rolled ``{"enabled": 1}`` filter on the mapping alone would miss.
+
+    A Shopify variant's ``variant.id`` GID is exactly what #105 stores as
+    ``Marketplace Product Mapping.external_reference`` for a Shopify mapping
+    (see #109's issue body "Note on variant identity") - so the variant GID
+    is passed straight through as the external_reference resolve_item()
+    expects, matching how every other resolve_item()/resolve_mapping_and_item()
+    caller in this app already calls it.
+    """
+    if not variant_gid:
+        return None
+    return resolve_item(account, variant_gid)

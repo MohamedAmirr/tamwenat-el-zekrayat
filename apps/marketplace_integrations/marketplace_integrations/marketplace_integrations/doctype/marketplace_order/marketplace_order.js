@@ -74,7 +74,38 @@ function apply_platform_gating(frm) {
 		load_item_presentation(frm);
 	} else if (platform === "Shopify") {
 		add_generic_status_indicator(frm);
+		frm.add_custom_button(__("Refresh from Shopify"), () => {
+			frappe.call({
+				method: "marketplace_integrations.api.shopify_orders.refresh_order",
+				args: { marketplace_order: frm.doc.name },
+				freeze: true,
+				freeze_message: __("Refreshing from Shopify..."),
+			}).then(() => frm.reload_doc());
+		});
+		load_shopify_item_presentation(frm);
 	}
+}
+
+function load_shopify_item_presentation(frm) {
+	frappe.call({
+		method: "marketplace_integrations.api.marketplace_order_presentation.get_item_presentation",
+		args: { marketplace_order: frm.doc.name },
+	}).then((response) => {
+		const wrapper = frm.get_field("talabat_order_presentation").$wrapper;
+		wrapper.empty();
+		for (const item of response.message.items || []) {
+			const line = document.createElement("p");
+			// A custom/no-variant line (variant: null on the Shopify side) has no
+			// mapping to report at all - showing it as its own clean label rather
+			// than concatenating with the "Unmapped"/mapped-item text below, which
+			// always read "No Shopify variant: Unmapped" for this case even though
+			// nothing was actually left unmapped.
+			line.textContent = item.external_variant_id
+				? `${item.external_variant_id}: ${item.mapped_item || __("Unmapped")}`
+				: __("No Shopify variant");
+			wrapper.append(line);
+		}
+	});
 }
 
 // Read-only JSON-fieldtype fields are not HTML-escaped by Frappe's default

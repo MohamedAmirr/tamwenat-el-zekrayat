@@ -376,7 +376,7 @@ test("apply_platform_gating shows the full Talabat action set for a Talabat orde
 	assert.ok(!frm_calls.indicators.some((indicator) => indicator.label.startsWith("Fulfillment:")));
 });
 
-test("apply_platform_gating shows no Talabat controls and only the Financial/Fulfillment indicator pair for a Shopify order", () => {
+test("apply_platform_gating shows only the Refresh from Shopify control and the Financial/Fulfillment indicator pair for a Shopify order", () => {
 	frm_calls = {custom_buttons: [], indicators: []};
 	const frm = make_frm({
 		platform: "Shopify",
@@ -386,7 +386,7 @@ test("apply_platform_gating shows no Talabat controls and only the Financial/Ful
 
 	apply_platform_gating(frm);
 
-	assert.deepEqual(frm_calls.custom_buttons, []);
+	assert.deepEqual(frm_calls.custom_buttons, ["Refresh from Shopify"]);
 	assert.deepEqual(frm_calls.indicators, [
 		{label: "Financial: PAID", color: "gray"},
 		{label: "Fulfillment: FULFILLED", color: "gray"},

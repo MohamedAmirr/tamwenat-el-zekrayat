@@ -46,7 +46,7 @@ Source: [GraphQL Admin API reference](https://shopify.dev/docs/api/admin-graphql
 - Decision made and implemented: **no separate Node/Remix bridge app** for this (a scaffold exploring that shape exists at `github.com/MohamedAmirr/erpnext-shopify-integration` but is not the chosen path — see #104). ERPNext registers its own webhook subscription and verifies HMAC itself, mirroring `api/talabat_webhooks.py`'s pattern but with HMAC instead of Bearer-token auth.
 - Client secret rotation is handled: Shopify signs webhooks with the app's *oldest unrevoked* client secret, so `verify_shopify_hmac()` checks the connection's current `client_secret` first and, if that fails, its `previous_client_secret` — accepting either until the old secret is revoked and the field cleared.
 - Every subscribed topic shares one endpoint (`webhook_event()`); `X-Shopify-Topic` (delivery header form, e.g. `orders/create`) is mapped to the GraphQL enum form (e.g. `ORDERS_CREATE`, via `SHOPIFY_WEBHOOK_TOPIC_HEADER_TO_ENUM`) to route to `process_shopify_webhook()`. Deduplication is by `X-Shopify-Webhook-Id`, enforced with a DB-level unique index on `Shopify Webhook Delivery.webhook_id`, not a check-then-insert read.
-- The webhook request itself only authenticates, minimally validates shape, and enqueues — canonical order retrieval/ERPNext document creation from webhook payloads is out of scope for #104; every topic other than `APP_UNINSTALLED` (which disables the `Shopify Connection`) is acknowledged and recorded only.
+- The webhook request itself only authenticates, minimally validates shape, and enqueues — order topics retain only an order GID and the worker refetches canonical state for #109; the webhook payload is never treated as financial evidence and no ERPNext document is created. `APP_UNINSTALLED` disables the `Shopify Connection`; `APP_SCOPES_UPDATE` remains an acknowledged no-op.
 - Because `webhook_event()` responds 200 as soon as processing is enqueued (correct: "respond promptly"), Shopify never retries a delivery whose async processing later fails. A scheduled hourly sweep (`retry_errored_webhook_deliveries()`, registered in `hooks.py`'s `scheduler_events`) reprocesses any `Shopify Webhook Delivery` still at `status="Error"`, bounded by a simple `attempt_count` cutoff (`MAX_WEBHOOK_DELIVERY_ATTEMPTS`) so a permanently-failing delivery isn't retried forever.
 
 Source: [Manage your app credentials](https://shopify.dev/docs/apps/build/authentication-authorization/client-secrets), [webhookSubscriptionCreate mutation](https://shopify.dev/docs/api/admin-graphql/latest/mutations/webhookSubscriptionCreate).
@@ -101,6 +101,17 @@ Source: [productVariantsBulkUpdate mutation](https://shopify.dev/docs/api/admin-
   8. That the stale-compare userError code is `COMPARE_FAILED` (seen in one doc fetch; a later fetch said the code enum is not listed).
 
 Source: [inventorySetQuantities mutation](https://shopify.dev/docs/api/admin-graphql/latest/mutations/inventorySetQuantities), verified against shopify.dev on 2026-09-24 (external source, approved by the user for reliance) for the arguments/fields listed in the issue's locked plan only, per the caveats above.
+
+## Orders, refunds, and reconciliation (#109)
+
+- Canonical order state is fetched through the Admin GraphQL `order(id:)` query by Shopify GID; webhook payloads provide only the GID and are never treated as financial evidence.
+- The initial query intentionally excludes protected customer-data fields (`customer`, email, phone, billing address, and shipping address). Shopify can return partial data plus top-level GraphQL errors for unapproved fields, and the shared client rejects any top-level error. These fields remain blank until approval and live verification.
+- Current Shopify MoneyBag totals are persisted as evidence (`subtotal`, discount, tax, shipping, duties, and total); line net amount is computed from original unit price × current quantity minus discount allocations.
+- Duplicate and out-of-order fetches converge through an opt-in `updatedAt` stale-write guard in the shared order upsert. Shopify GID is the identity, not the display order name.
+- Webhook order topics reuse the existing asynchronous delivery worker. Manual import, per-order refresh, and scheduled incremental reconciliation are intended to reuse the same `import_order()` funnel; refunds never create accounting or stock documents.
+- The current implementation rejects an order when line, transaction, refund, or refund-line-item pagination reports another page; pagination support is intentionally deferred for this grocery/small-retail scope.
+
+Source: [Order object](https://shopify.dev/docs/api/admin-graphql/latest/objects/Order), [LineItem object](https://shopify.dev/docs/api/admin-graphql/latest/objects/LineItem) - verified against shopify.dev on 2026-09-27 (external source, approved for #109's locked plan).
 
 ## Open questions
 

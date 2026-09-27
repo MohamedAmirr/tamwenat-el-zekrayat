@@ -326,7 +326,18 @@ class IntegrationTestProcessShopifyWebhook(IntegrationTestCase):
 		self.assertEqual(count, 1)
 
 	def test_non_uninstall_topic_is_recorded_processed(self):
-		process_shopify_webhook(self.connection.name, "ORDERS_CREATE", "webhook-order-1", "test-shop.myshopify.com")
+		# ORDERS_CREATE is an order topic (#109 decision 4) - it requires an
+		# order_gid; account_for_connection() resolves to None here (no
+		# Marketplace Account exists for this connection), so this is still a
+		# silent Processed no-op end-to-end, same as before #109's order
+		# handling existed.
+		process_shopify_webhook(
+			self.connection.name,
+			"ORDERS_CREATE",
+			"webhook-order-1",
+			"test-shop.myshopify.com",
+			order_gid="gid://shopify/Order/1",
+		)
 
 		delivery = frappe.get_doc(
 			"Shopify Webhook Delivery", {"webhook_id": "webhook-order-1"}
@@ -360,7 +371,7 @@ class IntegrationTestProcessShopifyWebhook(IntegrationTestCase):
 
 		call_count = {"n": 0}
 
-		def flaky_handle_topic(connection, topic):
+		def flaky_handle_topic(connection, topic, order_gid=None):
 			call_count["n"] += 1
 			if call_count["n"] == 1:
 				raise RuntimeError("boom: simulated failure")
@@ -389,7 +400,7 @@ class IntegrationTestProcessShopifyWebhook(IntegrationTestCase):
 	def test_previously_processed_delivery_is_not_reprocessed_on_retry(self):
 		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
 
-		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
+		with patch.object(webhooks_module, "_handle_topic", return_value=None) as mocked_handle_topic:
 			process_shopify_webhook(
 				self.connection.name, "ORDERS_CREATE", "webhook-processed-1", "test-shop.myshopify.com"
 			)
@@ -412,7 +423,7 @@ class IntegrationTestProcessShopifyWebhook(IntegrationTestCase):
 
 		call_count = {"n": 0}
 
-		def flaky_handle_topic(connection, topic):
+		def flaky_handle_topic(connection, topic, order_gid=None):
 			call_count["n"] += 1
 			if call_count["n"] == 1:
 				raise RuntimeError("boom: simulated failure")
@@ -483,7 +494,7 @@ class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
 
 		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
 
-		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
+		with patch.object(webhooks_module, "_handle_topic", return_value=None) as mocked_handle_topic:
 			retry_errored_webhook_deliveries()
 
 		self.assertEqual(len(self._calls_for(mocked_handle_topic, self.connection.name)), 1)
@@ -498,7 +509,7 @@ class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
 
 		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
 
-		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
+		with patch.object(webhooks_module, "_handle_topic", return_value=None) as mocked_handle_topic:
 			retry_errored_webhook_deliveries()
 
 		self.assertEqual(self._calls_for(mocked_handle_topic, self.connection.name), [])
@@ -516,7 +527,7 @@ class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
 
 		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
 
-		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
+		with patch.object(webhooks_module, "_handle_topic", return_value=None) as mocked_handle_topic:
 			retry_errored_webhook_deliveries()
 
 		# The sweep's own query filter already excludes an exhausted row, and
@@ -549,7 +560,7 @@ class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
 
 		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
 
-		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
+		with patch.object(webhooks_module, "_handle_topic", return_value=None) as mocked_handle_topic:
 			retry_errored_webhook_deliveries()
 
 		# Only the old stuck row was picked up - a fresh "Received" row could
@@ -582,7 +593,7 @@ class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
 		# regardless of what else the sweep happens to touch.
 		call_order = []
 
-		def flaky(connection, topic):
+		def flaky(connection, topic, order_gid=None):
 			if connection.name != self.connection.name:
 				return
 			call_order.append(connection.name)
@@ -633,7 +644,7 @@ class UnitTestProcessDeliveryAtomicIncrement(IntegrationTestCase):
 			update_modified=False,
 		)
 
-		with patch.object(webhooks_module, "_handle_topic") as mocked_handle_topic:
+		with patch.object(webhooks_module, "_handle_topic", return_value=None) as mocked_handle_topic:
 			webhooks_module._process_delivery(delivery, connection)
 
 		mocked_handle_topic.assert_not_called()
