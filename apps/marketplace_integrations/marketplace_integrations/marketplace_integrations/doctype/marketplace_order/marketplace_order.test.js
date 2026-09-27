@@ -6,6 +6,30 @@ global.__ = (message, args) => {
 	return message.replace(/\{(\d+)\}/g, (_, index) => args[index]);
 };
 
+global.frappe = {
+	// Resolves synchronously, but only for get_erpnext_sync_status - the call
+	// load_erpnext_sync_status() makes, whose own .then() is what adds the
+	// async "Send to ERPNext"/"Update ERPNext Order" button - so
+	// apply_platform_gating()'s full Talabat control set can be asserted by
+	// name in a synchronous test, not just "more than one button got added".
+	// get_item_presentation() (load_item_presentation()) is deliberately left
+	// unresolved here: its own .then() calls render_item_presentation(),
+	// which uses real DOM APIs (document.createElement, ...) that this plain
+	// Node test environment has no jsdom-equivalent stand-in for - resolving
+	// it would fail with "document is not defined", unrelated to whatever
+	// this file's tests actually assert.
+	call: (opts) => ({
+		then: (resolve) => {
+			if (opts && String(opts.method || "").includes("get_erpnext_sync_status") && typeof resolve === "function") {
+				resolve({message: {status: "Not Synced"}});
+			}
+			return {then: () => {}};
+		},
+	}),
+	ui: {form: {on: () => {}}},
+	utils: {escape_html: (v) => v},
+};
+
 const {
 	build_cart_update_items,
 	get_status_indicator,
@@ -16,7 +40,30 @@ const {
 	parse_promotions,
 	catalog_price_cell_text,
 	price_difference_text,
+	render_json_evidence_fields_as_escaped_text,
+	add_generic_status_indicator,
+	add_status_indicators,
+	apply_platform_gating,
+	JSON_EVIDENCE_FIELDS,
 } = require("./marketplace_order.js");
+
+function make_frm(doc) {
+	return {
+		doc,
+		is_new: () => false,
+		add_custom_button: (label) => {
+			frm_calls.custom_buttons.push(label);
+		},
+		dashboard: {
+			add_indicator: (label, color) => frm_calls.indicators.push({label, color}),
+		},
+		set_df_property: () => {},
+		get_field: () => ({$wrapper: {empty: () => {}, append: () => {}}}),
+		refresh_field: () => {},
+	};
+}
+
+let frm_calls;
 
 test("cart update preserves existing replacement and addition items on repeat", () => {
 	const rows = [
@@ -174,4 +221,191 @@ test("price_difference_text never labels a difference as a discount and is blank
 	assert.equal(price_difference_text(10, 10), "0.00");
 	assert.equal(price_difference_text(null, 10), "—");
 	assert.equal(price_difference_text(10, undefined), "—");
+});
+
+// Minimal stand-in for frappe.utils.escape_html, matching its real escaping
+// of the characters that matter for this test (<, >, &, ", ').
+function fake_escape_html(value) {
+	return String(value)
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#39;");
+}
+
+test("render_json_evidence_fields_as_escaped_text sets an escaping formatter on exactly the four new JSON fields", () => {
+	global.frappe.meta = {
+		docfield_map: {
+			"Marketplace Order": {
+				billing_address: {},
+				shipping_address: {},
+				payment_transactions: {},
+				refunds: {},
+				// A pre-existing Talabat JSON field must be left untouched -
+				// #108's fix is scoped to only the four new fields, not a
+				// blanket change to every JSON field on this doctype.
+				discounts: {},
+			},
+		},
+	};
+	const previous_escape_html = global.frappe.utils.escape_html;
+	global.frappe.utils.escape_html = fake_escape_html;
+
+	render_json_evidence_fields_as_escaped_text();
+
+	const docfield_map = global.frappe.meta.docfield_map["Marketplace Order"];
+	for (const fieldname of JSON_EVIDENCE_FIELDS) {
+		assert.equal(typeof docfield_map[fieldname].formatter, "function");
+	}
+	assert.equal(docfield_map.discounts.formatter, undefined);
+
+	const malicious = '{"name": "<img src=x onerror=alert(1)>"}';
+	const rendered = docfield_map.billing_address.formatter(malicious);
+	assert.equal(rendered, `<pre>${fake_escape_html(malicious)}</pre>`);
+	assert.doesNotMatch(rendered, /<img/);
+
+	assert.equal(docfield_map.shipping_address.formatter(""), "");
+	assert.equal(docfield_map.shipping_address.formatter(null), "");
+
+	delete global.frappe.meta;
+	global.frappe.utils.escape_html = previous_escape_html;
+});
+
+test("add_generic_status_indicator shows the Financial/Fulfillment indicator pair sourced from the two new status fields", () => {
+	const indicators = [];
+	const frm = {
+		doc: {external_financial_status: "PAID", external_fulfillment_status: "FULFILLED"},
+		dashboard: {add_indicator: (label, color) => indicators.push({label, color})},
+	};
+
+	add_generic_status_indicator(frm);
+
+	assert.equal(indicators.length, 2);
+	assert.equal(indicators[0].label, "Financial: PAID");
+	assert.equal(indicators[1].label, "Fulfillment: FULFILLED");
+});
+
+test("add_generic_status_indicator handles blank financial/fulfillment status without inventing a value", () => {
+	const indicators = [];
+	const frm = {
+		doc: {external_financial_status: "", external_fulfillment_status: ""},
+		dashboard: {add_indicator: (label, color) => indicators.push({label, color})},
+	};
+
+	add_generic_status_indicator(frm);
+
+	assert.equal(indicators[0].label, "Financial: Unavailable");
+	assert.equal(indicators[1].label, "Fulfillment: Unavailable");
+});
+
+test("add_status_indicators escapes an untrusted external_status value before it reaches the Talabat indicator label", () => {
+	// #108 converted external_status from a closed Select to a Data field, so
+	// an out-of-range/malicious value now persists instead of being rejected
+	// at save time - it must still be safely escaped on display.
+	const indicators = [];
+	const frm = {
+		doc: {external_status: "<img src=x onerror=alert(1)>", erpnext_sync_status: "Not Synced"},
+		dashboard: {add_indicator: (label, color) => indicators.push({label, color})},
+	};
+	const previous_escape_html = global.frappe.utils.escape_html;
+	global.frappe.utils.escape_html = fake_escape_html;
+
+	add_status_indicators(frm);
+
+	assert.doesNotMatch(indicators[0].label, /<img/);
+	assert.match(indicators[0].label, /&lt;img/);
+
+	global.frappe.utils.escape_html = previous_escape_html;
+});
+
+test("add_generic_status_indicator escapes an untrusted status value before it reaches the indicator label", () => {
+	const indicators = [];
+	const frm = {
+		doc: {external_financial_status: "<img src=x onerror=alert(1)>", external_fulfillment_status: "FULFILLED"},
+		dashboard: {add_indicator: (label, color) => indicators.push({label, color})},
+	};
+	const previous_escape_html = global.frappe.utils.escape_html;
+	global.frappe.utils.escape_html = fake_escape_html;
+
+	add_generic_status_indicator(frm);
+
+	assert.doesNotMatch(indicators[0].label, /<img/);
+	assert.match(indicators[0].label, /&lt;img/);
+
+	global.frappe.utils.escape_html = previous_escape_html;
+});
+
+// #108 decision 9: platform gating on the Marketplace Order form itself.
+test("apply_platform_gating shows the full Talabat action set for a Talabat order", () => {
+	frm_calls = {custom_buttons: [], indicators: []};
+	const frm = make_frm({
+		platform: "Talabat",
+		external_status: "RECEIVED",
+		transport_type: "VENDOR_DELIVERY",
+		erpnext_sync_status: "Not Synced",
+		items: [],
+	});
+
+	assert.doesNotThrow(() => apply_platform_gating(frm));
+
+	// The exact expected Talabat control set for a RECEIVED,
+	// VENDOR_DELIVERY order - asserted by name, not just a count, so a
+	// regression that silently drops or renames one of these (e.g. the
+	// async "Send to ERPNext" button added from load_erpnext_sync_status()'s
+	// own .then()) is actually caught.
+	// load_erpnext_sync_status()'s frappe.call resolves synchronously in this
+	// test harness, so "Send to ERPNext" is added before the rest of
+	// apply_platform_gating()'s Talabat branch runs - a real form load
+	// resolves it asynchronously instead, so the real UI's button order can
+	// differ; this test cares about the exact SET of buttons, not their
+	// real-world order.
+	assert.deepEqual(frm_calls.custom_buttons, [
+		"Send to ERPNext",
+		"Refresh from Talabat",
+		"Update Cart",
+		"Dispatch",
+		"Cancel Order",
+	]);
+	// The Talabat + ERPNext dashboard indicators from add_status_indicators().
+	assert.ok(frm_calls.indicators.some((indicator) => indicator.label === "Talabat: RECEIVED"));
+	assert.ok(frm_calls.indicators.some((indicator) => indicator.label === "ERPNext: Not Synced"));
+	// Never the Financial/Fulfillment indicator pair shown to non-Talabat
+	// platforms.
+	assert.ok(!frm_calls.indicators.some((indicator) => indicator.label.startsWith("Financial:")));
+	assert.ok(!frm_calls.indicators.some((indicator) => indicator.label.startsWith("Fulfillment:")));
+});
+
+test("apply_platform_gating shows no Talabat controls and only the Financial/Fulfillment indicator pair for a Shopify order", () => {
+	frm_calls = {custom_buttons: [], indicators: []};
+	const frm = make_frm({
+		platform: "Shopify",
+		external_financial_status: "PAID",
+		external_fulfillment_status: "FULFILLED",
+	});
+
+	apply_platform_gating(frm);
+
+	assert.deepEqual(frm_calls.custom_buttons, []);
+	assert.deepEqual(frm_calls.indicators, [
+		{label: "Financial: PAID", color: "gray"},
+		{label: "Fulfillment: FULFILLED", color: "gray"},
+	]);
+});
+
+test("apply_platform_gating shows nothing at all for a blank/unrecognized platform (fails closed)", () => {
+	frm_calls = {custom_buttons: [], indicators: []};
+	const frm = make_frm({platform: "", external_status: "RECEIVED"});
+
+	apply_platform_gating(frm);
+
+	assert.deepEqual(frm_calls.custom_buttons, []);
+	assert.deepEqual(frm_calls.indicators, []);
+
+	frm_calls = {custom_buttons: [], indicators: []};
+	const unknown_platform_frm = make_frm({platform: "SomeFuturePlatform"});
+	apply_platform_gating(unknown_platform_frm);
+
+	assert.deepEqual(frm_calls.custom_buttons, []);
+	assert.deepEqual(frm_calls.indicators, []);
 });

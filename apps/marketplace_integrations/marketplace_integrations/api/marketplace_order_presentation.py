@@ -46,6 +46,14 @@ def get_item_presentation(marketplace_order: str):
     if not frappe.has_permission("Item Price", ptype="read"):
         frappe.throw(_("Not permitted"), frappe.PermissionError)
 
+    # #108: this presentation (live mapping/catalog price comparison against
+    # a Talabat SKU) is Talabat-specific. A blank platform is treated as
+    # Talabat, matching every existing Marketplace Order's real origin today
+    # (see services/sales_order_sync.py's identical rationale) - only a
+    # platform explicitly known to be something else short-circuits here.
+    if order.platform and order.platform != "Talabat":
+        return {"items": []}
+
     account, account_error = resolve_catalog_sync_account(order.marketplace_account)
 
     items = []

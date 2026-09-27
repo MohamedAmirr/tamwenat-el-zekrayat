@@ -1,6 +1,8 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
+from unittest.mock import patch
+
 import frappe
 from frappe.tests import IntegrationTestCase
 
@@ -326,6 +328,190 @@ class IntegrationTestMarketplaceOrder(IntegrationTestCase):
         for forbidden_word in ("Paid", "Settled", "Received"):
             self.assertNotIn(forbidden_word, collect_at_pickup_label)
             self.assertNotIn(forbidden_word, payment_type_label)
+
+    def test_platform_is_fetched_from_the_linked_marketplace_account(self):
+        """#108: platform is never set by a normalized payload/adapter - it
+        is always derived from the linked Marketplace Account via
+        fetch_from, on every save."""
+        account = self.make_account()
+        order = upsert_marketplace_order(account.name, self.sample_order())
+        order.reload()
+
+        self.assertEqual(order.platform, "Talabat")
+
+    def test_external_status_is_a_generic_data_field_not_a_closed_select(self):
+        """#108 decision 2: external_status converts from Select to Data at
+        the order level so an unrecognized future value from any platform
+        persists rather than failing validation. Talabat's own 5 existing
+        values must still round-trip byte-for-byte."""
+        meta = frappe.get_meta("Marketplace Order")
+        external_status_field = meta.get_field("external_status")
+        self.assertEqual(external_status_field.fieldtype, "Data")
+        self.assertEqual(external_status_field.label, "External Status")
+        self.assertFalse(external_status_field.options)
+
+        account = self.make_account()
+        order_values = self.sample_order()
+        order_values["external_status"] = "SOME_FUTURE_TALABAT_STATUS"
+        order = upsert_marketplace_order(account.name, order_values)
+        order.reload()
+        self.assertEqual(order.external_status, "SOME_FUTURE_TALABAT_STATUS")
+
+    def test_item_external_status_stays_a_select_relabeled_generically(self):
+        """#108 decision 2: only the label changes for the item-level field -
+        it stays a Select, since sales_order_sync.py relies on its exact
+        closed set of Talabat values."""
+        meta = frappe.get_meta("Marketplace Order Item")
+        item_status_field = meta.get_field("external_status")
+        self.assertEqual(item_status_field.fieldtype, "Select")
+        self.assertEqual(item_status_field.label, "External Item Status")
+        self.assertEqual(item_status_field.options, "NOT_PROCESSED\nIN_CART\nNOT_FOUND\nREPLACED\nADDITION")
+
+    def test_relabeled_fields_keep_their_original_fieldnames(self):
+        """#108 decision 3: latest_payload/talabat_order_presentation are
+        relabeled only - renaming the fieldname would break every existing
+        reference/patch, so this must never happen."""
+        order_meta = frappe.get_meta("Marketplace Order")
+        self.assertEqual(order_meta.get_field("latest_payload").label, "Latest Platform Payload")
+        self.assertEqual(order_meta.get_field("talabat_order_presentation").label, "Item Presentation")
+        self.assertIsNotNone(order_meta.get_field("latest_payload"))
+        self.assertIsNotNone(order_meta.get_field("talabat_order_presentation"))
+
+    def test_upsert_persists_new_evidence_fields_and_leaves_them_blank_for_talabat(self):
+        """#108 decision 10: the Talabat normalizer never emits
+        customer_email/shop_currency/presentment_currency/billing_address/
+        shipping_address/payment_transactions/refunds/external_variant_id -
+        they must persist as None on every Talabat upsert without breaking
+        anything, exactly like discounts/additional_fees already do when
+        Talabat omits them."""
+        account = self.make_account()
+        order = upsert_marketplace_order(account.name, self.sample_order())
+        order.reload()
+
+        self.assertFalse(order.customer_email)
+        self.assertFalse(order.shop_currency)
+        self.assertFalse(order.presentment_currency)
+        self.assertFalse(order.billing_address)
+        self.assertFalse(order.shipping_address)
+        self.assertFalse(order.payment_transactions)
+        self.assertFalse(order.refunds)
+        unit_line = next(row for row in order.items if row.external_item_id == "line-unit-001")
+        self.assertFalse(unit_line.external_variant_id)
+
+    def test_full_talabat_round_trip_after_schema_change(self):
+        """End-to-end proof that #108's schema change did not alter any
+        Talabat-observable behavior: the same sample order upserted twice
+        still creates exactly one row, keyed the same way, with every
+        pre-existing field intact, plus platform auto-populated and every
+        new field left blank."""
+        account = self.make_account()
+        first = upsert_marketplace_order(account.name, self.sample_order())
+
+        updated = self.sample_order()
+        updated["external_status"] = "DISPATCHED"
+        second = upsert_marketplace_order(account.name, updated)
+        second.reload()
+
+        self.assertEqual(first.name, second.name)
+        self.assertEqual(frappe.db.count("Marketplace Order", {"marketplace_account": account.name}), 1)
+        self.assertEqual(second.platform, "Talabat")
+        self.assertEqual(second.external_status, "DISPATCHED")
+        self.assertEqual(second.customer_city, "Cairo")
+        self.assertEqual(frappe.parse_json(second.discounts)[0]["name"], "<Promotion>")
+        self.assertFalse(second.billing_address)
+        self.assertFalse(second.shop_currency)
+        self.assertEqual(len(second.items), 2)
+
+    def make_shopify_account(self):
+        """Marketplace Account.validate() runs a live (read-only) Shopify
+        shop/Location verification call for a Shopify-platform account
+        (#103) - mock it the same way test_marketplace_account.py does,
+        rather than ever making a real Admin GraphQL call from this test."""
+        suffix = frappe.generate_hash(length=8)
+        shop_gid = f"gid://shopify/Shop/{suffix}"
+        connection = frappe.get_doc(
+            {
+                "doctype": "Shopify Connection",
+                "connection_name": f"Order Test Shopify Connection {suffix}",
+                "shop_domain": f"order-test-{suffix}.myshopify.com",
+                "client_id": "shopify-order-test-client",
+                "client_secret": "shopify-order-test-secret",
+            }
+        ).insert()
+        with patch(
+            "marketplace_integrations.marketplace_integrations.doctype.marketplace_account."
+            "marketplace_account.fetch_shop_and_active_locations",
+            return_value={"shop_id": shop_gid, "active_locations": []},
+        ):
+            return frappe.get_doc(
+                {
+                    "doctype": "Marketplace Account",
+                    "account_name": f"Shopify Order Test Account {suffix}",
+                    "platform": "Shopify",
+                    "external_account_id": shop_gid,
+                    "connection_doctype": "Shopify Connection",
+                    "connection": connection.name,
+                }
+            ).insert()
+
+    def test_upsert_persists_shopify_shaped_order_with_gid_identifiers_and_html_like_json(self):
+        """New Shopify-shaped upsert coverage (#108): GID-style identifiers,
+        JSON evidence fields containing HTML-like content, idempotent
+        repeat, and lines keyed by a LineItem-GID-style external_item_id -
+        all through the exact same upsert path Talabat uses, with no
+        platform-specific branching in the service itself."""
+        account = self.make_shopify_account()
+
+        external_order_id = f"gid://shopify/Order/{frappe.generate_hash(length=8)}"
+        normalized_order = {
+            "external_order_id": external_order_id,
+            "order_code": "#1001",
+            "customer_email": "buyer@example.com",
+            "shop_currency": "EGP",
+            "presentment_currency": "USD",
+            "billing_address": {"name": "<script>alert(1)</script>", "city": "Cairo"},
+            "shipping_address": {"name": "Same <Person>", "city": "Cairo"},
+            "payment_transactions": [{"id": "gid://shopify/OrderTransaction/1", "amount": "10.00"}],
+            "refunds": [],
+            "latest_payload": {"id": external_order_id, "note": "Handle <carefully>"},
+            "items": [
+                {
+                    "external_item_id": "gid://shopify/LineItem/111",
+                    "external_sku": "SHOP-SKU-1",
+                    "external_variant_id": "gid://shopify/ProductVariant/222",
+                    "product_name": "Shopify Item",
+                }
+            ],
+        }
+
+        order = upsert_marketplace_order(account.name, normalized_order)
+        order.reload()
+
+        self.assertEqual(order.platform, "Shopify")
+        self.assertEqual(order.external_order_id, external_order_id)
+        self.assertEqual(order.customer_email, "buyer@example.com")
+        self.assertEqual(order.shop_currency, "EGP")
+        self.assertEqual(order.presentment_currency, "USD")
+        self.assertEqual(frappe.parse_json(order.billing_address)["name"], "<script>alert(1)</script>")
+        self.assertEqual(frappe.parse_json(order.shipping_address)["city"], "Cairo")
+        self.assertEqual(
+            frappe.parse_json(order.payment_transactions)[0]["id"], "gid://shopify/OrderTransaction/1"
+        )
+        self.assertEqual(frappe.parse_json(order.refunds), [])
+        self.assertEqual(frappe.parse_json(order.latest_payload)["note"], "Handle <carefully>")
+        line = order.items[0]
+        self.assertEqual(line.external_item_id, "gid://shopify/LineItem/111")
+        self.assertEqual(line.external_variant_id, "gid://shopify/ProductVariant/222")
+
+        # Idempotent repeat: same external_order_id, same lines - no
+        # duplicate parent, no duplicate line.
+        repeat = upsert_marketplace_order(account.name, normalized_order)
+        self.assertEqual(order.name, repeat.name)
+        self.assertEqual(
+            frappe.db.count("Marketplace Order", {"order_identity_key": order.order_identity_key}), 1
+        )
+        repeat.reload()
+        self.assertEqual(len(repeat.items), 1)
 
     def test_upsert_preserves_promotion_name_with_html_like_characters(self):
         """ignore_xss_filter on the promotions JSON field must actually
