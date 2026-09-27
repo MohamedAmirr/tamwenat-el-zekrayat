@@ -15,6 +15,12 @@ write) must be gated behind an explicit user-triggered action instead.
 
 One combined query covers both concerns so validating a Shopify Marketplace
 Account on save costs exactly one Shopify API call, not two.
+
+Note (#107): the read-vs-write rule above is about a *mutation*. #107's
+automatic Shopify inventory sync (its decisions 1/2: the scheduled changed-Bin
+sweep and daily reconciliation, in ``integrations/shopify/inventory_sync.py``)
+DOES run mutations with no explicit user action - a deliberate, user-approved
+exception to this rule, not a contradiction of it.
 """
 
 from marketplace_integrations.integrations.shopify.client import ShopifyClient
