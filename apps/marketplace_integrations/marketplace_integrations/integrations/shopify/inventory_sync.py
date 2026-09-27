@@ -60,9 +60,22 @@ Locked decisions this implements (see the issue's "Implementation plan"):
   push) are never touched. A **whole-job setup failure** (before the
   per-mapping/per-chunk loop starts - e.g. the Location re-check throwing
   because the bound Location was deactivated) also writes ``Error`` +
-  ``inventory_last_error`` to every mapping this job would have touched, via
-  ``_record_whole_job_failure()`` - otherwise those rows would silently keep
-  showing a stale prior status forever, visible only in the Error Log.
+  ``inventory_last_error`` to every mapping this job would ACTUALLY have
+  touched, via ``_record_whole_job_failure()`` - otherwise those rows would
+  silently keep showing a stale prior status forever, visible only in the
+  Error Log. "Would actually have touched" is computed by re-running
+  ``_mappings_for_sync()`` + ``_fetch_items()`` + ``_split_active_mappings()``,
+  the exact same classification the worker itself uses, so a skip-class
+  mapping (disabled, disabled Item, non-stock Item, template Item) is left
+  untouched exactly as a normal run would leave it, and a mapping since moved
+  to another account is never touched under the wrong account's job. The
+  persisted message is the exception text only for a ``frappe.ValidationError``
+  (already user-facing); any other exception gets a generic "see Error Log"
+  message so an internal/DB-error string, or a raw Shopify response fragment,
+  is never shown on a mapping row - full detail always still goes to
+  ``frappe.log_error()``. A failure inside ``_record_whole_job_failure()``
+  itself is caught and logged separately so it can never mask/replace the
+  original exception being re-raised.
 - **No inbound path**: this module never creates a Stock Entry / Stock
   Reconciliation / Stock Ledger Entry, and ``SHOPIFY_WEBHOOK_TOPICS`` has no
   inventory topic.
@@ -536,16 +549,24 @@ def sync_account_inventory(account_name, mapping_names=None, job_id_for_result=N
 	except Exception as exc:
 		_report(job_id_for_result, owner, status="failed", error=str(exc))
 		if not mapping_processing_started:
-			_record_whole_job_failure(account_name, mapping_names, exc)
+			try:
+				_record_whole_job_failure(account_name, mapping_names, exc)
+			except Exception:
+				# Never let a failure in the fallback itself mask/replace the
+				# real exception being re-raised below (see this module's
+				# docstring's "Status" bullet).
+				frappe.log_error(
+					title="Failed to record whole-job sync failure", message=frappe.get_traceback()
+				)
 		raise
 	finally:
 		_log_suppressed_failures()
 
 
 def _record_whole_job_failure(account_name, mapping_names, exc):
-	"""Bulk-write a job-level error onto every mapping this job would have
-	touched, for the one failure mode nothing else covers: a whole-job setup
-	step (``validate_inventory_account()``, the Location re-check, ...)
+	"""Bulk-write a job-level error onto every mapping this job would ACTUALLY
+	have touched, for the one failure mode nothing else covers: a whole-job
+	setup step (``validate_inventory_account()``, the Location re-check, ...)
 	raising BEFORE the per-mapping/per-chunk loop starts - so no mapping
 	already got its own outcome recorded via ``_mark_error()``/``_persist_chunk()``
 	(see ``sync_account_inventory()``'s ``mapping_processing_started`` guard,
@@ -555,30 +576,55 @@ def _record_whole_job_failure(account_name, mapping_names, exc):
 	aging ``inventory_last_synced_on`` - drifting silently except for the
 	Error Log entry the caller's own ``except`` block already produces.
 
-	One bulk ``frappe.db.set_value()`` UPDATE (matched by name, or by account +
-	enabled for a full reconciliation), never a ``frappe.get_doc()`` per
-	mapping - same style as ``_mark_error()``/``_mark_synced()``. Explicitly
-	committed here since this runs inside the worker's own ``except`` block,
-	right before re-raising - ``frappe.utils.background_jobs.execute_job()``
-	rolls back the transaction on an unhandled exception, which would
-	otherwise silently discard this write too."""
-	if mapping_names is not None:
-		names = list(dict.fromkeys(mapping_names))
-		if not names:
-			return
-		filters = {"name": ["in", names]}
-	else:
-		filters = {"marketplace_account": account_name, "enabled": 1}
+	"Would actually have touched" is computed by re-running the exact same
+	classification the worker itself uses (``_mappings_for_sync()`` ->
+	``_fetch_items()`` -> ``_split_active_mappings()``), scoped to this
+	account. A skip-class mapping (disabled mapping, disabled Item, non-stock
+	Item, template Item) never gets a status write from a normal run, so this
+	fallback must not write one either - or a stale ``Error`` would persist
+	forever, since a later successful run silently skips it with no write to
+	clear it. Scoping through ``_mappings_for_sync()`` (rather than a bare
+	``name in names`` filter) also means a mapping moved to another account
+	between enqueue and a setup failure is naturally excluded, the same as the
+	worker's own "no longer exists or was moved" handling.
+
+	One bulk ``frappe.db.set_value()`` UPDATE (matched by name), never a
+	``frappe.get_doc()`` per mapping - same style as
+	``_mark_error()``/``_mark_synced()``. Explicitly committed here since this
+	runs inside the worker's own ``except`` block, right before re-raising -
+	``frappe.utils.background_jobs.execute_job()`` rolls back the transaction
+	on an unhandled exception, which would otherwise silently discard this
+	write too."""
+	mappings = _mappings_for_sync(account_name, mapping_names)
+	item_by_name = _fetch_items({mapping.item for mapping in mappings if mapping.item})
+	active_mappings, _skipped = _split_active_mappings(mappings, item_by_name)
+	names = [mapping.name for mapping in active_mappings]
+	if not names:
+		return
 	frappe.db.set_value(
 		MAPPING_DOCTYPE,
-		filters,
+		{"name": ["in", names]},
 		{
 			"inventory_sync_status": "Error",
-			"inventory_last_error": cstr(exc).strip()[:ERROR_MESSAGE_MAX_LENGTH],
+			"inventory_last_error": _whole_job_failure_message(exc),
 		},
 		update_modified=False,
 	)
 	frappe.db.commit()
+
+
+def _whole_job_failure_message(exc):
+	"""User-facing text for a whole-job setup failure (decision 3): the
+	exception's own text only for ``frappe.ValidationError`` - a validation
+	message is already meant to be shown to a mapping viewer (e.g. "Location
+	is no longer active") - otherwise a generic message, since an unexpected
+	exception's raw text can carry a Shopify response fragment, an internal DB
+	error, or anything else not meant for that audience. Full detail always
+	still goes to the Error Log via the caller's own ``except`` block
+	regardless of which message is chosen here."""
+	if isinstance(exc, frappe.ValidationError):
+		return cstr(exc).strip()[:ERROR_MESSAGE_MAX_LENGTH]
+	return cstr(_("Sync failed, see Error Log for details."))
 
 
 def _sync_chunk(client, account_doc, location_id, mappings, item_by_name):
@@ -1030,6 +1076,32 @@ def _log_suppressed_failures():
 # sweep-triggered full sync would duplicate that safety net for no benefit.
 
 
+_EXCLUDED_ACCOUNTS_LOG_CACHE_KEY = "marketplace_integrations:shopify:inventory_reconcile_excluded_accounts_logged_date"
+
+
+def _log_excluded_accounts_once_per_day(excluded):
+	"""Write ONE Error Log entry (one line per excluded account) the first
+	time ``reconcile_all_accounts()`` runs with a non-empty ``excluded`` list
+	on a given calendar day - a ``frappe.cache()`` guard (no TTL, keyed by
+	date string) rather than per-tick logging, since the daily reconciliation
+	could in principle be triggered more than once on the same day and this
+	must not turn into per-run noise (decision 6)."""
+	if not excluded:
+		return
+	today = now_datetime().date().isoformat()
+	if frappe.cache().get_value(_EXCLUDED_ACCOUNTS_LOG_CACHE_KEY) == today:
+		return
+	frappe.cache().set_value(_EXCLUDED_ACCOUNTS_LOG_CACHE_KEY, today)
+	lines = "\n".join(f"{name}: {reason}" for name, reason in excluded)
+	frappe.log_error(
+		title="Shopify inventory reconciliation: accounts excluded from automatic sync",
+		message=(
+			"The following enabled Shopify Marketplace Accounts are excluded from "
+			f"automatic inventory sync (misconfigured):\n{lines}"
+		),
+	)
+
+
 def _watermark_cache_key(account_name):
 	return f"marketplace_integrations:shopify:inventory_sweep_watermark:{account_name}"
 
@@ -1049,47 +1121,69 @@ def _advance_watermark(account_name, tick_time):
 
 
 def _enabled_shopify_accounts():
-	"""Bulk-filtered Marketplace Accounts a scheduled job may enqueue for,
-	without a per-account query or a per-account ``frappe.get_doc()`` +
-	throw: Shopify platform, enabled, using an enabled Shopify Connection,
-	with both a Warehouse and a Shopify Location configured, AND a Warehouse
-	that would actually pass ``validate_account_warehouse()`` (not a group /
-	disabled Warehouse, and not one belonging to a different Company than the
-	account's own ``erpnext_company``). This last check mirrors the worker's
-	own validation (``sync_account_inventory()`` -> ``validate_inventory_account()``
-	-> ``validate_account_warehouse()``) so a misconfigured account is
-	excluded HERE, before any enqueue, rather than getting enqueued by every
-	sweep tick and failing in the worker every time (previously a real gap:
-	this filter only checked "Warehouse is set", not "Warehouse is usable").
-	A disabled/misconfigured account is silently excluded (never reported -
-	unlike the manual Desk actions, a scheduled tick has no user to show a
-	skip reason to). Deliberately no result-count limit - see
-	constants.py's note next to SHOPIFY_INVENTORY_SWEEP_OVERLAP_MINUTES on
-	why an ``ORDER BY ... LIMIT`` here would starve accounts rather than
-	bound a backlog.
-	"""
+	"""Bulk-filtered Marketplace Accounts a scheduled job may enqueue for -
+	see ``_enabled_shopify_accounts_with_exclusions()`` for the filter
+	criteria. Used by ``sweep_changed_bins()``, which stays silent about a
+	misconfigured account (no user to show a skip reason to on a tick this
+	frequent) - ``reconcile_all_accounts()`` uses the exclusions-reporting
+	variant instead so a misconfiguration gets a once-daily Error Log entry
+	(decision 6)."""
+	accounts, _excluded = _enabled_shopify_accounts_with_exclusions()
+	return accounts
+
+
+def _enabled_shopify_accounts_with_exclusions():
+	"""Return ``(usable_accounts, excluded)`` where ``excluded`` is
+	``[(account_name, reason), ...]`` for every enabled Shopify Marketplace
+	Account that exists but fails a config check: Shopify platform, enabled,
+	using an enabled Shopify Connection, with both a Warehouse and a Shopify
+	Location configured, AND a Warehouse that would actually pass
+	``validate_account_warehouse()`` (not a group / disabled Warehouse, and
+	not one belonging to a different Company than the account's own
+	``erpnext_company``). This last check mirrors the worker's own validation
+	(``sync_account_inventory()`` -> ``validate_inventory_account()`` ->
+	``validate_account_warehouse()``) so a misconfigured account is excluded
+	HERE, before any enqueue, rather than getting enqueued by every sweep tick
+	and failing in the worker every time (previously a real gap: this filter
+	only checked "Warehouse is set", not "Warehouse is usable"). Deliberately
+	no result-count limit - see constants.py's note next to
+	SHOPIFY_INVENTORY_SWEEP_OVERLAP_MINUTES on why an ``ORDER BY ... LIMIT``
+	here would starve accounts rather than bound a backlog."""
 	accounts = frappe.get_all(
 		"Marketplace Account",
 		filters={"platform": "Shopify", "enabled": 1, "connection_doctype": "Shopify Connection"},
 		fields=["name", "warehouse", "shopify_location_gid", "connection"],
 	)
-	accounts = [
-		account
-		for account in accounts
-		if account.warehouse and cstr(account.shopify_location_gid).strip() and account.connection
-	]
 	if not accounts:
-		return []
+		return [], []
 
 	enabled_connections = set(
 		frappe.get_all(
 			"Shopify Connection",
-			filters={"name": ["in", [account.connection for account in accounts]], "enabled": 1},
+			filters={
+				"name": ["in", [account.connection for account in accounts if account.connection]],
+				"enabled": 1,
+			},
 			pluck="name",
 		)
 	)
-	accounts = [account for account in accounts if account.connection in enabled_connections]
-	return [account for account in accounts if _has_usable_warehouse(account)]
+
+	usable = []
+	excluded = []
+	for account in accounts:
+		if not account.warehouse:
+			excluded.append((account.name, _("No Warehouse configured.")))
+		elif not cstr(account.shopify_location_gid).strip():
+			excluded.append((account.name, _("No Shopify Location configured.")))
+		elif not account.connection or account.connection not in enabled_connections:
+			excluded.append((account.name, _("Shopify Connection is disabled.")))
+		elif not _has_usable_warehouse(account):
+			excluded.append(
+				(account.name, _("Warehouse is disabled, a group, or belongs to a different Company."))
+			)
+		else:
+			usable.append(account)
+	return usable, excluded
 
 
 def _has_usable_warehouse(account):
@@ -1209,8 +1303,20 @@ def reconcile_all_accounts():
 	one daily "catch everything" pass, so a skip here is written to the
 	Error Log (never silently dropped) rather than given its own
 	retry/pending-flag mechanism, which is out of scope.
+
+	**Excluded-account visibility (decision 6):** unlike the sweep, this is
+	the one automatic entry point that runs infrequently enough (once a day)
+	to log which enabled Shopify Accounts exist but are excluded from
+	automatic sync entirely (a disabled/wrong-Company Warehouse, a disabled
+	Connection, a missing Warehouse/Location) - see
+	``_enabled_shopify_accounts_with_exclusions()`` and
+	``_log_excluded_accounts_once_per_day()``. Without this, such a
+	misconfiguration was previously invisible until someone manually clicked
+	"Reconcile".
 	"""
-	for account in _enabled_shopify_accounts():
+	accounts, excluded = _enabled_shopify_accounts_with_exclusions()
+	_log_excluded_accounts_once_per_day(excluded)
+	for account in accounts:
 		try:
 			enqueued, _job_id = enqueue_account_sync(account.name)
 			if not enqueued:

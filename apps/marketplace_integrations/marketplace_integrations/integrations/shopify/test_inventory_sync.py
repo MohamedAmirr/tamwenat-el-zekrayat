@@ -758,16 +758,19 @@ class IntegrationTestJobResilience(InventoryFixtureMixin, IntegrationTestCase):
 		# validate_inventory_account() (or the Location re-check, or any other
 		# whole-job setup step) throwing BEFORE per-mapping processing starts
 		# must not leave the mappings' inventory_sync_status untouched/stale -
-		# see this module's _record_whole_job_failure().
+		# see this module's _record_whole_job_failure(). A ValidationError's
+		# own text is user-facing (decision 3), so it survives verbatim.
 		first = self._one(5)
 		first.db_set("inventory_sync_status", "Synced", update_modified=False)
 		second = self._one(6)
 		second.db_set("inventory_sync_status", "Synced", update_modified=False)
 
 		with patch.object(
-			inventory_sync, "validate_inventory_account", side_effect=RuntimeError("Location deactivated")
+			inventory_sync,
+			"validate_inventory_account",
+			side_effect=frappe.ValidationError("Location deactivated"),
 		):
-			with self.assertRaises(RuntimeError):
+			with self.assertRaises(frappe.ValidationError):
 				inventory_sync.sync_account_inventory(self.account.name, [first.name, second.name])
 
 		for mapping in (first, second):
@@ -782,9 +785,9 @@ class IntegrationTestJobResilience(InventoryFixtureMixin, IntegrationTestCase):
 		disabled.db_set("enabled", 0, update_modified=False)
 
 		with patch.object(
-			inventory_sync, "validate_inventory_account", side_effect=RuntimeError("boom")
+			inventory_sync, "validate_inventory_account", side_effect=frappe.ValidationError("boom")
 		):
-			with self.assertRaises(RuntimeError):
+			with self.assertRaises(frappe.ValidationError):
 				inventory_sync.sync_account_inventory(self.account.name, None)
 
 		enabled.reload()
@@ -794,6 +797,114 @@ class IntegrationTestJobResilience(InventoryFixtureMixin, IntegrationTestCase):
 		# A disabled mapping is never touched by the full-account fallback either
 		# - matching the ordinary reconciliation's own enabled-only scope.
 		self.assertNotEqual(disabled.inventory_sync_status, "Error")
+
+	def test_whole_job_setup_failure_uses_a_generic_message_for_non_validation_errors(self):
+		# Anything other than frappe.ValidationError could carry a raw Shopify
+		# response fragment, an internal DB error, etc. - never echoed on a
+		# mapping row (decision 3). Full detail still reaches the Error Log via
+		# the caller's own except block.
+		mapping = self._one(5)
+
+		with patch.object(
+			inventory_sync, "validate_inventory_account", side_effect=RuntimeError("raw db error detail")
+		):
+			with self.assertRaises(RuntimeError):
+				inventory_sync.sync_account_inventory(self.account.name, [mapping.name])
+
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Error")
+		self.assertNotIn("raw db error detail", mapping.inventory_last_error)
+		self.assertIn("Error Log", mapping.inventory_last_error)
+
+	def test_whole_job_setup_failure_excludes_skip_class_mappings_explicit_selection(self):
+		# A skip-class mapping never gets a status write from a normal run
+		# (disabled, disabled Item, non-stock Item, template Item) - the
+		# whole-job fallback must leave it untouched too, or a stale Error
+		# would persist forever since a later successful run silently skips it
+		# with no write to clear it.
+		stock = self._one(5)
+		non_stock = self._one(None, is_stock_item=0, tracked=False, has_level=False, on_hand=None)
+		template = self._one(None, has_variants=1, tracked=False, has_level=False, on_hand=None)
+		disabled_item = self._make_item("WholeJobDisabledItem", qty=1, disabled=1)
+		disabled_item_mapping = self._make_mapping(disabled_item)
+		self.shopify.add(disabled_item_mapping.external_reference)
+
+		with patch.object(
+			inventory_sync, "validate_inventory_account", side_effect=frappe.ValidationError("Location deactivated")
+		):
+			with self.assertRaises(frappe.ValidationError):
+				inventory_sync.sync_account_inventory(
+					self.account.name,
+					[stock.name, non_stock.name, template.name, disabled_item_mapping.name],
+				)
+
+		stock.reload()
+		self.assertEqual(stock.inventory_sync_status, "Error")
+		for skipped in (non_stock, template, disabled_item_mapping):
+			skipped.reload()
+			self.assertNotEqual(skipped.inventory_sync_status, "Error")
+		self.assertEqual(self.shopify.calls, [])
+
+	def test_whole_job_setup_failure_full_reconciliation_excludes_skip_class_mappings(self):
+		enabled_stock = self._one(5)
+		non_stock = self._one(None, is_stock_item=0, tracked=False, has_level=False, on_hand=None)
+		template = self._one(None, has_variants=1, tracked=False, has_level=False, on_hand=None)
+		disabled_mapping = self._one(5)
+		disabled_mapping.db_set("enabled", 0, update_modified=False)
+		disabled_item = self._make_item("WholeJobReconcileDisabledItem", qty=1, disabled=1)
+		disabled_item_mapping = self._make_mapping(disabled_item)
+
+		with patch.object(
+			inventory_sync, "validate_inventory_account", side_effect=frappe.ValidationError("boom")
+		):
+			with self.assertRaises(frappe.ValidationError):
+				inventory_sync.sync_account_inventory(self.account.name, None)
+
+		enabled_stock.reload()
+		self.assertEqual(enabled_stock.inventory_sync_status, "Error")
+		for skipped in (non_stock, template, disabled_mapping, disabled_item_mapping):
+			skipped.reload()
+			self.assertNotEqual(skipped.inventory_sync_status, "Error")
+
+	def test_whole_job_setup_failure_does_not_touch_a_mapping_moved_to_another_account(self):
+		# The explicit-selection path is scoped by account (same as
+		# _mappings_for_sync()'s own "no longer exists or was moved" handling)
+		# - a mapping since moved to a different account must not be marked
+		# Error under this (wrong) account's job.
+		mapping = self._one(5)
+		other_account = self._make_account("MovedAway")
+		other_item = self._make_item("MovedAwayItem", qty=1)
+		moved_mapping = self._make_mapping(other_item, account=other_account)
+		moved_mapping.db_set("inventory_sync_status", "Synced", update_modified=False)
+
+		with patch.object(
+			inventory_sync, "validate_inventory_account", side_effect=frappe.ValidationError("boom")
+		):
+			with self.assertRaises(frappe.ValidationError):
+				inventory_sync.sync_account_inventory(self.account.name, [mapping.name, moved_mapping.name])
+
+		mapping.reload()
+		moved_mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Error")
+		self.assertEqual(moved_mapping.inventory_sync_status, "Synced")
+
+	def test_a_failure_while_recording_the_whole_job_failure_does_not_mask_the_original_exception(self):
+		mapping = self._one(5)
+
+		with (
+			patch.object(
+				inventory_sync, "validate_inventory_account", side_effect=RuntimeError("original failure")
+			),
+			patch.object(
+				inventory_sync, "_record_whole_job_failure", side_effect=RuntimeError("secondary failure")
+			),
+			patch.object(inventory_sync.frappe, "log_error") as mocked_log_error,
+		):
+			with self.assertRaisesRegex(RuntimeError, "original failure"):
+				inventory_sync.sync_account_inventory(self.account.name, [mapping.name])
+
+		titles = [call.kwargs.get("title") for call in mocked_log_error.call_args_list]
+		self.assertIn("Failed to record whole-job sync failure", titles)
 
 	def test_a_failure_after_per_mapping_processing_started_does_not_overwrite_earlier_outcomes(self):
 		# A later chunk's exception must not retroactively blanket-overwrite an
@@ -1524,6 +1635,47 @@ class IntegrationTestScheduledTriggers(InventoryFixtureMixin, IntegrationTestCas
 		self.assertEqual(
 			calls_for_account[0]["job_id"], f"marketplace-shopify-inventory-sync-{self.account.name}"
 		)
+
+	def test_reconcile_logs_excluded_misconfigured_accounts_once_per_day(self):
+		frappe.cache().delete_value(inventory_sync._EXCLUDED_ACCOUNTS_LOG_CACHE_KEY)
+		self.account.db_set("erpnext_company", None, update_modified=False)
+		frappe.db.set_value("Warehouse", self.warehouse, "disabled", 1)
+		self.addCleanup(lambda: frappe.db.set_value("Warehouse", self.warehouse, "disabled", 0))
+
+		with (
+			patch(EXECUTE_TARGET) as mocked_execute,
+			patch("frappe.enqueue") as mocked_enqueue,
+			patch.object(inventory_sync.frappe, "log_error") as mocked_log_error,
+		):
+			# A second run on the same day must not log a second time.
+			inventory_sync.reconcile_all_accounts()
+			inventory_sync.reconcile_all_accounts()
+
+		mocked_execute.assert_not_called()
+		self.assertEqual(self._calls_for_account(mocked_enqueue, self.account.name), [])
+		titles = [call.kwargs.get("title") for call in mocked_log_error.call_args_list]
+		self.assertEqual(
+			titles.count("Shopify inventory reconciliation: accounts excluded from automatic sync"), 1
+		)
+
+	def test_sweep_does_not_log_excluded_accounts(self):
+		# The sweep runs every 2 minutes - logging there would flood the Error
+		# Log, so only the daily reconciliation logs exclusions (decision 6).
+		frappe.cache().delete_value(inventory_sync._EXCLUDED_ACCOUNTS_LOG_CACHE_KEY)
+		self.account.db_set("erpnext_company", None, update_modified=False)
+		frappe.db.set_value("Warehouse", self.warehouse, "disabled", 1)
+		self.addCleanup(lambda: frappe.db.set_value("Warehouse", self.warehouse, "disabled", 0))
+
+		with (
+			patch(EXECUTE_TARGET) as mocked_execute,
+			patch("frappe.enqueue") as mocked_enqueue,
+			patch.object(inventory_sync.frappe, "log_error") as mocked_log_error,
+		):
+			inventory_sync.sweep_changed_bins()
+
+		mocked_execute.assert_not_called()
+		self.assertEqual(self._calls_for_account(mocked_enqueue, self.account.name), [])
+		mocked_log_error.assert_not_called()
 
 	def test_one_account_failing_does_not_stop_the_sweep_for_another(self):
 		item = self._make_item("SweepIsolation", qty=1)
