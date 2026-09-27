@@ -114,9 +114,14 @@ class IntegrationTestBackfillMarketplaceOrderPlatform(IntegrationTestCase):
 
 	def test_backfill_is_idempotent(self):
 		"""Re-running the patch after it already backfilled a row must not
-		touch that row again: the WHERE clause excludes already-set rows, so
-		the second run's own UPDATE affects zero rows, and the already-correct
-		value survives untouched."""
+		touch that row again. This is proven, not merely asserted: after the
+		first run fills the blank platform from the account, the account's
+		own platform is changed (bypassing the doctype controller) to a
+		different value. If the WHERE clause guard were broken/removed, a
+		second run would treat the row as fair game again and overwrite it
+		to match the account's new platform; because the guard excludes rows
+		whose platform is already set, the order's platform must stay exactly
+		what the first run produced."""
 		account = self.make_account("Talabat")
 		order = self.make_order(account, f"order-{frappe.generate_hash(length=8)}")
 		frappe.db.set_value("Marketplace Order", order.name, "platform", "", update_modified=False)
@@ -125,8 +130,15 @@ class IntegrationTestBackfillMarketplaceOrderPlatform(IntegrationTestCase):
 		execute()
 		self.assertEqual(frappe.db.get_value("Marketplace Order", order.name, "platform"), "Talabat")
 
+		# Simulate the account's platform having changed since the first run
+		# (e.g. re-pointed at a different connection). A correctly-guarded
+		# second run must not propagate this onto the already-backfilled
+		# order; a broken guard would.
+		frappe.db.set_value("Marketplace Account", account.name, "platform", "Shopify", update_modified=False)
+		frappe.clear_document_cache("Marketplace Account", account.name)
+
 		execute()
-		self.assertEqual(frappe.db._cursor.rowcount, 0)
+
 		self.assertEqual(frappe.db.get_value("Marketplace Order", order.name, "platform"), "Talabat")
 
 	def test_never_touches_order_identity_key(self):
