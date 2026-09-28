@@ -33,7 +33,9 @@ def normalize_order(order):
 		"external_financial_status": order.get("displayFinancialStatus"),
 		"external_fulfillment_status": order.get("displayFulfillmentStatus"),
 		"received_on": _parse_datetime(order.get("createdAt")),
+		"processed_on": _parse_datetime(order.get("processedAt")),
 		"last_platform_update_on": _parse_datetime(order.get("updatedAt")),
+		"cancelled_at": _parse_datetime(order.get("cancelledAt")),
 		"cancelled_by": None,
 		"cancellation_reason": order.get("cancelReason"),
 		"post_picked_up": None,
@@ -74,6 +76,13 @@ def _normalize_item(item):
 	net_amount = _decimal(unit_price) * _decimal(current_quantity)
 	for allocation in item.get("discountAllocations") or []:
 		net_amount -= _decimal(_money(allocation.get("allocatedAmountSet")))
+	transaction_money_bag = item.get("priceAfterAllDiscountsBeforeTaxesSet")
+	transaction_amount = _money(transaction_money_bag)
+	transaction_amount_missing = int(
+		not isinstance(transaction_money_bag, dict)
+		or not isinstance(transaction_money_bag.get("shopMoney"), dict)
+		or transaction_money_bag["shopMoney"].get("amount") is None
+	)
 
 	return {
 		"external_item_id": item.get("id"),
@@ -85,6 +94,8 @@ def _normalize_item(item):
 		"original_unit_price": unit_price,
 		"original_total_price": _decimal(unit_price) * _decimal(quantity),
 		"net_amount": net_amount,
+		"transaction_amount": transaction_amount,
+		"transaction_amount_missing": transaction_amount_missing,
 		"barcodes": None,
 		"promotions": item.get("discountAllocations"),
 	}

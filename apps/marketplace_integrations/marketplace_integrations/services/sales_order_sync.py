@@ -35,6 +35,7 @@ from marketplace_integrations.marketplace_integrations.doctype.marketplace_produ
 	compute_mapping_identity_key,
 )
 from marketplace_integrations.services.account_warehouse import validate_account_warehouse
+from marketplace_integrations.services.mappings import resolve_mapping_and_item
 
 FINAL_ITEM_STATUSES = {"IN_CART", "ADDITION"}
 
@@ -109,7 +110,7 @@ def sync_sales_order(marketplace_order):
 		account = _get_account(order)
 		_validate_sync_permissions(order, account)
 		_validate_account_configuration(account)
-		lines = _build_sales_order_lines(order, account)
+		lines = _build_order_lines(order, account)
 		customer = _get_or_create_customer(account)
 		snapshot = _make_snapshot(account, customer, lines, _transaction_date(order), _delivery_date(order))
 		current_hash = _snapshot_hash(snapshot)
@@ -161,7 +162,7 @@ def build_sales_order_snapshot(order, account=None, customer=None):
 	"""
 	account = account or _get_account(order)
 	_validate_account_configuration(account)
-	lines = _build_sales_order_lines(order, account)
+	lines = _build_order_lines(order, account)
 	customer = customer or _require_customer(account)
 	return _make_snapshot(account, customer, lines, _transaction_date(order), _delivery_date(order))
 
@@ -273,6 +274,61 @@ def _build_sales_order_lines(order, account):
 	return sorted(lines, key=lambda line: line["external_item_id"])
 
 
+def _build_order_lines(order, account):
+	if order.platform == "Shopify":
+		return _build_shopify_sales_order_lines(order, account)
+	return _build_sales_order_lines(order, account)
+
+
+def _build_shopify_sales_order_lines(order, account):
+	"""Build immutable Sales Order lines from Shopify transaction evidence."""
+	if order.cancelled_at:
+		raise SyncBlocker(_("Cancelled Shopify orders cannot be synchronized."))
+	if order.external_financial_status not in {"PAID", "PARTIALLY_PAID"}:
+		raise SyncBlocker(
+			_("Shopify order {0} is not financially eligible for synchronization ({1}).").format(
+				order.name, order.external_financial_status or _("unknown status")
+			)
+		)
+
+	lines = []
+	for row in order.items or []:
+		if flt(row.current_quantity) <= 0:
+			raise SyncBlocker(
+				_("Shopify line {0} is fully refunded or has no current quantity.").format(
+					row.external_item_id
+				)
+			)
+		resolved = resolve_mapping_and_item(account.name, row.external_variant_id)
+		if not resolved:
+			raise SyncBlocker(
+				_("No enabled Shopify variant mapping exists for line {0}.").format(row.external_item_id)
+			)
+		if row.transaction_amount_missing or row.transaction_amount is None:
+			raise SyncBlocker(_("Shopify line {0} has no transaction amount.").format(row.external_item_id))
+		transaction_amount = flt(row.transaction_amount)
+		if transaction_amount < 0:
+			raise SyncBlocker(_("Shopify line {0} has a negative transaction amount.").format(row.external_item_id))
+		quantity = flt(row.current_quantity)
+		effective_rate = flt(transaction_amount / quantity, EFFECTIVE_RATE_PRECISION)
+		item_uom = resolved.get("sales_uom") or frappe.get_cached_value("Item", resolved["item"], "stock_uom")
+		lines.append(
+			{
+				"external_item_id": cstr(row.external_item_id).strip(),
+				"item_code": resolved["item"],
+				"qty": quantity,
+				"uom": item_uom,
+				"warehouse": account.warehouse,
+				"fulfilled_total_price": transaction_amount,
+				"effective_rate": effective_rate,
+			}
+		)
+
+	if not lines:
+		raise SyncBlocker(_("No eligible Shopify order lines are available to synchronize."))
+	return sorted(lines, key=lambda line: line["external_item_id"])
+
+
 def _resolved_currency(account):
 	"""Return the currency the resulting Sales Order will actually be in.
 
@@ -363,17 +419,17 @@ def get_current_sync_status(marketplace_order):
 
 def _validate_platform_supported(order):
 	"""Block ERPNext Sales Order synchronization for any platform other than
-	Talabat (#108). Real Shopify order sync does not exist yet (#110) - a
-	stray sync attempt on a Shopify order must not persist a misleading
-	"Sync Error" status, and must fail with a clear, actionable message
+	Talabat or Shopify (#110). A stray sync attempt on an unsupported
+	platform must not persist a misleading "Sync Error" status, and must fail
+	with a clear, actionable message
 	instead. A blank ``platform`` (e.g. a pre-#108 order whose backfill
 	patch has not yet run) is treated as Talabat, matching every existing
 	Marketplace Order's real origin today - it is never a Shopify order.
 	"""
-	if order.platform and order.platform != "Talabat":
+	if order.platform and order.platform not in {"Talabat", "Shopify"}:
 		raise SyncBlocker(
 			_(
-				"ERPNext Sales Order synchronization is only available for Talabat orders. "
+				"ERPNext Sales Order synchronization is only available for Talabat and Shopify orders. "
 				"Marketplace Order {0} is a {1} order."
 			).format(order.name, order.platform)
 		)
@@ -659,12 +715,20 @@ def _line_identifier(row):
 
 
 def _delivery_date(order):
+	if order.platform == "Shopify":
+		if not order.processed_on:
+			raise SyncBlocker(_("Shopify Processed On is required to set the ERPNext Sales Order Delivery Date."))
+		return getdate(order.processed_on)
 	if not order.promised_for:
 		raise SyncBlocker(_("Talabat Promised For is required to set the ERPNext Sales Order Delivery Date."))
 	return getdate(order.promised_for)
 
 
 def _transaction_date(order):
+	if order.platform == "Shopify":
+		if not order.processed_on:
+			raise SyncBlocker(_("Shopify Processed On is required to set the ERPNext Sales Order Transaction Date."))
+		return getdate(order.processed_on)
 	# received_on (Talabat order.sys.created_at) is not in openapi.json's
 	# required list for order.OrderSys, and the Marketplace Order field
 	# itself is read-only/non-mandatory - so this is not formally guaranteed

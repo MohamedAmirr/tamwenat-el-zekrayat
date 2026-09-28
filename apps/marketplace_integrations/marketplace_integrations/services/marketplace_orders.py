@@ -29,6 +29,8 @@ ORDER_FIELDS = (
 	"accepted_for",
 	"promised_for",
 	"received_on",
+	"processed_on",
+	"cancelled_at",
 	"last_platform_update_on",
 	"cancelled_by",
 	"cancellation_reason",
@@ -88,6 +90,8 @@ ITEM_FIELDS = (
 	"fulfilled_total_price_missing",
 	"current_quantity",
 	"net_amount",
+	"transaction_amount",
+	"transaction_amount_missing",
 	"container_deposit",
 )
 JSON_ITEM_FIELDS = ("barcodes", "promotions")

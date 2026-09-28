@@ -113,6 +113,14 @@ Source: [inventorySetQuantities mutation](https://shopify.dev/docs/api/admin-gra
 
 Source: [Order object](https://shopify.dev/docs/api/admin-graphql/latest/objects/Order), [LineItem object](https://shopify.dev/docs/api/admin-graphql/latest/objects/LineItem) - verified against shopify.dev on 2026-09-27 (external source, approved for #109's locked plan).
 
+## Controlled Sales Order handoff (#110)
+
+- Sales Order creation is explicit and manual. Only Shopify orders with no `cancelled_at` and financial status `PAID` or `PARTIALLY_PAID` are eligible.
+- Each line resolves only through the exact `(Marketplace Account, external_variant_id)` mapping. A missing mapping, null variant, missing transaction amount, or fully refunded line blocks the whole order; no partial Sales Order is created.
+- The line rate is `priceAfterAllDiscountsBeforeTaxesSet.shopMoney.amount / currentQuantity`, rounded to the existing six-decimal effective-rate precision. The stored `transaction_amount` is separate from #109's `net_amount`.
+- The existing snapshot/hash/idempotency flow is reused. Later Item Price changes do not change an already synchronized Shopify-derived rate; reprocessing updates the same Draft Sales Order rather than creating a duplicate.
+- The handoff creates or updates only a Draft Sales Order. Taxes, shipping, duties, refunds, payouts, invoices, payments, GL entries, Delivery Notes, and Stock Entries remain outside this issue.
+
 ## Open questions
 
 `Shopify Connection` + `ShopifyClient` are now built (#101), and the Admin GraphQL `execute()` layer on top of it is now built (#102). What those issues settled and what's still open:

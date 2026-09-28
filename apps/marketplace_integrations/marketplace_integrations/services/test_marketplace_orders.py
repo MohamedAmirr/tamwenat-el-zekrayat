@@ -27,7 +27,7 @@ def _is_stale_by_updated_at(incoming_updated_at):
 		if isinstance(stored_payload, str):
 			try:
 				stored_payload = frappe.parse_json(stored_payload)
-			except TypeError, ValueError:
+			except (TypeError, ValueError):
 				return False
 		stored_updated_at = (
 			(stored_payload or {}).get("updatedAt") if isinstance(stored_payload, dict) else None

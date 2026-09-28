@@ -48,12 +48,15 @@ if (typeof frappe !== "undefined") {
 // #108 decision 9: Talabat keeps every existing control verbatim (Refresh
 // from Talabat, cart/dispatch/cancel actions, the Talabat + ERPNext status
 // indicators, item price/mapping presentation, Send to ERPNext). Shopify
-// gets none of that - no Talabat indicator, no item presentation, no
-// ERPNext sync button (#108 decision 7 blocks the sync itself server-side
-// too) - and shows the Financial/Fulfillment status indicator pair instead.
-// Any other value
-// (blank/unrecognized platform) shows none of the above at all, failing
-// closed rather than guessing which control set applies - the same pattern
+// shows the Financial/Fulfillment status indicator pair instead of Talabat's
+// own status indicator, and its own item presentation (mapping only, not
+// Talabat's fulfillment/pricing table) - but never Talabat's status
+// indicator or cart/dispatch/cancel actions, none of which apply to Shopify.
+// Shopify also gets the ERPNext sync button/status (#110 unblocks
+// server-side sync for Shopify; #108 decision 7 only ever blocked it as a
+// placeholder until #110 landed). Any other value (blank/unrecognized
+// platform) shows none of the above at all, failing closed rather than
+// guessing which control set applies - the same pattern
 // marketplace_product_mapping.js uses (#106).
 function apply_platform_gating(frm) {
 	const platform = frm.doc.platform;
@@ -74,6 +77,7 @@ function apply_platform_gating(frm) {
 		load_item_presentation(frm);
 	} else if (platform === "Shopify") {
 		add_generic_status_indicator(frm);
+		load_erpnext_sync_status(frm);
 		frm.add_custom_button(__("Refresh from Shopify"), () => {
 			frappe.call({
 				method: "marketplace_integrations.api.shopify_orders.refresh_order",

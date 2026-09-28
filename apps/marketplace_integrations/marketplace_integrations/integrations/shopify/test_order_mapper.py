@@ -67,6 +67,18 @@ class UnitTestShopifyOrderMapper(UnitTestCase):
 		result = normalize_order(order)
 		self.assertIsNone(result["items"][0]["external_variant_id"])
 
+	def test_transaction_amount_distinguishes_missing_from_real_zero(self):
+		order = self.order()
+		line = order["lineItems"]["nodes"][0]
+		line["priceAfterAllDiscountsBeforeTaxesSet"] = None
+		missing = normalize_order(order)["items"][0]
+		self.assertEqual(missing["transaction_amount_missing"], 1)
+
+		line["priceAfterAllDiscountsBeforeTaxesSet"] = {"shopMoney": {"amount": "0.00"}}
+		zero = normalize_order(order)["items"][0]
+		self.assertEqual(zero["transaction_amount"], "0.00")
+		self.assertEqual(zero["transaction_amount_missing"], 0)
+
 	def test_rejects_unbounded_line_items(self):
 		order = self.order()
 		order["lineItems"]["pageInfo"]["hasNextPage"] = True
