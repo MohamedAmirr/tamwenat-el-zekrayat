@@ -3,66 +3,32 @@
 
 """Operator-visible attempts to synchronize Marketplace Orders to ERPNext."""
 
-import json
-
 import frappe
-from frappe import _
 from frappe.model.document import Document
 from frappe.utils import add_days, now_datetime
-
-UNEXPECTED_SYNC_ERROR = _(
-	"ERPNext Sales Order synchronization failed. Please review the ERPNext configuration and try again."
-)
 
 
 class MarketplaceSyncLog(Document):
 	@frappe.whitelist()
 	def resync(self):
-		"""Retry this log's Marketplace Order and append a separate attempt row."""
+		"""Retry this log's Marketplace Order.
+
+		``sync_sales_order()`` (see ``services/sales_order_sync.py``) already
+		writes its own single ``Marketplace Sync Log`` row for every attempt -
+		success, expected blocker, or unexpected exception - via its internal
+		``_create_sync_log()``. This method used to ALSO insert/update its own
+		row around that call, so every resync produced two log rows for one
+		attempt. It now does nothing but delegate: ``sync_sales_order()``'s own
+		logging, tagged "Manual Resync" so it's distinguishable in the log from
+		an original "Manual" sync, is the single source of truth for what
+		happened.
+		"""
 		frappe.only_for("System Manager")
 		self.check_permission("read")
 
-		attempt = frappe.get_doc(
-			{
-				"doctype": "Marketplace Sync Log",
-				"marketplace_order": self.marketplace_order,
-				"status": "Queued",
-				"trigger_source": "Manual",
-				"attempted_at": now_datetime(),
-				"request_data": json.dumps(
-					{"marketplace_order": self.marketplace_order, "retry_of": self.name},
-					ensure_ascii=False,
-				),
-			}
-		)
-		attempt.insert()
+		from marketplace_integrations.services.sales_order_sync import sync_sales_order
 
-		try:
-			from marketplace_integrations.services.sales_order_sync import sync_sales_order
-
-			result = sync_sales_order(self.marketplace_order)
-			attempt.status = _status_for_result(result)
-			attempt.response_data = json.dumps(result, ensure_ascii=False, default=str)
-		except Exception as exc:
-			frappe.log_error(title=_("Marketplace Order resynchronization"))
-			attempt.status = "Error"
-			attempt.response_data = json.dumps(
-				{"ok": False, "error": str(exc)}, ensure_ascii=False
-			)
-			attempt.traceback = frappe.get_traceback()
-		finally:
-			attempt.completed_at = now_datetime()
-			attempt.save()
-
-		return {"name": attempt.name, "status": attempt.status}
-
-
-def _status_for_result(result):
-	if result.get("ok"):
-		return "Success"
-	if result.get("error") == UNEXPECTED_SYNC_ERROR:
-		return "Error"
-	return "Invalid"
+		return sync_sales_order(self.marketplace_order, trigger_source="Manual Resync")
 
 
 def clear_old_logs(days=90):

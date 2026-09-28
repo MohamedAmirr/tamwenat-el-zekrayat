@@ -1,7 +1,6 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-import json
 from unittest.mock import patch
 
 import frappe
@@ -12,7 +11,6 @@ from marketplace_integrations.marketplace_integrations.doctype.marketplace_order
 	compute_order_identity_key,
 )
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_sync_log.marketplace_sync_log import (
-	UNEXPECTED_SYNC_ERROR,
 	clear_old_logs,
 )
 
@@ -84,7 +82,7 @@ class TestMarketplaceSyncLog(IntegrationTestCase):
 		self.assertTrue(fields["status"].read_only)
 		self.assertEqual(
 			fields["trigger_source"].options.splitlines(),
-			["Manual", "Shopify Webhook", "Talabat Webhook"],
+			["Manual", "Manual Resync", "Shopify Webhook", "Talabat Webhook"],
 		)
 		self.assertEqual(fields["trigger_source"].default, "Manual")
 		self.assertTrue(fields["attempted_at"].reqd)
@@ -96,71 +94,30 @@ class TestMarketplaceSyncLog(IntegrationTestCase):
 		self.assertTrue(permissions["System Manager"].create)
 		self.assertTrue(permissions["System Manager"].write)
 
-	def test_resync_appends_manual_success_attempt_linked_to_same_order(self):
+	def test_resync_delegates_to_sync_sales_order_as_manual_resync_without_its_own_log_row(self):
+		"""`resync()` must not write/update its own `Marketplace Sync Log` row -
+		`sync_sales_order()`'s internal `_create_sync_log()` (see
+		`services/sales_order_sync.py`) is the single source of truth for what
+		happened. Before this fix, `resync()` ALSO inserted its own attempt row
+		around the call, producing two log rows per resync attempt. Here
+		`sync_sales_order()` itself is mocked out entirely (its own logging
+		behavior is covered by `services/test_sales_order_sync.py`), so this
+		test only proves `resync()`'s own code path creates nothing beyond the
+		pre-existing `original` row."""
 		original = self.make_log(status="Error")
+		before_count = frappe.db.count("Marketplace Sync Log", {"marketplace_order": self.order.name})
+
 		with patch(
 			"marketplace_integrations.services.sales_order_sync.sync_sales_order",
 			return_value={"ok": True, "sales_order": "SO-TEST"},
-		):
+		) as sync_sales_order:
 			result = original.resync()
 
-		attempt = frappe.get_doc("Marketplace Sync Log", result["name"])
-		self.assertNotEqual(attempt.name, original.name)
-		self.assertEqual(attempt.marketplace_order, self.order.name)
-		self.assertEqual(attempt.trigger_source, "Manual")
-		self.assertEqual(attempt.status, "Success")
-		self.assertTrue(attempt.completed_at)
-		self.assertEqual(json.loads(attempt.response_data)["sales_order"], "SO-TEST")
-		self.assertEqual(frappe.db.count("Marketplace Sync Log", {"marketplace_order": self.order.name}), 2)
-
-	def test_resync_classifies_expected_blocker_result_as_invalid_without_traceback(self):
-		original = self.make_log(status="Error")
-		with (
-			patch(
-				"marketplace_integrations.services.sales_order_sync.sync_sales_order",
-				return_value={"ok": False, "error": "Missing mapping"},
-			),
-			patch("marketplace_integrations.marketplace_integrations.doctype.marketplace_sync_log.marketplace_sync_log.frappe.get_traceback") as traceback,
-		):
-			result = original.resync()
-
-		attempt = frappe.get_doc("Marketplace Sync Log", result["name"])
-		self.assertEqual(attempt.status, "Invalid")
-		self.assertFalse(attempt.traceback)
-		traceback.assert_not_called()
-
-	def test_resync_classifies_unexpected_result_as_error_without_invented_traceback(self):
-		original = self.make_log(status="Error")
-		with (
-			patch(
-				"marketplace_integrations.services.sales_order_sync.sync_sales_order",
-				return_value={"ok": False, "error": UNEXPECTED_SYNC_ERROR},
-			),
-			patch("marketplace_integrations.marketplace_integrations.doctype.marketplace_sync_log.marketplace_sync_log.frappe.get_traceback", return_value=None),
-		):
-			result = original.resync()
-
-		attempt = frappe.get_doc("Marketplace Sync Log", result["name"])
-		self.assertEqual(attempt.status, "Error")
-		self.assertFalse(attempt.traceback)
-
-	def test_resync_records_traceback_only_when_unexpected_exception_has_one(self):
-		original = self.make_log(status="Error")
-		with (
-			patch(
-				"marketplace_integrations.services.sales_order_sync.sync_sales_order",
-				side_effect=RuntimeError("unexpected sync failure"),
-			),
-			patch(
-				"marketplace_integrations.marketplace_integrations.doctype.marketplace_sync_log.marketplace_sync_log.frappe.get_traceback",
-				return_value="Traceback (most recent call last): test",
-			),
-		):
-			result = original.resync()
-
-		attempt = frappe.get_doc("Marketplace Sync Log", result["name"])
-		self.assertEqual(attempt.status, "Error")
-		self.assertEqual(attempt.traceback, "Traceback (most recent call last): test")
+		sync_sales_order.assert_called_once_with(self.order.name, trigger_source="Manual Resync")
+		self.assertEqual(result, {"ok": True, "sales_order": "SO-TEST"})
+		self.assertEqual(
+			frappe.db.count("Marketplace Sync Log", {"marketplace_order": self.order.name}), before_count
+		)
 
 	def test_resync_requires_system_manager(self):
 		original = self.make_log(status="Error")
