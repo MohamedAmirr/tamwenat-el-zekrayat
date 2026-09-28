@@ -688,6 +688,8 @@ def _resolve_shopify_address(order, customer, create=True):
 		}
 		if not any(values.values()):
 			return None
+		values["email_id"] = cstr(order.customer_email).strip()
+		values["phone"] = cstr(order.customer_phone_number or "").strip()
 		if values["country"] and not frappe.db.exists("Country", values["country"]):
 			frappe.logger("marketplace_integrations").warning(
 				"Shopify Address country was not recognized; defaulted to Egypt."
