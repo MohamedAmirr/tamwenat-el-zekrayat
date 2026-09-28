@@ -241,6 +241,13 @@ scheduler_events = {
 # 9.99 / 2) can never reconstruct exactly, no matter what precision the
 # Python-side division itself uses. See `services/sales_order_sync.py`'s
 # module docstring and `docs/frappe-conventions.md` for the verified detail.
+#
+# #136: flags refund evidence (#109) in the UI without any new doc_events -
+# a declarative Notification on Marketplace Order (event=Value Change,
+# value_changed=refunds, condition=doc.refunds) that Frappe core's own
+# Notification controller wires and fires on save; see
+# test_no_catalog_document_events_are_registered in
+# api/test_talabat_catalog.py, which this fixture does not affect.
 fixtures = [
 	{
 		"dt": "Property Setter",
@@ -254,6 +261,10 @@ fixtures = [
 				],
 			]
 		],
+	},
+	{
+		"dt": "Notification",
+		"filters": [["name", "in", ["Refund Detected on Marketplace Order"]]],
 	},
 ]
 
