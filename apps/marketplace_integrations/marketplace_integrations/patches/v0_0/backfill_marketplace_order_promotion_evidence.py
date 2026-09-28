@@ -24,11 +24,19 @@ from marketplace_integrations.services.marketplace_orders import _as_json
 
 def execute():
 	"""Idempotent: re-deriving the same fields from the same stored
-	``latest_payload`` on a later run yields the same values again."""
+	``latest_payload`` on a later run yields the same values again.
+
+	Talabat-only: ``normalize_order()`` is Talabat's payload mapper, and the
+	fields this backfill derives (``promotion_status``,
+	``container_deposit``, ``promotions``) only exist on Talabat orders in
+	the doctype itself (each is ``depends_on: platform=='Talabat'``). A
+	Shopify-shaped ``latest_payload`` isn't a Talabat order.Order object and
+	must never be run through this mapper.
+	"""
 	if not frappe.db.table_exists("Marketplace Order"):
 		return
 
-	for name in frappe.get_all("Marketplace Order", pluck="name"):
+	for name in frappe.get_all("Marketplace Order", filters={"platform": "Talabat"}, pluck="name"):
 		doc = frappe.get_doc("Marketplace Order", name)
 		payload = frappe.parse_json(doc.latest_payload) if doc.latest_payload else None
 		if not isinstance(payload, dict):

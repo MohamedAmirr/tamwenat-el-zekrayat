@@ -187,10 +187,14 @@ scheduler_events = {
 		SHOPIFY_INVENTORY_SWEEP_CRON: [
 			"marketplace_integrations.integrations.shopify.inventory_sync.sweep_changed_bins",
 		],
+		"* * * * *": [
+			"marketplace_integrations.services.sales_order_sync_debounce.sweep_due_sales_order_syncs",
+		],
 	},
 	"daily": [
 		"marketplace_integrations.integrations.shopify.inventory_sync.reconcile_all_accounts",
 		"marketplace_integrations.integrations.shopify.orders.reconcile_all_accounts_orders",
+		"marketplace_integrations.marketplace_integrations.doctype.marketplace_sync_log.marketplace_sync_log.clear_old_logs",
 	],
 }
 
@@ -241,6 +245,24 @@ scheduler_events = {
 # 9.99 / 2) can never reconstruct exactly, no matter what precision the
 # Python-side division itself uses. See `services/sales_order_sync.py`'s
 # module docstring and `docs/frappe-conventions.md` for the verified detail.
+#
+# #136: flags refund evidence (#109) in the UI without any new doc_events -
+# a declarative Notification on Marketplace Order (event=Value Change,
+# value_changed=refunds, condition=doc.refunds) that Frappe core's own
+# Notification controller wires and fires on save; see
+# test_no_catalog_document_events_are_registered in
+# api/test_talabat_catalog.py, which this fixture does not affect.
+#
+# #135: opening a Sales Order created by `services/sales_order_sync.py` gave
+# zero indication it came from Talabat/Shopify vs. being created manually -
+# two Custom Fields on core Sales Order fix that: `custom_marketplace_order`
+# (Link to Marketplace Order, set explicitly by
+# `services/sales_order_sync.py::_apply_snapshot()` on every sync, both
+# platforms) and `custom_marketplace_platform` (Data, `fetch_from:
+# custom_marketplace_order.platform`, populated automatically once the first
+# field is set and the document is saved/inserted - confirmed to fire on a
+# purely server-side `.insert()`/`.save()`, so no separate assignment is
+# needed for it).
 fixtures = [
 	{
 		"dt": "Property Setter",
@@ -251,6 +273,23 @@ fixtures = [
 				[
 					"Sales Order Item-rate-precision",
 					"Sales Order Item-price_list_rate-precision",
+				],
+			]
+		],
+	},
+	{
+		"dt": "Notification",
+		"filters": [["name", "in", ["Refund Detected on Marketplace Order"]]],
+	},
+	{
+		"dt": "Custom Field",
+		"filters": [
+			[
+				"name",
+				"in",
+				[
+					"Sales Order-custom_marketplace_order",
+					"Sales Order-custom_marketplace_platform",
 				],
 			]
 		],

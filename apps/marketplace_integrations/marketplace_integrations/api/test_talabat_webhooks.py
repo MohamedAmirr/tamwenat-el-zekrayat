@@ -133,21 +133,27 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			self._call_webhook(payload, "test-order-webhook-secret")
 
+	@patch("marketplace_integrations.integrations.talabat.order_events.bump_sync_debounce")
 	@patch("marketplace_integrations.integrations.talabat.order_events.upsert_marketplace_order")
 	@patch("marketplace_integrations.integrations.talabat.order_events.normalize_order")
 	@patch("marketplace_integrations.integrations.talabat.order_events.frappe.set_user")
 	def test_worker_sets_system_user_before_shared_mapper_and_upsert(
-		self, set_user, normalize_order, upsert_marketplace_order
+		self, set_user, normalize_order, upsert_marketplace_order, bump_sync_debounce
 	):
 		payload = _payload(self.account)
 		normalized = {"external_order_id": "webhook-order-001", "items": [], "latest_payload": payload}
+		upserted_order = MagicMock()
+		upserted_order.name = "webhook-order-001"
 		call_order = []
 		set_user.side_effect = lambda user: call_order.append(("set_user", user))
 		normalize_order.side_effect = (
 			lambda event_payload: call_order.append(("normalize", event_payload)) or normalized
 		)
-		upsert_marketplace_order.side_effect = lambda account, order: call_order.append(
-			("upsert", account, order)
+		upsert_marketplace_order.side_effect = (
+			lambda account, order: call_order.append(("upsert", account, order)) or upserted_order
+		)
+		bump_sync_debounce.side_effect = lambda marketplace_order, trigger_source: call_order.append(
+			("bump_sync_debounce", marketplace_order, trigger_source)
 		)
 
 		process_order_event(self.account.name, payload)
@@ -158,6 +164,7 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 				("set_user", "Administrator"),
 				("normalize", payload),
 				("upsert", self.account.name, normalized),
+				("bump_sync_debounce", upserted_order.name, "Talabat Webhook"),
 			],
 		)
 
@@ -222,6 +229,56 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 		item = order.items[0]
 		self.assertEqual(item.container_deposit, 0.25)
 		self.assertEqual(frappe.parse_json(item.promotions), [])
+
+	def test_successful_upsert_bumps_the_sales_order_sync_debounce(self):
+		"""#134: a successful upsert schedules the eventual Sales Order sync via
+		the shared per-order debounce (#132) rather than enqueueing directly."""
+		order_id = f"debounce-{frappe.generate_hash(length=8)}"
+		payload = _payload(self.account, order_id=order_id)
+
+		process_order_event(self.account.name, payload)
+
+		order = frappe.get_doc(
+			"Marketplace Order",
+			{"marketplace_account": self.account.name, "external_order_id": order_id},
+		)
+		self.assertIsNotNone(order.sync_debounce_until)
+		self.assertEqual(order.pending_sync_trigger_source, "Talabat Webhook")
+
+	def test_successful_upsert_calls_bump_sync_debounce_with_talabat_webhook_trigger_source(self):
+		# Direct call-site assertion, complementing the state-based assertion
+		# above - confirms process_order_event() wires bump_sync_debounce() to
+		# trigger_source="Talabat Webhook" specifically (#135).
+		payload = _payload(self.account)
+
+		import marketplace_integrations.integrations.talabat.order_events as order_events_module
+
+		with patch.object(order_events_module, "bump_sync_debounce") as mocked_bump:
+			order = process_order_event(self.account.name, payload)
+
+		mocked_bump.assert_called_once_with(order.name, trigger_source="Talabat Webhook")
+
+	@patch("marketplace_integrations.integrations.talabat.order_events.bump_sync_debounce")
+	@patch("marketplace_integrations.integrations.talabat.order_events.upsert_marketplace_order")
+	def test_bump_sync_debounce_is_not_called_when_upsert_fails(self, upsert_marketplace_order, bump_sync_debounce):
+		upsert_marketplace_order.side_effect = frappe.ValidationError
+		payload = _payload(self.account)
+
+		with self.assertRaises(frappe.ValidationError):
+			process_order_event(self.account.name, payload)
+
+		bump_sync_debounce.assert_not_called()
+
+	@patch("marketplace_integrations.integrations.talabat.order_events.bump_sync_debounce")
+	@patch("marketplace_integrations.integrations.talabat.order_events.normalize_order")
+	def test_bump_sync_debounce_is_not_called_on_malformed_payload(self, normalize_order, bump_sync_debounce):
+		normalize_order.side_effect = frappe.ValidationError
+		payload = _payload(self.account)
+
+		with self.assertRaises(frappe.ValidationError):
+			process_order_event(self.account.name, payload)
+
+		bump_sync_debounce.assert_not_called()
 
 
 def _catalog_payload(account, job_id="job-001", **overrides):

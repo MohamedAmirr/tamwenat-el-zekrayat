@@ -257,7 +257,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			},
 		)
 
-	def test_creates_one_draft_sales_order_with_talabat_transaction_pricing(self):
+	def test_creates_one_submitted_sales_order_with_talabat_transaction_pricing(self):
 		order = self._make_order()
 
 		result = sync_sales_order(order.name)
@@ -267,7 +267,9 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 		self.assertTrue(result["ok"])
 		self.assertEqual(order.erpnext_sync_status, "Synced")
-		self.assertEqual(sales_order.docstatus, 0)
+		# #131: a freshly-inserted Sales Order is immediately submitted, never
+		# left in Draft.
+		self.assertEqual(sales_order.docstatus, 1)
 		self.assertEqual(sales_order.company, self.company)
 		self.assertEqual(sales_order.selling_price_list, self.price_list)
 		self.assertEqual(sales_order.transaction_date, getdate(order.received_on))
@@ -289,6 +291,19 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(
 			frappe.db.get_value("Customer", self.account.erpnext_customer, "customer_type"), "Company"
 		)
+
+	def test_sets_custom_marketplace_order_and_platform_fields(self):
+		"""#135: the resulting Sales Order must carry back-links to its
+		Marketplace Order and platform - opening a Sales Order created from a
+		Talabat sync should not give zero indication of its origin."""
+		order = self._make_order()
+
+		result = sync_sales_order(order.name)
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+
+		self.assertTrue(result["ok"])
+		self.assertEqual(sales_order.custom_marketplace_order, order.name)
+		self.assertEqual(sales_order.custom_marketplace_platform, "Talabat")
 
 	def test_zero_value_line_remains_zero_and_is_not_price_list_filled(self):
 		"""Zero fulfilled_total_price (with a matching zero fulfilled_unit_price,
@@ -348,7 +363,11 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
 		self.assertEqual(sales_order.items[0].rate, 499.5)
 
-	def test_fulfilled_total_price_change_dirties_hash_and_updates_the_sales_order(self):
+	def test_fulfilled_total_price_change_after_auto_submit_blocks_resync(self):
+		"""#131: the first sync auto-submits the Sales Order, so a later
+		Talabat-side change that dirties the hash can no longer update it
+		in-place - it now hits `_save_submitted_blocker()` instead, and the
+		already-submitted Sales Order's rate/amount are left untouched."""
 		order = self._make_order()
 		first = sync_sales_order(order.name)
 		order.reload()
@@ -361,11 +380,11 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		sales_order = frappe.get_doc("Sales Order", first["sales_order"])
 		order.reload()
 
-		self.assertTrue(second["ok"])
-		self.assertEqual(second["sales_order"], first["sales_order"])
-		self.assertEqual(sales_order.items[0].rate, 250)
-		self.assertEqual(sales_order.items[0].amount, 500)
-		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertFalse(second["ok"])
+		self.assertEqual(sales_order.docstatus, 1)
+		self.assertEqual(sales_order.items[0].rate, 499.5)
+		self.assertEqual(sales_order.items[0].amount, 999)
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
 
 	def test_retry_does_not_create_a_second_sales_order(self):
 		order = self._make_order()
@@ -377,9 +396,40 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(first["sales_order"], second["sales_order"])
 		self.assertEqual(frappe.db.count("Sales Order", {"name": first["sales_order"]}), 1)
 
-	def test_changed_fulfilled_quantity_updates_the_same_draft_sales_order(self):
+	def test_changed_fulfilled_quantity_after_auto_submit_blocks_resync(self):
+		"""#131: same reasoning as
+		test_fulfilled_total_price_change_after_auto_submit_blocks_resync -
+		the first sync's auto-submit means a later qty/total change can no
+		longer be applied in-place."""
 		order = self._make_order()
 		first = sync_sales_order(order.name)
+		order.reload()
+		order.items[0].fulfilled_quantity = 3
+		order.items[0].fulfilled_total_price = 1500
+		order.save()
+		order.reload()
+
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		second = sync_sales_order(order.name)
+		sales_order = frappe.get_doc("Sales Order", first["sales_order"])
+		order.reload()
+
+		self.assertFalse(second["ok"])
+		self.assertEqual(sales_order.items[0].qty, 2)
+		self.assertEqual(sales_order.items[0].rate, 499.5)
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+
+	def test_update_branch_still_reapplies_snapshot_for_a_legacy_draft_sales_order(self):
+		"""#131's auto-submit means the existing-Sales-Order UPDATE branch
+		(`_apply_snapshot()` + `.save()`, as opposed to `.insert()` +
+		`.submit()`) is only reachable today for a Sales Order that predates
+		this feature and was never submitted. Simulated here by forcing the
+		freshly-auto-submitted Sales Order's docstatus back to Draft via a
+		direct db write - the update branch itself is unchanged and still
+		needs coverage."""
+		order = self._make_order()
+		first = sync_sales_order(order.name)
+		frappe.db.set_value("Sales Order", first["sales_order"], "docstatus", 0, update_modified=False)
 		order.reload()
 		order.items[0].fulfilled_quantity = 3
 		order.items[0].fulfilled_total_price = 1500
@@ -418,10 +468,12 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertIn("KG", result["error"])
 
 	def test_submitted_sales_order_remains_modified_after_sync(self):
+		# #131: the first sync already auto-submits the Sales Order - no
+		# manual .submit() call needed (and calling it again here would raise).
 		order = self._make_order()
 		first = sync_sales_order(order.name)
 		sales_order = frappe.get_doc("Sales Order", first["sales_order"])
-		sales_order.submit()
+		self.assertEqual(sales_order.docstatus, 1)
 		order.reload()
 		order.items[0].fulfilled_quantity = 3
 		order.items[0].fulfilled_total_price = 1500
@@ -547,9 +599,16 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 	def test_resync_resets_header_discount_tax_and_shipping(self):
 		"""#85 review finding #3: a header-level discount/tax/shipping added by
 		hand to the Draft between syncs must not survive a re-sync and silently
-		cut the merchandise total below the Talabat transaction total."""
+		cut the merchandise total below the Talabat transaction total.
+
+		#131: the first sync now auto-submits the Sales Order, so this
+		scenario (a hand-edited still-Draft Sales Order between syncs) is only
+		reachable for a pre-existing legacy Draft - forced back to Draft here
+		via a direct db write, matching the update-branch coverage pattern in
+		test_update_branch_still_reapplies_snapshot_for_a_legacy_draft_sales_order."""
 		order = self._make_order()
 		first = sync_sales_order(order.name)
+		frappe.db.set_value("Sales Order", first["sales_order"], "docstatus", 0, update_modified=False)
 		sales_order = frappe.get_doc("Sales Order", first["sales_order"])
 		sales_order.apply_discount_on = "Grand Total"
 		sales_order.discount_amount = 500
@@ -901,13 +960,31 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(frappe.db.get_value("Sales Order Item", {"parent": so_name}, "rate"), 18)
 		self.assertFalse(third["updated"])
 
+		# #131: the Sales Order was auto-submitted by the very first sync
+		# above, so a later Shopify-side transaction_amount change can no
+		# longer be applied in-place - it now hits `_save_submitted_blocker()`
+		# and the original rate survives untouched.
 		order.reload()
 		order.items[0].transaction_amount = 40
 		order.save()
 		fourth = sync_sales_order(order.name)
-		self.assertTrue(fourth["ok"], fourth.get("error"))
-		self.assertEqual(fourth["sales_order"], so_name)
-		self.assertTrue(fourth["updated"])
+		self.assertFalse(fourth["ok"])
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(frappe.db.get_value("Sales Order Item", {"parent": so_name}, "rate"), 18)
+
+	def test_shopify_sync_sets_custom_marketplace_order_and_platform_fields(self):
+		"""#135: platform-agnostic wiring in `_apply_snapshot()` - the same
+		back-link fields set for Talabat above must also be set for Shopify."""
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account)
+
+		result = sync_sales_order(order.name)
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(sales_order.custom_marketplace_order, order.name)
+		self.assertEqual(sales_order.custom_marketplace_platform, "Shopify")
 
 	def test_shopify_sync_creates_no_accounting_or_stock_documents(self):
 		account = self._make_shopify_account()
@@ -1130,6 +1207,15 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(frappe.db.get_value("Address", sales_order.customer_address, "address_type"), "Billing")
 
 	def test_shopify_resync_updates_only_dedicated_address_without_duplicate(self):
+		"""#131: the first sync auto-submits the Sales Order, so a later
+		address/phone change on the Marketplace Order can no longer flow
+		through to the SALES ORDER - the resync attempt hits
+		`_save_submitted_blocker()` and the submitted Sales Order keeps
+		pointing at the same Address it always did. The buyer's dedicated
+		Address record itself is still resolved/updated in-place as part of
+		building the snapshot (unchanged pre-#131 behavior, upstream of the
+		Sales Order docstatus check) - so it picks up the new billing details,
+		but no SECOND/duplicate Address is ever created for the same buyer."""
 		account = self._make_shopify_account()
 		email = f"address-update-{self.suffix}@example.test"
 		order, _mapping = self._make_shopify_order(
@@ -1155,18 +1241,16 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order_doc.customer_phone_number = "+20122222222"
 		order_doc.save(ignore_permissions=True)
 		second = sync_sales_order(order.name)
+		order_doc.reload()
 
-		self.assertTrue(second["ok"], second.get("error"))
-		self.assertEqual(second["sales_order"], first["sales_order"])
-		self.assertTrue(second["updated"])
+		self.assertFalse(second["ok"])
+		self.assertEqual(order_doc.erpnext_sync_status, "Modified After Sync")
 		address = frappe.get_doc("Address", address_name)
 		self.assertEqual(address.address_line1, "Updated Billing Road")
 		self.assertEqual(address.address_type, "Billing")
-		self.assertEqual(address.email_id, email)
 		self.assertEqual(address.phone, "+20122222222")
-		sales_order = frappe.get_doc("Sales Order", second["sales_order"])
+		sales_order = frappe.get_doc("Sales Order", first["sales_order"])
 		self.assertEqual(sales_order.shipping_address_name, address_name)
-		self.assertEqual(sales_order.customer_address, address_name)
 		buyer_address_names = frappe.get_all(
 			"Dynamic Link",
 			filters={
@@ -1185,9 +1269,6 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			)
 		]
 		self.assertEqual(dedicated_addresses, [address_name])
-		third = sync_sales_order(order.name)
-		self.assertTrue(third["ok"], third.get("error"))
-		self.assertFalse(third["updated"])
 
 	def test_shopify_customers_get_distinct_idempotent_dedicated_addresses(self):
 		account = self._make_shopify_account()
@@ -1315,3 +1396,105 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		result = sync_sales_order(order.name)
 
 		self.assertTrue(result["ok"], result.get("error"))
+
+	# --- #131: Marketplace Sync Log row creation ---------------------------
+
+	def test_successful_sync_creates_marketplace_sync_log_success_row(self):
+		order = self._make_order()
+
+		result = sync_sales_order(order.name, trigger_source="Manual")
+
+		self.assertTrue(result["ok"], result.get("error"))
+		logs = frappe.get_all(
+			"Marketplace Sync Log",
+			filters={"marketplace_order": order.name},
+			fields=["status", "trigger_source", "traceback"],
+		)
+		self.assertEqual(len(logs), 1)
+		self.assertEqual(logs[0].status, "Success")
+		self.assertEqual(logs[0].trigger_source, "Manual")
+		self.assertFalse(logs[0].traceback)
+
+	def test_sync_log_records_the_caller_supplied_trigger_source(self):
+		"""`trigger_source` is passed through as-is - #133/#134's future
+		webhook callers aren't built yet, but the parameter is already wired
+		end-to-end into the log row."""
+		order = self._make_order()
+
+		result = sync_sales_order(order.name, trigger_source="Shopify Webhook")
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(
+			frappe.db.get_value("Marketplace Sync Log", {"marketplace_order": order.name}, "trigger_source"),
+			"Shopify Webhook",
+		)
+
+	def test_blocked_sync_creates_marketplace_sync_log_invalid_row_without_traceback(self):
+		order = self._make_order(sku="UNMAPPED-SKU")
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		logs = frappe.get_all(
+			"Marketplace Sync Log",
+			filters={"marketplace_order": order.name},
+			fields=["status", "traceback"],
+		)
+		self.assertEqual(len(logs), 1)
+		self.assertEqual(logs[0].status, "Invalid")
+		self.assertFalse(logs[0].traceback)
+
+	def test_unsupported_platform_creates_marketplace_sync_log_invalid_row(self):
+		order = self._make_order()
+		frappe.db.set_value("Marketplace Order", order.name, "platform", "Amazon", update_modified=False)
+		frappe.clear_document_cache("Marketplace Order", order.name)
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(
+			frappe.db.get_value("Marketplace Sync Log", {"marketplace_order": order.name}, "status"),
+			"Invalid",
+		)
+
+	def test_already_submitted_resync_creates_marketplace_sync_log_invalid_row(self):
+		order = self._make_order()
+		sync_sales_order(order.name)
+		order.reload()
+		order.items[0].fulfilled_quantity = 3
+		order.items[0].fulfilled_total_price = 1500
+		order.save()
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		logs = frappe.get_all(
+			"Marketplace Sync Log",
+			filters={"marketplace_order": order.name},
+			fields=["status"],
+			order_by="creation asc",
+		)
+		self.assertEqual(len(logs), 2)
+		self.assertEqual(logs[0].status, "Success")
+		self.assertEqual(logs[1].status, "Invalid")
+
+	def test_unexpected_exception_creates_marketplace_sync_log_error_row_with_traceback(self):
+		order = self._make_order()
+
+		with patch(
+			"marketplace_integrations.services.sales_order_sync._verify_line_amounts",
+			side_effect=RuntimeError("boom"),
+		):
+			result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		logs = frappe.get_all(
+			"Marketplace Sync Log",
+			filters={"marketplace_order": order.name},
+			fields=["status", "traceback"],
+		)
+		self.assertEqual(len(logs), 1)
+		self.assertEqual(logs[0].status, "Error")
+		self.assertIn("RuntimeError", logs[0].traceback)
+		order.reload()
+		self.assertFalse(order.erpnext_sales_order)

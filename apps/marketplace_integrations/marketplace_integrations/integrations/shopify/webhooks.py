@@ -46,6 +46,7 @@ from marketplace_integrations.integrations.shopify.constants import (
 	SHOPIFY_WEBHOOK_TOPICS,
 )
 from marketplace_integrations.integrations.shopify.orders import account_for_connection, import_order
+from marketplace_integrations.services.sales_order_sync_debounce import bump_sync_debounce
 
 _WEBHOOK_SUBSCRIPTIONS_QUERY = """
 query webhookSubscriptions($first: Int!, $topics: [WebhookSubscriptionTopic!]) {
@@ -568,6 +569,15 @@ def _handle_topic(connection, topic, order_gid=None):
 			# visible note, unlike the silent no-op above - see
 			# _process_delivery()'s use of this return value.
 			return frappe._("Shopify order {0} could not be refetched (not found or outside the read_orders window).").format(order_gid)
+		# #133: a successful import schedules the eventual Sales Order sync via
+		# the debounce window (#132) rather than enqueueing a sync job
+		# directly - a burst of webhooks for the same order within the
+		# debounce window collapses to exactly one eventual sync_sales_order()
+		# call. bump_sync_debounce() records trigger_source="Shopify Webhook"
+		# on the order itself (#135); _run_debounced_sync() reads it back and
+		# threads it into sync_sales_order() so the Marketplace Sync Log row
+		# this eventually produces records the real origin, not "Manual".
+		bump_sync_debounce(order.name, trigger_source="Shopify Webhook")
 		return None
 	# APP_SCOPES_UPDATE remains an acknowledged no-op.
 	return None
