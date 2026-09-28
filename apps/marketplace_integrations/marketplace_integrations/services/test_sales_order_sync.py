@@ -1079,9 +1079,11 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 	def test_shopify_shipping_address_is_created_and_linked_to_buyer(self):
 		account = self._make_shopify_account()
+		email = f"shipping-{self.suffix}@example.test"
 		order, _mapping = self._make_shopify_order(
 			account,
-			customer_email=f"shipping-{self.suffix}@example.test",
+			customer_email=email,
+			customer_phone_number="+20123456789",
 			shipping_address={
 				"address1": "12 Market Street",
 				"address2": "Unit 4",
@@ -1104,6 +1106,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(address.city, "Cairo")
 		self.assertEqual(address.country, "Egypt")
 		self.assertEqual(address.pincode, "11511")
+		self.assertEqual(address.email_id, email)
+		self.assertEqual(address.phone, "+20123456789")
 		self.assertTrue(
 			any(link.link_doctype == "Customer" and link.link_name == sales_order.customer for link in address.links)
 		)
@@ -1127,14 +1131,19 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 	def test_shopify_resync_updates_only_dedicated_address_without_duplicate(self):
 		account = self._make_shopify_account()
+		email = f"address-update-{self.suffix}@example.test"
 		order, _mapping = self._make_shopify_order(
 			account,
-			customer_email=f"address-update-{self.suffix}@example.test",
+			customer_email=email,
+			customer_phone_number="+20111111111",
 			shipping_address={"address1": "Original Street", "city": "Cairo", "country": "Egypt"},
 		)
 		first = sync_sales_order(order.name)
 		self.assertTrue(first["ok"], first.get("error"))
 		address_name = frappe.db.get_value("Sales Order", first["sales_order"], "shipping_address_name")
+		first_address = frappe.get_doc("Address", address_name)
+		self.assertEqual(first_address.email_id, email)
+		self.assertEqual(first_address.phone, "+20111111111")
 
 		order_doc = frappe.get_doc("Marketplace Order", order.name)
 		order_doc.shipping_address = None
@@ -1143,6 +1152,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			"city": "Giza",
 			"country": "Egypt",
 		}
+		order_doc.customer_phone_number = "+20122222222"
 		order_doc.save(ignore_permissions=True)
 		second = sync_sales_order(order.name)
 
@@ -1152,6 +1162,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		address = frappe.get_doc("Address", address_name)
 		self.assertEqual(address.address_line1, "Updated Billing Road")
 		self.assertEqual(address.address_type, "Billing")
+		self.assertEqual(address.email_id, email)
+		self.assertEqual(address.phone, "+20122222222")
 		sales_order = frappe.get_doc("Sales Order", second["sales_order"])
 		self.assertEqual(sales_order.shipping_address_name, address_name)
 		self.assertEqual(sales_order.customer_address, address_name)
@@ -1241,20 +1253,23 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 	def test_shopify_unknown_country_defaults_to_egypt_without_blocking_sync(self):
 		account = self._make_shopify_account()
+		email = f"unknown-country-{self.suffix}@example.test"
 		order, _mapping = self._make_shopify_order(
 			account,
-			customer_email=f"unknown-country-{self.suffix}@example.test",
+			customer_email=email,
 			shipping_address={"address1": "12 Quiet Road", "city": "Cairo", "country": "Not a Country"},
 		)
+		self.assertFalse(order.customer_phone_number)
 
 		result = sync_sales_order(order.name)
 
 		self.assertTrue(result["ok"], result.get("error"))
 		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
 		self.assertTrue(sales_order.shipping_address_name)
-		self.assertEqual(
-			frappe.db.get_value("Address", sales_order.shipping_address_name, "country"), "Egypt"
-		)
+		address = frappe.get_doc("Address", sales_order.shipping_address_name)
+		self.assertEqual(address.country, "Egypt")
+		self.assertEqual(address.email_id, email)
+		self.assertFalse(address.phone)
 
 	def test_shopify_does_not_repurpose_unrelated_customer_address(self):
 		account = self._make_shopify_account()
