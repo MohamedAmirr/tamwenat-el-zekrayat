@@ -292,6 +292,19 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			frappe.db.get_value("Customer", self.account.erpnext_customer, "customer_type"), "Company"
 		)
 
+	def test_sets_custom_marketplace_order_and_platform_fields(self):
+		"""#135: the resulting Sales Order must carry back-links to its
+		Marketplace Order and platform - opening a Sales Order created from a
+		Talabat sync should not give zero indication of its origin."""
+		order = self._make_order()
+
+		result = sync_sales_order(order.name)
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+
+		self.assertTrue(result["ok"])
+		self.assertEqual(sales_order.custom_marketplace_order, order.name)
+		self.assertEqual(sales_order.custom_marketplace_platform, "Talabat")
+
 	def test_zero_value_line_remains_zero_and_is_not_price_list_filled(self):
 		"""Zero fulfilled_total_price (with a matching zero fulfilled_unit_price,
 		see `_make_order()`) is a valid, final, free-item amount - not
@@ -959,6 +972,19 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.reload()
 		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
 		self.assertEqual(frappe.db.get_value("Sales Order Item", {"parent": so_name}, "rate"), 18)
+
+	def test_shopify_sync_sets_custom_marketplace_order_and_platform_fields(self):
+		"""#135: platform-agnostic wiring in `_apply_snapshot()` - the same
+		back-link fields set for Talabat above must also be set for Shopify."""
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account)
+
+		result = sync_sales_order(order.name)
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(sales_order.custom_marketplace_order, order.name)
+		self.assertEqual(sales_order.custom_marketplace_platform, "Shopify")
 
 	def test_shopify_sync_creates_no_accounting_or_stock_documents(self):
 		account = self._make_shopify_account()

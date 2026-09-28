@@ -160,7 +160,7 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 				result = _save_submitted_blocker(order)
 				_create_sync_log(order, trigger_source, "Invalid", snapshot, result)
 				return result
-			_apply_snapshot(sales_order, snapshot)
+			_apply_snapshot(sales_order, snapshot, order.name)
 			_verify_line_amounts(sales_order, snapshot, account)
 			sales_order.save()
 			result = _save_success(order, current_hash, sales_order.name, updated=True)
@@ -168,7 +168,7 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 			return result
 
 		sales_order = frappe.new_doc("Sales Order")
-		_apply_snapshot(sales_order, snapshot)
+		_apply_snapshot(sales_order, snapshot, order.name)
 		_verify_line_amounts(sales_order, snapshot, account)
 		sales_order.insert()
 		sales_order.submit()
@@ -821,9 +821,20 @@ def _get_enabled_mapping(marketplace_account, external_sku):
 	return frappe._dict(values) if values else None
 
 
-def _apply_snapshot(sales_order, snapshot):
+def _apply_snapshot(sales_order, snapshot, marketplace_order_name):
 	"""Populate a Sales Order, then overwrite every line with the historical
 	Talabat transaction amount so it survives ERPNext's own recalculation.
+
+	``custom_marketplace_order`` (a fixture-defined Custom Field on core Sales
+	Order, see ``fixtures/custom_field.json``) is set explicitly here rather
+	than relying on the user opening the Marketplace Order form - both the
+	Talabat and Shopify branches of ``sync_sales_order()`` share this one
+	function, so the wiring is platform-agnostic. ``custom_marketplace_platform``
+	is populated via that Custom Field's own ``fetch_from:
+	custom_marketplace_order.platform`` the moment this field is set and the
+	document is saved/inserted - confirmed to fire on a purely server-side
+	``.insert()``/``.save()`` with no client/form involved, so it needs no
+	separate assignment here.
 
 	`set_missing_values()` is used exactly once, purely for structural
 	defaults (Item/UOM/conversion, accounts, party/company details,
@@ -865,6 +876,7 @@ def _apply_snapshot(sales_order, snapshot):
 	sales_order.transaction_date = snapshot["transaction_date"]
 	sales_order.delivery_date = snapshot["delivery_date"]
 	sales_order.ignore_pricing_rule = 1
+	sales_order.custom_marketplace_order = marketplace_order_name
 	# A pre-existing Draft being re-synced may carry header discount/tax/
 	# shipping configuration from a prior manual Desk edit made between
 	# syncs. apply_discount_amount() (erpnext/controllers/taxes_and_totals.py)

@@ -252,6 +252,17 @@ scheduler_events = {
 # Notification controller wires and fires on save; see
 # test_no_catalog_document_events_are_registered in
 # api/test_talabat_catalog.py, which this fixture does not affect.
+#
+# #135: opening a Sales Order created by `services/sales_order_sync.py` gave
+# zero indication it came from Talabat/Shopify vs. being created manually -
+# two Custom Fields on core Sales Order fix that: `custom_marketplace_order`
+# (Link to Marketplace Order, set explicitly by
+# `services/sales_order_sync.py::_apply_snapshot()` on every sync, both
+# platforms) and `custom_marketplace_platform` (Data, `fetch_from:
+# custom_marketplace_order.platform`, populated automatically once the first
+# field is set and the document is saved/inserted - confirmed to fire on a
+# purely server-side `.insert()`/`.save()`, so no separate assignment is
+# needed for it).
 fixtures = [
 	{
 		"dt": "Property Setter",
@@ -269,6 +280,19 @@ fixtures = [
 	{
 		"dt": "Notification",
 		"filters": [["name", "in", ["Refund Detected on Marketplace Order"]]],
+	},
+	{
+		"dt": "Custom Field",
+		"filters": [
+			[
+				"name",
+				"in",
+				[
+					"Sales Order-custom_marketplace_order",
+					"Sales Order-custom_marketplace_platform",
+				],
+			]
+		],
 	},
 ]
 
