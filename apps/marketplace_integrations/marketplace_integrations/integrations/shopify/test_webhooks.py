@@ -16,6 +16,7 @@ from marketplace_integrations.integrations.shopify.webhooks import (
 	sync_webhook_subscriptions,
 	verify_shopify_hmac,
 )
+from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 
 EXECUTE_TARGET = "marketplace_integrations.integrations.shopify.client.ShopifyClient.execute"
 
@@ -738,3 +739,124 @@ class IntegrationTestHandleTopicRealOrderRouting(IntegrationTestCase):
 		# The distinguishing note - present here, unlike the silent no-op
 		# above, and unlike a genuine success (which also leaves error blank).
 		self.assertTrue(delivery.error)
+
+	def test_successful_import_bumps_the_sync_debounce_window(self):
+		# #133: a successful import_order() schedules the eventual Sales Order
+		# sync via bump_sync_debounce() (#132) rather than enqueueing directly.
+		# import_order() is mocked to return a real Marketplace Order (built
+		# the same way import_order() itself would upsert one) so
+		# bump_sync_debounce(order.name) has a real row to act on; only
+		# import_order() is mocked, _handle_topic()'s own routing runs for
+		# real.
+		account = make_shopify_account(
+			f"Handle Topic Routing Account {frappe.generate_hash(length=8)}",
+			connection=self.connection.name,
+		)
+		order = upsert_marketplace_order(
+			account.name,
+			{
+				"external_order_id": f"handle-topic-debounce-{frappe.generate_hash(length=6)}",
+				"latest_payload": {"order_id": "external-order"},
+				"items": [],
+			},
+		)
+		webhook_id = f"webhook-debounce-bump-{frappe.generate_hash(length=6)}"
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		before = frappe.utils.now_datetime()
+		with patch.object(webhooks_module, "import_order", return_value=order) as mocked_import_order:
+			process_shopify_webhook(
+				self.connection.name,
+				"ORDERS_CREATE",
+				webhook_id,
+				self.connection.shop_domain,
+				order_gid="gid://shopify/Order/12345",
+			)
+
+		mocked_import_order.assert_called_once()
+		delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": webhook_id})
+		self.assertEqual(delivery.status, "Processed")
+		self.assertEqual(delivery.error, "")
+		sync_debounce_until = frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until")
+		self.assertIsNotNone(sync_debounce_until)
+		self.assertGreater(sync_debounce_until, before)
+
+	def test_successful_import_calls_bump_sync_debounce_with_the_order_name(self):
+		# Direct call-site assertion, complementing the state-based assertion
+		# above - confirms _handle_topic() wires bump_sync_debounce() to the
+		# imported order's name specifically, not e.g. the raw order_gid.
+		account = make_shopify_account(
+			f"Handle Topic Routing Account {frappe.generate_hash(length=8)}",
+			connection=self.connection.name,
+		)
+		order = upsert_marketplace_order(
+			account.name,
+			{
+				"external_order_id": f"handle-topic-debounce-call-{frappe.generate_hash(length=6)}",
+				"latest_payload": {"order_id": "external-order"},
+				"items": [],
+			},
+		)
+		webhook_id = f"webhook-debounce-call-{frappe.generate_hash(length=6)}"
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with (
+			patch.object(webhooks_module, "import_order", return_value=order),
+			patch.object(webhooks_module, "bump_sync_debounce") as mocked_bump,
+		):
+			process_shopify_webhook(
+				self.connection.name,
+				"ORDERS_CREATE",
+				webhook_id,
+				self.connection.shop_domain,
+				order_gid="gid://shopify/Order/12345",
+			)
+
+		mocked_bump.assert_called_once_with(order.name)
+
+	def test_no_resolvable_account_does_not_bump_sync_debounce(self):
+		# #109 decision 5 edge case 2 (no resolvable account) must remain a
+		# pure no-op - bump_sync_debounce() is only reachable past a
+		# successful import_order() call, which never happens on this path.
+		webhook_id = f"webhook-no-account-no-bump-{frappe.generate_hash(length=6)}"
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with patch.object(webhooks_module, "bump_sync_debounce") as mocked_bump:
+			process_shopify_webhook(
+				self.connection.name,
+				"ORDERS_CREATE",
+				webhook_id,
+				self.connection.shop_domain,
+				order_gid="gid://shopify/Order/12345",
+			)
+
+		mocked_bump.assert_not_called()
+
+	def test_null_order_does_not_bump_sync_debounce(self):
+		# #109 decision 5 edge case 3 (import_order() returns None) must also
+		# remain unaffected - bump_sync_debounce() is only called on the
+		# non-None branch.
+		make_shopify_account(
+			f"Handle Topic Routing Account {frappe.generate_hash(length=8)}",
+			connection=self.connection.name,
+		)
+		webhook_id = f"webhook-null-order-no-bump-{frappe.generate_hash(length=6)}"
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with (
+			patch.object(webhooks_module, "import_order", return_value=None),
+			patch.object(webhooks_module, "bump_sync_debounce") as mocked_bump,
+		):
+			process_shopify_webhook(
+				self.connection.name,
+				"ORDERS_CREATE",
+				webhook_id,
+				self.connection.shop_domain,
+				order_gid="gid://shopify/Order/12345",
+			)
+
+		mocked_bump.assert_not_called()
