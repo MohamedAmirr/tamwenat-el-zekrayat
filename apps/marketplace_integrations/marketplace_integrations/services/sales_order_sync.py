@@ -26,6 +26,7 @@ source.
 """
 
 import hashlib
+import json
 
 import frappe
 from frappe import _
@@ -111,8 +112,15 @@ def sync_sales_order(marketplace_order):
 		_validate_sync_permissions(order, account)
 		_validate_account_configuration(account)
 		lines = _build_order_lines(order, account)
-		customer = _get_or_create_customer(account)
-		snapshot = _make_snapshot(account, customer, lines, _transaction_date(order), _delivery_date(order))
+		if order.platform == "Shopify":
+			customer = _get_or_create_shopify_customer(order, account)
+			address = _resolve_shopify_address(order, customer) or {"name": None, "address_type": None}
+		else:
+			customer = _get_or_create_customer(account)
+			address = None
+		snapshot = _make_snapshot(
+			account, customer, lines, _transaction_date(order), _delivery_date(order), address
+		)
 		current_hash = _snapshot_hash(snapshot)
 
 		if order.erpnext_sales_order:
@@ -159,12 +167,42 @@ def build_sales_order_snapshot(order, account=None, customer=None):
 	No Talabat customer PII, status, address, raw payload, or current Item
 	Price belongs in the snapshot.  The historical Talabat fulfilled amount
 	for each final line is the only commercial rate input.
+
+	When no explicit ``customer`` is passed, this is the read-only
+	snapshot-preview/status-check path (reachable from
+	``get_current_sync_status()``, which runs on every Marketplace Order form
+	load - not an explicit user-authorized sync). Shopify Customer/Address
+	resolution therefore runs in lookup-only mode (``create=False``): it must
+	never insert a new Customer or Address as a side effect of merely opening
+	the form. If nothing has been resolved yet by a prior real sync, this
+	falls back to the generic account Customer / a blank address purely so
+	the snapshot/hash computation still succeeds - nothing is persisted.
+	``sync_sales_order()`` (the actual explicit-sync path) never calls this
+	function; it resolves the buyer Customer/Address itself with
+	``create=True``.
 	"""
 	account = account or _get_account(order)
 	_validate_account_configuration(account)
 	lines = _build_order_lines(order, account)
-	customer = customer or _require_customer(account)
-	return _make_snapshot(account, customer, lines, _transaction_date(order), _delivery_date(order))
+	if not customer:
+		if order.platform == "Shopify":
+			customer = _get_or_create_shopify_customer(order, account, create=False) or account.erpnext_customer
+			address = _resolve_shopify_address(order, customer, create=False) or {
+				"name": None,
+				"address_type": None,
+			}
+		else:
+			customer = _require_customer(account)
+			address = None
+	else:
+		address = (
+			(_resolve_shopify_address(order, customer, create=False) or {"name": None, "address_type": None})
+			if order.platform == "Shopify"
+			else None
+		)
+	return _make_snapshot(
+		account, customer, lines, _transaction_date(order), _delivery_date(order), address
+	)
 
 
 def _build_sales_order_lines(order, account):
@@ -372,8 +410,8 @@ def _amount_precision(account):
 	return frappe.get_precision("Sales Order Item", "amount", currency=_resolved_currency(account))
 
 
-def _make_snapshot(account, customer, lines, transaction_date, delivery_date):
-	return {
+def _make_snapshot(account, customer, lines, transaction_date, delivery_date, address=None):
+	snapshot = {
 		"company": account.erpnext_company,
 		"customer": customer,
 		"selling_price_list": account.erpnext_selling_price_list,
@@ -381,6 +419,12 @@ def _make_snapshot(account, customer, lines, transaction_date, delivery_date):
 		"delivery_date": delivery_date,
 		"items": lines,
 	}
+	if address is not None:
+		snapshot["shipping_address_name"] = address["name"]
+		snapshot["customer_address"] = (
+			address["name"] if address["address_type"] == "Billing" and address["name"] else None
+		)
+	return snapshot
 
 
 def set_sync_status_from_current_snapshot(order, preserve_sync_error=False):
@@ -536,6 +580,174 @@ def _get_or_create_customer(account):
 	return customer.name
 
 
+def _get_or_create_shopify_customer(order, account, create=True):
+	"""Resolve a Shopify buyer by email, falling back to the account Customer.
+
+	``create=False`` is the read-only snapshot-preview/status-check mode used
+	by ``build_sales_order_snapshot()`` when it wasn't given an explicit
+	``customer`` (see that function's docstring): it only looks up a Customer
+	already resolved by a prior real sync and never inserts a new one. When
+	nothing has been resolved yet, it returns the account's own generic
+	Customer if one already exists, or ``None`` otherwise - it is the
+	caller's responsibility to fall back sensibly for a snapshot-only value.
+	"""
+	email = cstr(order.customer_email).strip()
+	if not email:
+		if create:
+			return _get_or_create_customer(account)
+		return account.erpnext_customer or None
+
+	customer_name = frappe.db.get_value("Customer", {"email_id": email}, "name")
+	if customer_name:
+		return customer_name
+	if not create:
+		return account.erpnext_customer or None
+
+	first_name = cstr(order.customer_first_name or "").strip()
+	last_name = cstr(order.customer_last_name or "").strip()
+	full_name = " ".join(part for part in (first_name, last_name) if part) or email
+	customer = frappe.get_doc(
+		{
+			"doctype": "Customer",
+			"customer_name": full_name,
+			"customer_type": "Individual",
+			"email_id": email,
+			"mobile_no": order.customer_phone_number,
+		}
+	).insert()
+	return customer.name
+
+
+SHOPIFY_ADDRESS_TITLE_PREFIX = "Shopify Marketplace Address-"
+
+
+def _shopify_address_title(customer):
+	"""Return a stable, customer-specific title for this integration's Address."""
+	customer_hash = hashlib.sha256(cstr(customer).encode()).hexdigest()[:10]
+	return f"{SHOPIFY_ADDRESS_TITLE_PREFIX}{customer_hash}"
+
+
+def _find_shopify_address(customer):
+	"""Return the name of this integration's dedicated Address for a buyer, if any."""
+	links = frappe.get_all(
+		"Dynamic Link",
+		filters={
+			"parenttype": "Address",
+			"parentfield": "links",
+			"link_doctype": "Customer",
+			"link_name": customer,
+		},
+		fields=["parent"],
+	)
+	address_title = _shopify_address_title(customer)
+	return next(
+		(
+			row.parent
+			for row in links
+			if frappe.db.get_value("Address", row.parent, "address_title") == address_title
+		),
+		None,
+	)
+
+
+def _resolve_shopify_address(order, customer, create=True):
+	"""Create/update this integration's dedicated Address for a buyer.
+
+	``create=False`` is the read-only snapshot-preview/status-check mode used
+	by ``build_sales_order_snapshot()`` (see that function's docstring): it
+	only looks up an Address already created by a prior real sync and never
+	inserts or updates one. When nothing exists yet, it returns ``None`` -
+	the caller falls back to a blank address for the snapshot only.
+	"""
+	if not cstr(order.customer_email).strip() or not customer:
+		return None
+
+	try:
+		if not create:
+			address_name = _find_shopify_address(customer)
+			if not address_name:
+				return None
+			address_type = frappe.db.get_value("Address", address_name, "address_type")
+			return {"name": address_name, "address_type": address_type}
+
+		shipping = _as_address_dict(order.shipping_address)
+		billing = _as_address_dict(order.billing_address)
+		# An explicitly present shipping object wins even if it is sparse; only
+		# a null shipping object permits billing fallback.
+		if order.shipping_address is not None:
+			source, address_type = shipping, "Shipping"
+		else:
+			source, address_type = billing, "Billing"
+
+		values = {
+			"address_line1": cstr(source.get("address1") or "").strip(),
+			"address_line2": cstr(source.get("address2") or "").strip(),
+			"city": cstr(source.get("city") or "").strip(),
+			"country": cstr(source.get("country") or "").strip(),
+			"pincode": cstr(source.get("zip") or "").strip(),
+		}
+		if not any(values.values()):
+			return None
+		if values["country"] and not frappe.db.exists("Country", values["country"]):
+			frappe.logger("marketplace_integrations").warning(
+				"Shopify Address country was not recognized; defaulted to Egypt."
+			)
+			values["country"] = "Egypt"
+
+		address_title = _shopify_address_title(customer)
+		address_name = _find_shopify_address(customer)
+
+		if address_name:
+			address = frappe.get_doc("Address", address_name)
+		else:
+			address = frappe.new_doc("Address")
+		address.address_title = address_title
+		address.address_type = address_type
+		for fieldname, value in values.items():
+			setattr(address, fieldname, value)
+		if not any(
+			link.link_doctype == "Customer" and link.link_name == customer
+			for link in address.get("links", [])
+		):
+			address.append("links", {"link_doctype": "Customer", "link_name": customer})
+		address.is_primary_address = 1
+
+		frappe.db.savepoint("shopify_address_sync")
+		try:
+			if address.is_new():
+				address.insert()
+			else:
+				address.save()
+		except Exception:
+			frappe.db.rollback(save_point="shopify_address_sync")
+			frappe.db.release_savepoint("shopify_address_sync")
+			frappe.clear_messages()
+			frappe.logger("marketplace_integrations").warning(
+				"Shopify Address could not be saved; Sales Order synchronization will continue without it."
+			)
+			return None
+		frappe.db.release_savepoint("shopify_address_sync")
+		return {"name": address.name, "address_type": address_type}
+	except Exception:
+		frappe.clear_messages()
+		frappe.logger("marketplace_integrations").warning(
+			"Shopify Address could not be resolved; Sales Order synchronization will continue without it."
+		)
+		return None
+
+
+def _as_address_dict(value):
+	if isinstance(value, dict):
+		return value
+	if isinstance(value, str):
+		try:
+			parsed = json.loads(value)
+			return parsed if isinstance(parsed, dict) else {}
+		except (TypeError, ValueError):
+			return {}
+	return {}
+
+
 def _require_customer(account):
 	if not account.erpnext_customer:
 		raise SyncBlocker(_("Marketplace Account {0} has no ERPNext Customer.").format(account.name))
@@ -650,6 +862,9 @@ def _apply_snapshot(sales_order, snapshot):
 	# the header fields just reset - no Sales Taxes and Charges Template,
 	# Shipping Rule, or additional discount survives from before this call.
 	sales_order.calculate_taxes_and_totals()
+	if "shipping_address_name" in snapshot:
+		sales_order.shipping_address_name = snapshot["shipping_address_name"]
+		sales_order.customer_address = snapshot["customer_address"]
 
 
 def _verify_line_amounts(sales_order, snapshot, account):

@@ -40,6 +40,35 @@ query ShopifyOrder($id: ID!, $lineItemsFirst: Int!, $transactionsFirst: Int!, $r
     displayFulfillmentStatus
     currencyCode
     presentmentCurrencyCode
+    customer {
+      id
+      firstName
+      lastName
+      defaultEmailAddress { emailAddress }
+      defaultPhoneNumber { phoneNumber }
+    }
+    shippingAddress {
+      address1
+      address2
+      city
+      province
+      country
+      zip
+      latitude
+      longitude
+      formatted
+    }
+    billingAddress {
+      address1
+      address2
+      city
+      province
+      country
+      zip
+      latitude
+      longitude
+      formatted
+    }
     currentSubtotalPriceSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }
     currentTotalDiscountsSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }
     currentTotalTaxSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }
