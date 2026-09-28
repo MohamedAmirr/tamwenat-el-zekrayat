@@ -16,7 +16,7 @@ def sync_to_erpnext(marketplace_order: str):
 	"""Explicitly create or update this order's linked ERPNext Sales Order."""
 	doc = frappe.get_doc("Marketplace Order", marketplace_order)
 	doc.check_permission("write")
-	return sync_sales_order(doc.name)
+	return sync_sales_order(doc.name, trigger_source="Manual")
 
 
 @frappe.whitelist()

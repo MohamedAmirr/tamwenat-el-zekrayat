@@ -4,8 +4,20 @@
 """Explicit Marketplace Order to ERPNext Sales Order synchronization.
 
 Marketplace Order remains Talabat's operational record.  This module creates
-or updates only a Draft Sales Order after an authorized user explicitly asks
-for it.
+a Sales Order after an authorized user explicitly asks for it (or an
+automated trigger calls it, see ``trigger_source`` below) and immediately
+submits it (#131) - a fresh Sales Order is never left in Draft.  Only the
+existing-Sales-Order UPDATE branch (re-syncing an order whose linked Sales
+Order is still Draft, e.g. one created before #131) leaves the document in
+whatever docstatus it already had; once that Sales Order is submitted, a
+later re-sync attempt is blocked by ``_save_submitted_blocker()`` rather than
+silently updating or re-submitting it.
+
+Every ``sync_sales_order()`` attempt - success, an expected ``SyncBlocker``,
+or an unexpected exception - writes one ``Marketplace Sync Log`` row
+recording the outcome and the ``trigger_source`` the caller passed in
+("Manual" for the existing "Send to ERPNext" button; a webhook value for the
+not-yet-built sub-issues #133/#134).
 
 Commercial values are the historical, finalized marketplace transaction, not
 whatever ERPNext's current Item Price/Pricing Rules would compute today:
@@ -83,13 +95,25 @@ class SyncBlocker(frappe.ValidationError):
 	"""A user-actionable prerequisite that prevents Sales Order synchronization."""
 
 
-def sync_sales_order(marketplace_order):
-	"""Create or update one Marketplace Order's linked Draft Sales Order.
+def sync_sales_order(marketplace_order, trigger_source="Manual"):
+	"""Create or update one Marketplace Order's linked Sales Order.
 
 	The Marketplace Order row is locked before it is reloaded, so concurrent
 	button clicks observe a successful link rather than creating a second Sales
 	Order.  Expected blockers are persisted as sanitized sync state and returned
 	to the API without raising, so that status write is not rolled back.
+
+	A fresh Sales Order (the ``.insert()`` branch) is immediately submitted
+	(#131) - unconditionally, for every caller, Talabat and Shopify alike.
+	Re-syncing an order whose Sales Order is already submitted continues to
+	hit ``_save_submitted_blocker()`` unchanged: this never re-submits or
+	double-submits anything.
+
+	Every attempt - success, expected ``SyncBlocker``, or unexpected
+	exception - writes one ``Marketplace Sync Log`` row via
+	``_create_sync_log()``, tagged with the caller-supplied ``trigger_source``
+	("Manual" for the existing "Send to ERPNext" button; a webhook value for
+	the not-yet-built sub-issues #133/#134).
 	"""
 	frappe.db.get_value("Marketplace Order", marketplace_order, "name", for_update=True)
 	order = frappe.get_doc("Marketplace Order", marketplace_order)
@@ -105,8 +129,11 @@ def sync_sales_order(marketplace_order):
 	try:
 		_validate_platform_supported(order)
 	except SyncBlocker as exc:
-		return {"ok": False, "status": order.erpnext_sync_status, "error": str(exc)}
+		result = {"ok": False, "status": order.erpnext_sync_status, "error": str(exc)}
+		_create_sync_log(order, trigger_source, "Invalid", None, result)
+		return result
 
+	snapshot = None
 	try:
 		account = _get_account(order)
 		_validate_sync_permissions(order, account)
@@ -126,21 +153,32 @@ def sync_sales_order(marketplace_order):
 		if order.erpnext_sales_order:
 			sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
 			if order.last_synced_hash == current_hash:
-				return _save_success(order, current_hash, sales_order.name, updated=False)
+				result = _save_success(order, current_hash, sales_order.name, updated=False)
+				_create_sync_log(order, trigger_source, "Success", snapshot, result)
+				return result
 			if sales_order.docstatus != 0:
-				return _save_submitted_blocker(order)
+				result = _save_submitted_blocker(order)
+				_create_sync_log(order, trigger_source, "Invalid", snapshot, result)
+				return result
 			_apply_snapshot(sales_order, snapshot)
 			_verify_line_amounts(sales_order, snapshot, account)
 			sales_order.save()
-			return _save_success(order, current_hash, sales_order.name, updated=True)
+			result = _save_success(order, current_hash, sales_order.name, updated=True)
+			_create_sync_log(order, trigger_source, "Success", snapshot, result)
+			return result
 
 		sales_order = frappe.new_doc("Sales Order")
 		_apply_snapshot(sales_order, snapshot)
 		_verify_line_amounts(sales_order, snapshot, account)
 		sales_order.insert()
-		return _save_success(order, current_hash, sales_order.name, updated=False)
+		sales_order.submit()
+		result = _save_success(order, current_hash, sales_order.name, updated=False)
+		_create_sync_log(order, trigger_source, "Success", snapshot, result)
+		return result
 	except SyncBlocker as exc:
-		return _save_failure(order, str(exc))
+		result = _save_failure(order, str(exc))
+		_create_sync_log(order, trigger_source, "Invalid", snapshot, result)
+		return result
 	except frappe.PermissionError:
 		raise
 	except Exception:
@@ -153,12 +191,15 @@ def sync_sales_order(marketplace_order):
 		# delivery_date < transaction_date, etc.). The user-facing message
 		# below is unaffected either way - it never came from this call.
 		frappe.log_error(title=_("Marketplace Sales Order synchronization"))
-		return _save_failure(
+		traceback_text = frappe.get_traceback()
+		result = _save_failure(
 			order,
 			_(
 				"ERPNext Sales Order synchronization failed. Please review the ERPNext configuration and try again."
 			),
 		)
+		_create_sync_log(order, trigger_source, "Error", snapshot, result, traceback_text=traceback_text)
+		return result
 
 
 def build_sales_order_snapshot(order, account=None, customer=None):
@@ -895,6 +936,41 @@ def _verify_line_amounts(sales_order, snapshot, account):
 
 def _snapshot_hash(snapshot):
 	return hashlib.sha256(frappe.as_json(snapshot).encode()).hexdigest()
+
+
+def _create_sync_log(order, trigger_source, status, snapshot, response, traceback_text=None):
+	"""Write one ``Marketplace Sync Log`` row for this attempt (#131).
+
+	``ignore_permissions=True``: this doctype's create permission is
+	restricted to System Manager, but ``sync_sales_order()`` itself runs
+	under whatever session actually triggered it (the manual button's user
+	today; a webhook/background job with no interactive user for #132-#134) -
+	none of those callers should be blocked from recording an audit trail of
+	their own attempt merely because they aren't System Manager.
+
+	``request_data`` is the built snapshot when one was computed before the
+	failure (or on success); a blocker raised before any snapshot exists
+	(e.g. the platform gate, or missing account/configuration) logs just the
+	Marketplace Order name instead - there is nothing else to capture yet.
+	"""
+	now = now_datetime()
+	frappe.get_doc(
+		{
+			"doctype": "Marketplace Sync Log",
+			"marketplace_order": order.name,
+			"status": status,
+			"trigger_source": trigger_source,
+			"attempted_at": now,
+			"completed_at": now,
+			"request_data": json.dumps(
+				snapshot if snapshot is not None else {"marketplace_order": order.name},
+				ensure_ascii=False,
+				default=str,
+			),
+			"response_data": json.dumps(response, ensure_ascii=False, default=str),
+			"traceback": traceback_text,
+		}
+	).insert(ignore_permissions=True)
 
 
 def _save_success(order, snapshot_hash, sales_order, updated):
