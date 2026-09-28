@@ -77,6 +77,7 @@
   "last_synced_hash",
   "last_sync_error",
   "sync_debounce_until",
+  "pending_sync_trigger_source",
   "latest_payload"
  ],
  "fields": [
@@ -151,6 +152,7 @@
   {"fieldname": "last_synced_hash", "fieldtype": "Data", "hidden": 1, "label": "Last Synced Hash", "length": 64, "read_only": 1},
   {"fieldname": "last_sync_error", "fieldtype": "Small Text", "label": "Last Sync Error", "read_only": 1},
   {"description": "Internal debounce state (#132): when set and due, the next scheduled sweep enqueues a Sales Order sync for this order. Set/cleared only by services/sales_order_sync_debounce.py - never edited directly.", "fieldname": "sync_debounce_until", "fieldtype": "Datetime", "hidden": 1, "label": "Sync Debounce Until", "read_only": 1},
+  {"description": "Internal debounce state (#135): the webhook trigger source waiting to be recorded on the Marketplace Sync Log row once the pending sync in sync_debounce_until fires. Set/cleared only by services/sales_order_sync_debounce.py - never edited directly.", "fieldname": "pending_sync_trigger_source", "fieldtype": "Select", "hidden": 1, "label": "Pending Sync Trigger Source", "options": "\nManual\nManual Resync\nShopify Webhook\nTalabat Webhook", "read_only": 1},
   {"fieldname": "latest_payload", "fieldtype": "JSON", "ignore_xss_filter": 1, "label": "Latest Platform Payload", "read_only": 1}
  ],
  "index_web_pages_for_search": 1,

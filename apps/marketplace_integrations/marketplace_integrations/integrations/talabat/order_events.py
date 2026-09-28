@@ -20,5 +20,9 @@ def process_order_event(marketplace_account, payload):
 	# Schedule the eventual Sales Order sync via the shared per-order debounce
 	# (#132) rather than enqueueing a sync job directly - a burst of webhooks
 	# for the same order only ever results in one eventual sync.
-	bump_sync_debounce(order.name)
+	# bump_sync_debounce() records trigger_source="Talabat Webhook" on the
+	# order itself (#135); _run_debounced_sync() reads it back and threads it
+	# into sync_sales_order() so the Marketplace Sync Log row this eventually
+	# produces records the real origin, not "Manual".
+	bump_sync_debounce(order.name, trigger_source="Talabat Webhook")
 	return order

@@ -74,21 +74,45 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 		order = self._make_order()
 		before = now_datetime()
 
-		debounce.bump_sync_debounce(order.name)
+		debounce.bump_sync_debounce(order.name, trigger_source="Talabat Webhook")
 
 		value = frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until")
 		self.assertIsNotNone(value)
 		self.assertGreater(value, before)
 
+	def test_bump_records_the_pending_trigger_source(self):
+		order = self._make_order()
+
+		debounce.bump_sync_debounce(order.name, trigger_source="Talabat Webhook")
+
+		self.assertEqual(
+			frappe.db.get_value("Marketplace Order", order.name, "pending_sync_trigger_source"),
+			"Talabat Webhook",
+		)
+
 	def test_second_bump_within_window_pushes_it_further_out(self):
 		order = self._make_order()
 
-		debounce.bump_sync_debounce(order.name, delay_seconds=45)
+		debounce.bump_sync_debounce(order.name, trigger_source="Talabat Webhook", delay_seconds=45)
 		first = frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until")
-		debounce.bump_sync_debounce(order.name, delay_seconds=90)
+		debounce.bump_sync_debounce(order.name, trigger_source="Talabat Webhook", delay_seconds=90)
 		second = frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until")
 
 		self.assertGreater(second, first)
+
+	def test_second_bump_with_a_different_trigger_source_overwrites_the_first(self):
+		"""#135: the latest bump_sync_debounce() call's trigger_source wins - no
+		merge logic, a simple overwrite matching the timestamp's own
+		always-pushes-forward semantics."""
+		order = self._make_order()
+
+		debounce.bump_sync_debounce(order.name, trigger_source="Talabat Webhook", delay_seconds=45)
+		debounce.bump_sync_debounce(order.name, trigger_source="Shopify Webhook", delay_seconds=90)
+
+		self.assertEqual(
+			frappe.db.get_value("Marketplace Order", order.name, "pending_sync_trigger_source"),
+			"Shopify Webhook",
+		)
 
 	def test_two_bumps_result_in_exactly_one_eventual_sync(self):
 		"""Two bump_sync_debounce() calls for the same order within the delay
@@ -99,8 +123,8 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 		end-to-end without needing a running worker."""
 		order = self._make_order()
 
-		debounce.bump_sync_debounce(order.name, delay_seconds=-10)
-		debounce.bump_sync_debounce(order.name, delay_seconds=-5)
+		debounce.bump_sync_debounce(order.name, trigger_source="Talabat Webhook", delay_seconds=-10)
+		debounce.bump_sync_debounce(order.name, trigger_source="Talabat Webhook", delay_seconds=-5)
 
 		def run_immediately(func, **kwargs):
 			job_kwargs = {
@@ -113,17 +137,20 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 		with patch(SYNC_TARGET) as mocked_sync, patch("frappe.enqueue", side_effect=run_immediately):
 			debounce.sweep_due_sales_order_syncs()
 
-		self.assertEqual(_calls_for_order(mocked_sync, order.name), [call(order.name)])
+		self.assertEqual(
+			_calls_for_order(mocked_sync, order.name),
+			[call(order.name, trigger_source="Talabat Webhook")],
+		)
 		self.assertIsNone(frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until"))
 
 	def test_stale_expected_debounce_until_no_ops(self):
 		order = self._make_order()
-		debounce.bump_sync_debounce(order.name, delay_seconds=45)
+		debounce.bump_sync_debounce(order.name, trigger_source="Talabat Webhook", delay_seconds=45)
 		stale_expected = frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until")
 
 		# A newer webhook pushes the window further out after the sweep tick
 		# already read the (now stale) value above.
-		debounce.bump_sync_debounce(order.name, delay_seconds=90)
+		debounce.bump_sync_debounce(order.name, trigger_source="Talabat Webhook", delay_seconds=90)
 		current_expected = frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until")
 		self.assertNotEqual(stale_expected, current_expected)
 
@@ -138,18 +165,59 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 
 	def test_run_debounced_sync_clears_the_window_and_calls_sync_on_a_match(self):
 		order = self._make_order()
-		debounce.bump_sync_debounce(order.name, delay_seconds=45)
+		debounce.bump_sync_debounce(order.name, trigger_source="Talabat Webhook", delay_seconds=45)
 		expected = frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until")
 
 		with patch(SYNC_TARGET) as mocked_sync:
 			debounce._run_debounced_sync(order.name, expected)
 
-		mocked_sync.assert_called_once_with(order.name)
+		mocked_sync.assert_called_once_with(order.name, trigger_source="Talabat Webhook")
 		self.assertIsNone(frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until"))
+		self.assertIsNone(
+			frappe.db.get_value("Marketplace Order", order.name, "pending_sync_trigger_source")
+		)
+
+	def test_run_debounced_sync_passes_through_shopify_webhook_trigger_source(self):
+		order = self._make_order()
+		debounce.bump_sync_debounce(order.name, trigger_source="Shopify Webhook", delay_seconds=45)
+		expected = frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until")
+
+		with patch(SYNC_TARGET) as mocked_sync:
+			debounce._run_debounced_sync(order.name, expected)
+
+		mocked_sync.assert_called_once_with(order.name, trigger_source="Shopify Webhook")
+
+	def test_run_debounced_sync_passes_through_talabat_webhook_trigger_source(self):
+		order = self._make_order()
+		debounce.bump_sync_debounce(order.name, trigger_source="Talabat Webhook", delay_seconds=45)
+		expected = frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until")
+
+		with patch(SYNC_TARGET) as mocked_sync:
+			debounce._run_debounced_sync(order.name, expected)
+
+		mocked_sync.assert_called_once_with(order.name, trigger_source="Talabat Webhook")
+
+	def test_run_debounced_sync_falls_back_to_manual_default_when_trigger_source_is_blank(self):
+		"""Defensive fallback (#135): shouldn't happen given bump_sync_debounce()
+		always sets both fields together, but a blank pending_sync_trigger_source
+		at execution time must fall back to sync_sales_order()'s own "Manual"
+		default rather than crashing."""
+		order = self._make_order()
+		debounce.bump_sync_debounce(order.name, trigger_source="Talabat Webhook", delay_seconds=45)
+		expected = frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until")
+		frappe.db.set_value(
+			"Marketplace Order", order.name, "pending_sync_trigger_source", None, update_modified=False
+		)
+
+		with patch(SYNC_TARGET) as mocked_sync:
+			debounce._run_debounced_sync(order.name, expected)
+
+		mocked_sync.assert_called_once_with(order.name)
 
 	def test_sweep_enqueues_one_deduplicated_job_per_due_order(self):
 		order = self._make_order()
-		debounce.bump_sync_debounce(order.name, delay_seconds=-1)  # already due
+		# already due
+		debounce.bump_sync_debounce(order.name, trigger_source="Talabat Webhook", delay_seconds=-1)
 
 		with patch("frappe.enqueue") as mocked_enqueue:
 			debounce.sweep_due_sales_order_syncs()
@@ -171,7 +239,7 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 
 	def test_sweep_ignores_orders_not_yet_due(self):
 		order = self._make_order()
-		debounce.bump_sync_debounce(order.name, delay_seconds=3600)
+		debounce.bump_sync_debounce(order.name, trigger_source="Talabat Webhook", delay_seconds=3600)
 
 		with patch("frappe.enqueue") as mocked_enqueue:
 			debounce.sweep_due_sales_order_syncs()
@@ -186,7 +254,7 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 		concurrent/overlapping tick must not treat that rejection as an error
 		or retry it itself."""
 		order = self._make_order()
-		debounce.bump_sync_debounce(order.name, delay_seconds=-1)
+		debounce.bump_sync_debounce(order.name, trigger_source="Talabat Webhook", delay_seconds=-1)
 
 		with patch("frappe.enqueue", return_value=None) as mocked_enqueue:
 			debounce.sweep_due_sales_order_syncs()

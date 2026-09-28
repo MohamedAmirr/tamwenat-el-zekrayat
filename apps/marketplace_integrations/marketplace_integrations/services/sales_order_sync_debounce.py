@@ -16,10 +16,14 @@ not a true RQ delayed job (out of scope; don't attempt to build one from
 scratch).
 
 - ``bump_sync_debounce()``: a cheap ``frappe.db.set_value()`` write that sets
-  ``Marketplace Order.sync_debounce_until`` to now + ``SYNC_DEBOUNCE_SECONDS``,
-  always pushing the window forward. No enqueue happens here - a caller (e.g.
-  a webhook handler) may call this many times in quick succession for the same
-  order without ever enqueueing more than the one eventual sync that follows.
+  both ``Marketplace Order.sync_debounce_until`` to now + ``SYNC_DEBOUNCE_SECONDS``
+  and ``Marketplace Order.pending_sync_trigger_source`` to the caller-supplied
+  ``trigger_source`` (#135), always pushing the window forward and overwriting
+  whichever trigger source was previously pending. No enqueue happens here - a
+  caller (e.g. a webhook handler) may call this many times in quick succession
+  for the same order without ever enqueueing more than the one eventual sync
+  that follows; if two different webhooks bump the same order within one
+  window, the LATEST call's trigger_source simply wins - no merge logic.
 - ``sweep_due_sales_order_syncs()``: scheduled every minute
   (``hooks.py``'s ``scheduler_events["cron"]``, ``"* * * * *"`` - tighter than
   a 1-minute cron bucket doesn't exist, so actual latency is
@@ -32,8 +36,12 @@ scratch).
   ``sync_debounce_until`` at execution time. A mismatch against the value the
   sweep read means a newer bump pushed the window further out after the sweep
   tick already read it - that job no-ops; the next sweep tick picks up the new
-  value once it's due. A match consumes the window (cleared to ``None``) and
-  calls ``sync_sales_order()``.
+  value once it's due. A match consumes the window (both
+  ``sync_debounce_until`` and ``pending_sync_trigger_source`` cleared to
+  ``None`` together) and calls ``sync_sales_order()`` with the
+  ``pending_sync_trigger_source`` value just read, so the ``Marketplace Sync
+  Log`` row this produces records the real originating webhook rather than
+  falling back to ``sync_sales_order()``'s own "Manual" default (#135).
 
 Per-order RQ dedup job id (``{_SYNC_RQ_JOB_ID_PREFIX}-{order}``) means a sweep
 tick for an order whose previous debounced-sync job is still
@@ -56,15 +64,21 @@ SYNC_DEBOUNCE_SECONDS = 45
 _SYNC_RQ_JOB_ID_PREFIX = "marketplace-sync"
 
 
-def bump_sync_debounce(marketplace_order, delay_seconds=SYNC_DEBOUNCE_SECONDS):
+def bump_sync_debounce(marketplace_order, trigger_source, delay_seconds=SYNC_DEBOUNCE_SECONDS):
 	"""Push ``marketplace_order``'s sync debounce window forward to
-	``now + delay_seconds``. Always pushes forward, even if a window is
-	already pending - never enqueues anything itself."""
+	``now + delay_seconds`` and record ``trigger_source`` as the pending sync's
+	origin (#135). Always pushes forward, even if a window is already pending -
+	never enqueues anything itself. If a window is already pending when this
+	is called again (e.g. two webhooks touching the same order in quick
+	succession), the LATEST call's ``trigger_source`` simply overwrites the
+	previous one - no merge logic."""
 	frappe.db.set_value(
 		ORDER_DOCTYPE,
 		marketplace_order,
-		"sync_debounce_until",
-		add_to_date(now_datetime(), seconds=delay_seconds),
+		{
+			"sync_debounce_until": add_to_date(now_datetime(), seconds=delay_seconds),
+			"pending_sync_trigger_source": trigger_source,
+		},
 		update_modified=False,
 	)
 
@@ -111,21 +125,35 @@ def sweep_due_sales_order_syncs():
 
 def _run_debounced_sync(marketplace_order, expected_debounce_until):
 	"""Debounced-sync job body. Re-reads the order's CURRENT
-	``sync_debounce_until``: a mismatch against ``expected_debounce_until``
-	(read by the sweep tick that enqueued this job) means a newer
-	``bump_sync_debounce()`` call has since pushed the window further out, so
-	this no-ops - the next sweep tick will pick up the new value once it's
-	due. A match consumes the window (cleared to ``None``, so a later sweep
-	tick doesn't re-fire for the same debounce) and runs the real sync.
+	``sync_debounce_until`` (and, alongside it, the currently-pending
+	``pending_sync_trigger_source``, #135): a mismatch of the debounce
+	timestamp against ``expected_debounce_until`` (read by the sweep tick that
+	enqueued this job) means a newer ``bump_sync_debounce()`` call has since
+	pushed the window further out, so this no-ops - the next sweep tick will
+	pick up the new value once it's due. A match consumes the window (both
+	fields cleared to ``None`` together, so a later sweep tick doesn't re-fire
+	for the same debounce) and runs the real sync, passing the just-read
+	trigger source through so the resulting ``Marketplace Sync Log`` row
+	records the real originating webhook rather than defaulting to "Manual".
 	"""
-	current_debounce_until = frappe.db.get_value(ORDER_DOCTYPE, marketplace_order, "sync_debounce_until")
-	if current_debounce_until != expected_debounce_until:
+	current = frappe.db.get_value(
+		ORDER_DOCTYPE,
+		marketplace_order,
+		["sync_debounce_until", "pending_sync_trigger_source"],
+		as_dict=True,
+	)
+	if current.sync_debounce_until != expected_debounce_until:
 		return
 	frappe.db.set_value(
 		ORDER_DOCTYPE,
 		marketplace_order,
-		"sync_debounce_until",
-		None,
+		{"sync_debounce_until": None, "pending_sync_trigger_source": None},
 		update_modified=False,
 	)
-	sync_sales_order(marketplace_order)
+	if current.pending_sync_trigger_source:
+		sync_sales_order(marketplace_order, trigger_source=current.pending_sync_trigger_source)
+	else:
+		# Shouldn't happen given bump_sync_debounce() always sets both fields
+		# together - defensive fallback to sync_sales_order()'s own "Manual"
+		# default rather than crashing.
+		sync_sales_order(marketplace_order)

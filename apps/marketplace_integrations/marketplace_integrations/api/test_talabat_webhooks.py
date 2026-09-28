@@ -152,8 +152,8 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 		upsert_marketplace_order.side_effect = (
 			lambda account, order: call_order.append(("upsert", account, order)) or upserted_order
 		)
-		bump_sync_debounce.side_effect = lambda marketplace_order: call_order.append(
-			("bump_sync_debounce", marketplace_order)
+		bump_sync_debounce.side_effect = lambda marketplace_order, trigger_source: call_order.append(
+			("bump_sync_debounce", marketplace_order, trigger_source)
 		)
 
 		process_order_event(self.account.name, payload)
@@ -164,7 +164,7 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 				("set_user", "Administrator"),
 				("normalize", payload),
 				("upsert", self.account.name, normalized),
-				("bump_sync_debounce", upserted_order.name),
+				("bump_sync_debounce", upserted_order.name, "Talabat Webhook"),
 			],
 		)
 
@@ -243,6 +243,20 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 			{"marketplace_account": self.account.name, "external_order_id": order_id},
 		)
 		self.assertIsNotNone(order.sync_debounce_until)
+		self.assertEqual(order.pending_sync_trigger_source, "Talabat Webhook")
+
+	def test_successful_upsert_calls_bump_sync_debounce_with_talabat_webhook_trigger_source(self):
+		# Direct call-site assertion, complementing the state-based assertion
+		# above - confirms process_order_event() wires bump_sync_debounce() to
+		# trigger_source="Talabat Webhook" specifically (#135).
+		payload = _payload(self.account)
+
+		import marketplace_integrations.integrations.talabat.order_events as order_events_module
+
+		with patch.object(order_events_module, "bump_sync_debounce") as mocked_bump:
+			order = process_order_event(self.account.name, payload)
+
+		mocked_bump.assert_called_once_with(order.name, trigger_source="Talabat Webhook")
 
 	@patch("marketplace_integrations.integrations.talabat.order_events.bump_sync_debounce")
 	@patch("marketplace_integrations.integrations.talabat.order_events.upsert_marketplace_order")

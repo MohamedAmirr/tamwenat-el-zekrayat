@@ -573,10 +573,11 @@ def _handle_topic(connection, topic, order_gid=None):
 		# the debounce window (#132) rather than enqueueing a sync job
 		# directly - a burst of webhooks for the same order within the
 		# debounce window collapses to exactly one eventual sync_sales_order()
-		# call. trigger_source="Shopify Webhook" plumbing into the Marketplace
-		# Sync Log row happens downstream in _run_debounced_sync()/
-		# sync_sales_order(), not here.
-		bump_sync_debounce(order.name)
+		# call. bump_sync_debounce() records trigger_source="Shopify Webhook"
+		# on the order itself (#135); _run_debounced_sync() reads it back and
+		# threads it into sync_sales_order() so the Marketplace Sync Log row
+		# this eventually produces records the real origin, not "Manual".
+		bump_sync_debounce(order.name, trigger_source="Shopify Webhook")
 		return None
 	# APP_SCOPES_UPDATE remains an acknowledged no-op.
 	return None

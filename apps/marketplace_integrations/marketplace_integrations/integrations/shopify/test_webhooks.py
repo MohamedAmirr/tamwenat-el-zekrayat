@@ -5,8 +5,10 @@ from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase, UnitTestCase
+from frappe.utils import add_to_date, now_datetime
 
 from marketplace_integrations.integrations.shopify.constants import SHOPIFY_ORDER_WEBHOOK_TOPICS
+from marketplace_integrations.integrations.shopify.test_orders import make_order_payload
 from marketplace_integrations.integrations.shopify.test_products import make_shopify_account
 from marketplace_integrations.integrations.shopify.webhooks import (
 	MAX_WEBHOOK_DELIVERY_ATTEMPTS,
@@ -17,6 +19,7 @@ from marketplace_integrations.integrations.shopify.webhooks import (
 	verify_shopify_hmac,
 )
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
+from marketplace_integrations.services.sales_order_sync_debounce import _run_debounced_sync
 
 EXECUTE_TARGET = "marketplace_integrations.integrations.shopify.client.ShopifyClient.execute"
 
@@ -814,7 +817,7 @@ class IntegrationTestHandleTopicRealOrderRouting(IntegrationTestCase):
 				order_gid="gid://shopify/Order/12345",
 			)
 
-		mocked_bump.assert_called_once_with(order.name)
+		mocked_bump.assert_called_once_with(order.name, trigger_source="Shopify Webhook")
 
 	def test_no_resolvable_account_does_not_bump_sync_debounce(self):
 		# #109 decision 5 edge case 2 (no resolvable account) must remain a
@@ -860,3 +863,122 @@ class IntegrationTestHandleTopicRealOrderRouting(IntegrationTestCase):
 			)
 
 		mocked_bump.assert_not_called()
+
+
+class IntegrationTestShopifyWebhookDebouncedSyncTriggerSourceEndToEnd(IntegrationTestCase):
+	"""#135 end-to-end: a real Shopify webhook delivery, through the real
+	debounce window, must produce a Marketplace Sync Log row correctly
+	attributed to "Shopify Webhook" rather than silently defaulting to
+	"Manual". Only ShopifyClient.execute() is mocked - import_order(),
+	_handle_topic(), bump_sync_debounce() and _run_debounced_sync() all run
+	for real, exercising the exact regression this issue fixes."""
+
+	EXECUTE_TARGET = "marketplace_integrations.integrations.shopify.client.ShopifyClient.execute"
+
+	def setUp(self):
+		self.suffix = frappe.generate_hash(length=8)
+		self.company = frappe.defaults.get_global_default("company")
+		self.price_list = frappe.get_all(
+			"Price List", filters={"selling": 1, "enabled": 1}, pluck="name", limit=1
+		)[0]
+		self.warehouse = frappe.get_all(
+			"Warehouse",
+			filters={"disabled": 0, "is_group": 0, "company": self.company},
+			pluck="name",
+			limit=1,
+		)[0]
+		self.item = frappe.get_doc(
+			{
+				"doctype": "Item",
+				"item_code": f"TEST-WEBHOOK-E2E-{self.suffix}",
+				"item_group": "Products",
+				"stock_uom": "Nos",
+				"is_stock_item": 0,
+			}
+		).insert()
+		self.connection = make_connection(f"Webhook E2E {self.suffix}")
+		self.account = make_shopify_account(
+			f"Webhook E2E Account {self.suffix}", connection=self.connection.name
+		)
+		self.account.db_set("erpnext_company", self.company, update_modified=False)
+		self.account.db_set("erpnext_selling_price_list", self.price_list, update_modified=False)
+		self.account.db_set("warehouse", self.warehouse, update_modified=False)
+		self.variant_gid = f"gid://shopify/ProductVariant/{self.suffix}"
+		frappe.get_doc(
+			{
+				"doctype": "Marketplace Product Mapping",
+				"marketplace_account": self.account.name,
+				"item": self.item.name,
+				"external_reference": self.variant_gid,
+				"external_variant_id": self.variant_gid,
+				"sales_uom": "Nos",
+			}
+		).insert()
+
+	def test_webhook_driven_debounced_sync_logs_shopify_webhook_trigger_source_and_submits(self):
+		order_gid = f"gid://shopify/Order/{self.suffix}"
+		# displayFinancialStatus="PAID" and refunds=[]: the fixture's default
+		# PARTIALLY_REFUNDED/refund-evidence shape is exactly what
+		# test_orders.py exercises elsewhere - this test only needs a plain,
+		# synchronizable order so sync_sales_order() doesn't hit an unrelated
+		# SyncBlocker. priceAfterAllDiscountsBeforeTaxesSet is added on the
+		# line item because _build_shopify_sales_order_lines() requires real
+		# transaction evidence (transaction_amount_missing=0), which the
+		# fixture's default line item doesn't include.
+		payload = make_order_payload(
+			order_gid,
+			displayFinancialStatus="PAID",
+			refunds=[],
+			processedAt="2026-09-27T10:00:05Z",
+		)
+		payload["lineItems"]["nodes"][0]["variant"]["id"] = self.variant_gid
+		payload["lineItems"]["nodes"][0]["priceAfterAllDiscountsBeforeTaxesSet"] = {
+			"shopMoney": {"amount": "40.00", "currencyCode": "EGP"}
+		}
+		webhook_id = f"webhook-e2e-{self.suffix}"
+
+		with patch(self.EXECUTE_TARGET, return_value={"order": payload}):
+			process_shopify_webhook(
+				self.connection.name,
+				"ORDERS_CREATE",
+				webhook_id,
+				self.connection.shop_domain,
+				order_gid=order_gid,
+			)
+
+		delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": webhook_id})
+		self.assertEqual(delivery.status, "Processed")
+		order = frappe.get_doc(
+			"Marketplace Order",
+			{"marketplace_account": self.account.name, "external_order_id": order_gid},
+		)
+		self.assertEqual(order.pending_sync_trigger_source, "Shopify Webhook")
+		self.assertIsNotNone(order.sync_debounce_until)
+
+		# Backdate the debounce window to simulate it already being due, then
+		# run the real (not mocked) debounced-sync job body.
+		frappe.db.set_value(
+			"Marketplace Order",
+			order.name,
+			"sync_debounce_until",
+			add_to_date(now_datetime(), seconds=-1),
+			update_modified=False,
+		)
+		expected_debounce_until = frappe.db.get_value(
+			"Marketplace Order", order.name, "sync_debounce_until"
+		)
+
+		_run_debounced_sync(order.name, expected_debounce_until)
+
+		order.reload()
+		self.assertIsNone(order.sync_debounce_until)
+		self.assertIsNone(order.pending_sync_trigger_source)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		self.assertEqual(sales_order.docstatus, 1)
+
+		log = frappe.get_doc(
+			"Marketplace Sync Log",
+			{"marketplace_order": order.name, "status": "Success"},
+		)
+		self.assertEqual(log.trigger_source, "Shopify Webhook")
