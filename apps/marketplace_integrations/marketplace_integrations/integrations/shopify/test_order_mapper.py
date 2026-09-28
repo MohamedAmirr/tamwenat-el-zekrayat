@@ -67,6 +67,83 @@ class UnitTestShopifyOrderMapper(UnitTestCase):
 		result = normalize_order(order)
 		self.assertIsNone(result["items"][0]["external_variant_id"])
 
+	def test_maps_customer_and_both_addresses(self):
+		shipping = {
+			"address1": "10 Main St",
+			"address2": "Apt 2",
+			"city": "Cairo",
+			"province": "Cairo",
+			"country": "Egypt",
+			"zip": "11511",
+			"latitude": 30.0444,
+			"longitude": 31.2357,
+			"formatted": ["10 Main St", "Apt 2", "Cairo", "Egypt"],
+		}
+		billing = {"address1": "Billing Rd", "formatted": ["Billing Rd"]}
+		order = self.order(
+			customer={
+				"id": "gid://shopify/Customer/7",
+				"firstName": "Ada",
+				"lastName": "Lovelace",
+				"defaultEmailAddress": {"emailAddress": "ada@example.com"},
+				"defaultPhoneNumber": {"phoneNumber": "+201000000000"},
+			},
+			shippingAddress=shipping,
+			billingAddress=billing,
+		)
+
+		result = normalize_order(order)
+
+		self.assertEqual(result["customer_external_id"], "gid://shopify/Customer/7")
+		self.assertEqual(result["customer_first_name"], "Ada")
+		self.assertEqual(result["customer_last_name"], "Lovelace")
+		self.assertEqual(result["customer_email"], "ada@example.com")
+		self.assertEqual(result["customer_phone_number"], "+201000000000")
+		self.assertEqual(result["customer_formatted_address"], "10 Main St, Apt 2, Cairo, Egypt")
+		self.assertEqual(result["customer_city"], "Cairo")
+		self.assertEqual(result["customer_latitude"], 30.0444)
+		self.assertEqual(result["customer_longitude"], 31.2357)
+		self.assertEqual(result["shipping_address"], shipping)
+		self.assertEqual(result["billing_address"], billing)
+
+	def test_missing_addresses_leave_customer_address_fields_blank(self):
+		result = normalize_order(self.order(customer={"id": "customer-1"}))
+
+		self.assertEqual(result["customer_formatted_address"], "")
+		self.assertIsNone(result["customer_city"])
+		self.assertIsNone(result["customer_latitude"])
+		self.assertIsNone(result["customer_longitude"])
+		self.assertIsNone(result["billing_address"])
+		self.assertIsNone(result["shipping_address"])
+
+	def test_billing_address_is_used_when_shipping_address_is_absent(self):
+		billing = {"city": "Alexandria", "latitude": 31.2, "longitude": 29.9, "formatted": ["Alexandria", "Egypt"]}
+		result = normalize_order(self.order(billingAddress=billing))
+
+		self.assertEqual(result["customer_formatted_address"], "Alexandria, Egypt")
+		self.assertEqual(result["customer_city"], "Alexandria")
+		self.assertEqual(result["customer_latitude"], 31.2)
+		self.assertEqual(result["customer_longitude"], 29.9)
+		self.assertEqual(result["billing_address"], billing)
+
+	def test_null_customer_and_missing_or_null_contact_fields_are_safe(self):
+		result = normalize_order(self.order(customer=None, shippingAddress=None, billingAddress=None))
+		for fieldname in (
+			"customer_external_id",
+			"customer_first_name",
+			"customer_last_name",
+			"customer_email",
+			"customer_phone_number",
+		):
+			self.assertIsNone(result[fieldname])
+
+		order = self.order(
+			customer={"defaultEmailAddress": None, "defaultPhoneNumber": None},
+		)
+		result = normalize_order(order)
+		self.assertIsNone(result["customer_email"])
+		self.assertIsNone(result["customer_phone_number"])
+
 	def test_transaction_amount_distinguishes_missing_from_real_zero(self):
 		order = self.order()
 		line = order["lineItems"]["nodes"][0]

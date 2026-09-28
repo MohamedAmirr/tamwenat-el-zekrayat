@@ -13,6 +13,7 @@ from marketplace_integrations.services.sales_order_sync import (
 	SyncBlocker,
 	_build_sales_order_lines,
 	_validate_platform_supported,
+	build_sales_order_snapshot,
 	get_current_sync_status,
 	sync_sales_order,
 )
@@ -133,6 +134,12 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		transaction_amount_missing=0,
 		create_mapping=True,
 		original_unit_price=None,
+		customer_email=None,
+		customer_first_name=None,
+		customer_last_name=None,
+		customer_phone_number=None,
+		shipping_address=None,
+		billing_address=None,
 	):
 		if variant_gid is _DEFAULT_VARIANT:
 			variant_gid = f"gid://shopify/ProductVariant/{frappe.generate_hash(length=12)}"
@@ -155,6 +162,12 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 				"processed_on": nowdate(),
 				"cancelled_at": cancelled_at,
 				"external_financial_status": financial_status,
+				"customer_email": customer_email,
+				"customer_first_name": customer_first_name,
+				"customer_last_name": customer_last_name,
+				"customer_phone_number": customer_phone_number,
+				"shipping_address": shipping_address,
+				"billing_address": billing_address,
 				"latest_payload": {"updatedAt": "2026-09-28T10:00:00Z"},
 				"items": [
 					{
@@ -273,6 +286,9 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(sales_order.grand_total, 999)
 		self.assertNotEqual(sales_order.grand_total, order.order_total)
 		self.assertFalse(frappe.db.get_value("Customer", self.account.erpnext_customer, "mobile_no"))
+		self.assertEqual(
+			frappe.db.get_value("Customer", self.account.erpnext_customer, "customer_type"), "Company"
+		)
 
 	def test_zero_value_line_remains_zero_and_is_not_price_list_filled(self):
 		"""Zero fulfilled_total_price (with a matching zero fulfilled_unit_price,
@@ -933,6 +949,345 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(sales_order.items[0].price_list_rate, 15)
 		self.assertEqual(sales_order.items[0].discount_percentage, 0)
 		self.assertEqual(sales_order.items[0].amount, 30)
+
+	def test_shopify_blank_email_uses_generic_account_customer(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account)
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		account.reload()
+		self.assertEqual(frappe.db.get_value("Sales Order", result["sales_order"], "customer"), account.erpnext_customer)
+		self.assertEqual(frappe.db.get_value("Customer", account.erpnext_customer, "customer_type"), "Company")
+
+	def test_shopify_first_sync_creates_individual_customer_and_repeat_reuses_it(self):
+		account = self._make_shopify_account()
+		email = f"buyer-{self.suffix}@example.test"
+		order, _mapping = self._make_shopify_order(
+			account,
+			customer_email=email,
+			customer_first_name="  Casey ",
+			customer_last_name=" Buyer  ",
+			customer_phone_number="+20123456789",
+		)
+
+		first = sync_sales_order(order.name)
+		self.assertTrue(first["ok"], first.get("error"))
+		first_customer = frappe.db.get_value("Sales Order", first["sales_order"], "customer")
+		customer = frappe.get_doc("Customer", first_customer)
+		self.assertEqual(customer.customer_name, "Casey Buyer")
+		self.assertEqual(customer.customer_type, "Individual")
+		self.assertEqual(customer.email_id, email)
+		self.assertEqual(customer.mobile_no, "+20123456789")
+
+		second = sync_sales_order(order.name)
+		self.assertTrue(second["ok"], second.get("error"))
+		self.assertEqual(frappe.db.get_value("Sales Order", second["sales_order"], "customer"), first_customer)
+		self.assertEqual(frappe.db.count("Customer", {"email_id": email}), 1)
+		self.assertFalse(account.reload().erpnext_customer)
+
+	def test_shopify_orders_with_same_email_share_customer(self):
+		account = self._make_shopify_account()
+		email = f"shared-{self.suffix}@example.test"
+		orders = [
+			self._make_shopify_order(account, customer_email=email, customer_first_name="Buyer")[0]
+			for _ in range(2)
+		]
+		customers = []
+		for order in orders:
+			result = sync_sales_order(order.name)
+			self.assertTrue(result["ok"], result.get("error"))
+			customers.append(frappe.db.get_value("Sales Order", result["sales_order"], "customer"))
+
+		self.assertEqual(customers[0], customers[1])
+		self.assertEqual(frappe.db.count("Customer", {"email_id": email}), 1)
+
+	def test_shopify_customer_name_falls_back_to_email(self):
+		account = self._make_shopify_account()
+		email = f"nameless-{self.suffix}@example.test"
+		order, _mapping = self._make_shopify_order(account, customer_email=email)
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		customer = frappe.get_doc("Customer", frappe.db.get_value("Sales Order", result["sales_order"], "customer"))
+		self.assertEqual(customer.customer_name, email)
+		self.assertEqual(customer.customer_type, "Individual")
+
+	def test_shopify_snapshot_default_uses_buyer_customer(self):
+		# build_sales_order_snapshot()'s no-customer-passed default is the
+		# read-only status-check path: it only looks up a Customer already
+		# resolved by a prior real sync, so this syncs once first.
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(
+			account, customer_email=f"snapshot-{self.suffix}@example.test"
+		)
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+
+		snapshot = build_sales_order_snapshot(order, account=account)
+
+		self.assertEqual(
+			frappe.db.get_value("Customer", snapshot["customer"], "email_id"), order.customer_email
+		)
+
+	def test_shopify_status_check_never_synced_creates_no_customer_or_address(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(
+			account,
+			customer_email=f"status-no-sync-{self.suffix}@example.test",
+			shipping_address={"address1": "1 Untouched Street", "city": "Cairo", "country": "Egypt"},
+		)
+
+		customer_count_before = frappe.db.count("Customer")
+		address_count_before = frappe.db.count("Address")
+
+		get_current_sync_status(order.name)
+
+		self.assertEqual(frappe.db.count("Customer"), customer_count_before)
+		self.assertEqual(frappe.db.count("Address"), address_count_before)
+
+	def test_shopify_status_check_after_sync_with_new_email_creates_no_customer_or_address(self):
+		# Once an order has been synced, get_current_sync_status() recomputes
+		# a fresh snapshot on every form load to detect drift. If the order's
+		# customer_email has since changed to one never resolved before (e.g.
+		# a webhook reprocessing the order), the status check must still be
+		# read-only: it must not insert a new buyer Customer or Address just
+		# because the form was opened.
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(
+			account,
+			customer_email=f"status-old-{self.suffix}@example.test",
+			shipping_address={"address1": "1 Original Street", "city": "Cairo", "country": "Egypt"},
+		)
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+
+		order_doc = frappe.get_doc("Marketplace Order", order.name)
+		order_doc.customer_email = f"status-new-{self.suffix}@example.test"
+		order_doc.save(ignore_permissions=True)
+
+		customer_count_before = frappe.db.count("Customer")
+		address_count_before = frappe.db.count("Address")
+
+		status = get_current_sync_status(order.name)
+
+		self.assertEqual(frappe.db.count("Customer"), customer_count_before)
+		self.assertEqual(frappe.db.count("Address"), address_count_before)
+		self.assertEqual(status, "Modified After Sync")
+
+	def test_shopify_shipping_address_is_created_and_linked_to_buyer(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(
+			account,
+			customer_email=f"shipping-{self.suffix}@example.test",
+			shipping_address={
+				"address1": "12 Market Street",
+				"address2": "Unit 4",
+				"city": "Cairo",
+				"country": "Egypt",
+				"zip": "11511",
+			},
+			billing_address={"address1": "Billing must not win", "country": "Egypt"},
+		)
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+		address = frappe.get_doc("Address", sales_order.shipping_address_name)
+		self.assertTrue(address.address_title.startswith("Shopify Marketplace Address-"))
+		self.assertEqual(address.address_type, "Shipping")
+		self.assertEqual(address.address_line1, "12 Market Street")
+		self.assertEqual(address.address_line2, "Unit 4")
+		self.assertEqual(address.city, "Cairo")
+		self.assertEqual(address.country, "Egypt")
+		self.assertEqual(address.pincode, "11511")
+		self.assertTrue(
+			any(link.link_doctype == "Customer" and link.link_name == sales_order.customer for link in address.links)
+		)
+		self.assertTrue(address.is_primary_address)
+
+	def test_shopify_billing_fallback_sets_customer_address_and_type(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(
+			account,
+			customer_email=f"billing-{self.suffix}@example.test",
+			billing_address={"address1": "8 Billing Road", "city": "Giza", "country": "Egypt"},
+		)
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+		self.assertTrue(sales_order.shipping_address_name)
+		self.assertEqual(sales_order.shipping_address_name, sales_order.customer_address)
+		self.assertEqual(frappe.db.get_value("Address", sales_order.customer_address, "address_type"), "Billing")
+
+	def test_shopify_resync_updates_only_dedicated_address_without_duplicate(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(
+			account,
+			customer_email=f"address-update-{self.suffix}@example.test",
+			shipping_address={"address1": "Original Street", "city": "Cairo", "country": "Egypt"},
+		)
+		first = sync_sales_order(order.name)
+		self.assertTrue(first["ok"], first.get("error"))
+		address_name = frappe.db.get_value("Sales Order", first["sales_order"], "shipping_address_name")
+
+		order_doc = frappe.get_doc("Marketplace Order", order.name)
+		order_doc.shipping_address = None
+		order_doc.billing_address = {
+			"address1": "Updated Billing Road",
+			"city": "Giza",
+			"country": "Egypt",
+		}
+		order_doc.save(ignore_permissions=True)
+		second = sync_sales_order(order.name)
+
+		self.assertTrue(second["ok"], second.get("error"))
+		self.assertEqual(second["sales_order"], first["sales_order"])
+		self.assertTrue(second["updated"])
+		address = frappe.get_doc("Address", address_name)
+		self.assertEqual(address.address_line1, "Updated Billing Road")
+		self.assertEqual(address.address_type, "Billing")
+		sales_order = frappe.get_doc("Sales Order", second["sales_order"])
+		self.assertEqual(sales_order.shipping_address_name, address_name)
+		self.assertEqual(sales_order.customer_address, address_name)
+		buyer_address_names = frappe.get_all(
+			"Dynamic Link",
+			filters={
+				"parenttype": "Address",
+				"parentfield": "links",
+				"link_doctype": "Customer",
+				"link_name": sales_order.customer,
+			},
+			pluck="parent",
+		)
+		dedicated_addresses = [
+			name
+			for name in buyer_address_names
+			if frappe.db.get_value("Address", name, "address_title").startswith(
+				"Shopify Marketplace Address-"
+			)
+		]
+		self.assertEqual(dedicated_addresses, [address_name])
+		third = sync_sales_order(order.name)
+		self.assertTrue(third["ok"], third.get("error"))
+		self.assertFalse(third["updated"])
+
+	def test_shopify_customers_get_distinct_idempotent_dedicated_addresses(self):
+		account = self._make_shopify_account()
+		orders = [
+			self._make_shopify_order(
+				account,
+				customer_email=f"distinct-address-{index}-{self.suffix}@example.test",
+				shipping_address={
+					"address1": f"{index} Marketplace Road",
+					"city": "Cairo",
+					"country": "Egypt",
+				},
+			)[0]
+			for index in (1, 2)
+		]
+		first_pass = [sync_sales_order(order.name) for order in orders]
+		self.assertTrue(all(result["ok"] for result in first_pass), first_pass)
+		addresses = [
+			frappe.db.get_value("Sales Order", result["sales_order"], "shipping_address_name")
+			for result in first_pass
+		]
+		self.assertTrue(all(addresses))
+		self.assertNotEqual(addresses[0], addresses[1])
+		titles = [frappe.db.get_value("Address", name, "address_title") for name in addresses]
+		self.assertTrue(all(title.startswith("Shopify Marketplace Address-") for title in titles))
+		self.assertNotEqual(titles[0], titles[1])
+
+		for order, result, address_name in zip(orders, first_pass, addresses, strict=True):
+			customer = frappe.db.get_value("Sales Order", result["sales_order"], "customer")
+			self.assertTrue(
+				frappe.db.exists(
+					"Dynamic Link",
+					{
+						"parent": address_name,
+						"parenttype": "Address",
+						"parentfield": "links",
+						"link_doctype": "Customer",
+						"link_name": customer,
+					},
+				)
+			)
+			reprocessed = sync_sales_order(order.name)
+			self.assertTrue(reprocessed["ok"], reprocessed.get("error"))
+			self.assertEqual(reprocessed["sales_order"], result["sales_order"])
+			self.assertFalse(reprocessed["updated"])
+			self.assertEqual(
+				frappe.db.get_value("Sales Order", reprocessed["sales_order"], "shipping_address_name"),
+				address_name,
+			)
+
+	def test_shopify_missing_address_data_syncs_with_blank_address_fields(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(
+			account, customer_email=f"no-address-{self.suffix}@example.test"
+		)
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+		self.assertFalse(sales_order.shipping_address_name)
+		self.assertFalse(sales_order.customer_address)
+
+	def test_shopify_unknown_country_defaults_to_egypt_without_blocking_sync(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(
+			account,
+			customer_email=f"unknown-country-{self.suffix}@example.test",
+			shipping_address={"address1": "12 Quiet Road", "city": "Cairo", "country": "Not a Country"},
+		)
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+		self.assertTrue(sales_order.shipping_address_name)
+		self.assertEqual(
+			frappe.db.get_value("Address", sales_order.shipping_address_name, "country"), "Egypt"
+		)
+
+	def test_shopify_does_not_repurpose_unrelated_customer_address(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(
+			account,
+			customer_email=f"preserve-address-{self.suffix}@example.test",
+			shipping_address={"address1": "Marketplace Road", "city": "Cairo", "country": "Egypt"},
+		)
+		customer = frappe.get_doc(
+			{
+				"doctype": "Customer",
+				"customer_name": f"Existing Buyer {self.suffix}",
+				"customer_type": "Individual",
+				"email_id": order.customer_email,
+			}
+		).insert()
+		unrelated = frappe.get_doc(
+			{
+				"doctype": "Address",
+				"address_title": f"User Address {self.suffix}",
+				"address_type": "Billing",
+				"address_line1": "User-maintained Street",
+				"city": "Cairo",
+				"links": [{"link_doctype": "Customer", "link_name": customer.name}],
+			}
+		).insert()
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(frappe.db.get_value("Address", unrelated.name, "address_line1"), "User-maintained Street")
+		self.assertNotEqual(
+			frappe.db.get_value("Sales Order", result["sales_order"], "shipping_address_name"), unrelated.name
+		)
 
 	def test_blank_platform_is_treated_as_talabat_not_blocked(self):
 		"""A pre-#108 order whose platform backfill has not run yet must not

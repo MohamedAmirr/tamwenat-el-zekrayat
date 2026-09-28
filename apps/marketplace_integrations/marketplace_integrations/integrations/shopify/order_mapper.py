@@ -24,6 +24,12 @@ def normalize_order(order):
 	if not order_gid:
 		frappe.throw(_("Shopify order payload is missing id."))
 	_validate_evidence_pages(order)
+	customer = order.get("customer") or {}
+	shipping_address = order.get("shippingAddress")
+	billing_address = order.get("billingAddress")
+	address = shipping_address or billing_address or {}
+	default_email = customer.get("defaultEmailAddress") or {}
+	default_phone = customer.get("defaultPhoneNumber") or {}
 
 	return {
 		"external_order_id": order_gid,
@@ -49,17 +55,17 @@ def normalize_order(order):
 		"presentment_currency": order.get("presentmentCurrencyCode"),
 		"payment_transactions": order.get("transactions"),
 		"refunds": order.get("refunds"),
-		"customer_external_id": None,
-		"customer_first_name": None,
-		"customer_last_name": None,
-		"customer_phone_number": None,
-		"customer_email": None,
-		"customer_formatted_address": None,
-		"customer_city": None,
-		"customer_latitude": None,
-		"customer_longitude": None,
-		"billing_address": None,
-		"shipping_address": None,
+		"customer_external_id": customer.get("id"),
+		"customer_first_name": customer.get("firstName"),
+		"customer_last_name": customer.get("lastName"),
+		"customer_phone_number": default_phone.get("phoneNumber"),
+		"customer_email": default_email.get("emailAddress"),
+		"customer_formatted_address": ", ".join(address.get("formatted") or []),
+		"customer_city": address.get("city"),
+		"customer_latitude": address.get("latitude"),
+		"customer_longitude": address.get("longitude"),
+		"billing_address": billing_address,
+		"shipping_address": shipping_address,
 		"items": [_normalize_item(item) for item in _nodes(order, "lineItems")],
 		"latest_payload": order,
 	}
