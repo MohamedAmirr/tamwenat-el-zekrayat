@@ -191,6 +191,7 @@ scheduler_events = {
 	"daily": [
 		"marketplace_integrations.integrations.shopify.inventory_sync.reconcile_all_accounts",
 		"marketplace_integrations.integrations.shopify.orders.reconcile_all_accounts_orders",
+		"marketplace_integrations.marketplace_integrations.doctype.marketplace_sync_log.marketplace_sync_log.clear_old_logs",
 	],
 }
 
