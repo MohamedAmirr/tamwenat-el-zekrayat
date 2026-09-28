@@ -2,6 +2,7 @@
 # For license information, please see license.txt
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
@@ -11,9 +12,12 @@ from marketplace_integrations.services.marketplace_orders import upsert_marketpl
 from marketplace_integrations.services.sales_order_sync import (
 	SyncBlocker,
 	_build_sales_order_lines,
+	_validate_platform_supported,
 	get_current_sync_status,
 	sync_sales_order,
 )
+
+_DEFAULT_VARIANT = object()
 
 
 class IntegrationTestSalesOrderSync(IntegrationTestCase):
@@ -88,6 +92,87 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 				"sales_uom": "Nos",
 			}
 		).insert()
+
+	def _make_shopify_account(self):
+		connection = frappe.get_doc(
+			{
+				"doctype": "Shopify Connection",
+				"connection_name": f"Shopify SO Sync {self.suffix}",
+				"shop_domain": f"shop-so-{self.suffix}.myshopify.com",
+				"client_id": f"shopify-so-client-{self.suffix}",
+				"client_secret": "test-secret",
+			}
+		).insert()
+		with patch(
+			"marketplace_integrations.marketplace_integrations.doctype.marketplace_account.marketplace_account.fetch_shop_and_active_locations",
+			return_value={"shop_id": f"gid://shopify/Shop/{self.suffix}", "active_locations": []},
+		):
+			account = frappe.get_doc(
+				{
+					"doctype": "Marketplace Account",
+					"account_name": f"Shopify SO Sync Account {self.suffix}",
+					"platform": "Shopify",
+					"external_account_id": f"gid://shopify/Shop/{self.suffix}",
+					"connection": connection.name,
+					"erpnext_company": self.company,
+					"erpnext_selling_price_list": self.price_list,
+					"warehouse": self.warehouse,
+				}
+			).insert()
+		return account
+
+	def _make_shopify_order(
+		self,
+		account,
+		*,
+		transaction_amount=36.0,
+		current_quantity=2,
+		variant_gid=_DEFAULT_VARIANT,
+		financial_status="PAID",
+		cancelled_at=None,
+		transaction_amount_missing=0,
+		create_mapping=True,
+		original_unit_price=None,
+	):
+		if variant_gid is _DEFAULT_VARIANT:
+			variant_gid = f"gid://shopify/ProductVariant/{frappe.generate_hash(length=12)}"
+		mapping = None
+		if create_mapping:
+			mapping = frappe.get_doc(
+				{
+					"doctype": "Marketplace Product Mapping",
+					"marketplace_account": account.name,
+					"item": self.item.name,
+					"external_reference": variant_gid,
+					"external_variant_id": variant_gid,
+					"sales_uom": "Nos",
+				}
+			).insert()
+		order = upsert_marketplace_order(
+			account.name,
+			{
+				"external_order_id": f"gid://shopify/Order/{self.suffix}-{frappe.generate_hash(length=4)}",
+				"processed_on": nowdate(),
+				"cancelled_at": cancelled_at,
+				"external_financial_status": financial_status,
+				"latest_payload": {"updatedAt": "2026-09-28T10:00:00Z"},
+				"items": [
+					{
+						"external_item_id": f"gid://shopify/LineItem/{self.suffix}",
+						"external_variant_id": variant_gid,
+						"current_quantity": current_quantity,
+						"transaction_amount": transaction_amount,
+						"transaction_amount_missing": transaction_amount_missing,
+						**(
+							{"original_unit_price": original_unit_price}
+							if original_unit_price is not None
+							else {}
+						),
+					}
+				],
+			},
+		)
+		return order, mapping
 
 	def _make_pricing_rule(self):
 		return frappe.get_doc(
@@ -700,17 +785,13 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertIn("nonzero unit price", result["error"].lower())
 		self.assertEqual(order.erpnext_sync_status, "Sync Error")
 
-	def test_non_talabat_platform_blocks_sync_without_creating_a_sales_order(self):
-		"""#108: ERPNext Sales Order synchronization does not exist yet for
-		any platform other than Talabat (#110 owns building it). A stray
-		sync attempt on a Shopify order must be rejected cleanly rather than
-		attempting a Talabat-shaped line build against data that was never
-		normalized that way. Decision 7 also forbids persisting a misleading
+	def test_unsupported_platform_blocks_sync_without_creating_a_sales_order(self):
+		"""Unsupported platforms are rejected without persisting a misleading
 		"Sync Error" status for an order that was never eligible for sync in
 		the first place - this must be a pure no-op on the stored document:
 		no status change, no save (asserted via `modified` being unchanged)."""
 		order = self._make_order()
-		frappe.db.set_value("Marketplace Order", order.name, "platform", "Shopify", update_modified=False)
+		frappe.db.set_value("Marketplace Order", order.name, "platform", "Amazon", update_modified=False)
 		frappe.clear_document_cache("Marketplace Order", order.name)
 		order.reload()
 		original_status = order.erpnext_sync_status
@@ -720,11 +801,138 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.reload()
 
 		self.assertFalse(result["ok"])
-		self.assertIn("Talabat", result["error"])
+		self.assertIn("Talabat and Shopify", result["error"])
 		self.assertFalse(order.erpnext_sales_order)
 		self.assertEqual(order.erpnext_sync_status, original_status)
 		self.assertNotEqual(order.erpnext_sync_status, "Sync Error")
 		self.assertEqual(order.modified, original_modified)
+
+	def test_shopify_platform_passes_platform_gate(self):
+		order = self._make_order()
+		order.platform = "Shopify"
+		_validate_platform_supported(order)
+
+	def test_shopify_cancelled_or_unpaid_orders_are_blocked(self):
+		account = self._make_shopify_account()
+		for options in (
+			{"cancelled_at": nowdate()},
+			{"financial_status": "PENDING"},
+		):
+			with self.subTest(options=options):
+				order, _mapping = self._make_shopify_order(account, **options)
+				result = sync_sales_order(order.name)
+				self.assertFalse(result["ok"])
+				self.assertEqual(result["status"], "Sync Error")
+				self.assertFalse(order.erpnext_sales_order)
+
+	def test_shopify_unmapped_null_variant_and_fully_refunded_lines_block(self):
+		account = self._make_shopify_account()
+		cases = [
+			{"variant_gid": None, "create_mapping": False},
+			{"variant_gid": f"gid://shopify/ProductVariant/unmapped-{self.suffix}", "create_mapping": False},
+			{"current_quantity": 0},
+		]
+		for options in cases:
+			with self.subTest(options=options):
+				order, _mapping = self._make_shopify_order(account, **options)
+				if options.get("variant_gid") is None:
+					order.items[0].external_variant_id = None
+					order.save()
+				result = sync_sales_order(order.name)
+				self.assertFalse(result["ok"])
+				self.assertFalse(order.erpnext_sales_order)
+
+	def test_missing_transaction_amount_blocks_but_real_zero_is_free(self):
+		account = self._make_shopify_account()
+		missing, _mapping = self._make_shopify_order(
+			account, transaction_amount=None, transaction_amount_missing=1
+		)
+		missing.reload()
+		self.assertEqual(missing.items[0].transaction_amount, 0)
+		self.assertTrue(missing.items[0].transaction_amount_missing)
+		result = sync_sales_order(missing.name)
+		self.assertFalse(result["ok"])
+		self.assertIn("no transaction amount", result["error"].lower())
+
+		free, _mapping = self._make_shopify_order(account, transaction_amount=0)
+		result = sync_sales_order(free.name)
+		self.assertTrue(result["ok"], result.get("error"))
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+		self.assertEqual(sales_order.items[0].rate, 0)
+		self.assertTrue(sales_order.items[0].is_free_item)
+
+	def test_shopify_reprocessing_reuses_sales_order_and_preserves_transaction_rate(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, transaction_amount=36, current_quantity=2)
+		first = sync_sales_order(order.name)
+		self.assertTrue(first["ok"], first.get("error"))
+		so_name = first["sales_order"]
+		so = frappe.get_doc("Sales Order", so_name)
+		self.assertEqual(so.items[0].rate, 18)
+
+		second = sync_sales_order(order.name)
+		self.assertTrue(second["ok"], second.get("error"))
+		self.assertEqual(second["sales_order"], so_name)
+		self.assertFalse(second["updated"])
+
+		item_price = frappe.get_doc(
+			"Item Price", {"item_code": self.item.name, "price_list": self.price_list}
+		)
+		item_price.price_list_rate = 99
+		item_price.save()
+		third = sync_sales_order(order.name)
+		self.assertTrue(third["ok"], third.get("error"))
+		self.assertEqual(frappe.db.get_value("Sales Order Item", {"parent": so_name}, "rate"), 18)
+		self.assertFalse(third["updated"])
+
+		order.reload()
+		order.items[0].transaction_amount = 40
+		order.save()
+		fourth = sync_sales_order(order.name)
+		self.assertTrue(fourth["ok"], fourth.get("error"))
+		self.assertEqual(fourth["sales_order"], so_name)
+		self.assertTrue(fourth["updated"])
+
+	def test_shopify_sync_creates_no_accounting_or_stock_documents(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account)
+		doctypes = (
+			"Sales Invoice",
+			"Payment Entry",
+			"GL Entry",
+			"Delivery Note",
+			"Stock Entry",
+		)
+		before = {doctype: frappe.db.count(doctype) for doctype in doctypes}
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual({doctype: frappe.db.count(doctype) for doctype in doctypes}, before)
+
+	def test_shopify_discounted_transaction_amount_flows_through_without_further_discount_math(self):
+		"""Shopify's `transaction_amount` arrives from
+		`priceAfterAllDiscountsBeforeTaxesSet` already discount-adjusted
+		(see `integrations/shopify/order_mapper.py`), unlike Talabat, which
+		computes its own discount logic on this codebase's side. A
+		`transaction_amount` lower than `original_unit_price *
+		current_quantity` (20 * 2 = 40 here, vs. a 30 transaction_amount - a
+		25% discount already baked in by Shopify) must flow straight through
+		to `effective_rate`/the Sales Order Item's rate as-is: no further
+		discount arithmetic is ever applied on this side."""
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(
+			account, original_unit_price=20, current_quantity=2, transaction_amount=30
+		)
+
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+
+		# effective_rate = transaction_amount / current_quantity = 30 / 2 = 15,
+		# NOT original_unit_price (20) and not a further-discounted value.
+		self.assertEqual(sales_order.items[0].rate, 15)
+		self.assertEqual(sales_order.items[0].price_list_rate, 15)
+		self.assertEqual(sales_order.items[0].discount_percentage, 0)
+		self.assertEqual(sales_order.items[0].amount, 30)
 
 	def test_blank_platform_is_treated_as_talabat_not_blocked(self):
 		"""A pre-#108 order whose platform backfill has not run yet must not

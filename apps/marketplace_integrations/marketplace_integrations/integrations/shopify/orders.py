@@ -30,6 +30,7 @@ query ShopifyOrder($id: ID!, $lineItemsFirst: Int!, $transactionsFirst: Int!, $r
     id
     name
     createdAt
+    processedAt
     updatedAt
     cancelledAt
     cancelReason
@@ -63,6 +64,7 @@ query ShopifyOrder($id: ID!, $lineItemsFirst: Int!, $transactionsFirst: Int!, $r
       nodes {
         id name sku quantity currentQuantity variant { id }
         originalUnitPriceSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }
+        priceAfterAllDiscountsBeforeTaxesSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }
         discountAllocations { allocatedAmountSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } } }
         taxLines { title rate priceSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } } }
       }

@@ -60,7 +60,7 @@ def _resolve(marketplace_account, external_reference):
         frappe.qb.from_(MPM)
         .join(MA)
         .on(MA.name == MPM.marketplace_account)
-        .select(MPM.name, MPM.item)
+        .select(MPM.name, MPM.item, MPM.sales_uom)
         .where(MPM.mapping_identity_key == key)
         .where(MPM.enabled == 1)
         .where(MA.enabled == 1)
@@ -113,4 +113,8 @@ def resolve_mapping_and_item(marketplace_account, external_reference):
     resolved = _resolve(marketplace_account, external_reference)
     if not resolved:
         return None
-    return {"mapping_name": resolved["name"], "item": resolved["item"]}
+    return {
+        "mapping_name": resolved["name"],
+        "item": resolved["item"],
+        "sales_uom": resolved.get("sales_uom"),
+    }

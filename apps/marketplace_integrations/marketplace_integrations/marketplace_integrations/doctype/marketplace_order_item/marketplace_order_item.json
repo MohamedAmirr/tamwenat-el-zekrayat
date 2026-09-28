@@ -28,6 +28,8 @@
   "fulfilled_total_price_missing",
   "current_quantity",
   "net_amount",
+  "transaction_amount",
+  "transaction_amount_missing",
   "container_deposit",
   "promotions"
  ],
@@ -55,6 +57,8 @@
   {"description": "Set when Talabat's item.pricing.total_price was absent/null in the raw payload. A Float column cannot itself store NULL (it silently coerces to 0.0), so this flag is what actually distinguishes a genuinely missing fulfilled total from a real zero-value line - never derive that distinction from fulfilled_total_price alone.", "fieldname": "fulfilled_total_price_missing", "fieldtype": "Check", "label": "Fulfilled Total Price Missing", "read_only": 1},
   {"fieldname": "current_quantity", "fieldtype": "Float", "label": "Current Quantity", "read_only": 1},
   {"fieldname": "net_amount", "fieldtype": "Float", "label": "Net Amount", "read_only": 1},
+  {"fieldname": "transaction_amount", "fieldtype": "Float", "ignore_xss_filter": 1, "label": "Transaction Amount", "read_only": 1},
+  {"description": "Set when Shopify's priceAfterAllDiscountsBeforeTaxesSet.shopMoney.amount was absent or null before the Float field's database coercion.", "fieldname": "transaction_amount_missing", "fieldtype": "Check", "label": "Transaction Amount Missing", "read_only": 1},
   {"fieldname": "container_deposit", "fieldtype": "Float", "label": "Container Deposit", "read_only": 1},
   {"description": "Full Talabat item.promotion array (name, type, discount_amount, sponsorships[]), preserved without interpretation.", "fieldname": "promotions", "fieldtype": "JSON", "ignore_xss_filter": 1, "label": "Promotions", "read_only": 1}
  ],
