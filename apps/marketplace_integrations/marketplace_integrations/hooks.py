@@ -187,6 +187,9 @@ scheduler_events = {
 		SHOPIFY_INVENTORY_SWEEP_CRON: [
 			"marketplace_integrations.integrations.shopify.inventory_sync.sweep_changed_bins",
 		],
+		"* * * * *": [
+			"marketplace_integrations.services.sales_order_sync_debounce.sweep_due_sales_order_syncs",
+		],
 	},
 	"daily": [
 		"marketplace_integrations.integrations.shopify.inventory_sync.reconcile_all_accounts",

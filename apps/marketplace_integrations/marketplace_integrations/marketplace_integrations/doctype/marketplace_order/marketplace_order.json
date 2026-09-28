@@ -76,6 +76,7 @@
   "last_erpnext_sync_on",
   "last_synced_hash",
   "last_sync_error",
+  "sync_debounce_until",
   "latest_payload"
  ],
  "fields": [
@@ -149,6 +150,7 @@
   {"fieldname": "last_erpnext_sync_on", "fieldtype": "Datetime", "label": "Last ERPNext Sync On", "read_only": 1},
   {"fieldname": "last_synced_hash", "fieldtype": "Data", "hidden": 1, "label": "Last Synced Hash", "length": 64, "read_only": 1},
   {"fieldname": "last_sync_error", "fieldtype": "Small Text", "label": "Last Sync Error", "read_only": 1},
+  {"description": "Internal debounce state (#132): when set and due, the next scheduled sweep enqueues a Sales Order sync for this order. Set/cleared only by services/sales_order_sync_debounce.py - never edited directly.", "fieldname": "sync_debounce_until", "fieldtype": "Datetime", "hidden": 1, "label": "Sync Debounce Until", "read_only": 1},
   {"fieldname": "latest_payload", "fieldtype": "JSON", "ignore_xss_filter": 1, "label": "Latest Platform Payload", "read_only": 1}
  ],
  "index_web_pages_for_search": 1,
