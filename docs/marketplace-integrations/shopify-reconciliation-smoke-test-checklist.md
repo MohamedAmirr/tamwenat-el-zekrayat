@@ -1,12 +1,15 @@
 # Shopify Reconciliation Dashboard — Production Smoke-Test Checklist (#142)
 
 Run this against a real (non-production-data) environment after deploying #139's
-Workspace/Number Cards/Page, to confirm each dashboard section surfaces its
-corresponding failure state end-to-end. Automated coverage for the underlying
-queries lives in `services/test_shopify_reconciliation_dashboard_fixtures.py`
-(one test per state below) — this checklist is the manual, whole-stack confirmation
-that the Desk UI itself renders correctly, which an integration test against the ORM
-doesn't prove.
+Workspace, Number Cards, and Script Reports, to confirm each dashboard section
+surfaces its corresponding failure state end-to-end. Sections 5 and 6 were
+originally a hand-built custom Page; they now ship as the "Shopify Order Import
+Failures" and "Shopify Refund Evidence Gaps" native Script Reports instead.
+Automated coverage for the underlying queries lives in
+`services/test_shopify_reconciliation_dashboard_fixtures.py` (one test per state
+below) and each report's own `test_*.py` — this checklist is the manual,
+whole-stack confirmation that the Desk UI itself renders correctly, which an
+integration test against the ORM doesn't prove.
 
 For each state: create the fixture, refresh the dashboard, confirm it appears, then
 delete/reset the fixture.
@@ -50,35 +53,35 @@ delete/reset the fixture.
 - [ ] From the click-through list, open the order and use its existing resync retry
       button (#130) to confirm the remediation path still works from here.
 
-## 5. Order Import failures (custom Page, Section 4)
+## 5. Order Import failures (Shopify Order Import Failures report, Section 4)
 
 - [ ] Trigger a Shopify order import that will fail (e.g. a test account whose
       Shopify Connection has an intentionally revoked/invalid token, or a
       deliberately malformed order id).
 - [ ] Confirm a new `Marketplace Sync Log` row appears with `sync_type = "Order
       Import"` and `status = "Error"`.
-- [ ] Open the **Shopify Reconciliation Dashboard** page — confirm the failure
-      appears in the "Recent Order Import Failures" table, most recent first, with a
-      working link to the log document.
+- [ ] Open the **Shopify Order Import Failures** report (via the Workspace
+      shortcut, or Report List) — confirm the failure appears, most recent
+      first, with a working link to the log document.
 - [ ] Confirm the SAME failure was also written to the Error Log
       (`frappe.log_error()`) — both must exist, not just one.
 
-## 6. Refund evidence gaps (custom Page, Section 6)
+## 6. Refund evidence gaps (Shopify Refund Evidence Gaps report, Section 6)
 
 - [ ] On a test/sandbox Shopify store, issue a refund on a test order so its
       `displayFinancialStatus` becomes `REFUNDED` or `PARTIALLY_REFUNDED`.
 - [ ] Before the order is ever re-imported/re-synced, confirm its `Marketplace
       Order.refunds` field is still empty (`NULL`/`''`/`'[]'`) and that it appears in
-      the dashboard's "Refund Evidence Gaps" table.
+      the **Shopify Refund Evidence Gaps** report.
 - [ ] Re-import the order (manual order import, or wait for the next
       webhook/reconciliation pass) so `refunds` gets populated.
-- [ ] Confirm the order now DISAPPEARS from the "Refund Evidence Gaps" table, and
-      that the existing refund Notification (#136) fired once for this transition.
+- [ ] Confirm the order now DISAPPEARS from the report, and that the existing
+      refund Notification (#136) fired once for this transition.
 
 ## Sign-off
 
 - [ ] All 6 states above were verified end-to-end in this environment.
-- [ ] The Workspace and Page are only visible to System Manager users (confirm by
-      checking as a non-System-Manager test user that neither the workspace nor its
-      cards/page are reachable).
+- [ ] The Workspace and both Script Reports are only visible to System Manager
+      users (confirm by checking as a non-System-Manager test user that neither
+      the workspace nor its cards/reports are reachable).
 - [ ] No fixture data created for this checklist was left behind in the environment.

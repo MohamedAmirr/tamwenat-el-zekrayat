@@ -2,7 +2,7 @@
 # For license information, please see license.txt
 
 """#142: one test per dashboard failure state, proving each surfaces correctly
-in its corresponding Number Card filter / Page query.
+in its corresponding Number Card filter / Script Report query.
 
 Sections 2, 3, 5 are plain Number Cards (fixtures/number_card.json) - Frappe's
 own Number Card widget evaluates `filters_json` via `frappe.get_list()`, so
@@ -11,9 +11,11 @@ Number Card fixture declares" is the correct test boundary here, without
 reimplementing Frappe's Number Card rendering. Sections 1's cache and 4/6's
 live queries are exercised directly via their own functions, already unit
 tested in integrations/shopify/test_products.py, integrations/shopify/
-test_orders.py and services/test_shopify_reconciliation.py - referenced here
-again only to keep all 6 states enumerated in one place, per #142's
-acceptance criteria."""
+test_orders.py, services/test_shopify_reconciliation.py, and each Script
+Report's own test_*.py (marketplace_integrations/report/
+shopify_order_import_failures/, .../shopify_refund_evidence_gaps/) -
+referenced here again only to keep all 6 states enumerated in one place, per
+#142's acceptance criteria."""
 
 import json
 
@@ -54,9 +56,7 @@ class IntegrationTestDashboardFailureStatesSurfaceCorrectly(IntegrationTestCase)
 	def tearDown(self):
 		frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": self.account.name})
 		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
-		frappe.delete_doc(
-			"Shopify Connection", self.account.connection, ignore_permissions=True, force=True
-		)
+		frappe.delete_doc("Shopify Connection", self.account.connection, ignore_permissions=True, force=True)
 
 	def test_state_1_catalog_push_error_surfaces(self):
 		mapping = frappe.get_doc(

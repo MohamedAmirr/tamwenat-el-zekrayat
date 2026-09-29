@@ -295,17 +295,25 @@ fixtures = [
 		],
 	},
 	# #139: the Shopify Reconciliation dashboard's 5 Number Cards (Sections 2,
-	# 3, 5 of the reconciliation dashboard) - see
-	# marketplace_integrations/page/shopify_reconciliation_dashboard/ for
-	# Sections 1, 4, 6, which are a custom Page instead (a live cache read
-	# plus action button, a filtered log table, and a live cross-field query -
-	# none of which a static Number Card can express). The dashboard's
+	# 3, 5 of the reconciliation dashboard). Sections 4 and 6 (Order Import
+	# failures, refund evidence gaps) ship as native Script Reports instead
+	# of a hand-built custom Page - see
+	# marketplace_integrations/report/shopify_order_import_failures/ and
+	# .../report/shopify_refund_evidence_gaps/, both of which call the same
+	# services/shopify_reconciliation.py query functions this dashboard has
+	# always used, so there is one source of truth for each query, not two
+	# implementations that could drift. Section 1 (catalog sweeps) is not
+	# reproduced here at all - the Workspace links straight to the existing
+	# "Marketplace Shopify Catalog Mapping" page instead. The dashboard's
 	# "Shopify Reconciliation" Workspace itself ships as a module file
 	# (marketplace_integrations/workspace/shopify_reconciliation/), not a
 	# fixture - frappe's migrate-time orphan-entity sweep
 	# (frappe.model.sync.remove_orphan_entities) deletes any public Workspace
 	# with no matching on-disk .../workspace/<name>/<name>.json file, which a
-	# fixtures/workspace.json entry can't satisfy.
+	# fixtures/workspace.json entry can't satisfy. Script Reports follow the
+	# same app-level-folder convention as doctype/ and page/ - every
+	# report/<name>/<name>.json under the module is synced automatically by
+	# bench migrate, no fixtures/hooks.py wiring needed.
 	{
 		"dt": "Number Card",
 		"filters": [

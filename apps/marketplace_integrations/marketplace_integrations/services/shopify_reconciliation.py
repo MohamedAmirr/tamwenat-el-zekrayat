@@ -1,8 +1,12 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-"""Read-only queries backing the Shopify Reconciliation dashboard's custom
-Page sections that a Number Card can't express (#139 sections 4 and 6):
+"""Read-only queries backing the Shopify Reconciliation dashboard's two
+Script Reports (#139 sections 4 and 6, converted from a hand-built custom
+Page to native Frappe Script Reports - see
+marketplace_integrations/report/shopify_order_import_failures/ and
+.../report/shopify_refund_evidence_gaps/, whose execute() functions call
+these same functions directly so there is one source of truth per query):
 recent Order Import failures, and Shopify orders with refund evidence but no
 recorded refund. Both are computed fresh on every call - no caching, no new
 persisted field.
