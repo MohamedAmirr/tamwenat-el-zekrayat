@@ -208,6 +208,20 @@ class MarketplaceAccount(Document):
 			frappe.throw(
 				_("External Account ID must exactly match the selected Noon Connection's project code.")
 			)
+		if self.noon_country_code:
+			from marketplace_integrations.integrations.noon.constants import COUNTRY_CURRENCY
+
+			if self.noon_country_code not in COUNTRY_CURRENCY:
+				frappe.throw(_("Noon Country Code must be ae, sa, or eg."))
+
+		if self.noon_warehouse_code and (
+			self.is_new()
+			or self.has_value_changed("connection")
+			or self.has_value_changed("noon_warehouse_code")
+		):
+			from marketplace_integrations.integrations.noon.catalog import validate_warehouse_code
+
+			validate_warehouse_code(self.connection, self.noon_warehouse_code)
 
 	def validate_unique_account_identity(self):
 		# account_identity_key isn't set yet at this point (before_save runs

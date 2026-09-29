@@ -182,6 +182,7 @@ required_apps = ["erpnext"]
 scheduler_events = {
 	"hourly": [
 		"marketplace_integrations.integrations.shopify.webhooks.retry_errored_webhook_deliveries",
+		"marketplace_integrations.integrations.noon.sweep.sweep_all_accounts",
 	],
 	"cron": {
 		SHOPIFY_INVENTORY_SWEEP_CRON: [

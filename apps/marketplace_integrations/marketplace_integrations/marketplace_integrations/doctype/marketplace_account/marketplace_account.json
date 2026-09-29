@@ -13,6 +13,9 @@
   "connection_doctype",
   "connection",
   "warehouse",
+  "noon_warehouse_section",
+  "noon_warehouse_code",
+  "noon_country_code",
   "shopify_location_section",
   "shopify_location_gid",
   "shopify_location_name",
@@ -85,6 +88,23 @@
    "fieldtype": "Link",
    "label": "Warehouse",
    "options": "Warehouse"
+  },
+  {
+   "fieldname": "noon_warehouse_section",
+   "fieldtype": "Section Break",
+   "label": "Noon Storefront and Warehouse"
+  },
+  {
+   "fieldname": "noon_warehouse_code",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Noon Warehouse Code"
+  },
+  {
+   "fieldname": "noon_country_code",
+   "fieldtype": "Select",
+   "label": "Noon Country Code",
+   "options": "\nae\nsa\neg"
   },
   {
    "fieldname": "shopify_location_section",
