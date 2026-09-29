@@ -177,6 +177,75 @@ class IntegrationTestMarketplaceAccount(IntegrationTestCase):
         doc.update(kwargs)
         return frappe.get_doc(doc).insert()
 
+    def make_noon_connection(self, project_code):
+        return (
+            frappe.get_doc(
+                {
+                    "doctype": "Noon Connection",
+                    "connection_name": f"Test {project_code}",
+                    "project_code": project_code,
+                    "key_id": f"test-key-{project_code}",
+                    "private_key": "-----BEGIN PRIVATE KEY-----\ntest-only\n-----END PRIVATE KEY-----\n",
+                    "environment": "Static Sandbox",
+                    "enabled": 1,
+                }
+            )
+            .insert()
+            .name
+        )
+
+    def make_noon_account(self, account_name, external_account_id, connection):
+        return frappe.get_doc(
+            {
+                "doctype": "Marketplace Account",
+                "account_name": account_name,
+                "platform": "Noon",
+                "external_account_id": external_account_id,
+                "connection": connection,
+            }
+        ).insert()
+
+    def test_noon_platform_option_and_connection_doctype_default(self):
+        meta = frappe.get_meta("Marketplace Account")
+        self.assertIn("Noon", meta.get_field("platform").options.split("\n"))
+        self.assertEqual(
+            meta.get_field("external_account_id").mandatory_depends_on,
+            'eval:doc.platform != "Shopify"',
+        )
+        account = frappe.get_doc({"doctype": "Marketplace Account", "platform": "Noon"})
+        self.assertEqual(account.connection_doctype, "Noon Connection")
+
+    def test_noon_account_saves_only_with_matching_project_code_and_without_network(self):
+        project_code = "noon-account-match-143"
+        connection = self.make_noon_connection(project_code)
+        with patch("requests.sessions.Session.request", side_effect=AssertionError("unexpected HTTP request")):
+            account = self.make_noon_account("Test Noon Matching Project", project_code, connection)
+        account.reload()
+        self.assertEqual(account.connection_doctype, "Noon Connection")
+        self.assertEqual(account.connection, connection)
+        self.assertEqual(account.external_account_id, project_code)
+        self.assertEqual(account.account_identity_key, compute_account_identity_key("Noon", project_code))
+
+    def test_noon_account_rejects_wrong_or_blank_project_code(self):
+        connection = self.make_noon_connection("noon-account-mismatch-143")
+        for external_account_id in ("another-project", "", " noon-account-mismatch-143 "):
+            with self.subTest(external_account_id=external_account_id):
+                with self.assertRaisesRegex(frappe.ValidationError, "exactly match"):
+                    self.make_noon_account("Test Noon Wrong Project", external_account_id, connection)
+
+    def test_noon_account_rejects_wrong_connection_doctype(self):
+        with self.assertRaisesRegex(frappe.ValidationError, "must use a Noon Connection"):
+            frappe.get_doc(
+                {
+                    "doctype": "Marketplace Account",
+                    "account_name": "Test Noon Wrong Connection Type",
+                    "platform": "Noon",
+                    "external_account_id": "noon-account-wrong-type-143",
+                    "connection_doctype": STAND_IN_CONNECTION_DOCTYPE,
+                    "connection": STAND_IN_CONNECTION,
+                }
+            ).insert()
+
     def test_fields_persist_and_identity_key_computed(self):
         account = self.make_account("Test Account 1", "ext-account-001")
         account.reload()

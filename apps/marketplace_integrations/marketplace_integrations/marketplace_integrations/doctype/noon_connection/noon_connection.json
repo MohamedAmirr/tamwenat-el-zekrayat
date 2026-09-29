@@ -1,0 +1,89 @@
+{
+ "actions": [],
+ "autoname": "NOONCONN-.#####",
+ "creation": "2026-09-29 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "connection_name",
+  "project_code",
+  "key_id",
+  "private_key",
+  "environment",
+  "enabled"
+ ],
+ "fields": [
+  {
+   "fieldname": "connection_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Connection Name",
+   "reqd": 1
+  },
+  {
+   "fieldname": "project_code",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "in_list_view": 1,
+   "label": "Project Code",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "key_id",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Key ID",
+   "reqd": 1
+  },
+  {
+   "description": "Paste the complete PEM private key, including BEGIN/END lines. Use literal \\n between lines when copying from a credentials JSON file; line breaks are restored only when signing.",
+   "fieldname": "private_key",
+   "fieldtype": "Password",
+   "ignore_xss_filter": 1,
+   "label": "Private Key",
+   "reqd": 1
+  },
+  {
+   "fieldname": "environment",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Environment",
+   "options": "\nProduction\nStatic Sandbox",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-09-29 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Marketplace Integrations",
+ "name": "Noon Connection",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "connection_name",
+ "track_changes": 1
+}

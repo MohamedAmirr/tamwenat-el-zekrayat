@@ -1,0 +1,1 @@
+"""Noon Partner API integration."""

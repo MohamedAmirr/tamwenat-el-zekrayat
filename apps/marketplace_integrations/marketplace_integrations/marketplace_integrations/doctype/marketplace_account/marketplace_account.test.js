@@ -90,6 +90,12 @@ test("setting platform on a new document defaults connection_doctype when blank"
 	assert.equal(frm.doc.connection_doctype, PLATFORM_CONNECTION_DOCTYPES.Shopify);
 });
 
+test("Noon defaults its own connection doctype on a new document", () => {
+	const frm = { doc: { platform: "Noon", connection_doctype: "" }, refresh_field: () => {} };
+	set_default_connection_doctype(frm);
+	assert.equal(frm.doc.connection_doctype, "Noon Connection");
+});
+
 test("changing platform does not overwrite an already-set connection_doctype", () => {
 	const frm = { doc: { platform: "Shopify", connection_doctype: "Talabat Connection" }, refresh_field: () => {} };
 	set_default_connection_doctype(frm);
@@ -159,6 +165,36 @@ test("clear_fields_for_platform_left clears Talabat fields when leaving Talabat 
 	clear_fields_for_platform_left(leaving_shopify);
 	assert.equal(leaving_shopify.doc.shopify_location_gid, null);
 	assert.equal(leaving_shopify.doc.shopify_location_name, null);
+});
+
+test("switching to Noon clears the old connection and all Talabat and Shopify state", () => {
+	for (const old_connection_doctype of ["Talabat Connection", "Shopify Connection"]) {
+		const doc = {
+			platform: "Noon",
+			connection_doctype: old_connection_doctype,
+			connection: "Old connection",
+			external_account_id: "Old platform ID",
+			external_status_payload: '{"status":"OPEN"}',
+			shopify_orders_reconciled_through: "2026-09-29 09:00:00",
+		};
+		for (const fieldname of [...TALABAT_OUTLET_FIELDS, ...SHOPIFY_LOCATION_FIELDS]) {
+			if (!fieldname.endsWith("_section")) doc[fieldname] = "stale";
+		}
+		const frm = make_frm(doc);
+		update_connection_doctype_on_platform_change(frm);
+
+		assert.equal(frm.doc.connection_doctype, "Noon Connection");
+		assert.equal(frm.doc.connection, "");
+		for (const fieldname of [
+			...TALABAT_OUTLET_FIELDS,
+			"external_status_payload",
+			...SHOPIFY_LOCATION_FIELDS,
+			"shopify_orders_reconciled_through",
+			"external_account_id",
+		]) {
+			if (!fieldname.endsWith("_section")) assert.equal(frm.doc[fieldname], null);
+		}
+	}
 });
 
 test("Talabat outlet buttons are removed when platform is switched away from Talabat (#103 review finding #3)", () => {
