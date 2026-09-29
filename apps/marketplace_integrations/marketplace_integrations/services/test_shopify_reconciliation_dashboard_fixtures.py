@@ -30,6 +30,7 @@ from marketplace_integrations.services.shopify_reconciliation import (
 	get_refund_evidence_gaps,
 )
 
+
 def _number_card_filters(name):
 	"""Read a shipped Number Card fixture's own filters_json and turn it into
 	an ORM filter dict, so this test proves the fixture used by the real
@@ -40,7 +41,7 @@ def _number_card_filters(name):
 		cards = json.load(f)
 	card = next(c for c in cards if c["name"] == name)
 	filters = {}
-	for doctype, fieldname, operator, value, _invert in json.loads(card["filters_json"]):
+	for _doctype, fieldname, operator, value, _invert in json.loads(card["filters_json"]):
 		filters[fieldname] = value if operator == "=" else [operator, value]
 	return card["document_type"], filters
 

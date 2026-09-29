@@ -41,13 +41,15 @@ frappe.pages["shopify-reconciliation-dashboard"].on_page_load = function (wrappe
 	function render_sweep_section($el) {
 		$el.empty();
 		$("<h4></h4>").text(__("Catalog Sweeps")).appendTo($el);
-		$('<p class="text-muted"></p>')
-			.text(
-				__(
-					"Last catalog sweep per enabled Shopify account. See the Marketplace Shopify Catalog Mapping page for live exception detail."
-				)
-			)
-			.appendTo($el);
+		const $intro = $('<p class="text-muted"></p>').appendTo($el);
+		$intro.text(
+			__("Last catalog sweep per enabled Shopify account. See the ")
+		);
+		$('<a></a>')
+			.attr("href", "/app/marketplace-shopify-catalog-mapping")
+			.text(__("Marketplace Shopify Catalog Mapping"))
+			.appendTo($intro);
+		$intro.append(document.createTextNode(" " + __("page for live exception detail.")));
 		const $table = $('<table class="table table-bordered"></table>').appendTo($el);
 		const $tbody = $("<tbody></tbody>").appendTo($table);
 
