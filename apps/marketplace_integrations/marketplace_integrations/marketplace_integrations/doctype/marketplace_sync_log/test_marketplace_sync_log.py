@@ -149,6 +149,29 @@ class TestMarketplaceSyncLog(IntegrationTestCase):
 			frappe.db.count("Marketplace Sync Log", {"marketplace_order": self.order.name}), before_count
 		)
 
+	def test_resync_on_order_import_failure_raises_clear_error(self):
+		"""An Order Import failure row has no `marketplace_order` (there's no
+		Marketplace Order to link yet - the import itself is what failed).
+		Calling `resync()` on it used to fall through to
+		`frappe.get_doc("Marketplace Order", None)`, raising a confusing
+		`DoesNotExistError`. It must now raise a clear, actionable
+		`frappe.throw()` instead. The list view JS excludes these rows from the
+		bulk-retry selection (see `marketplace_sync_log_list.test.js`); this
+		covers any other caller that bypasses that filter."""
+		log = frappe.get_doc(
+			{
+				"doctype": "Marketplace Sync Log",
+				"sync_type": "Order Import",
+				"status": "Error",
+				"attempted_at": now_datetime(),
+			}
+		).insert()
+
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			log.resync()
+		self.assertNotIsInstance(ctx.exception, frappe.DoesNotExistError)
+		self.assertIn("no Marketplace Order to resync", str(ctx.exception))
+
 	def test_resync_requires_system_manager(self):
 		original = self.make_log(status="Error")
 		frappe.set_user("Guest")

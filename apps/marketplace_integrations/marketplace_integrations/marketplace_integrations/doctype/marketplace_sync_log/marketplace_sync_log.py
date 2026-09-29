@@ -48,6 +48,15 @@ class MarketplaceSyncLog(Document):
 		frappe.only_for("System Manager")
 		self.check_permission("read")
 
+		if not self.marketplace_order:
+			frappe.throw(
+				_(
+					"This log row has no Marketplace Order to resync - Order Import "
+					"failures must be resolved by re-importing the order, not by "
+					"resyncing."
+				)
+			)
+
 		from marketplace_integrations.services.sales_order_sync import sync_sales_order
 
 		return sync_sales_order(self.marketplace_order, trigger_source="Manual Resync")

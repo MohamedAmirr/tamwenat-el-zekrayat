@@ -111,6 +111,5 @@
  "sort_field": "creation",
  "sort_order": "DESC",
  "states": [],
- "title_field": "marketplace_order",
  "track_changes": 1
 }
