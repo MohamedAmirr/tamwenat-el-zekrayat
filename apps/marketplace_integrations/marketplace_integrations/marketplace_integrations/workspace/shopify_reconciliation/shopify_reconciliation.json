@@ -1,7 +1,7 @@
 {
  "app": "marketplace_integrations",
  "charts": [],
- "content": "[{\"id\":\"src1header\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Shopify Reconciliation</b></span>\",\"col\":12}},{\"id\":\"src1card1\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Shopify Catalog Push Errors\",\"col\":4}},{\"id\":\"src1card2\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Shopify Inventory Sync Errors\",\"col\":4}},{\"id\":\"src1card3\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Marketplace Orders: Sync Error\",\"col\":4}},{\"id\":\"src1card4\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Shopify Webhook Deliveries: Error\",\"col\":4}},{\"id\":\"src1card5\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Shopify Webhook Deliveries: Exhausted Retries\",\"col\":4}},{\"id\":\"src1spacer\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"src1shortcuts\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Detail</b></span>\",\"col\":12}},{\"id\":\"src1shortcut1\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Order Import Failures\",\"col\":4}},{\"id\":\"src1shortcut2\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Refund Evidence Gaps\",\"col\":4}},{\"id\":\"src1shortcut3\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Marketplace Shopify Catalog Mapping\",\"col\":4}}]",
+ "content": "[{\"id\":\"src1header\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Shopify Reconciliation</b></span>\",\"col\":12}},{\"id\":\"src1card1\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Shopify Catalog Push Errors\",\"col\":4}},{\"id\":\"src1card2\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Shopify Inventory Sync Errors\",\"col\":4}},{\"id\":\"src1card3\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Marketplace Orders: Sync Error\",\"col\":4}},{\"id\":\"src1card4\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Shopify Webhook Deliveries: Error\",\"col\":4}},{\"id\":\"src1card5\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Shopify Webhook Deliveries: Exhausted Retries\",\"col\":4}},{\"id\":\"src1spacer\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"src1shortcuts\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Detail</b></span>\",\"col\":12}},{\"id\":\"src1shortcut1\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Order Import Failures\",\"col\":4}},{\"id\":\"src1shortcut2\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Refund Evidence Gaps\",\"col\":4}},{\"id\":\"src1shortcut3\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Refunded Orders\",\"col\":4}},{\"id\":\"src1shortcut4\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Marketplace Shopify Catalog Mapping\",\"col\":4}}]",
  "creation": "2026-09-29 00:00:00.000000",
  "custom_blocks": [],
  "docstatus": 0,
@@ -64,6 +64,13 @@
    "doctype": "Workspace Shortcut",
    "label": "Shopify Refund Evidence Gaps",
    "link_to": "Shopify Refund Evidence Gaps",
+   "type": "Report"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Shopify Refunded Orders",
+   "link_to": "Shopify Refunded Orders",
    "type": "Report"
   },
   {

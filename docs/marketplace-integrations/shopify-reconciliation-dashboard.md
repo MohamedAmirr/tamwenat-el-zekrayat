@@ -11,10 +11,11 @@ for what this dashboard deliberately does NOT cover).
 ## Where to find it
 
 Desk sidebar → **Shopify Reconciliation** workspace. It shows 5 Number Cards
-(click any one to open the correctly filtered list view) plus 3 shortcuts:
-the **Shopify Order Import Failures** and **Shopify Refund Evidence Gaps**
-Script Reports, and the existing **Marketplace Shopify Catalog Mapping** page
-(for catalog-sweep access — see "Catalog Sweeps" below).
+(click any one to open the correctly filtered list view) plus 4 shortcuts:
+the **Shopify Order Import Failures**, **Shopify Refund Evidence Gaps**, and
+**Shopify Refunded Orders** Script Reports, and the existing **Marketplace
+Shopify Catalog Mapping** page (for catalog-sweep access — see "Catalog
+Sweeps" below).
 
 ## Number Cards (Workspace)
 
@@ -76,6 +77,26 @@ should populate `refunds` and clear it from this report. If it still shows
 up as a gap after a fresh import, the refund may genuinely not have
 line-item detail in Shopify's API response yet — investigate on the Shopify
 admin side.
+
+### Shopify Refunded Orders
+
+`marketplace_integrations/report/shopify_refunded_orders/` — a standard
+Frappe Script Report. Its `execute()` calls
+`services/shopify_reconciliation.py::get_refunded_orders()`.
+
+The general-purpose "show me every refunded order" view: ALL Shopify
+`Marketplace Order` rows where `external_financial_status` is `REFUNDED` or
+`PARTIALLY_REFUNDED`, regardless of whether `refunds` evidence is populated
+— unlike **Shopify Refund Evidence Gaps** above, which only shows the subset
+missing evidence. A `Has Refund Evidence` checkbox column (reusing the exact
+same NULL/`''`/`'[]'` emptiness test as the gaps report) lets you see at a
+glance which rows are also gaps.
+
+Supports a native Frappe Report date-range filter (`From Date`/`To Date`,
+shown as date pickers above the report table) on `last_platform_update_on`
+— the field that changes when Shopify sends a refund update, as opposed to
+`received_on` (the original order date, not relevant to "when was it
+refunded").
 
 ## Catalog Sweeps
 
