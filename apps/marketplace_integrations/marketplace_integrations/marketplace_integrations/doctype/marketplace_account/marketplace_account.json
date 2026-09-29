@@ -43,7 +43,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Platform",
-   "options": "Talabat\nShopify",
+   "options": "Talabat\nShopify\nNoon",
    "reqd": 1
   },
   {

@@ -3,14 +3,10 @@
 
 """Platform-neutral HTTP helpers shared by every marketplace integration client.
 
-Every marketplace-specific client (``TalabatClient``, ``ShopifyClient``, ...)
-needs the same three primitives: a bounded-timeout/network-error request
-wrapper, a length-bounded error-message extractor for non-2xx responses, and
-a client-credentials token fetch with expiry-buffer caching math. None of
-this is platform-specific - it is the same shape every OAuth2
-client-credentials integration needs - so it lives here once instead of
-being copy-pasted per platform client and drifting (as it briefly did
-between TalabatClient and ShopifyClient before this module existed).
+Every marketplace-specific client needs a bounded-timeout/network-error
+request wrapper and safe error presentation. Talabat and Shopify also share
+OAuth2 client-credentials token caching; Noon uses the same request wrapper
+with its own cookie session, but not the OAuth2 helper.
 """
 
 import time
@@ -27,7 +23,9 @@ REQUEST_TIMEOUT_SECONDS = 10
 ERROR_BODY_MAX_LENGTH = 200
 
 
-def http_request(method, url, *, service_name="the remote service", **kwargs):
+def http_request(
+	method, url, *, service_name="the remote service", session=None, include_exception_details=True, **kwargs
+):
 	"""Make an HTTP request, raising a clean frappe error on any network-level
 	failure (connection error, timeout, SSL error, ...).
 
@@ -41,12 +39,22 @@ def http_request(method, url, *, service_name="the remote service", **kwargs):
 	made by this app, e.g. ``integrations/talabat/catalog_feedback.py``'s
 	feedback CSV download. Public (no leading underscore) specifically
 	because it is called across module boundaries.
+
+	``session`` lets cookie-authenticated clients use their own requests.Session
+	without bypassing this timeout/error boundary. ``include_exception_details``
+	defaults to the existing behavior; clients whose request carries a secret
+	can suppress exception text that might echo it.
 	"""
 	kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
 	try:
-		return requests.request(method, url, **kwargs)
+		request = session.request if session is not None else requests.request
+		return request(method, url, **kwargs)
 	except requests.exceptions.RequestException as e:
-		frappe.throw(frappe._("Failed to reach {0}: {1}").format(service_name, str(e)))
+		if include_exception_details:
+			frappe.throw(frappe._("Failed to reach {0}: {1}").format(service_name, str(e)))
+	# Throw outside the exception handler so a sensitive request exception is
+	# not retained as this new error's implicit traceback context.
+	frappe.throw(frappe._("Failed to reach {0}.").format(service_name))
 
 
 def error_message_from_response(response):

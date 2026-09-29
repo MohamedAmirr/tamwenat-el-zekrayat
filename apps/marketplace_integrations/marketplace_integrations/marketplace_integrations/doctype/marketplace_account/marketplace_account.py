@@ -12,10 +12,11 @@ from marketplace_integrations.integrations.shopify.locations import fetch_shop_a
 
 # connection_doctype is hidden/read-only on the form - a user never types it
 # directly (#103). This is the one place platform -> Connection DocType is
-# decided; both platforms already resolve to a real Connection DocType.
+# decided; each platform resolves to its own Connection DocType.
 PLATFORM_CONNECTION_DOCTYPES = {
 	"Talabat": "Talabat Connection",
 	"Shopify": "Shopify Connection",
+	"Noon": "Noon Connection",
 }
 
 
@@ -119,6 +120,7 @@ class MarketplaceAccount(Document):
 		# precheck below needs that populated value, not the blank one, to
 		# compute a meaningful candidate identity key.
 		self.validate_shopify_account()
+		self.validate_noon_account()
 		self.validate_unique_account_identity()
 
 	def before_save(self):
@@ -190,6 +192,22 @@ class MarketplaceAccount(Document):
 		# fold the two together; they intentionally check different things.
 		if self.warehouse and frappe.db.get_value("Warehouse", self.warehouse, "is_group"):
 			frappe.throw(_("Marketplace Account Warehouse must be a leaf Warehouse, not a group Warehouse."))
+
+	def validate_noon_account(self):
+		"""Bind a Noon account to the selected connection's project code locally."""
+		if self.platform != "Noon":
+			return
+
+		if self.connection_doctype != "Noon Connection":
+			frappe.throw(_("A Noon Marketplace Account must use a Noon Connection."))
+
+		project_code = frappe.db.get_value("Noon Connection", self.connection, "project_code")
+		if not project_code:
+			frappe.throw(_("The selected Noon Connection must have a project code."))
+		if self.external_account_id != project_code:
+			frappe.throw(
+				_("External Account ID must exactly match the selected Noon Connection's project code.")
+			)
 
 	def validate_unique_account_identity(self):
 		# account_identity_key isn't set yet at this point (before_save runs

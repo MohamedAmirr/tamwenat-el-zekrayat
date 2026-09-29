@@ -36,6 +36,7 @@ const TALABAT_OUTLET_BUTTON_LABELS = ["Refresh Status", "Open Outlet", "Close To
 const PLATFORM_CONNECTION_DOCTYPES = {
 	Talabat: "Talabat Connection",
 	Shopify: "Shopify Connection",
+	Noon: "Noon Connection",
 };
 
 if (typeof frappe !== "undefined") {
@@ -102,8 +103,21 @@ function update_connection_doctype_on_platform_change(frm) {
 function clear_fields_for_platform_left(frm) {
 	// Clear whichever platform's fields are no longer relevant after this
 	// platform change - Shopify Location fields when leaving Shopify,
-	// Talabat outlet-status fields when leaving Talabat.
-	const fields_to_clear = frm.doc.platform === "Shopify" ? TALABAT_OUTLET_FIELDS : SHOPIFY_LOCATION_FIELDS;
+	// Talabat outlet-status fields when leaving Talabat. Noon must also
+	// discard any residue from either platform, including the previous
+	// platform's external ID before the user enters the Noon project code.
+	const fields_to_clear =
+		frm.doc.platform === "Noon"
+			? [
+					...TALABAT_OUTLET_FIELDS,
+					"external_status_payload",
+					...SHOPIFY_LOCATION_FIELDS,
+					"shopify_orders_reconciled_through",
+					"external_account_id",
+				]
+			: frm.doc.platform === "Shopify"
+				? TALABAT_OUTLET_FIELDS
+				: SHOPIFY_LOCATION_FIELDS;
 	for (const fieldname of fields_to_clear) {
 		const field = frm.fields_dict && frm.fields_dict[fieldname];
 		if (field && field.df && field.df.fieldtype === "Section Break") continue;
