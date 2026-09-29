@@ -2,22 +2,23 @@
 # For license information, please see license.txt
 
 """#142: one test per dashboard failure state, proving each surfaces correctly
-in its corresponding Number Card filter / Script Report query.
+in its corresponding count function / Script Report query.
 
-Sections 2, 3, 5 are plain Number Cards (fixtures/number_card.json) - Frappe's
-own Number Card widget evaluates `filters_json` via `frappe.get_list()`, so
-proving "a fixture in this failure state is counted by the SAME filter the
-Number Card fixture declares" is the correct test boundary here, without
-reimplementing Frappe's Number Card rendering. Sections 1's cache and 4/6's
-live queries are exercised directly via their own functions, already unit
-tested in integrations/shopify/test_products.py, integrations/shopify/
-test_orders.py, services/test_shopify_reconciliation.py, and each Script
-Report's own test_*.py (marketplace_integrations/report/
-shopify_order_import_failures/, .../shopify_refund_evidence_gaps/) -
+States 1-4 used to be plain Number Cards (fixtures/number_card.json) -
+Frappe's own Number Card widget evaluated `filters_json` via
+`frappe.get_list()`. #139 superseded those 5 Number Cards with the "Shopify
+Reconciliation Summary" Script Report, whose first 5 metric rows reproduce
+the exact same filter logic via dedicated count functions in
+services/shopify_reconciliation.py (get_catalog_push_error_count() etc.), so
+these tests now call those functions directly instead of reading the
+(removed) number_card.json fixture. States 5/6's live queries are exercised
+directly via their own functions, already unit tested in
+integrations/shopify/test_products.py, integrations/shopify/test_orders.py,
+services/test_shopify_reconciliation.py, and each Script Report's own
+test_*.py (marketplace_integrations/report/shopify_order_import_failures/,
+.../shopify_refund_evidence_gaps/, .../shopify_reconciliation_summary/) -
 referenced here again only to keep all 6 states enumerated in one place, per
 #142's acceptance criteria."""
-
-import json
 
 import frappe
 from frappe.tests import IntegrationTestCase
@@ -28,24 +29,14 @@ from marketplace_integrations.marketplace_integrations.doctype.marketplace_order
 	compute_order_identity_key,
 )
 from marketplace_integrations.services.shopify_reconciliation import (
+	get_catalog_push_error_count,
+	get_inventory_sync_error_count,
 	get_order_import_failures,
+	get_order_sync_error_count,
 	get_refund_evidence_gaps,
+	get_webhook_delivery_error_count,
+	get_webhook_delivery_exhausted_retry_count,
 )
-
-
-def _number_card_filters(name):
-	"""Read a shipped Number Card fixture's own filters_json and turn it into
-	an ORM filter dict, so this test proves the fixture used by the real
-	dashboard - not a hand-copied duplicate of its filter."""
-	with open(
-		frappe.get_app_path("marketplace_integrations", "fixtures", "number_card.json"), encoding="utf-8"
-	) as f:
-		cards = json.load(f)
-	card = next(c for c in cards if c["name"] == name)
-	filters = {}
-	for _doctype, fieldname, operator, value, _invert in json.loads(card["filters_json"]):
-		filters[fieldname] = value if operator == "=" else [operator, value]
-	return card["document_type"], filters
 
 
 class IntegrationTestDashboardFailureStatesSurfaceCorrectly(IntegrationTestCase):
@@ -59,7 +50,8 @@ class IntegrationTestDashboardFailureStatesSurfaceCorrectly(IntegrationTestCase)
 		frappe.delete_doc("Shopify Connection", self.account.connection, ignore_permissions=True, force=True)
 
 	def test_state_1_catalog_push_error_surfaces(self):
-		mapping = frappe.get_doc(
+		before = get_catalog_push_error_count()
+		frappe.get_doc(
 			{
 				"doctype": "Marketplace Product Mapping",
 				"marketplace_account": self.account.name,
@@ -69,12 +61,11 @@ class IntegrationTestDashboardFailureStatesSurfaceCorrectly(IntegrationTestCase)
 			}
 		).insert()
 
-		doctype, filters = _number_card_filters("Shopify Catalog Push Errors")
-		names = [row.name for row in frappe.get_all(doctype, filters=filters)]
-		self.assertIn(mapping.name, names)
+		self.assertEqual(get_catalog_push_error_count(), before + 1)
 
 	def test_state_2_inventory_sync_error_surfaces(self):
-		mapping = frappe.get_doc(
+		before = get_inventory_sync_error_count()
+		frappe.get_doc(
 			{
 				"doctype": "Marketplace Product Mapping",
 				"marketplace_account": self.account.name,
@@ -84,12 +75,11 @@ class IntegrationTestDashboardFailureStatesSurfaceCorrectly(IntegrationTestCase)
 			}
 		).insert()
 
-		doctype, filters = _number_card_filters("Shopify Inventory Sync Errors")
-		names = [row.name for row in frappe.get_all(doctype, filters=filters)]
-		self.assertIn(mapping.name, names)
+		self.assertEqual(get_inventory_sync_error_count(), before + 1)
 
 	def test_state_3_webhook_delivery_error_surfaces(self):
-		delivery = frappe.get_doc(
+		before = get_webhook_delivery_error_count()
+		frappe.get_doc(
 			{
 				"doctype": "Shopify Webhook Delivery",
 				"connection": self.account.connection,
@@ -102,12 +92,11 @@ class IntegrationTestDashboardFailureStatesSurfaceCorrectly(IntegrationTestCase)
 			}
 		).insert()
 
-		doctype, filters = _number_card_filters("Shopify Webhook Deliveries: Error")
-		names = [row.name for row in frappe.get_all(doctype, filters=filters)]
-		self.assertIn(delivery.name, names)
+		self.assertEqual(get_webhook_delivery_error_count(), before + 1)
 
 	def test_state_3b_webhook_delivery_exhausted_retries_surfaces(self):
-		delivery = frappe.get_doc(
+		before = get_webhook_delivery_exhausted_retry_count()
+		frappe.get_doc(
 			{
 				"doctype": "Shopify Webhook Delivery",
 				"connection": self.account.connection,
@@ -120,11 +109,10 @@ class IntegrationTestDashboardFailureStatesSurfaceCorrectly(IntegrationTestCase)
 			}
 		).insert()
 
-		doctype, filters = _number_card_filters("Shopify Webhook Deliveries: Exhausted Retries")
-		names = [row.name for row in frappe.get_all(doctype, filters=filters)]
-		self.assertIn(delivery.name, names)
+		self.assertEqual(get_webhook_delivery_exhausted_retry_count(), before + 1)
 
 	def test_state_4_sync_error_marketplace_order_surfaces(self):
+		before = get_order_sync_error_count()
 		order = frappe.get_doc(
 			{
 				"doctype": "Marketplace Order",
@@ -138,9 +126,7 @@ class IntegrationTestDashboardFailureStatesSurfaceCorrectly(IntegrationTestCase)
 		order.insert()
 		order.db_set("erpnext_sync_status", "Sync Error", update_modified=False)
 
-		doctype, filters = _number_card_filters("Marketplace Orders: Sync Error")
-		names = [row.name for row in frappe.get_all(doctype, filters=filters)]
-		self.assertIn(order.name, names)
+		self.assertEqual(get_order_sync_error_count(), before + 1)
 
 	def test_state_5_order_import_failure_log_row_surfaces(self):
 		log = frappe.get_doc(

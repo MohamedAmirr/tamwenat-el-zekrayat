@@ -294,42 +294,35 @@ fixtures = [
 			]
 		],
 	},
-	# #139: the Shopify Reconciliation dashboard's 5 Number Cards (Sections 2,
-	# 3, 5 of the reconciliation dashboard). Sections 4 and 6 (Order Import
-	# failures, refund evidence gaps) ship as native Script Reports instead
-	# of a hand-built custom Page - see
-	# marketplace_integrations/report/shopify_order_import_failures/ and
-	# .../report/shopify_refund_evidence_gaps/, both of which call the same
+	# #139: the Shopify Reconciliation dashboard's Script Reports (Order Import
+	# failures, refund evidence gaps, all refunded orders, and the
+	# reconciliation summary that replaced the dashboard's original 5 Number
+	# Cards with one date-filterable report) ship as native Script Reports
+	# instead of a hand-built custom Page or Number Cards - see
+	# marketplace_integrations/report/shopify_order_import_failures/,
+	# .../report/shopify_refund_evidence_gaps/,
+	# .../report/shopify_refunded_orders/, and
+	# .../report/shopify_reconciliation_summary/, all of which call the same
 	# services/shopify_reconciliation.py query functions this dashboard has
-	# always used, so there is one source of truth for each query, not two
-	# implementations that could drift. Section 1 (catalog sweeps) is not
-	# reproduced here at all - the Workspace links straight to the existing
-	# "Marketplace Shopify Catalog Mapping" page instead. The dashboard's
-	# "Shopify Reconciliation" Workspace itself ships as a module file
-	# (marketplace_integrations/workspace/shopify_reconciliation/), not a
+	# always used, so there is one source of truth for each query, not
+	# multiple implementations that could drift. Section 1 (catalog sweeps)
+	# is not reproduced here at all - the Workspace links straight to the
+	# existing "Marketplace Shopify Catalog Mapping" page instead. The
+	# dashboard's "Shopify Reconciliation" Workspace itself ships as a module
+	# file (marketplace_integrations/workspace/shopify_reconciliation/), not a
 	# fixture - frappe's migrate-time orphan-entity sweep
 	# (frappe.model.sync.remove_orphan_entities) deletes any public Workspace
 	# with no matching on-disk .../workspace/<name>/<name>.json file, which a
 	# fixtures/workspace.json entry can't satisfy. Script Reports follow the
 	# same app-level-folder convention as doctype/ and page/ - every
 	# report/<name>/<name>.json under the module is synced automatically by
-	# bench migrate, no fixtures/hooks.py wiring needed.
-	{
-		"dt": "Number Card",
-		"filters": [
-			[
-				"name",
-				"in",
-				[
-					"Shopify Catalog Push Errors",
-					"Shopify Inventory Sync Errors",
-					"Shopify Webhook Deliveries: Error",
-					"Shopify Webhook Deliveries: Exhausted Retries",
-					"Marketplace Orders: Sync Error",
-				],
-			]
-		],
-	},
+	# bench migrate, no fixtures/hooks.py wiring needed. There is no longer a
+	# "Number Card" fixtures entry: the 5 Number Cards this dashboard used to
+	# ship (Shopify Catalog Push Errors, Shopify Inventory Sync Errors,
+	# Shopify Webhook Deliveries: Error/Exhausted Retries, Marketplace
+	# Orders: Sync Error) are superseded by the "Shopify Reconciliation
+	# Summary" report above, which reproduces their exact filter logic as its
+	# first 5 (date-filter-independent, current-state) metric rows.
 ]
 
 # Request Events
