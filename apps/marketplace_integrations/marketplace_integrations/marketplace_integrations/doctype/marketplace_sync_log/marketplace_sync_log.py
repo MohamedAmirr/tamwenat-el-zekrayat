@@ -4,11 +4,33 @@
 """Operator-visible attempts to synchronize Marketplace Orders to ERPNext."""
 
 import frappe
+from frappe import _
 from frappe.model.document import Document
 from frappe.utils import add_days, now_datetime
 
 
 class MarketplaceSyncLog(Document):
+	def validate(self):
+		self._validate_marketplace_order_required_for_sales_order_sync()
+
+	def _validate_marketplace_order_required_for_sales_order_sync(self):
+		"""#139's schema-conflict resolution relaxed ``marketplace_order`` from
+		a static ``reqd=1`` to ``mandatory_depends_on: eval:doc.sync_type==
+		"Sales Order Sync"`` (an Order Import failure has no Marketplace Order
+		to link yet). ``mandatory_depends_on`` only drives the Desk form's
+		mandatory-field indicator, though - Frappe's own server-side check
+		(``Document._get_missing_mandatory_fields()``) only ever looks at the
+		static ``reqd`` flag, so without this explicit check a ``Sales Order
+		Sync`` row could be inserted with no ``marketplace_order`` at all,
+		silently losing the guarantee ``sync_type`` was introduced to
+		preserve for every existing writer (``sales_order_sync.py::
+		_create_sync_log()``)."""
+		if self.sync_type == "Sales Order Sync" and not self.marketplace_order:
+			frappe.throw(
+				_("Marketplace Order is mandatory when Sync Type is Sales Order Sync"),
+				frappe.MandatoryError,
+			)
+
 	@frappe.whitelist()
 	def resync(self):
 		"""Retry this log's Marketplace Order.

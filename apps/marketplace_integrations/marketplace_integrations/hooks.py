@@ -294,6 +294,34 @@ fixtures = [
 			]
 		],
 	},
+	# #139: the Shopify Reconciliation dashboard's 5 Number Cards (Sections 2,
+	# 3, 5 of the reconciliation dashboard) - see
+	# marketplace_integrations/page/shopify_reconciliation_dashboard/ for
+	# Sections 1, 4, 6, which are a custom Page instead (a live cache read
+	# plus action button, a filtered log table, and a live cross-field query -
+	# none of which a static Number Card can express). The dashboard's
+	# "Shopify Reconciliation" Workspace itself ships as a module file
+	# (marketplace_integrations/workspace/shopify_reconciliation/), not a
+	# fixture - frappe's migrate-time orphan-entity sweep
+	# (frappe.model.sync.remove_orphan_entities) deletes any public Workspace
+	# with no matching on-disk .../workspace/<name>/<name>.json file, which a
+	# fixtures/workspace.json entry can't satisfy.
+	{
+		"dt": "Number Card",
+		"filters": [
+			[
+				"name",
+				"in",
+				[
+					"Shopify Catalog Push Errors",
+					"Shopify Inventory Sync Errors",
+					"Shopify Webhook Deliveries: Error",
+					"Shopify Webhook Deliveries: Exhausted Retries",
+					"Marketplace Orders: Sync Error",
+				],
+			]
+		],
+	},
 ]
 
 # Request Events

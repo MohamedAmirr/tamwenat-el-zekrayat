@@ -1,0 +1,65 @@
+{
+ "app": "marketplace_integrations",
+ "charts": [],
+ "content": "[{\"id\":\"src1header\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Shopify Reconciliation</b></span>\",\"col\":12}},{\"id\":\"src1card1\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Shopify Catalog Push Errors\",\"col\":4}},{\"id\":\"src1card2\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Shopify Inventory Sync Errors\",\"col\":4}},{\"id\":\"src1card3\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Marketplace Orders: Sync Error\",\"col\":4}},{\"id\":\"src1card4\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Shopify Webhook Deliveries: Error\",\"col\":4}},{\"id\":\"src1card5\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Shopify Webhook Deliveries: Exhausted Retries\",\"col\":4}},{\"id\":\"src1spacer\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"src1shortcuts\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Detail</b></span>\",\"col\":12}},{\"id\":\"src1shortcut1\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Reconciliation Dashboard\",\"col\":4}}]",
+ "creation": "2026-09-29 00:00:00.000000",
+ "custom_blocks": [],
+ "docstatus": 0,
+ "doctype": "Workspace",
+ "for_user": "",
+ "hide_custom": 0,
+ "icon": "refresh",
+ "idx": 0,
+ "is_hidden": 0,
+ "label": "Shopify Reconciliation",
+ "links": [],
+ "modified": "2026-09-29 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Marketplace Integrations",
+ "name": "Shopify Reconciliation",
+ "number_cards": [
+  {
+   "doctype": "Workspace Number Card",
+   "number_card_name": "Shopify Catalog Push Errors"
+  },
+  {
+   "doctype": "Workspace Number Card",
+   "number_card_name": "Shopify Inventory Sync Errors"
+  },
+  {
+   "doctype": "Workspace Number Card",
+   "number_card_name": "Marketplace Orders: Sync Error"
+  },
+  {
+   "doctype": "Workspace Number Card",
+   "number_card_name": "Shopify Webhook Deliveries: Error"
+  },
+  {
+   "doctype": "Workspace Number Card",
+   "number_card_name": "Shopify Webhook Deliveries: Exhausted Retries"
+  }
+ ],
+ "owner": "Administrator",
+ "parent_page": "",
+ "public": 1,
+ "quick_lists": [],
+ "restrict_to_domain": "",
+ "roles": [
+  {
+   "doctype": "Has Role",
+   "role": "System Manager"
+  }
+ ],
+ "sequence_id": 1.0,
+ "shortcuts": [
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Shopify Reconciliation Dashboard",
+   "link_to": "shopify-reconciliation-dashboard",
+   "type": "Page"
+  }
+ ],
+ "title": "Shopify Reconciliation",
+ "type": "Workspace"
+}

@@ -74,15 +74,23 @@ class TestMarketplaceSyncLog(IntegrationTestCase):
 	def test_doctype_fields_defaults_and_permissions_match_contract(self):
 		meta = frappe.get_meta("Marketplace Sync Log")
 		fields = {field.fieldname: field for field in meta.fields if field.fieldname}
+		self.assertEqual(fields["sync_type"].fieldtype, "Select")
+		self.assertEqual(fields["sync_type"].options.splitlines(), ["Sales Order Sync", "Order Import"])
+		self.assertEqual(fields["sync_type"].default, "Sales Order Sync")
+		self.assertTrue(fields["sync_type"].reqd)
 		self.assertEqual(fields["marketplace_order"].fieldtype, "Link")
 		self.assertEqual(fields["marketplace_order"].options, "Marketplace Order")
-		self.assertTrue(fields["marketplace_order"].reqd)
+		# #139: no longer unconditionally required - an Order Import failure
+		# has no Marketplace Order yet to link to. Still mandatory for the
+		# original Sales Order Sync rows.
+		self.assertFalse(fields["marketplace_order"].reqd)
+		self.assertEqual(fields["marketplace_order"].mandatory_depends_on, 'eval:doc.sync_type=="Sales Order Sync"')
 		self.assertEqual(fields["status"].options.splitlines(), ["Queued", "Success", "Error", "Invalid"])
 		self.assertEqual(fields["status"].default, "Queued")
 		self.assertTrue(fields["status"].read_only)
 		self.assertEqual(
 			fields["trigger_source"].options.splitlines(),
-			["Manual", "Manual Resync", "Shopify Webhook", "Talabat Webhook"],
+			["Manual", "Manual Resync", "Shopify Webhook", "Talabat Webhook", "Scheduled Reconciliation"],
 		)
 		self.assertEqual(fields["trigger_source"].default, "Manual")
 		self.assertTrue(fields["attempted_at"].reqd)
@@ -93,6 +101,28 @@ class TestMarketplaceSyncLog(IntegrationTestCase):
 		self.assertTrue(permissions["System Manager"].read)
 		self.assertTrue(permissions["System Manager"].create)
 		self.assertTrue(permissions["System Manager"].write)
+
+	def test_order_import_row_does_not_require_marketplace_order(self):
+		log = frappe.get_doc(
+			{
+				"doctype": "Marketplace Sync Log",
+				"sync_type": "Order Import",
+				"status": "Error",
+				"attempted_at": now_datetime(),
+			}
+		).insert()
+		self.assertFalse(log.marketplace_order)
+
+	def test_sales_order_sync_row_still_requires_marketplace_order(self):
+		with self.assertRaises(frappe.MandatoryError):
+			frappe.get_doc(
+				{
+					"doctype": "Marketplace Sync Log",
+					"sync_type": "Sales Order Sync",
+					"status": "Error",
+					"attempted_at": now_datetime(),
+				}
+			).insert()
 
 	def test_resync_delegates_to_sync_sales_order_as_manual_resync_without_its_own_log_row(self):
 		"""`resync()` must not write/update its own `Marketplace Sync Log` row -
