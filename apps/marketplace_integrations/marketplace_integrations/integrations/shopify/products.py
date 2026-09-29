@@ -324,6 +324,24 @@ def get_sweep_status(job_id):
 	return {key: value for key, value in state.items() if key != "owner"}
 
 
+def get_last_catalog_sweep(account_name):
+	"""Return the most recently completed/failed catalog sweep for one
+	Marketplace Account, keyed by account rather than by a per-run random
+	job_id (#139 section 1) - so the reconciliation dashboard can show "last
+	sweep" status without already knowing that run's job_id.
+
+	Permission-checked the same way as ``get_account()``/
+	``_require_mapping_permission("read")`` - a per-document ``read`` check on
+	the Marketplace Account plus a doctype-level ``read`` check on Marketplace
+	Product Mapping, since the cached result exposes mapping-exception detail.
+
+	Returns ``None`` if no sweep has ever completed/failed for this account.
+	"""
+	get_account(account_name)
+	_require_mapping_permission("read")
+	return frappe.cache().get_value(_last_sweep_cache_key(account_name))
+
+
 def run_catalog_sweep(job_id_for_result, owner, account_name):
 	"""Background job body: walk the full live Shopify catalog plus this
 	account's saved mappings, and report unmapped/deleted/variant-less
@@ -347,27 +365,50 @@ def run_catalog_sweep(job_id_for_result, owner, account_name):
 		truncated = total_exceptions > MAX_EXCEPTIONS_RETURNED
 		if truncated:
 			exceptions = exceptions[:MAX_EXCEPTIONS_RETURNED]
-		_update_sweep_status(
-			job_id_for_result,
-			owner,
-			status="completed",
-			processed=processed,
-			result={
-				"exceptions": exceptions,
-				"total_exceptions": total_exceptions,
-				"truncated": truncated,
-				# Review finding #4: a descriptive-field refresh failure is
-				# caught, rolled back to its own savepoint, and logged to the
-				# Error Log (_refresh_mapping_descriptive_fields()) - without
-				# this count, a sweep with failed rows still reports plain
-				# "completed" with no indication anything needs attention.
-				# Deliberately just a count plus a static message on the page,
-				# not a new exception category or per-row detail.
-				"refresh_failures": refresh_failures,
+		result = {
+			"exceptions": exceptions,
+			"total_exceptions": total_exceptions,
+			"truncated": truncated,
+			# Review finding #4: a descriptive-field refresh failure is
+			# caught, rolled back to its own savepoint, and logged to the
+			# Error Log (_refresh_mapping_descriptive_fields()) - without
+			# this count, a sweep with failed rows still reports plain
+			# "completed" with no indication anything needs attention.
+			# Deliberately just a count plus a static message on the page,
+			# not a new exception category or per-row detail.
+			"refresh_failures": refresh_failures,
+		}
+		_update_sweep_status(job_id_for_result, owner, status="completed", processed=processed, result=result)
+		# #139 section 1: also write the account-keyed "last sweep" entry the
+		# reconciliation dashboard reads via get_last_catalog_sweep() - the
+		# per-job_id cache entry above stays scoped to whichever caller polled
+		# THIS run; this second entry is what lets a later, unrelated request
+		# find "the last sweep result for account X" without knowing that
+		# run's job_id.
+		_set_last_sweep(
+			account_name,
+			{
+				"job_id": job_id_for_result,
+				"status": "completed",
+				"processed": processed,
+				"result": result,
+				"error": None,
+				"completed_at": frappe.utils.now_datetime(),
 			},
 		)
 	except Exception as exc:
 		_update_sweep_status(job_id_for_result, owner, status="failed", error=str(exc))
+		_set_last_sweep(
+			account_name,
+			{
+				"job_id": job_id_for_result,
+				"status": "failed",
+				"processed": None,
+				"result": None,
+				"error": str(exc),
+				"completed_at": frappe.utils.now_datetime(),
+			},
+		)
 		raise
 
 
@@ -615,3 +656,11 @@ def _update_sweep_status(job_id, owner, **changes):
 
 def _sweep_cache_key(job_id):
 	return f"marketplace_integrations:shopify:catalog_sweep_job:{job_id}"
+
+
+def _set_last_sweep(account_name, state):
+	frappe.cache().set_value(_last_sweep_cache_key(account_name), state, expires_in_sec=RESULT_TTL)
+
+
+def _last_sweep_cache_key(account_name):
+	return f"marketplace_integrations:shopify:catalog_sweep_last:{account_name}"

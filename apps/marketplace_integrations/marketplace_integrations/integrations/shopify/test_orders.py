@@ -240,6 +240,73 @@ class IntegrationTestImportOrdersUpdatedBetween(IntegrationTestCase):
 		self.assertEqual(errors[0]["order_gid"], bad_gid)
 		self.assertEqual(len(imported), 1)
 
+	def test_per_order_failure_writes_a_marketplace_sync_log_row(self):
+		# #139 section 4: a failed order import must ALSO write a Marketplace
+		# Sync Log row (sync_type="Order Import", status="Error"), in addition
+		# to the aggregated frappe.log_error() call its callers already make.
+		bad_gid = _order_gid(frappe.generate_hash(length=8))
+		nodes = {
+			"orders": {
+				"pageInfo": {"hasNextPage": False},
+				"nodes": [{"id": bad_gid, "updatedAt": "2026-09-27T10:00:00Z"}],
+			}
+		}
+
+		def fake_execute(query, variables=None):
+			if "ShopifyOrderIds" in query:
+				return nodes
+			frappe.throw("boom")
+
+		with patch(EXECUTE_TARGET, side_effect=fake_execute):
+			client = orders.ShopifyClient(self.account.connection)
+			orders.import_orders_updated_between(self.account, client, "2026-09-01T00:00:00Z")
+
+		# Scoped by bad_gid (unique per test invocation) rather than just
+		# sync_type/status: IntegrationTestCase rolls back at the class level
+		# here, not per test method (see IntegrationTestRunCatalogSweep's
+		# tearDown comment in test_products.py for the same gotcha), so a
+		# loose sync_type/status-only filter would also match rows other test
+		# methods in this class write.
+		logs = frappe.get_all(
+			"Marketplace Sync Log",
+			filters={"sync_type": "Order Import", "status": "Error", "request_data": ["like", f"%{bad_gid}%"]},
+			fields=["name", "trigger_source", "marketplace_order", "traceback"],
+		)
+		self.assertEqual(len(logs), 1)
+		self.assertFalse(logs[0].marketplace_order)
+		self.assertEqual(logs[0].trigger_source, "Manual")
+		self.assertIn("boom", logs[0].traceback)
+
+	def test_per_order_failure_uses_the_passed_in_trigger_source(self):
+		bad_gid = _order_gid(frappe.generate_hash(length=8))
+		nodes = {
+			"orders": {
+				"pageInfo": {"hasNextPage": False},
+				"nodes": [{"id": bad_gid, "updatedAt": "2026-09-27T10:00:00Z"}],
+			}
+		}
+
+		def fake_execute(query, variables=None):
+			if "ShopifyOrderIds" in query:
+				return nodes
+			frappe.throw("boom")
+
+		with patch(EXECUTE_TARGET, side_effect=fake_execute):
+			client = orders.ShopifyClient(self.account.connection)
+			orders.import_orders_updated_between(
+				self.account, client, "2026-09-01T00:00:00Z", trigger_source="Scheduled Reconciliation"
+			)
+
+		# Scoped by bad_gid for the same class-level-rollback reason as
+		# test_per_order_failure_writes_a_marketplace_sync_log_row above.
+		logs = frappe.get_all(
+			"Marketplace Sync Log",
+			filters={"sync_type": "Order Import", "status": "Error", "request_data": ["like", f"%{bad_gid}%"]},
+			fields=["trigger_source"],
+		)
+		self.assertEqual(len(logs), 1)
+		self.assertEqual(logs[0].trigger_source, "Scheduled Reconciliation")
+
 
 class IntegrationTestReconcileAllAccountsOrders(IntegrationTestCase):
 	"""Review finding #3: reconcile_all_accounts_orders() must isolate one

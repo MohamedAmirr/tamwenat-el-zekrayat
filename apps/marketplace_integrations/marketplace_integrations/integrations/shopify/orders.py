@@ -219,7 +219,7 @@ def _import_order_isolated(account, order_gid):
 		return order, None
 
 
-def import_orders_updated_between(account, client, start, end=None, on_progress=None):
+def import_orders_updated_between(account, client, start, end=None, on_progress=None, trigger_source="Manual"):
 	"""List order ids updated in ``[start, end]`` (``end`` defaults to no
 	upper bound) via ``list_order_ids_updated_since()`` and ``import_order()``
 	each one, with per-order savepoint isolation - the one shared "list then
@@ -235,20 +235,56 @@ def import_orders_updated_between(account, client, start, end=None, on_progress=
 	Returns (imported_names, errors) where errors is a list of
 	{"order_gid": ..., "error": ...} dicts - one order's failure never stops
 	the rest of the list from being processed.
+
+	#139 section 4: every per-order failure ALSO writes a ``Marketplace Sync
+	Log`` row (``sync_type="Order Import"``, ``status="Error"``) in addition
+	to (not instead of) the ``frappe.log_error()`` calls its two callers
+	already make on the aggregated error list - so the reconciliation
+	dashboard has a per-order, queryable record of Order Import failures, the
+	same way Sales Order Sync failures already do via
+	services/sales_order_sync.py::_create_sync_log(). ``trigger_source``
+	distinguishes a manual range import (run_order_import(), the default
+	"Manual") from the scheduled sweep (reconcile_all_accounts_orders() passes
+	"Scheduled Reconciliation").
 	"""
 	imported = []
 	errors = []
 	for node in list_order_ids_updated_since(client, start, until=end):
 		if end and node.get("updatedAt") and node["updatedAt"] > end:
 			break
-		order, error = _import_order_isolated(account, node.get("id"))
+		order_gid = node.get("id")
+		order, error = _import_order_isolated(account, order_gid)
 		if error:
-			errors.append({"order_gid": node.get("id"), "error": error})
+			errors.append({"order_gid": order_gid, "error": error})
+			_log_order_import_failure(account, order_gid, error, trigger_source)
 		elif order:
 			imported.append(order.name)
 		if on_progress:
 			on_progress(imported, errors)
 	return imported, errors
+
+
+def _log_order_import_failure(account, order_gid, error, trigger_source):
+	"""Write one ``Marketplace Sync Log`` row for a single failed order
+	import (#139 section 4). There is no Marketplace Order to link yet (the
+	import itself is what failed), so ``marketplace_order`` is left blank -
+	the doctype's ``mandatory_depends_on`` only requires it for
+	``sync_type="Sales Order Sync"`` rows. ``ignore_permissions=True`` mirrors
+	sales_order_sync.py::_create_sync_log() - this runs from a background job
+	or the scheduler, not an interactive System Manager session."""
+	now = frappe.utils.now_datetime()
+	frappe.get_doc(
+		{
+			"doctype": "Marketplace Sync Log",
+			"sync_type": "Order Import",
+			"status": "Error",
+			"trigger_source": trigger_source,
+			"attempted_at": now,
+			"completed_at": now,
+			"request_data": frappe.as_json({"account": account.name, "order_gid": order_gid}),
+			"traceback": error,
+		}
+	).insert(ignore_permissions=True)
 
 
 def reconcile_all_accounts_orders():
@@ -274,7 +310,10 @@ def reconcile_all_accounts_orders():
 			start = row.shopify_orders_reconciled_through or add_to_date(now_datetime(), days=-60)
 			run_started = now_datetime()
 			_imported, errors = import_orders_updated_between(
-				account, ShopifyClient(account.connection), _as_shopify_timestamp(start)
+				account,
+				ShopifyClient(account.connection),
+				_as_shopify_timestamp(start),
+				trigger_source="Scheduled Reconciliation",
 			)
 			# Advance the watermark only after a successful run (decision 8) -
 			# per-order failures are already isolated above and don't count as

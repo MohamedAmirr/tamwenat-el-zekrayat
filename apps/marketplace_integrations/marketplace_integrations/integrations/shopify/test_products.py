@@ -16,8 +16,10 @@ from marketplace_integrations.integrations.shopify import products
 from marketplace_integrations.integrations.shopify.constants import SHOPIFY_NODES_LOOKUP_CHUNK_SIZE
 from marketplace_integrations.integrations.shopify.products import (
 	_is_variant_gid,
+	_last_sweep_cache_key,
 	_sweep_cache_key,
 	get_account,
+	get_last_catalog_sweep,
 	get_sweep_status,
 	queue_catalog_sweep,
 	run_catalog_sweep,
@@ -176,6 +178,16 @@ class IntegrationTestRunCatalogSweep(IntegrationTestCase):
 		# transaction that the class-level rollback then undoes right back to
 		# "still present", silently defeating this whole cleanup.
 		frappe.db.commit()
+		# When a test's account insert does NOT reach the commit() above, the
+		# insert (and the MKTACC naming-series increment) rolls back with the
+		# rest of that test's transaction - so a later test can be handed the
+		# exact same account name. This class's own tests write a Redis cache
+		# entry keyed by that name (_last_sweep_cache_key) which is NOT
+		# transactional and survives the rollback, so a stale entry from one
+		# test leaks into whichever later test reuses the same name (caught
+		# by IntegrationTestGetLastCatalogSweep.test_returns_none_when_no_sweep_has_run
+		# in the same run). Clear it explicitly rather than relying on rollback.
+		frappe.cache().delete_value(_last_sweep_cache_key(self.account.name))
 
 	def _run(self, side_effect):
 		job_id = frappe.generate_hash(length=8)
@@ -323,6 +335,35 @@ class IntegrationTestRunCatalogSweep(IntegrationTestCase):
 				run_catalog_sweep(job_id, frappe.session.user, self.account.name)
 			state = frappe.cache().get_value(f"marketplace_integrations:shopify:catalog_sweep_job:{job_id}")
 		self.assertEqual(state["status"], "failed")
+
+	def test_completion_writes_account_keyed_last_sweep_cache_entry(self):
+		# #139 section 1: a completed sweep must also write the account-keyed
+		# "last sweep" cache entry get_last_catalog_sweep() reads - distinct
+		# from the per-job_id entry `_run()` already asserts on above.
+		responses = [
+			{"productVariants": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}},
+			{"nodes": []},
+		]
+		self._run(responses)
+
+		last_sweep = frappe.cache().get_value(
+			f"marketplace_integrations:shopify:catalog_sweep_last:{self.account.name}"
+		)
+		self.assertEqual(last_sweep["status"], "completed")
+		self.assertEqual(last_sweep["result"]["total_exceptions"], 0)
+		self.assertIsNotNone(last_sweep["completed_at"])
+
+	def test_failure_writes_account_keyed_last_sweep_cache_entry(self):
+		with patch(EXECUTE_TARGET, side_effect=frappe.ValidationError("boom")):
+			job_id = frappe.generate_hash(length=8)
+			with self.assertRaises(frappe.ValidationError):
+				run_catalog_sweep(job_id, frappe.session.user, self.account.name)
+
+		last_sweep = frappe.cache().get_value(
+			f"marketplace_integrations:shopify:catalog_sweep_last:{self.account.name}"
+		)
+		self.assertEqual(last_sweep["status"], "failed")
+		self.assertIn("boom", last_sweep["error"])
 
 	def test_pagination_walks_second_cursor_page(self):
 		# Explicit acceptance criterion for #105: pagination works beyond one
@@ -541,3 +582,53 @@ class IntegrationTestGetSweepStatusOwnerScoping(IntegrationTestCase):
 		self.assertEqual(status["status"], "running")
 		self.assertEqual(status["processed"], 5)
 		self.assertNotIn("owner", status)
+
+
+class IntegrationTestGetLastCatalogSweep(IntegrationTestCase):
+	"""#139 section 1: get_last_catalog_sweep() reads the account-keyed cache
+	entry, permission-checked like get_account()/_require_mapping_permission()
+	- NOT owner-scoped, unlike get_sweep_status() (see that function's
+	docstring)."""
+
+	def setUp(self):
+		self.account = make_shopify_account(f"Test Last Sweep Account {frappe.generate_hash(length=8)}")
+
+	def tearDown(self):
+		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
+		frappe.delete_doc(
+			"Shopify Connection", self.account.connection, ignore_permissions=True, force=True
+		)
+		# This class's own account insert isn't behind a commit(), so it rolls
+		# back with the rest of the test's transaction, freeing the MKTACC
+		# name for reuse by a later test/class - but a Redis cache entry
+		# written here (test_returns_cached_state_for_the_account) is not
+		# transactional and would otherwise leak into whichever later test
+		# gets handed that same reused name.
+		frappe.cache().delete_value(_last_sweep_cache_key(self.account.name))
+
+	def test_returns_none_when_no_sweep_has_run(self):
+		self.assertIsNone(get_last_catalog_sweep(self.account.name))
+
+	def test_returns_cached_state_for_the_account(self):
+		frappe.cache().set_value(
+			_last_sweep_cache_key(self.account.name),
+			{"job_id": "abc", "status": "completed", "result": {"total_exceptions": 3}},
+			expires_in_sec=60,
+		)
+
+		state = get_last_catalog_sweep(self.account.name)
+
+		self.assertEqual(state["status"], "completed")
+		self.assertEqual(state["result"]["total_exceptions"], 3)
+
+	def test_rejects_non_shopify_account(self):
+		account = make_shopify_account(f"Test Non-Shopify Last Sweep {frappe.generate_hash(length=8)}")
+		account.db_set("platform", "Talabat", update_modified=False)
+		try:
+			with self.assertRaisesRegex(frappe.ValidationError, "not a Shopify account"):
+				get_last_catalog_sweep(account.name)
+		finally:
+			frappe.delete_doc("Marketplace Account", account.name, ignore_permissions=True, force=True)
+			frappe.delete_doc(
+				"Shopify Connection", account.connection, ignore_permissions=True, force=True
+			)

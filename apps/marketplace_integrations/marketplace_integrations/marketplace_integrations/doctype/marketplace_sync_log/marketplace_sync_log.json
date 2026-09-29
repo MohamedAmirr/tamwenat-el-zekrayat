@@ -5,6 +5,7 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
+  "sync_type",
   "marketplace_order",
   "status",
   "trigger_source",
@@ -16,12 +17,21 @@
  ],
  "fields": [
   {
+   "default": "Sales Order Sync",
+   "fieldname": "sync_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Sync Type",
+   "options": "Sales Order Sync\nOrder Import",
+   "reqd": 1
+  },
+  {
    "fieldname": "marketplace_order",
    "fieldtype": "Link",
    "in_list_view": 1,
    "label": "Marketplace Order",
+   "mandatory_depends_on": "eval:doc.sync_type==\"Sales Order Sync\"",
    "options": "Marketplace Order",
-   "reqd": 1,
    "search_index": 1
   },
   {
@@ -40,7 +50,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Trigger Source",
-   "options": "Manual\nManual Resync\nShopify Webhook\nTalabat Webhook",
+   "options": "Manual\nManual Resync\nShopify Webhook\nTalabat Webhook\nScheduled Reconciliation",
    "reqd": 1
   },
   {
@@ -101,6 +111,5 @@
  "sort_field": "creation",
  "sort_order": "DESC",
  "states": [],
- "title_field": "marketplace_order",
  "track_changes": 1
 }
