@@ -14,11 +14,15 @@ these tests now call those functions directly instead of reading the
 (removed) number_card.json fixture. States 5/6's live queries are exercised
 directly via their own functions, already unit tested in
 integrations/shopify/test_products.py, integrations/shopify/test_orders.py,
-services/test_shopify_reconciliation.py, and each Script Report's own
-test_*.py (marketplace_integrations/report/shopify_order_import_failures/,
-.../shopify_refund_evidence_gaps/, .../shopify_reconciliation_summary/) -
-referenced here again only to keep all 6 states enumerated in one place, per
-#142's acceptance criteria."""
+services/test_shopify_reconciliation.py, and each remaining Script Report's
+own test_*.py (marketplace_integrations/report/shopify_order_import_failures/,
+.../shopify_reconciliation_summary/) - referenced here again only to keep all
+6 states enumerated in one place, per #142's acceptance criteria.
+get_refund_evidence_gaps() itself no longer backs a Script Report of its own
+(that report was removed in favor of a Marketplace Order list view filter -
+see docs/marketplace-integrations/shopify-reconciliation-dashboard.md), but
+state 6 is still exercised here directly against the shared service
+function."""
 
 import frappe
 from frappe.tests import IntegrationTestCase

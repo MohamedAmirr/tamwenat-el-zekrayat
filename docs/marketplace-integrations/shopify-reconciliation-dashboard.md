@@ -1,24 +1,28 @@
 # Shopify Reconciliation Dashboard (#139) — Setup & Operations
 
-Operator-facing guide to the "Shopify Reconciliation" Workspace. Sections that
-were originally a hand-built custom Page (Order Import failures, refund
-evidence gaps) now ship as native Frappe Script Reports instead, after an
-HTML-escaping bug on the hand-built Page showed that class of bug is worth
-avoiding by using Frappe's own report renderer. The dashboard's original 5
-Number Cards have themselves since been replaced by the **Shopify
-Reconciliation Summary** report below, because a Number Card can't offer a
-live user-adjustable date range and the new business metrics (order value,
-sync/webhook success rates, refunded amounts) need one. Everything here is
-System-Manager-only (see `docs/marketplace-integrations/shopify-reconciliation-v1-exclusions.md`
+Operator-facing guide to the "Shopify Reconciliation" Workspace. The Order
+Import failures section was originally a hand-built custom Page and now
+ships as a native Frappe Script Report instead, after an HTML-escaping bug on
+the hand-built Page showed that class of bug is worth avoiding by using
+Frappe's own report renderer. The dashboard's original 5 Number Cards have
+themselves since been replaced by the **Shopify Reconciliation Summary**
+report below, because a Number Card can't offer a live user-adjustable date
+range and the new business metrics (order value, sync/webhook success rates,
+refunded amounts) need one. The dashboard's two refund-focused Script
+Reports (**Shopify Refund Evidence Gaps**, **Shopify Refunded Orders**) were
+later removed as redundant with the Summary report's own Total Refunded
+Amount metric — see "Show Refunded Orders" list view filter below. Everything
+here is System-Manager-only (see `docs/marketplace-integrations/shopify-reconciliation-v1-exclusions.md`
 for what this dashboard deliberately does NOT cover).
 
 ## Where to find it
 
-Desk sidebar → **Shopify Reconciliation** workspace. It shows 5 shortcuts:
-the **Shopify Reconciliation Summary**, **Shopify Order Import Failures**,
-**Shopify Refund Evidence Gaps**, and **Shopify Refunded Orders** Script
-Reports, and the existing **Marketplace Shopify Catalog Mapping** page (for
-catalog-sweep access — see "Catalog Sweeps" below).
+Desk sidebar → **Shopify Reconciliation** workspace. It shows 3 shortcuts:
+the **Shopify Reconciliation Summary** and **Shopify Order Import Failures**
+Script Reports, and the existing **Marketplace Shopify Catalog Mapping** page
+(for catalog-sweep access — see "Catalog Sweeps" below). For refunded orders,
+use the **Show Refunded Orders** button on the Marketplace Order list view —
+see that section below.
 
 ## Script Reports
 
@@ -84,47 +88,23 @@ and read `request_data` (the account + order GID that failed) and
 the affected account/date range, or wait for the next
 `reconcile_all_accounts_orders()` scheduled sweep.
 
-### Shopify Refund Evidence Gaps
+## Show Refunded Orders (Marketplace Order list view)
 
-`marketplace_integrations/report/shopify_refund_evidence_gaps/` — a standard
-Frappe Script Report. Its `execute()` calls the same
-`services/shopify_reconciliation.py::get_refund_evidence_gaps()` function
-that ran this query before the conversion, so there is one source of truth
-for the query, not two implementations that could drift.
-
-A live query (no caching, no new field) for Shopify `Marketplace Order` rows
-where `platform = "Shopify"`, `external_financial_status` is `REFUNDED` or
-`PARTIALLY_REFUNDED`, and `refunds` is empty (`NULL`, `''`, or `'[]'`). This
-is a data gap: Shopify's financial status says money was refunded, but this
-order's `refunds` field — which should have been populated the next time the
-order was re-imported (webhook or reconciliation) — never was.
-
-To act: click the `Order` column, or manually re-import the order
-(`import_order()`/the order-import page) to force a fresh fetch, which
-should populate `refunds` and clear it from this report. If it still shows
-up as a gap after a fresh import, the refund may genuinely not have
-line-item detail in Shopify's API response yet — investigate on the Shopify
-admin side.
-
-### Shopify Refunded Orders
-
-`marketplace_integrations/report/shopify_refunded_orders/` — a standard
-Frappe Script Report. Its `execute()` calls
-`services/shopify_reconciliation.py::get_refunded_orders()`.
-
-The general-purpose "show me every refunded order" view: ALL Shopify
-`Marketplace Order` rows where `external_financial_status` is `REFUNDED` or
-`PARTIALLY_REFUNDED`, regardless of whether `refunds` evidence is populated
-— unlike **Shopify Refund Evidence Gaps** above, which only shows the subset
-missing evidence. A `Has Refund Evidence` checkbox column (reusing the exact
-same NULL/`''`/`'[]'` emptiness test as the gaps report) lets you see at a
-glance which rows are also gaps.
-
-Supports a native Frappe Report date-range filter (`From Date`/`To Date`,
-shown as date pickers above the report table) on `last_platform_update_on`
-— the field that changes when Shopify sends a refund update, as opposed to
-`received_on` (the original order date, not relevant to "when was it
-refunded").
+The dashboard's two refund-focused Script Reports above (Shopify Refund
+Evidence Gaps, Shopify Refunded Orders) were removed as redundant with the
+Shopify Reconciliation Summary report's own Total Refunded Amount metric.
+In their place, the Marketplace Order list view
+(`marketplace_integrations/doctype/marketplace_order/marketplace_order_list.js`)
+has a **Show Refunded Orders** button next to the existing "Retrieve from
+Talabat"/"Retrieve from Shopify" buttons. Clicking it applies a list view
+filter — `platform = Shopify` AND `external_financial_status` in
+(`REFUNDED`, `PARTIALLY_REFUNDED`) — via Frappe's own
+`listview.filter_area.add()` API, the same native filtering a user could set
+up manually from the list view's filter UI. This is a live filter on the
+standard list view (sortable, exportable, linkable), not a dedicated report;
+`services/shopify_reconciliation.py::get_refund_evidence_gaps()` (the
+narrower "refund status but missing `refunds` evidence" query) remains as
+shared/tested logic but no longer backs a report of its own.
 
 ## Catalog Sweeps
 

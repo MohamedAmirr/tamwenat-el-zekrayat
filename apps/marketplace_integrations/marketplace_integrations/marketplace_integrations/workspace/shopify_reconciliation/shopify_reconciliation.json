@@ -1,7 +1,7 @@
 {
  "app": "marketplace_integrations",
  "charts": [],
- "content": "[{\"id\":\"src1header\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Shopify Reconciliation</b></span>\",\"col\":12}},{\"id\":\"src1shortcut0\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Reconciliation Summary\",\"col\":4}},{\"id\":\"src1spacer\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"src1shortcuts\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Detail</b></span>\",\"col\":12}},{\"id\":\"src1shortcut1\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Order Import Failures\",\"col\":4}},{\"id\":\"src1shortcut2\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Refund Evidence Gaps\",\"col\":4}},{\"id\":\"src1shortcut3\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Refunded Orders\",\"col\":4}},{\"id\":\"src1shortcut4\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Marketplace Shopify Catalog Mapping\",\"col\":4}}]",
+ "content": "[{\"id\":\"src1header\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Shopify Reconciliation</b></span>\",\"col\":12}},{\"id\":\"src1shortcut0\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Reconciliation Summary\",\"col\":4}},{\"id\":\"src1spacer\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"src1shortcuts\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Detail</b></span>\",\"col\":12}},{\"id\":\"src1shortcut1\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Order Import Failures\",\"col\":4}},{\"id\":\"src1shortcut4\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Marketplace Shopify Catalog Mapping\",\"col\":4}}]",
  "creation": "2026-09-29 00:00:00.000000",
  "custom_blocks": [],
  "docstatus": 0,
@@ -13,7 +13,7 @@
  "is_hidden": 0,
  "label": "Shopify Reconciliation",
  "links": [],
- "modified": "2026-09-29 00:00:00.000000",
+ "modified": "2026-09-29 15:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Shopify Reconciliation",
@@ -43,20 +43,6 @@
    "doctype": "Workspace Shortcut",
    "label": "Shopify Order Import Failures",
    "link_to": "Shopify Order Import Failures",
-   "type": "Report"
-  },
-  {
-   "doc_view": "",
-   "doctype": "Workspace Shortcut",
-   "label": "Shopify Refund Evidence Gaps",
-   "link_to": "Shopify Refund Evidence Gaps",
-   "type": "Report"
-  },
-  {
-   "doc_view": "",
-   "doctype": "Workspace Shortcut",
-   "label": "Shopify Refunded Orders",
-   "link_to": "Shopify Refunded Orders",
    "type": "Report"
   },
   {

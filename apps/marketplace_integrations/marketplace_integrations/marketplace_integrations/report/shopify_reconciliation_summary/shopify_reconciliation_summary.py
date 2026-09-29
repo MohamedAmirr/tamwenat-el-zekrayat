@@ -14,8 +14,13 @@ refunded amount, webhook processing success rate), all scoped to the
 
 Calls services/shopify_reconciliation.py::get_reconciliation_summary() - the
 single source of truth for all 10 metrics, so this report has no query logic
-of its own, matching the sibling shopify_order_import_failures/,
-shopify_refund_evidence_gaps/, and shopify_refunded_orders/ reports.
+of its own, matching the sibling shopify_order_import_failures/ report.
+
+The dashboard's other two former Script Reports, "Shopify Refund Evidence
+Gaps" and "Shopify Refunded Orders", were removed in favor of a "Show
+Refunded Orders" Marketplace Order list view filter (redundant with this
+report's metric #9, Total Refunded Amount) - see
+docs/marketplace-integrations/shopify-reconciliation-dashboard.md.
 
 Metrics 1-5 are current-state snapshots (same semantics as the Number Cards
 they replace) and ignore this filter; metrics 6-10 respect it. Each row's

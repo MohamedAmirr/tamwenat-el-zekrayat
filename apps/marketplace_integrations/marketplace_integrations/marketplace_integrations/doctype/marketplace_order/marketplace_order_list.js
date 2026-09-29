@@ -7,8 +7,25 @@ if (typeof frappe !== "undefined") {
 			listview.page.add_inner_button(__("Retrieve from Shopify"), () => {
 				show_shopify_retrieval_dialog(listview);
 			});
+			listview.page.add_inner_button(__("Show Refunded Orders"), () => {
+				show_refunded_orders(listview);
+			});
 		},
 	};
+}
+
+// Replaces the removed "Shopify Refund Evidence Gaps"/"Shopify Refunded
+// Orders" Script Reports (#139 redundant with the "Shopify Reconciliation
+// Summary" report's own Total Refunded Amount metric) with a plain list view
+// quick filter: platform = Shopify AND external_financial_status in
+// (REFUNDED, PARTIALLY_REFUNDED) - frappe.listview.filter_area.add() takes an
+// array of [doctype, fieldname, condition, value] tuples, matching Frappe's
+// own list view filter API.
+function show_refunded_orders(listview) {
+	listview.filter_area.add([
+		["Marketplace Order", "platform", "=", "Shopify"],
+		["Marketplace Order", "external_financial_status", "in", ["REFUNDED", "PARTIALLY_REFUNDED"]],
+	]);
 }
 
 function show_shopify_retrieval_dialog(listview) {
@@ -129,5 +146,5 @@ function format_import_result(result) {
 }
 
 if (typeof module !== "undefined") {
-	module.exports = { build_utc_range, format_import_result };
+	module.exports = { build_utc_range, format_import_result, show_refunded_orders };
 }
