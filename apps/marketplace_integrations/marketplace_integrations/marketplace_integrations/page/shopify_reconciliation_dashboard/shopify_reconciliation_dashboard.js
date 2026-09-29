@@ -14,7 +14,66 @@
 // "marketplace_shopify_catalog_sweep_progress") rather than reinventing it -
 // adapted here to run per-account (this page shows every enabled Shopify
 // account at once, not one account picked from a dropdown).
+
+// Module-scope (not inside on_page_load's closure) so shopify_reconciliation_dashboard.test.js
+// can require() and unit-test the escaping decision directly, the same way
+// shopify_catalog_push_status.js's helpers are tested.
+function comment_when(datetime_str) {
+	return frappe.datetime.comment_when
+		? frappe.datetime.comment_when(datetime_str)
+		: frappe.utils.escape_html(datetime_str);
+}
+
+// Builds the "Catalog Sweeps" status-cell message and says how it must be
+// inserted into the DOM: mode "html" for the success message, which embeds a
+// real frappe-timestamp <span> from comment_when() and must go through
+// .html() to render (not .text(), which was the bug - it showed the span
+// markup as literal escaped text instead of a rendered timestamp element);
+// mode "text" for the failed/no-sweep-yet messages, which may carry a raw
+// API-controlled error string and must stay escaped via .text().
+//
+// Safe to use .html() for the success message: comment_when()'s markup is
+// built only from last_sweep.completed_at (a server-generated datetime,
+// never an API/user-controlled string), and every other value interpolated
+// into the message (counts, totals) is a plain integer, never a raw string -
+// so nothing user/API-controlled is ever inserted as HTML.
+function build_last_sweep_message(last_sweep) {
+	if (!last_sweep) {
+		return { mode: "text", content: __("No sweep has run yet.") };
+	}
+	if (last_sweep.status === "failed") {
+		return { mode: "text", content: __("Last sweep failed: {0}", [last_sweep.error || ""]) };
+	}
+	const result = last_sweep.result || {};
+	const exceptions = result.exceptions || [];
+	const counts = {};
+	exceptions.forEach((row) => {
+		counts[row.category] = (counts[row.category] || 0) + 1;
+	});
+	const age = last_sweep.completed_at ? comment_when(last_sweep.completed_at) : __("unknown");
+	let text = __("Last swept {0}. {1} exception(s) (Unmapped: {2}, Deleted: {3}, Variant-less: {4}).", [
+		age,
+		result.total_exceptions != null ? result.total_exceptions : exceptions.length,
+		counts["Unmapped"] || 0,
+		counts["Deleted"] || 0,
+		counts["Variant-less"] || 0,
+	]);
+	if (result.truncated) {
+		text += " " + __("(list truncated)");
+	}
+	if (result.refresh_failures) {
+		text += " " + __("{0} row(s) failed to refresh, see Error Log.", [result.refresh_failures]);
+	}
+	return { mode: "html", content: text };
+}
+
 frappe.pages["shopify-reconciliation-dashboard"].on_page_load = function (wrapper) {
+	// Standard page container styling (margin/padding matching this app's other
+	// custom Pages, e.g. marketplace_shopify_catalog_mapping.css) - without
+	// this the container div has no CSS of its own and renders edge-to-edge
+	// instead of centered/contained like the rest of Desk.
+	frappe.require("/assets/marketplace_integrations/css/shopify_reconciliation_dashboard.css");
+
 	const page = frappe.ui.make_app_page({
 		parent: wrapper,
 		title: __("Shopify Reconciliation Dashboard"),
@@ -119,39 +178,17 @@ frappe.pages["shopify-reconciliation-dashboard"].on_page_load = function (wrappe
 	}
 
 	function render_last_sweep($status_cell, last_sweep) {
-		if (!last_sweep) {
-			$status_cell.text(__("No sweep has run yet."));
-			return;
+		const message = build_last_sweep_message(last_sweep);
+		// message.mode "html" carries a real frappe-timestamp <span> (built by
+		// build_last_sweep_message/comment_when below) and must be inserted with
+		// .html() so it renders as an element, not literal text; "text" carries
+		// a plain-string message (e.g. a failed-job error, which may be an
+		// API-controlled string) and must stay escaped via .text().
+		if (message.mode === "html") {
+			$status_cell.html(message.content);
+		} else {
+			$status_cell.text(message.content);
 		}
-		if (last_sweep.status === "failed") {
-			$status_cell.text(__("Last sweep failed: {0}", [last_sweep.error || ""]));
-			return;
-		}
-		const result = last_sweep.result || {};
-		const exceptions = result.exceptions || [];
-		const counts = {};
-		exceptions.forEach((row) => {
-			counts[row.category] = (counts[row.category] || 0) + 1;
-		});
-		const age = last_sweep.completed_at ? comment_when(last_sweep.completed_at) : __("unknown");
-		let text = __("Last swept {0}. {1} exception(s) (Unmapped: {2}, Deleted: {3}, Variant-less: {4}).", [
-			age,
-			result.total_exceptions != null ? result.total_exceptions : exceptions.length,
-			counts["Unmapped"] || 0,
-			counts["Deleted"] || 0,
-			counts["Variant-less"] || 0,
-		]);
-		if (result.truncated) {
-			text += " " + __("(list truncated)");
-		}
-		if (result.refresh_failures) {
-			text += " " + __("{0} row(s) failed to refresh, see Error Log.", [result.refresh_failures]);
-		}
-		$status_cell.text(text);
-	}
-
-	function comment_when(datetime_str) {
-		return frappe.datetime.comment_when ? frappe.datetime.comment_when(datetime_str) : datetime_str;
 	}
 
 	function watch_sweep(job_id, account_name, $status_cell, $button) {
@@ -266,3 +303,7 @@ frappe.pages["shopify-reconciliation-dashboard"].on_page_load = function (wrappe
 			});
 	}
 };
+
+if (typeof module !== "undefined") {
+	module.exports = { build_last_sweep_message };
+}
