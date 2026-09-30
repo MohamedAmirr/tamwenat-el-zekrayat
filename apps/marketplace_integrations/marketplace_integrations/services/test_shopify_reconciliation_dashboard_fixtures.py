@@ -11,18 +11,16 @@ Reconciliation Summary" Script Report, whose first 5 metric rows reproduce
 the exact same filter logic via dedicated count functions in
 services/shopify_reconciliation.py (get_catalog_push_error_count() etc.), so
 these tests now call those functions directly instead of reading the
-(removed) number_card.json fixture. States 5/6's live queries are exercised
-directly via their own functions, already unit tested in
+(removed) number_card.json fixture. State 5's live query is exercised
+directly via its own function, already unit tested in
 integrations/shopify/test_products.py, integrations/shopify/test_orders.py,
 services/test_shopify_reconciliation.py, and each remaining Script Report's
 own test_*.py (marketplace_integrations/report/shopify_order_import_failures/,
-.../shopify_reconciliation_summary/) - referenced here again only to keep all
-6 states enumerated in one place, per #142's acceptance criteria.
-get_refund_evidence_gaps() itself no longer backs a Script Report of its own
-(that report was removed in favor of a Marketplace Order list view filter -
-see docs/marketplace-integrations/shopify-reconciliation-dashboard.md), but
-state 6 is still exercised here directly against the shared service
-function."""
+.../shopify_reconciliation_summary/) - referenced here again only to keep
+states enumerated in one place, per #142's acceptance criteria. State 6
+(refund evidence gaps) and its backing get_refund_evidence_gaps() were
+removed entirely in favor of a Marketplace Order list view filter - see
+docs/marketplace-integrations/shopify-reconciliation-dashboard.md."""
 
 import frappe
 from frappe.tests import IntegrationTestCase
@@ -37,7 +35,6 @@ from marketplace_integrations.services.shopify_reconciliation import (
 	get_inventory_sync_error_count,
 	get_order_import_failures,
 	get_order_sync_error_count,
-	get_refund_evidence_gaps,
 	get_webhook_delivery_error_count,
 	get_webhook_delivery_exhausted_retry_count,
 )
@@ -145,21 +142,3 @@ class IntegrationTestDashboardFailureStatesSurfaceCorrectly(IntegrationTestCase)
 
 		names = [row.name for row in get_order_import_failures()]
 		self.assertIn(log.name, names)
-
-	def test_state_6_refund_evidence_gap_order_surfaces(self):
-		order = frappe.get_doc(
-			{
-				"doctype": "Marketplace Order",
-				"marketplace_account": self.account.name,
-				"external_order_id": f"dashboard-fixture-refund-{frappe.generate_hash(length=8)}",
-				"platform": "Shopify",
-				"external_financial_status": "REFUNDED",
-				"refunds": "[]",
-			}
-		)
-		order.flags.skip_sync_status_update = True
-		order.order_identity_key = compute_order_identity_key(self.account.name, order.external_order_id)
-		order.insert()
-
-		names = [row.name for row in get_refund_evidence_gaps()]
-		self.assertIn(order.name, names)

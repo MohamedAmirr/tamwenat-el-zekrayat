@@ -16,7 +16,7 @@ from marketplace_integrations.marketplace_integrations.report.shopify_order_impo
 )
 from marketplace_integrations.services.shopify_reconciliation import get_order_import_failures
 
-EXPECTED_FIELDNAMES = {"name", "trigger_source", "attempted_at", "request_data", "traceback"}
+EXPECTED_FIELDNAMES = {"name", "marketplace_account", "trigger_source", "attempted_at", "request_data", "traceback"}
 
 
 class IntegrationTestShopifyOrderImportFailuresReport(IntegrationTestCase):

@@ -30,6 +30,13 @@ def get_columns():
 			"width": 180,
 		},
 		{
+			"label": "Marketplace Account",
+			"fieldname": "marketplace_account",
+			"fieldtype": "Link",
+			"options": "Marketplace Account",
+			"width": 180,
+		},
+		{
 			"label": "Trigger Source",
 			"fieldname": "trigger_source",
 			"fieldtype": "Data",

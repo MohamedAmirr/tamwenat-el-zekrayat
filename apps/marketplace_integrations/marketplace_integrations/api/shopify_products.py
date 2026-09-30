@@ -34,18 +34,6 @@ def get_catalog_sweep_status(job_id: str):
 	return products.get_sweep_status(job_id)
 
 
-@frappe.whitelist()
-def get_last_catalog_sweep(account: str):
-	"""Return the most recently completed/failed catalog sweep for one
-	Marketplace Account (#139 section 1), for the reconciliation dashboard.
-	Unlike get_catalog_sweep_status(), this is NOT owner-scoped to whoever
-	queued the run - it's permission-checked the same way as get_account()
-	instead, since any user with read access to the account/mapping doctype
-	should be able to see the account's last sweep outcome, not just the user
-	who happened to trigger it."""
-	return products.get_last_catalog_sweep(account)
-
-
 @frappe.whitelist(methods=["POST"])
 def upsert_mapping(
 	account: str,

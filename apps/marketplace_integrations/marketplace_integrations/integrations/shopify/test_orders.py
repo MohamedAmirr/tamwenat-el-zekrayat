@@ -215,6 +215,46 @@ class IntegrationTestImportOrdersUpdatedBetween(IntegrationTestCase):
 	def setUp(self):
 		self.account = make_shopify_account(f"Order Range {frappe.generate_hash(length=8)}")
 
+	def tearDown(self):
+		# _log_order_import_failure()'s frappe.db.commit() (review finding
+		# #2a) is reachable from several tests in this class - per
+		# docs/frappe-conventions.md's commit/test transaction gotcha, that
+		# permanently persists this test's rows past IntegrationTestCase's
+		# class-scoped rollback (same gotcha as
+		# IntegrationTestRunCatalogSweep's tearDown in test_products.py).
+		# Explicitly clean up here rather than relying on that rollback,
+		# which a commit() already defeats for whatever was in the
+		# transaction at that point.
+		#
+		# Marketplace Order rows (e.g. test_one_bad_order_does_not_stop_the_
+		# rest's successfully-imported "good" order) must be deleted BEFORE
+		# the account, not left dangling: deleting a doc named by a
+		# `.#####`-style naming series reverts that series' counter when
+		# it was the latest-issued name (frappe.model.naming), so the very
+		# next test's make_shopify_account() call in this same class can be
+		# handed back that exact same Account/Connection name. A leftover
+		# order still carrying the old (reused) name then reads as if it
+		# belongs to the new account, corrupting the next test's counts.
+		frappe.db.delete("Marketplace Order", filters={"marketplace_account": self.account.name})
+		frappe.db.delete(
+			"Marketplace Sync Log",
+			filters={
+				"sync_type": "Order Import",
+				"status": "Error",
+				"marketplace_account": self.account.name,
+			},
+		)
+		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
+		frappe.delete_doc(
+			"Shopify Connection", self.account.connection, ignore_permissions=True, force=True
+		)
+		# The commit() above (if a test reached it) already made this test's
+		# account/connection/log rows permanent - these deletes must be
+		# committed too, in the SAME way, or they'd only land in a fresh
+		# post-commit transaction that the class-level rollback then undoes
+		# right back to "still present", silently defeating this cleanup.
+		frappe.db.commit()
+
 	def test_one_bad_order_does_not_stop_the_rest(self):
 		good_gid = _order_gid(frappe.generate_hash(length=8))
 		bad_gid = _order_gid(frappe.generate_hash(length=8))
@@ -317,6 +357,25 @@ class IntegrationTestReconcileAllAccountsOrders(IntegrationTestCase):
 	def setUp(self):
 		self.account_a = make_shopify_account(f"Reconcile Fails {frappe.generate_hash(length=8)}")
 		self.account_b = make_shopify_account(f"Reconcile Succeeds {frappe.generate_hash(length=8)}")
+
+	def tearDown(self):
+		# reconcile_all_accounts_orders()'s per-account frappe.db.commit()
+		# on success (self.account_b's branch) permanently persists this
+		# test's rows past IntegrationTestCase's class-scoped rollback -
+		# same gotcha as IntegrationTestImportOrdersUpdatedBetween's
+		# tearDown above. Orders must go before their account (naming-series
+		# revert-on-delete gotcha, see that tearDown's comment).
+		for account_name in (self.account_a.name, self.account_b.name):
+			frappe.db.delete("Marketplace Order", filters={"marketplace_account": account_name})
+		frappe.delete_doc("Marketplace Account", self.account_a.name, ignore_permissions=True, force=True)
+		frappe.delete_doc("Marketplace Account", self.account_b.name, ignore_permissions=True, force=True)
+		frappe.delete_doc(
+			"Shopify Connection", self.account_a.connection, ignore_permissions=True, force=True
+		)
+		frappe.delete_doc(
+			"Shopify Connection", self.account_b.connection, ignore_permissions=True, force=True
+		)
+		frappe.db.commit()
 
 	def test_one_accounts_failure_does_not_stop_another_accounts_import_or_watermark(self):
 		order_gid_b = _order_gid(frappe.generate_hash(length=8))
