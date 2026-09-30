@@ -1,5 +1,11 @@
 # Shopify Reconciliation Dashboard — v1 Exclusions & Security Review (#141)
 
+> **Update (post-review follow-ups):** `get_last_catalog_sweep()` and
+> `get_refund_evidence_gaps()` — both reviewed below — were removed as dead
+> code (no live caller left). Read the findings below as evidence of the
+> access control they had while they existed, not as a description of
+> current live surfaces.
+
 ## Security/permission review (#139's new surfaces)
 
 Reviewed: the two new whitelisted methods (`get_last_catalog_sweep`,

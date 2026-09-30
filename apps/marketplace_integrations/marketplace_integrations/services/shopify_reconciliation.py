@@ -2,42 +2,35 @@
 # For license information, please see license.txt
 
 """Read-only queries backing the Shopify Reconciliation dashboard's Script
-Reports (#139 sections 4 and 6, converted from a hand-built custom Page to
-native Frappe Script Reports, plus the "Shopify Reconciliation Summary"
+Reports (#139 section 4, converted from a hand-built custom Page to a
+native Frappe Script Report, plus the "Shopify Reconciliation Summary"
 report that replaced the dashboard's 5 Number Cards - see
 marketplace_integrations/report/shopify_order_import_failures/ and
 .../report/shopify_reconciliation_summary/, whose execute() functions call
 these same functions directly so there is one source of truth per query):
-recent Order Import failures, Shopify orders with a refund status but no
-recorded refund evidence, and the reconciliation summary's 10 metrics. All
+recent Order Import failures and the reconciliation summary's metrics. All
 are computed fresh on every call - no caching, no new persisted field.
 
-get_refund_evidence_gaps() below no longer backs a Script Report of its own
-(its dedicated "Shopify Refund Evidence Gaps" report, and the general-purpose
-"Shopify Refunded Orders" report/get_refunded_orders(), were both removed in
-favor of a "Show Refunded Orders" Marketplace Order list view filter - see
-docs/marketplace-integrations/shopify-reconciliation-dashboard.md); it is
-kept because services/test_shopify_reconciliation.py and
-services/test_shopify_reconciliation_dashboard_fixtures.py (#142's "state 6"
-enumeration) still exercise it directly as a unit of shared logic.
+Section 6 (Shopify orders with a refund status but no recorded refund
+evidence) and its backing get_refund_evidence_gaps() were removed entirely
+in favor of a "Show Refunded Orders" Marketplace Order list view filter -
+see docs/marketplace-integrations/shopify-reconciliation-dashboard.md.
 
-Both underlying doctypes (``Marketplace Sync Log``, ``Marketplace Order``)
-restrict ``read`` to the System Manager role only (see their own DocType
-permissions) - these functions require the same role explicitly, matching
-``Marketplace Sync Log.resync()``'s ``frappe.only_for("System Manager")``,
-rather than relying solely on ``frappe.get_all()``'s own permission
-enforcement.
+The underlying doctype (``Marketplace Sync Log``) restricts ``read`` to the
+System Manager role only (see its own DocType permissions) - these functions
+require the same role explicitly, matching ``Marketplace Sync
+Log.resync()``'s ``frappe.only_for("System Manager")``, rather than relying
+solely on ``frappe.get_all()``'s own permission enforcement.
 """
 
 import frappe
-from frappe.utils import flt
+from frappe.utils import flt, get_datetime, getdate
 
 from marketplace_integrations.integrations.shopify.webhooks import (
 	MAX_WEBHOOK_DELIVERY_ATTEMPTS,
 )
 
 ORDER_IMPORT_FAILURES_LIMIT = 50
-REFUND_EVIDENCE_GAPS_LIMIT = 50
 
 
 def get_order_import_failures(limit=ORDER_IMPORT_FAILURES_LIMIT):
@@ -47,54 +40,38 @@ def get_order_import_failures(limit=ORDER_IMPORT_FAILURES_LIMIT):
 	return frappe.get_all(
 		"Marketplace Sync Log",
 		filters={"sync_type": "Order Import", "status": "Error"},
-		fields=["name", "trigger_source", "attempted_at", "request_data", "traceback"],
+		fields=["name", "marketplace_account", "trigger_source", "attempted_at", "request_data", "traceback"],
 		order_by="attempted_at desc",
 		limit_page_length=limit,
 	)
 
 
-def get_refund_evidence_gaps(limit=REFUND_EVIDENCE_GAPS_LIMIT):
-	"""Shopify Marketplace Order rows with a refund financial status but no
-	recorded refund evidence (#139 section 6, no longer surfaced by a Script
-	Report of its own - see this module's docstring) - a live query, not a
-	persisted field: ``platform="Shopify"``, ``external_financial_status`` in
-	(REFUNDED, PARTIALLY_REFUNDED), and ``refunds`` empty.
-
-	"Empty" is checked against the raw DB text representation - ``NULL``,
-	``''``, or ``'[]'`` - confirmed against
-	integrations/shopify/test_refund_notification.py's already-shipped
-	``doc.refunds`` truthiness check (an explicit empty list is falsy/no
-	refund there too). An OR across NULL/''/'[]' on one field, ordered and
-	limited across the whole result, can't be expressed by
-	frappe.get_all()'s AND-only filter dict - see
-	docs/frappe-conventions.md's "prefer the ORM, raw SQL only when it
-	genuinely can't express the query" guidance (same rationale as
-	integrations/shopify/webhooks.py::retry_errored_webhook_deliveries()).
-	"""
-	frappe.only_for("System Manager")
-	return frappe.db.sql(
-		"""
-		SELECT name, order_code, external_financial_status, last_platform_update_on
-		FROM `tabMarketplace Order`
-		WHERE platform = 'Shopify'
-		  AND external_financial_status IN ('REFUNDED', 'PARTIALLY_REFUNDED')
-		  AND (refunds IS NULL OR refunds = '' OR refunds = '[]')
-		ORDER BY last_platform_update_on DESC
-		LIMIT %(limit)s
-		""",
-		{"limit": limit},
-		as_dict=True,
-	)
+def _end_of_day(date_value):
+	"""Return a Datetime for the last instant of ``date_value``'s calendar
+	day, so a Date-typed "To Date" filter compared against a Datetime field
+	(``received_on``, ``last_platform_update_on``, ``received_at``) includes
+	every row on that day rather than only rows at/before midnight."""
+	return get_datetime(f"{getdate(date_value)} 23:59:59.999999")
 
 
 def _date_range_filters(fieldname, from_date=None, to_date=None):
 	"""Return a list of frappe.get_all()-style range conditions on
-	``fieldname``, only including the bounds actually supplied."""
+	``fieldname``, only including the bounds actually supplied.
+
+	``fieldname`` is always a Datetime field on the underlying doctype, while
+	``from_date``/``to_date`` come from Date-typed report filters. The lower
+	bound compares as-is (a bare date coerces to that day's midnight, which
+	is exactly "From Date onwards"), but the upper bound is expanded to the
+	end of ``to_date``'s day via ``_end_of_day()`` - otherwise a bare date
+	string compared with ``<=`` against a Datetime column excludes every row
+	timestamped later than midnight on the To Date itself, silently dropping
+	that whole day from the range.
+	"""
 	conditions = []
 	if from_date:
 		conditions.append([fieldname, ">=", from_date])
 	if to_date:
-		conditions.append([fieldname, "<=", to_date])
+		conditions.append([fieldname, "<=", _end_of_day(to_date)])
 	return conditions
 
 
@@ -171,12 +148,17 @@ def get_total_order_value_in_range(from_date=None, to_date=None):
 	"""
 	frappe.only_for("System Manager")
 	filters = [["platform", "=", "Shopify"], *_date_range_filters("received_on", from_date, to_date)]
-	rows = frappe.get_all("Marketplace Order", filters=filters, fields=["order_total", "shop_currency"])
+	rows = frappe.get_all(
+		"Marketplace Order",
+		filters=filters,
+		fields=["shop_currency", {"SUM": "order_total", "as": "total"}],
+		group_by="shop_currency",
+	)
 
 	breakdown = {}
 	for row in rows:
 		currency = row.shop_currency or "Unknown"
-		breakdown[currency] = breakdown.get(currency, 0.0) + flt(row.order_total)
+		breakdown[currency] = breakdown.get(currency, 0.0) + flt(row.total)
 
 	if not breakdown:
 		return {"total": 0.0, "currency": None, "breakdown": {}, "is_mixed": False}
@@ -205,7 +187,7 @@ def get_sales_order_sync_success_rate_in_range(from_date=None, to_date=None):
 	filters = [["platform", "=", "Shopify"], *_date_range_filters("received_on", from_date, to_date)]
 	rows = frappe.get_all("Marketplace Order", filters=filters, fields=["erpnext_sync_status"])
 	denominator = len(rows)
-	numerator = len([row for row in rows if row.erpnext_sync_status == "Synced"])
+	numerator = sum(1 for row in rows if row.erpnext_sync_status == "Synced")
 	rate = (numerator / denominator * 100) if denominator else None
 	return {"rate": rate, "numerator": numerator, "denominator": denominator}
 
@@ -277,7 +259,7 @@ def get_webhook_processing_success_rate_in_range(from_date=None, to_date=None):
 	filters = _date_range_filters("received_at", from_date, to_date)
 	rows = frappe.get_all("Shopify Webhook Delivery", filters=filters, fields=["status"])
 	denominator = len(rows)
-	numerator = len([row for row in rows if row.status == "Processed"])
+	numerator = sum(1 for row in rows if row.status == "Processed")
 	rate = (numerator / denominator * 100) if denominator else None
 	return {"rate": rate, "numerator": numerator, "denominator": denominator}
 

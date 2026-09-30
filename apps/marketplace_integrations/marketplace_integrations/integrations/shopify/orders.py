@@ -3,7 +3,7 @@
 
 """Canonical Shopify order retrieval and persistence (#109)."""
 
-from datetime import timezone
+from datetime import UTC
 
 import frappe
 from frappe import _
@@ -271,20 +271,49 @@ def _log_order_import_failure(account, order_gid, error, trigger_source):
 	the doctype's ``mandatory_depends_on`` only requires it for
 	``sync_type="Sales Order Sync"`` rows. ``ignore_permissions=True`` mirrors
 	sales_order_sync.py::_create_sync_log() - this runs from a background job
-	or the scheduler, not an interactive System Manager session."""
-	now = frappe.utils.now_datetime()
-	frappe.get_doc(
-		{
-			"doctype": "Marketplace Sync Log",
-			"sync_type": "Order Import",
-			"status": "Error",
-			"trigger_source": trigger_source,
-			"attempted_at": now,
-			"completed_at": now,
-			"request_data": frappe.as_json({"account": account.name, "order_gid": order_gid}),
-			"traceback": error,
-		}
-	).insert(ignore_permissions=True)
+	or the scheduler, not an interactive System Manager session.
+
+	The insert is wrapped in its own savepoint and committed independently
+	(review finding #2a) - the callers' loop (import_orders_updated_between())
+	runs inside a caller-managed transaction that a LATER order's failure, or
+	a later re-raise (run_order_import()), can roll back wholesale
+	(reconcile_all_accounts_orders()'s ``frappe.db.rollback(save_point=...)``,
+	or the exception propagating out of run_order_import()) - without this
+	commit, an earlier order's already-logged failure row would be silently
+	discarded by that later rollback, same rationale as
+	products.py's per-row commit inside its own sweep loop.
+
+	Any exception raised while writing the log itself is caught and reported
+	to the Error Log rather than propagating (review finding #2b) - one bad
+	log write must not stop the rest of the orders in the same batch, matching
+	import_orders_updated_between()'s own docstring promise that "one order's
+	failure never stops the rest"."""
+	savepoint = "shopify_order_import_failure_log_" + frappe.generate_hash(length=10)
+	frappe.db.savepoint(savepoint)
+	try:
+		now = frappe.utils.now_datetime()
+		frappe.get_doc(
+			{
+				"doctype": "Marketplace Sync Log",
+				"sync_type": "Order Import",
+				"marketplace_account": account.name,
+				"status": "Error",
+				"trigger_source": trigger_source,
+				"attempted_at": now,
+				"completed_at": now,
+				"request_data": frappe.as_json({"account": account.name, "order_gid": order_gid}),
+				"traceback": error,
+			}
+		).insert(ignore_permissions=True)
+	except Exception:
+		frappe.db.rollback(save_point=savepoint)
+		frappe.log_error(
+			title="Shopify order import: failed to write failure log",
+			message=frappe.get_traceback(),
+		)
+	else:
+		frappe.db.release_savepoint(savepoint)
+		frappe.db.commit()
 
 
 def reconcile_all_accounts_orders():
@@ -297,14 +326,22 @@ def reconcile_all_accounts_orders():
 	#2). Per-order isolation within an account is provided by
 	import_orders_updated_between()/_import_order_isolated() above - the same
 	path run_order_import() uses, per #109 decision 6.
-	"""
+
+	No savepoint wraps the per-account try/except: MariaDB's COMMIT releases
+	every savepoint on the connection, not just the caller's own, and
+	_log_order_import_failure() commits independently for each failed order
+	(review finding #2a) - a savepoint taken before that point would already
+	be invalid by the time an account-level exception tried to roll back to
+	it (`SAVEPOINT ... does not exist`), which previously meant one account's
+	late failure could abort every account after it. Any Marketplace Orders
+	already imported for an account that later raises are therefore left
+	committed rather than rolled back - harmless, since re-import is
+	idempotent (same rationale as the docstring above)."""
 	for row in frappe.get_all(
 		"Marketplace Account",
 		filters={"platform": "Shopify", "connection_doctype": "Shopify Connection", "enabled": 1},
 		fields=["name", "shopify_orders_reconciled_through"],
 	):
-		savepoint = "shopify_order_reconcile_account_" + frappe.generate_hash(length=10)
-		frappe.db.savepoint(savepoint)
 		try:
 			account = frappe.get_doc("Marketplace Account", row.name)
 			start = row.shopify_orders_reconciled_through or add_to_date(now_datetime(), days=-60)
@@ -328,13 +365,11 @@ def reconcile_all_accounts_orders():
 					message=frappe.as_json(errors),
 				)
 		except Exception:
-			frappe.db.rollback(save_point=savepoint)
 			frappe.log_error(
 				title="Shopify order reconciliation failed for account",
 				message=frappe.get_traceback(),
 			)
 		else:
-			frappe.db.release_savepoint(savepoint)
 			# Committed per-account, mirroring webhooks.py's
 			# retry_errored_webhook_deliveries() sweep: this account's imported
 			# orders and advanced watermark must survive a later account's
@@ -444,4 +479,4 @@ def _set_import_status(job_id, state):
 
 
 def _as_shopify_timestamp(value):
-	return get_datetime(value).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+	return get_datetime(value).astimezone(UTC).isoformat().replace("+00:00", "Z")

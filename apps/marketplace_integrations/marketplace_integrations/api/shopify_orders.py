@@ -8,7 +8,11 @@ from frappe import _
 
 from marketplace_integrations.integrations.shopify.orders import (
 	get_order_import_status as _get_order_import_status,
+)
+from marketplace_integrations.integrations.shopify.orders import (
 	import_order,
+)
+from marketplace_integrations.integrations.shopify.orders import (
 	queue_order_import as _queue_order_import,
 )
 
