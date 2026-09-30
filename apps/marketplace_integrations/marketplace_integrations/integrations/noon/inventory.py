@@ -1,7 +1,16 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-"""ERPNext Warehouse-partitioned Noon stock updates."""
+"""ERPNext Warehouse-partitioned Noon stock updates.
+
+Stock is converted into each mapping's listing UOM (``listing_uom()``, shared
+with ``integrations/noon/pricing.py`` - #150 review fix) before being sent:
+sending the Item's raw stock-UOM quantity while pricing at a different
+``sales_uom`` would overstate how many listing units are actually sellable
+(e.g. a "Box" listing of 12 units would report 120 raw units in stock instead
+of 10 boxes), letting Noon oversell. ``get_sellable_qty()`` performs the same
+UOM conversion Talabat's catalog sync already relies on
+(``integrations/talabat/catalog_sync.py``)."""
 
 import frappe
 from frappe import _
@@ -24,7 +33,8 @@ from marketplace_integrations.integrations.noon.sync import (
 	selected_mappings,
 )
 from marketplace_integrations.services.account_warehouse import validate_account_warehouse
-from marketplace_integrations.services.listing_quantity import get_stock_quantities
+from marketplace_integrations.services.listing_price import CatalogBuildError, listing_uom
+from marketplace_integrations.services.listing_quantity import get_sellable_qty
 
 STOCK_PATH = "/stock/v1/stock-update"
 
@@ -58,20 +68,36 @@ def push_stock(account_name, mapping_names=None):
 			frappe.log_error(title="Noon stock setup", message=frappe.get_traceback())
 		return {"synced": 0, "failed": len(selected)}
 
-	client = NoonClient(account.connection)
-	synced = failed = 0
-	for batch in chunks(selected, STOCK_CHUNK_SIZE):
+	prepared = []
+	local_errors = {}
+	for row, resolved, item in selected:
 		try:
-			quantities = get_stock_quantities(account.warehouse, [item.name for _, _, item in batch])
-			payload = [
+			listing_uom_value = listing_uom(frappe._dict(resolved), item)
+			qty = get_sellable_qty(item.name, account.warehouse, listing_uom_value)
+		except CatalogBuildError as error:
+			local_errors[row.name] = str(error)
+			continue
+		prepared.append(
+			(
+				row,
 				{
 					"warehouse_code": account.noon_warehouse_code,
 					"partner_sku": row.external_reference,
-					"qty": quantities[item.name],
-				}
-				for row, _, item in batch
-			]
-			response = client.request("POST", STOCK_PATH, json={"items": payload})
+					"qty": qty,
+				},
+			)
+		)
+	if local_errors:
+		persist_outcomes(local_errors, inventory=True)
+
+	client = NoonClient(account.connection)
+	synced = 0
+	failed = len(local_errors)
+	for batch in chunks(prepared, STOCK_CHUNK_SIZE):
+		try:
+			response = client.request(
+				"POST", STOCK_PATH, json={"items": [payload for _, payload in batch]}
+			)
 			results = response_by_key(
 				require_items_response(response, client), ("warehouse_code", "partner_sku")
 			)
@@ -79,7 +105,7 @@ def push_stock(account_name, mapping_names=None):
 				row.name: item_status_error(
 					results.get((account.noon_warehouse_code, row.external_reference))
 				)
-				for row, _, _ in batch
+				for row, _ in batch
 			}
 		except Exception as error:
 			message = (
@@ -87,7 +113,7 @@ def push_stock(account_name, mapping_names=None):
 				if isinstance(error, frappe.ValidationError)
 				else _("Noon stock update failed; see Error Log.")
 			)
-			outcomes = {row.name: message for row, _, _ in batch}
+			outcomes = {row.name: message for row, _ in batch}
 			if not isinstance(error, frappe.ValidationError):
 				frappe.log_error(title="Noon stock update", message=frappe.get_traceback())
 		persist_outcomes(outcomes, inventory=True)
