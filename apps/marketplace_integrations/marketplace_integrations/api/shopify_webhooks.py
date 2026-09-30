@@ -19,7 +19,6 @@ from marketplace_integrations.integrations.shopify.constants import (
 	SHOPIFY_ORDER_WEBHOOK_TOPICS,
 	SHOPIFY_WEBHOOK_TOPIC_HEADER_TO_ENUM,
 )
-
 from marketplace_integrations.integrations.shopify.webhooks import (
 	process_shopify_webhook,
 	verify_shopify_hmac,

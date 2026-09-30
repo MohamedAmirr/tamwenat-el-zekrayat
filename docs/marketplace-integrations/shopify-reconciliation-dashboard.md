@@ -82,6 +82,13 @@ here replaces that established path — this report just makes it
 queryable/dashboard-visible). There is no `Marketplace Order` for these rows
 yet, since the order was never successfully imported.
 
+Each row also shows a **Marketplace Account** column/filter (a `marketplace_account`
+Link field on `Marketplace Sync Log`, populated directly by
+`_log_order_import_failure()`; rows written before that field existed are
+backfilled by `patches/v0_0/backfill_marketplace_sync_log_marketplace_account.py`
+from the account already recorded in `request_data`), so failures can be
+filtered/grouped per account.
+
 To act: click the `Log` column to open the `Marketplace Sync Log` document
 and read `request_data` (the account + order GID that failed) and
 `traceback`. Once the root cause is fixed, re-run `queue_order_import()` for
@@ -101,10 +108,11 @@ filter — `platform = Shopify` AND `external_financial_status` in
 (`REFUNDED`, `PARTIALLY_REFUNDED`) — via Frappe's own
 `listview.filter_area.add()` API, the same native filtering a user could set
 up manually from the list view's filter UI. This is a live filter on the
-standard list view (sortable, exportable, linkable), not a dedicated report;
+standard list view (sortable, exportable, linkable), not a dedicated report.
 `services/shopify_reconciliation.py::get_refund_evidence_gaps()` (the
-narrower "refund status but missing `refunds` evidence" query) remains as
-shared/tested logic but no longer backs a report of its own.
+narrower "refund status but missing `refunds` evidence" query) has since
+been removed — it had no caller left once this list-view filter replaced its
+report, and its only remaining callers were its own tests.
 
 ## Catalog Sweeps
 

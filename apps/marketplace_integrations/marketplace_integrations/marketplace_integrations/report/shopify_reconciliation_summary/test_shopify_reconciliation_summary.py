@@ -159,8 +159,7 @@ class IntegrationTestShopifyReconciliationSummaryReport(IntegrationTestCase):
 
 	def test_total_order_value_sums_single_currency_orders(self):
 		rows = [
-			frappe._dict({"order_total": 100.0, "shop_currency": "EGP"}),
-			frappe._dict({"order_total": 50.0, "shop_currency": "EGP"}),
+			frappe._dict({"shop_currency": "EGP", "total": 150.0}),
 		]
 		with patch("frappe.get_all", return_value=rows) as mocked_get_all:
 			result = get_total_order_value_in_range(from_date="2020-01-01", to_date="2020-01-31")
@@ -172,8 +171,8 @@ class IntegrationTestShopifyReconciliationSummaryReport(IntegrationTestCase):
 
 	def test_total_order_value_flags_mixed_currencies_instead_of_summing(self):
 		rows = [
-			frappe._dict({"order_total": 100.0, "shop_currency": "EGP"}),
-			frappe._dict({"order_total": 10.0, "shop_currency": "USD"}),
+			frappe._dict({"shop_currency": "EGP", "total": 100.0}),
+			frappe._dict({"shop_currency": "USD", "total": 10.0}),
 		]
 		with patch("frappe.get_all", return_value=rows):
 			result = get_total_order_value_in_range(from_date="2020-01-01", to_date="2020-01-31")
