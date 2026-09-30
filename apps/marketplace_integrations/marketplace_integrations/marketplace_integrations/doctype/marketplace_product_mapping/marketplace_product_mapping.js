@@ -26,6 +26,8 @@ function add_platform_push_button(frm) {
 			frm.add_custom_button(__("Sync Shopify Inventory"), () => sync_shopify_inventory(frm));
 		} else if (platform === "Talabat") {
 			frm.add_custom_button(__("Push to Talabat"), () => push_to_talabat(frm));
+		} else if (platform === "Noon") {
+			frm.add_custom_button(__("Sync Noon Pricing and Stock"), () => sync_noon_mapping(frm));
 		}
 		// No `else` warning here (review finding #7): a lookup returning
 		// nothing here means the linked Marketplace Account was deleted, or
@@ -34,6 +36,23 @@ function add_platform_push_button(frm) {
 		// support a catalog push". Silently showing no push button (and no
 		// message) is fine for that edge case rather than guessing at a
 		// misleading explanation on every form load.
+	});
+}
+
+function sync_noon_mapping(frm) {
+	frappe.call({
+		method: "marketplace_integrations.api.noon_catalog.queue_account_sync",
+		args: { account: frm.doc.marketplace_account, mapping_names: [frm.doc.name] },
+		freeze: true,
+		freeze_message: __("Queuing Noon sync..."),
+	}).then((response) => {
+		const queued = response.message || {};
+		const kinds = ["pricing", "stock"].filter((kind) => queued[kind] && queued[kind].queued);
+		frappe.msgprint(
+			kinds.length
+				? __("Noon {0} sync queued. Refresh this mapping to see the results.", [kinds.join(" and ")])
+				: __("Noon pricing and stock syncs are already queued or running.")
+		);
 	});
 }
 
@@ -118,6 +137,7 @@ if (typeof module !== "undefined") {
 		push_to_talabat,
 		push_to_shopify,
 		sync_shopify_inventory,
+		sync_noon_mapping,
 		add_platform_push_button,
 	};
 }

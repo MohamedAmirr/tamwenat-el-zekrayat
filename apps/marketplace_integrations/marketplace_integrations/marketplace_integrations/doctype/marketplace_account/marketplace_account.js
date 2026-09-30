@@ -21,6 +21,8 @@ const TALABAT_OUTLET_FIELDS = [
 const RECONCILE_INVENTORY_LABEL = "Reconcile Shopify Inventory";
 
 const SHOPIFY_LOCATION_FIELDS = ["shopify_location_section", "shopify_location_gid", "shopify_location_name"];
+const NOON_FIELDS = ["noon_warehouse_section", "noon_warehouse_code", "noon_country_code"];
+const NOON_SYNC_LABEL = "Sync Noon Pricing and Stock";
 
 // Every custom button configure_outlet_management() can ever add - needed so
 // a platform change away from Talabat can remove all of them (#103 review
@@ -45,15 +47,18 @@ if (typeof frappe !== "undefined") {
 			configure_outlet_management(frm);
 			configure_shopify_location(frm);
 			configure_shopify_inventory(frm);
+			configure_noon(frm);
 		},
 		platform(frm) {
 			update_connection_doctype_on_platform_change(frm);
 			configure_outlet_management(frm);
 			configure_shopify_location(frm);
 			configure_shopify_inventory(frm);
+			configure_noon(frm);
 		},
 		connection(frm) {
 			configure_shopify_location(frm);
+			configure_noon(frm);
 		},
 	});
 }
@@ -112,12 +117,13 @@ function clear_fields_for_platform_left(frm) {
 					...TALABAT_OUTLET_FIELDS,
 					"external_status_payload",
 					...SHOPIFY_LOCATION_FIELDS,
+					...NOON_FIELDS,
 					"shopify_orders_reconciled_through",
 					"external_account_id",
 				]
 			: frm.doc.platform === "Shopify"
-				? TALABAT_OUTLET_FIELDS
-				: SHOPIFY_LOCATION_FIELDS;
+			? [...TALABAT_OUTLET_FIELDS, ...NOON_FIELDS]
+			: [...SHOPIFY_LOCATION_FIELDS, ...NOON_FIELDS];
 	for (const fieldname of fields_to_clear) {
 		const field = frm.fields_dict && frm.fields_dict[fieldname];
 		if (field && field.df && field.df.fieldtype === "Section Break") continue;
@@ -183,6 +189,72 @@ function configure_shopify_location(frm) {
 
 function should_show_shopify_location(platform) {
 	return platform === "Shopify";
+}
+
+function configure_noon(frm) {
+	const is_noon = frm.doc.platform === "Noon";
+	for (const fieldname of NOON_FIELDS) frm.toggle_display(fieldname, is_noon);
+	frm.remove_custom_button(__("Load Noon Warehouses"));
+	frm.remove_custom_button(__(NOON_SYNC_LABEL));
+	if (!is_noon) return;
+	if (frm.doc.connection && frappe.model.can_write("Marketplace Account")) {
+		frm.add_custom_button(__("Load Noon Warehouses"), () => show_noon_warehouse_picker(frm));
+	}
+	if (!frm.is_new() && frm.doc.enabled && frappe.model.can_write("Marketplace Account")) {
+		frm.add_custom_button(__(NOON_SYNC_LABEL), () => sync_noon(frm));
+	}
+}
+
+function show_noon_warehouse_picker(frm) {
+	frappe
+		.call({
+			method: "marketplace_integrations.api.noon_catalog.list_warehouses",
+			args: { connection: frm.doc.connection },
+			freeze: true,
+			freeze_message: __("Loading Noon Warehouses..."),
+		})
+		.then((response) => {
+			const warehouses = (response.message || []).filter((row) => row.is_active);
+			if (!warehouses.length) {
+				frappe.msgprint(__("No active Noon Warehouses were returned."));
+				return;
+			}
+			const by_label = {};
+			const labels = warehouses.map((row) => {
+				const label = `${row.display_name} (${row.warehouse_code})`;
+				by_label[label] = row.warehouse_code;
+				return label;
+			});
+			const dialog = new frappe.ui.Dialog({
+				title: __("Select Noon Warehouse"),
+				fields: [{ fieldname: "warehouse", fieldtype: "Select", label: __("Warehouse"), options: labels.join("\n"), reqd: 1 }],
+				primary_action_label: __("Use Warehouse"),
+				primary_action(values) {
+					frm.set_value("noon_warehouse_code", by_label[values.warehouse]);
+					dialog.hide();
+				},
+			});
+			dialog.show();
+		});
+}
+
+function sync_noon(frm) {
+	frappe.confirm(__("Push current ERPNext pricing and stock for this account to Noon?"), () => {
+		frappe.call({
+			method: "marketplace_integrations.api.noon_catalog.queue_account_sync",
+			args: { account: frm.doc.name },
+			freeze: true,
+			freeze_message: __("Queuing Noon sync..."),
+		}).then((response) => {
+			const queued = response.message || {};
+			const kinds = ["pricing", "stock"].filter((kind) => queued[kind] && queued[kind].queued);
+			frappe.msgprint(
+				kinds.length
+					? __("Noon {0} sync queued. Mapping statuses will update when the jobs finish.", [kinds.join(" and ")])
+					: __("Noon pricing and stock syncs are already queued or running.")
+			);
+		});
+	});
 }
 
 // #107: "Reconcile Shopify Inventory" - only on a saved, enabled Shopify
