@@ -1,10 +1,14 @@
-// #108: this doctype is now shared with Shopify (and future platforms), not
-// Talabat-only. Every Talabat-specific control (Refresh from Talabat, cart/
-// dispatch/cancel actions, the Talabat dashboard indicator, item price/
-// mapping presentation, and the ERPNext sync button) must keep running
-// verbatim for a Talabat order, none of it must ever run for a Shopify
-// order, and a blank/unrecognized platform must fail closed - show none of
-// it - mirroring marketplace_product_mapping.js's platform gating (#106).
+// #108: this doctype is now shared with Shopify and Noon (and future
+// platforms), not Talabat-only. Every Talabat-specific control (Refresh from
+// Talabat, cart/dispatch/cancel actions, the Talabat dashboard indicator,
+// item price/mapping presentation, and the ERPNext sync button) must keep
+// running verbatim for a Talabat order, none of it must ever run for a
+// Shopify or Noon order, and a blank/unrecognized platform must fail closed
+// - show none of it - mirroring marketplace_product_mapping.js's platform
+// gating (#106). #145 adds a minimal Noon-only "Refresh from Noon" manual
+// per-order action (GetFbpiOrder) - it deliberately does not add Noon
+// equivalents of Talabat's/Shopify's status indicators or item presentation
+// tables, which remain out of #145's scope.
 const JSON_EVIDENCE_FIELDS = ["billing_address", "shipping_address", "payment_transactions", "refunds"];
 
 if (typeof frappe !== "undefined") {
@@ -87,6 +91,36 @@ function apply_platform_gating(frm) {
 			}).then(() => frm.reload_doc());
 		});
 		load_shopify_item_presentation(frm);
+	} else if (platform === "Noon") {
+		// #145's manual per-order refresh is enqueued, not synchronous -
+		// matching #144's own manual single-mapping action convention for
+		// this Noon module (Sync Noon Pricing and Stock also enqueues and
+		// tells the user to refresh to see results), unlike the Talabat/
+		// Shopify refresh buttons above, which call their platform
+		// synchronously and reload the form immediately.
+		frm.add_custom_button(__("Refresh from Noon"), () => {
+			frappe.call({
+				method: "marketplace_integrations.api.noon_orders.refresh_order",
+				args: { marketplace_order: frm.doc.name },
+				freeze: true,
+				freeze_message: __("Queuing Noon refresh..."),
+			}).then((r) => {
+				// Review finding E: queue_order_refresh() dedups per order
+				// (job_id keyed on the order name) - `queued` is false when a
+				// refresh for this order is already queued/running, matching
+				// marketplace_account.js's own Noon button handling of the same
+				// {queued: bool} shape. Showing the "queued" toast unconditionally
+				// used to mislead the user into thinking a fresh refresh had just
+				// been kicked off even when it had actually been deduplicated.
+				const queued = (r.message || {}).queued;
+				frappe.show_alert({
+					message: queued
+						? __("Noon order refresh queued. Refresh this document to see the results.")
+						: __("A Noon refresh for this order is already queued or running."),
+					indicator: "blue",
+				});
+			});
+		});
 	}
 }
 
