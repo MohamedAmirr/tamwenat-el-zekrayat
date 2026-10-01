@@ -8,6 +8,17 @@ Never edit files inside the `frappe` or `erpnext` apps directly — those change
 - A custom app (new doctypes, business logic, overrides via hooks), or
 - Framework-native customization tools (Custom Field, Property Setter, Client Script, Server Script, Custom DocPerm) — these are exportable as **fixtures** in the custom app so they're version-controlled.
 
+This applies to any project-specific change to an existing ERPNext doctype, form, workflow, or behavior — not just schema edits. Covered by this rule: Custom Fields on standard doctypes (`Sales Order`, `Sales Invoice`, `Item`, `Customer`, etc.), form/UI behavior changes, client scripts, server-side validations/hooks, custom buttons/actions, and integration-specific fields (order source, external order IDs, marketplace references, integration statuses). All of it must be reproducible by installing/migrating the custom app on a fresh site — via fixtures, hooks, patches, migrations, or installation logic — never by hand-editing a core file or repeating manual production configuration.
+
+Before modifying anything that looks like an ERPNext core file, check whether the requirement can be done through the custom app instead, in this order:
+1. Custom Fields / Frappe customization mechanisms
+2. Hooks and DocType event handlers
+3. Client scripts or custom JS shipped by the app
+4. Fixtures, patches, migrations, or installation logic
+5. Frappe-provided overrides, only when genuinely necessary
+
+Direct core modification is a last resort and must be explicitly flagged to the user and documented if it's ever used — see "Show GitHub issue content..." and "Ask before deciding" in the root CLAUDE.md for the same standard applied to irreversible/structural decisions.
+
 ## App layout
 
 ```

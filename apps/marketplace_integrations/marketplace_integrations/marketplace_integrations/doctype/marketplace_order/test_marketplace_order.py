@@ -361,12 +361,12 @@ class IntegrationTestMarketplaceOrder(IntegrationTestCase):
     def test_item_external_status_stays_a_select_relabeled_generically(self):
         """#108 decision 2: only the label changes for the item-level field -
         it stays a Select, since sales_order_sync.py relies on its exact
-        closed set of Talabat values."""
+        closed set of values. Expanded in #145 to include Noon statuses."""
         meta = frappe.get_meta("Marketplace Order Item")
         item_status_field = meta.get_field("external_status")
         self.assertEqual(item_status_field.fieldtype, "Select")
         self.assertEqual(item_status_field.label, "External Item Status")
-        self.assertEqual(item_status_field.options, "NOT_PROCESSED\nIN_CART\nNOT_FOUND\nREPLACED\nADDITION")
+        self.assertEqual(item_status_field.options, "NOT_PROCESSED\nIN_CART\nNOT_FOUND\nREPLACED\nADDITION\nCONFIRMED\nCANCELLED\nMP_ITEM_STATUS_UNSPECIFIED")
 
     def test_relabeled_fields_keep_their_original_fieldnames(self):
         """#108 decision 3: latest_payload/talabat_order_presentation are

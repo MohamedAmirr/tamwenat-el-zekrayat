@@ -23,6 +23,7 @@ const RECONCILE_INVENTORY_LABEL = "Reconcile Shopify Inventory";
 const SHOPIFY_LOCATION_FIELDS = ["shopify_location_section", "shopify_location_gid", "shopify_location_name"];
 const NOON_FIELDS = ["noon_warehouse_section", "noon_warehouse_code", "noon_country_code"];
 const NOON_SYNC_LABEL = "Sync Noon Pricing and Stock";
+const NOON_IMPORT_ORDERS_LABEL = "Import Noon Orders";
 
 // Every custom button configure_outlet_management() can ever add - needed so
 // a platform change away from Talabat can remove all of them (#103 review
@@ -196,13 +197,39 @@ function configure_noon(frm) {
 	for (const fieldname of NOON_FIELDS) frm.toggle_display(fieldname, is_noon);
 	frm.remove_custom_button(__("Load Noon Warehouses"));
 	frm.remove_custom_button(__(NOON_SYNC_LABEL));
+	frm.remove_custom_button(__(NOON_IMPORT_ORDERS_LABEL));
 	if (!is_noon) return;
 	if (frm.doc.connection && frappe.model.can_write("Marketplace Account")) {
 		frm.add_custom_button(__("Load Noon Warehouses"), () => show_noon_warehouse_picker(frm));
 	}
 	if (!frm.is_new() && frm.doc.enabled && frappe.model.can_write("Marketplace Account")) {
 		frm.add_custom_button(__(NOON_SYNC_LABEL), () => sync_noon(frm));
+		frm.add_custom_button(__(NOON_IMPORT_ORDERS_LABEL), () => import_noon_orders(frm));
 	}
+}
+
+// Account-level bulk order import (#145 decision 12) - the manual Desk
+// trigger for api/noon_orders.py::import_orders(), which had no UI caller
+// before this fix (review finding B). Matches sync_noon()'s own
+// confirm -> queue -> "already queued or running" pattern exactly, since
+// both enqueue on the same per-account-deduplicated `long` queue rather than
+// call Noon inline.
+function import_noon_orders(frm) {
+	frappe.confirm(__("Import Noon orders for this account now?"), () => {
+		frappe.call({
+			method: "marketplace_integrations.api.noon_orders.import_orders",
+			args: { account: frm.doc.name },
+			freeze: true,
+			freeze_message: __("Queuing Noon order import..."),
+		}).then((response) => {
+			const queued = (response.message || {}).queued;
+			frappe.msgprint(
+				queued
+					? __("Noon order import queued. Refresh Marketplace Orders to see the results once it finishes.")
+					: __("A Noon order import is already queued or running for this account.")
+			);
+		});
+	});
 }
 
 function show_noon_warehouse_picker(frm) {

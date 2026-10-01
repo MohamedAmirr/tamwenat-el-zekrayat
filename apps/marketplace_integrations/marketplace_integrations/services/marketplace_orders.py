@@ -74,6 +74,7 @@ ITEM_FIELDS = (
 	"product_name",
 	"instructions",
 	"external_status",
+	"integration_status",
 	"replaced_external_item_id",
 	"pricing_type",
 	"original_quantity",
