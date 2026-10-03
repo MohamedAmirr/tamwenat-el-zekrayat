@@ -1,0 +1,148 @@
+# Copyright (c) 2026, Tamwenat El Zekrayat and contributors
+# For license information, please see license.txt
+
+"""Public Noon FBPI event-notification webhook receiver (#163).
+
+Auth and envelope-shape validation finish synchronously so an invalid
+request never reaches a worker - no Noon HTTP call happens in the request
+itself. ``payload`` is ONLY ever checked to be an object; its contents are
+never read/stored/logged by this module, matching #163's locked scope
+(per-event-type payload parsing is explicitly a future, separate issue).
+The secret header value and the raw request payload are never logged.
+
+Unlike Talabat's webhook pair (``api/talabat_webhooks.py``), Noon's Event
+Notifications have no HMAC/signature scheme - only a static per-connection
+credential header, defined and checked entirely by this receiver (see
+``docs/noon-integration/event-notifications.md``, sourced from Noon's
+public docs and explicitly user-approved for this work).
+"""
+
+import hmac
+
+import frappe
+from frappe import _
+from frappe.utils import cstr
+
+from marketplace_integrations.integrations.noon.constants import (
+	NOON_FBPI_ORDER_SYNC_EVENT_TYPE,
+	NOON_WEBHOOK_SECRET_HEADER,
+)
+from marketplace_integrations.integrations.noon.orders import enqueue_order_import
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def event_notification():
+	"""Authenticate one Noon FBPI event-notification envelope and, for a
+	handled ``event_type``, enqueue the existing per-account deduplicated
+	order-import job. Any other ``event_type`` is acknowledged (200) without
+	enqueuing anything, so Noon stops retrying a type this app doesn't act
+	on."""
+	body = frappe.request.get_json(silent=True)
+	if not isinstance(body, dict):
+		_invalid_webhook()
+
+	event_type = body.get("event_type")
+	metadata = body.get("metadata")
+	payload = body.get("payload")
+	if not isinstance(event_type, str) or not event_type:
+		_invalid_webhook()
+	if not isinstance(metadata, dict):
+		_invalid_webhook()
+	if not isinstance(payload, dict):
+		_invalid_webhook()
+
+	message_id = metadata.get("message_id")
+	project_code = metadata.get("project_code")
+	if not isinstance(message_id, str) or not message_id:
+		_invalid_webhook()
+	if not isinstance(project_code, str) or not project_code:
+		_invalid_webhook()
+
+	account, connection = _resolve_account_and_connection(project_code)
+
+	secret = connection.get_password("webhook_secret", raise_exception=False)
+	header_value = frappe.get_request_header(NOON_WEBHOOK_SECRET_HEADER, "")
+	if not secret or not hmac.compare_digest(cstr(header_value).encode(), cstr(secret).encode()):
+		_invalid_webhook()
+
+	import_queued = False
+	if event_type == NOON_FBPI_ORDER_SYNC_EVENT_TYPE:
+		job = enqueue_order_import(account.name, trigger_source="Noon Webhook")
+		import_queued = job is not None
+
+	_log_accepted_event(account, message_id, event_type, import_queued)
+
+	return {"accepted": True}
+
+
+def _resolve_account_and_connection(project_code):
+	"""Resolve exactly one enabled Noon Connection for ``project_code``, and
+	that connection to exactly one enabled Noon Marketplace Account. Either
+	zero or more than one match at either step is rejected."""
+	connections = frappe.get_all(
+		"Noon Connection",
+		filters={"project_code": project_code, "enabled": 1},
+		fields=["name"],
+	)
+	if len(connections) != 1:
+		_invalid_webhook()
+	connection = frappe.get_doc("Noon Connection", connections[0].name)
+
+	accounts = frappe.get_all(
+		"Marketplace Account",
+		filters={
+			"platform": "Noon",
+			"enabled": 1,
+			"connection_doctype": "Noon Connection",
+			"connection": connection.name,
+		},
+		fields=["name"],
+	)
+	if len(accounts) != 1:
+		_invalid_webhook()
+
+	account = frappe.get_doc("Marketplace Account", accounts[0].name)
+	return account, connection
+
+
+def _log_accepted_event(account, message_id, event_type, import_queued):
+	"""Write one committed ``Marketplace Sync Log`` row for an accepted event
+	(decision: relies on #145's existing per-account job_id dedup rather than
+	a new dedup doctype). Never raises outward - a logging failure must not
+	fail the webhook response Noon is waiting on.
+
+	Always called with the already-known real outcome of the enqueue
+	attempt - ``import_queued`` is ``True`` only when ``enqueue_order_import()``
+	actually returned a queued job, and ``False`` for both an unhandled
+	``event_type`` and a deduplicated delivery (enqueue returned ``None``
+	because an identical job_id was already queued/running). If
+	``enqueue_order_import()`` itself raises, this function is never reached
+	at all (see ``event_notification()``), so no row is ever committed that
+	misrepresents a raised enqueue failure as a Success."""
+	try:
+		now = frappe.utils.now_datetime()
+		frappe.get_doc(
+			{
+				"doctype": "Marketplace Sync Log",
+				"sync_type": "Order Import",
+				"marketplace_account": account.name,
+				"status": "Success",
+				"trigger_source": "Noon Webhook",
+				"attempted_at": now,
+				"completed_at": now,
+				"request_data": frappe.as_json(
+					{
+						"message_id": message_id,
+						"event_type": event_type,
+						"import_queued": import_queued,
+					}
+				),
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+	except Exception:
+		frappe.log_error(title="Noon webhook: failed to write sync log", message=frappe.get_traceback())
+
+
+def _invalid_webhook():
+	frappe.throw(_("Invalid Noon event-notification webhook."), frappe.PermissionError)

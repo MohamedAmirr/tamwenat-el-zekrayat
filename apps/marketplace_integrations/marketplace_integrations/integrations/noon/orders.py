@@ -637,6 +637,31 @@ def _run_import_for_account(account_name, trigger_source):
 	return {"imported": len(imported), "errors": len(errors)}
 
 
+def enqueue_order_import(account_name, trigger_source="Manual"):
+	"""Shared enqueue helper for a per-account, deduplicated
+	``run_order_import`` job on the ``long`` queue (decision 12's job_id
+	scheme) - the one place ``queue_order_import()``, ``poll_all_accounts()``,
+	and ``api/noon_webhooks.py``'s webhook receiver all funnel through, so the
+	queue/timeout/job_id/deduplicate args are defined once instead of being
+	copied at each call site.
+
+	Returns the ``frappe.enqueue()`` result directly: a queued job, or
+	``None`` if an identical job_id is already queued/running (RQ's own
+	``deduplicate=True`` behavior). Raises outward on an enqueue failure
+	(e.g. Redis down) - callers that need per-call isolation from that
+	(``poll_all_accounts()``) catch it themselves.
+	"""
+	return frappe.enqueue(
+		run_order_import,
+		queue="long",
+		timeout=3600,
+		job_id=f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{account_name}",
+		deduplicate=True,
+		account_name=account_name,
+		trigger_source=trigger_source,
+	)
+
+
 def queue_order_import(account_name):
 	"""Queue a manual order-import run for one Noon account on the ``long``
 	queue, deduplicated per account (decision 12) - never makes a Noon HTTP
@@ -646,15 +671,7 @@ def queue_order_import(account_name):
 	account.check_permission("write")
 	validate_connection_enabled(account)
 	_validate_order_import_setup(account)
-	job = frappe.enqueue(
-		run_order_import,
-		queue="long",
-		timeout=3600,
-		job_id=f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{account.name}",
-		deduplicate=True,
-		account_name=account.name,
-		trigger_source="Manual",
-	)
+	job = enqueue_order_import(account.name, trigger_source="Manual")
 	return {"queued": job is not None}
 
 
@@ -833,15 +850,7 @@ def poll_all_accounts():
 	queued = 0
 	for account_name in accounts:
 		try:
-			job = frappe.enqueue(
-				run_order_import,
-				queue="long",
-				timeout=3600,
-				job_id=f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{account_name}",
-				deduplicate=True,
-				account_name=account_name,
-				trigger_source="Scheduled Reconciliation",
-			)
+			job = enqueue_order_import(account_name, trigger_source="Scheduled Reconciliation")
 		except Exception:
 			frappe.log_error(
 				title="Noon order poll: failed to enqueue account", message=frappe.get_traceback()

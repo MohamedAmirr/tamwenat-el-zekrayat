@@ -33,3 +33,16 @@ SHIPMENT_INVOICE_UPLOAD_PATH = "/fbpi/v1/shipment/invoice/upload"
 
 # Decision 19: UploadShipmentInvoice documents a 5 MiB DECODED limit.
 SHIPMENT_INVOICE_MAX_BYTES = 5 * 1024 * 1024
+
+# #163 FBPI event-notification webhook receiver (api/noon_webhooks.py).
+# Envelope/auth facts sourced from Noon's public Event Notifications page
+# (internet-sourced, not a checked-in API spec file - see
+# docs/noon-integration/event-notifications.md for the user-approved
+# source note) - there is no HMAC/signature scheme, only a static
+# credential header this receiver defines and checks itself.
+NOON_WEBHOOK_SECRET_HEADER = "X-Noon-Webhook-Secret"
+
+# The only event_type this receiver currently acts on - any other
+# event_type is acknowledged (200) without enqueuing anything, so Noon
+# stops retrying a type we don't handle (#163 scope).
+NOON_FBPI_ORDER_SYNC_EVENT_TYPE = "FBPI::ORDER_SYNC"
