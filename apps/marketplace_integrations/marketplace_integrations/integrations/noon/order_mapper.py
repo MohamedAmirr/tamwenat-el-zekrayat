@@ -128,6 +128,16 @@ def normalize_order(account, raw_order):
 					fbpi_order_nr
 				)
 			)
+	# #146 round-3 review finding #8 used to reject any item here whose
+	# mp_item_nr didn't match a bounded alphanumeric/._- pattern, on the
+	# (never confirmed against real Noon data) assumption that every real
+	# Noon mp_item_nr always looks like a SKU-like token. Round-5 fix (review
+	# finding #4): dropped - rejecting orders based on an unverified guess
+	# about Noon's real data risks rejecting legitimate orders for no real
+	# reason. The XSS surface that pattern existed to close is instead closed
+	# at the point of actual risk: marketplace_order.js's MultiCheck controls
+	# now use a client-side index as their `value` (never the raw
+	# mp_item_nr) - see noon_unit_checklist_options() there.
 
 	items, unmapped_skus = _aggregate_items(account, raw_items)
 

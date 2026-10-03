@@ -19,3 +19,17 @@ ORDERS_PAGE_SIZE = 50
 # order creation time, so it would otherwise never surface a later item
 # status change (mp_status/integration_status) on an already-seen order.
 ORDER_IMPORT_LOOKBACK_DAYS = 7
+
+# #146 FBPI shipment fulfillment paths - docs/noon-integration/noon_api_full.md
+# (locked plan's "Noon API facts used" table). All go through
+# integrations/noon/client.py::NoonClient.request() unchanged.
+SHIPMENT_CREATE_PATH = "/fbpi/v1/shipment/create"
+SHIPMENT_GET_PATH = "/fbpi/v1/shipment/get"
+SHIPMENT_CANCEL_PATH = "/fbpi/v1/shipment/cancel"
+SHIPMENT_COURIER_AWBS_ADD_PATH = "/fbpi/v1/shipment/courier-awbs/add"
+NOON_LOGISTICS_AWBS_GET_PATH = "/fbpi/v1/shipment/noon-logistics-awbs/get"
+FBPI_ORDER_UPDATE_PATH = "/fbpi/v1/fbpi-order/update"
+SHIPMENT_INVOICE_UPLOAD_PATH = "/fbpi/v1/shipment/invoice/upload"
+
+# Decision 19: UploadShipmentInvoice documents a 5 MiB DECODED limit.
+SHIPMENT_INVOICE_MAX_BYTES = 5 * 1024 * 1024

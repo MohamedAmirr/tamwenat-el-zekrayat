@@ -23,7 +23,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Sync Type",
-   "options": "Sales Order Sync\nOrder Import",
+   "options": "Sales Order Sync\nOrder Import\nFulfillment",
    "reqd": 1
   },
   {
@@ -60,7 +60,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Trigger Source",
-   "options": "Manual\nManual Resync\nShopify Webhook\nTalabat Webhook\nScheduled Reconciliation",
+   "options": "Manual\nManual Resync\nShopify Webhook\nTalabat Webhook\nScheduled Reconciliation\nNoon Order Import",
    "reqd": 1
   },
   {

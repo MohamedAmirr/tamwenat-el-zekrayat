@@ -1,0 +1,28 @@
+{
+ "actions": [],
+ "creation": "2026-10-01 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "integration_shipment_nr",
+  "mp_item_nr",
+  "partner_sku"
+ ],
+ "fields": [
+  {"fieldname": "integration_shipment_nr", "fieldtype": "Data", "ignore_xss_filter": 1, "in_list_view": 1, "label": "Integration Shipment Nr", "read_only": 1, "reqd": 1},
+  {"description": "Noon's per-physical-unit mp_item_nr (only available in latest_payload.items[] per #145).", "fieldname": "mp_item_nr", "fieldtype": "Data", "ignore_xss_filter": 1, "in_list_view": 1, "label": "MP Item Nr", "read_only": 1, "reqd": 1},
+  {"fieldname": "partner_sku", "fieldtype": "Data", "ignore_xss_filter": 1, "in_list_view": 1, "label": "Partner SKU", "read_only": 1}
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-10-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Marketplace Integrations",
+ "name": "Marketplace Order Shipment Unit",
+ "owner": "Administrator",
+ "sort_field": "creation",
+ "sort_order": "ASC",
+ "states": []
+}

@@ -75,7 +75,7 @@ class TestMarketplaceSyncLog(IntegrationTestCase):
 		meta = frappe.get_meta("Marketplace Sync Log")
 		fields = {field.fieldname: field for field in meta.fields if field.fieldname}
 		self.assertEqual(fields["sync_type"].fieldtype, "Select")
-		self.assertEqual(fields["sync_type"].options.splitlines(), ["Sales Order Sync", "Order Import"])
+		self.assertEqual(fields["sync_type"].options.splitlines(), ["Sales Order Sync", "Order Import", "Fulfillment"])
 		self.assertEqual(fields["sync_type"].default, "Sales Order Sync")
 		self.assertTrue(fields["sync_type"].reqd)
 		self.assertEqual(fields["marketplace_order"].fieldtype, "Link")
@@ -90,7 +90,7 @@ class TestMarketplaceSyncLog(IntegrationTestCase):
 		self.assertTrue(fields["status"].read_only)
 		self.assertEqual(
 			fields["trigger_source"].options.splitlines(),
-			["Manual", "Manual Resync", "Shopify Webhook", "Talabat Webhook", "Scheduled Reconciliation"],
+			["Manual", "Manual Resync", "Shopify Webhook", "Talabat Webhook", "Scheduled Reconciliation", "Noon Order Import"],
 		)
 		self.assertEqual(fields["trigger_source"].default, "Manual")
 		self.assertTrue(fields["attempted_at"].reqd)
