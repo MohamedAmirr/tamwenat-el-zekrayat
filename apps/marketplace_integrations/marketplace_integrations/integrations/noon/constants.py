@@ -46,3 +46,22 @@ NOON_WEBHOOK_SECRET_HEADER = "X-Noon-Webhook-Secret"
 # event_type is acknowledged (200) without enqueuing anything, so Noon
 # stops retrying a type we don't handle (#163 scope).
 NOON_FBPI_ORDER_SYNC_EVENT_TYPE = "FBPI::ORDER_SYNC"
+
+# #153 FBPI return reference lookup/evidence - docs/noon-integration/
+# noon_api_full.md's "Returns" section documents this path/body/response
+# shape, but flags its own paired .yml entry as empty/unconfirmed (see
+# integrations/noon/returns.py's module docstring).
+RETURN_REFERENCES_LIST_PATH = "/returns/v1/return-references/list"
+
+# #153 review finding #3: bounds the daily AWB scan to shipments modified
+# within this window (and not Cancelled/Discarded) rather than scanning
+# every AWB this account has ever had. Not reused from
+# ORDER_IMPORT_LOOKBACK_DAYS above - that 7-day window exists for a
+# different purpose (re-listing recently-created orders to catch a later
+# status change), not for bounding how long a return can plausibly still be
+# in flight against an outbound shipment.
+AWB_SCAN_LOOKBACK_DAYS = 30
+
+# #153 review finding #4: Noon's ListReturnReferences contract caps
+# merchant_codes at 200 items.
+MERCHANT_CODES_MAX = 200
