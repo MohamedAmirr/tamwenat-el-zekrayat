@@ -90,7 +90,15 @@ class TestMarketplaceSyncLog(IntegrationTestCase):
 		self.assertTrue(fields["status"].read_only)
 		self.assertEqual(
 			fields["trigger_source"].options.splitlines(),
-			["Manual", "Manual Resync", "Shopify Webhook", "Talabat Webhook", "Scheduled Reconciliation", "Noon Order Import"],
+			[
+				"Manual",
+				"Manual Resync",
+				"Shopify Webhook",
+				"Talabat Webhook",
+				"Scheduled Reconciliation",
+				"Noon Order Import",
+				"Noon Webhook",
+			],
 		)
 		self.assertEqual(fields["trigger_source"].default, "Manual")
 		self.assertTrue(fields["attempted_at"].reqd)

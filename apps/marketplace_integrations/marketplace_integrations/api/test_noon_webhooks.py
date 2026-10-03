@@ -1,0 +1,322 @@
+# Copyright (c) 2026, Tamwenat El Zekrayat and contributors
+# For license information, please see license.txt
+
+from unittest.mock import MagicMock, patch
+
+import frappe
+from frappe.tests import IntegrationTestCase
+
+from marketplace_integrations.api import noon_webhooks
+from marketplace_integrations.integrations.noon import orders
+from marketplace_integrations.integrations.noon.orders import _ORDER_IMPORT_RQ_JOB_PREFIX, run_order_import
+
+_PRIVATE_KEY = (
+	"-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0Z3VS5JJcds1xfn8fH9gFKvKHxsXNpKZDqz5Fng0Z5HqL8H7"
+	"\n-----END RSA PRIVATE KEY-----"
+)
+
+_SENTINEL_PAYLOAD_VALUE = "SENTINEL-NEVER-STORED-OR-LOGGED"
+
+
+def _make_connection(connection_name, **kwargs):
+	doc = {
+		"doctype": "Noon Connection",
+		"connection_name": connection_name,
+		"project_code": f"test-project-{frappe.generate_hash(length=8)}",
+		"key_id": "test-key-id",
+		"private_key": _PRIVATE_KEY,
+		"environment": "Static Sandbox",
+		"webhook_secret": "test-webhook-secret",
+		"enabled": 1,
+	}
+	doc.update(kwargs)
+	return frappe.get_doc(doc).insert()
+
+
+def _make_account(account_name, connection, **kwargs):
+	doc = {
+		"doctype": "Marketplace Account",
+		"account_name": account_name,
+		"platform": "Noon",
+		"external_account_id": connection.project_code,
+		"connection_doctype": "Noon Connection",
+		"connection": connection.name,
+		"noon_warehouse_code": "NOON-WH-001",
+		"noon_country_code": "ae",
+		"enabled": 1,
+	}
+	doc.update(kwargs)
+	return frappe.get_doc(doc).insert()
+
+
+def _envelope(connection, event_type="FBPI::ORDER_SYNC", message_id="msg-001", payload=None, **overrides):
+	envelope = {
+		"event_schema_version": "1.0",
+		"event_type": event_type,
+		"metadata": {
+			"message_id": message_id,
+			"destination_id": "dest-001",
+			"published_at": "2026-10-03T00:00:00Z",
+			"project_code": connection.project_code,
+		},
+		"payload": payload if payload is not None else {"sentinel": _SENTINEL_PAYLOAD_VALUE},
+	}
+	envelope.update(overrides)
+	return envelope
+
+
+class IntegrationTestNoonWebhookReceiver(IntegrationTestCase):
+	def setUp(self):
+		# Marketplace Account creation for Noon calls out to validate_warehouse_code(),
+		# which hits the real Noon API - patch it out like test_orders.py does, so
+		# fixture setup never depends on network access or a real signing key.
+		warehouse_patch = patch("marketplace_integrations.integrations.noon.catalog.validate_warehouse_code")
+		warehouse_patch.start()
+		self.addCleanup(warehouse_patch.stop)
+
+		suffix = frappe.generate_hash(length=8)
+		self.connection = _make_connection(f"Webhook Connection {suffix}")
+		self.account = _make_account(f"Webhook Account {suffix}", self.connection)
+		self._other_connection = None
+		self._second_account = None
+
+	def tearDown(self):
+		# _log_accepted_event() commits on the accepted path, so the class-
+		# scoped rollback never undoes setUp's inserts here - clean up
+		# explicitly, following the same order as
+		# integrations/noon/test_orders.py's tearDown (orders/logs before the
+		# account, account before the connection), plus the extra
+		# other_connection/second_account the ambiguous-account test creates.
+		for account_name in (self.account.name, self._second_account):
+			if not account_name:
+				continue
+			frappe.db.delete("Marketplace Order", filters={"marketplace_account": account_name})
+			frappe.db.delete("Marketplace Sync Log", filters={"marketplace_account": account_name})
+			frappe.delete_doc("Marketplace Account", account_name, ignore_permissions=True, force=True)
+		for connection_name in (self.connection.name, self._other_connection):
+			if not connection_name:
+				continue
+			frappe.delete_doc("Noon Connection", connection_name, ignore_permissions=True, force=True)
+		frappe.db.commit()
+
+	def _call_webhook(self, envelope, header_value):
+		request = MagicMock()
+		request.get_json.return_value = envelope
+		with (
+			patch.object(noon_webhooks.frappe, "request", request),
+			patch.object(noon_webhooks.frappe, "get_request_header", return_value=header_value),
+		):
+			return noon_webhooks.event_notification()
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_valid_order_sync_enqueues_run_order_import(self, enqueue):
+		result = self._call_webhook(_envelope(self.connection), "test-webhook-secret")
+
+		self.assertEqual(result, {"accepted": True})
+		enqueue.assert_called_once_with(
+			run_order_import,
+			queue="long",
+			timeout=3600,
+			job_id=f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{self.account.name}",
+			deduplicate=True,
+			account_name=self.account.name,
+			trigger_source="Noon Webhook",
+		)
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_missing_secret_header_is_rejected_before_enqueue(self, enqueue):
+		with self.assertRaises(frappe.PermissionError):
+			self._call_webhook(_envelope(self.connection), "")
+		enqueue.assert_not_called()
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_wrong_secret_header_is_rejected_before_enqueue(self, enqueue):
+		with self.assertRaises(frappe.PermissionError):
+			self._call_webhook(_envelope(self.connection), "wrong-secret")
+		enqueue.assert_not_called()
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_unknown_project_code_is_rejected_before_enqueue(self, enqueue):
+		envelope = _envelope(self.connection)
+		envelope["metadata"]["project_code"] = "unknown-project-code"
+		with self.assertRaises(frappe.PermissionError):
+			self._call_webhook(envelope, "test-webhook-secret")
+		enqueue.assert_not_called()
+
+	# No "ambiguous project_code resolves to >1 Noon Connection" case is
+	# testable here: ``Noon Connection.project_code`` has a DB-level
+	# ``unique: 1`` constraint, so two connections can never actually share
+	# one - the receiver's ``len(connections) != 1`` check still defends
+	# against it, but ambiguity at this specific step is structurally
+	# prevented by the schema rather than something a test can construct.
+	# ``test_ambiguous_account_for_connection_is_rejected_before_enqueue``
+	# below exercises the one resolution step where ambiguity (>1 enabled
+	# account bound to the same connection) is actually reachable.
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_disabled_connection_is_rejected_before_enqueue(self, enqueue):
+		self.connection.enabled = 0
+		self.connection.save()
+
+		with self.assertRaises(frappe.PermissionError):
+			self._call_webhook(_envelope(self.connection), "test-webhook-secret")
+		enqueue.assert_not_called()
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_disabled_account_is_rejected_before_enqueue(self, enqueue):
+		self.account.enabled = 0
+		self.account.save()
+
+		with self.assertRaises(frappe.PermissionError):
+			self._call_webhook(_envelope(self.connection), "test-webhook-secret")
+		enqueue.assert_not_called()
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_ambiguous_account_for_connection_is_rejected_before_enqueue(self, enqueue):
+		# Two enabled Marketplace Accounts bound to the same Noon Connection is
+		# structurally unreachable via normal document creation:
+		# validate_noon_account() forces external_account_id == the
+		# connection's project_code, and validate_unique_account_identity()'s
+		# DB-level unique constraint on (platform, external_account_id) then
+		# rejects a second account on that same connection at insert time.
+		# To exercise the receiver's defensive len(accounts) != 1 check
+		# anyway, insert the second account against its own throwaway
+		# connection (so insert-time validation passes), then use
+		# frappe.db.set_value() - which bypasses validate_unique_account_identity()
+		# since it writes directly, not via .save() - to repoint it at
+		# self.connection, simulating the otherwise-impossible ambiguous state.
+		# This mirrors the frappe.db.set_value() bypass pattern used in
+		# test_inventory_sync.py for other defense-in-depth checks.
+		other_connection = _make_connection(f"Other Connection {frappe.generate_hash(length=8)}")
+		second_account = _make_account(f"Second Account {frappe.generate_hash(length=8)}", other_connection)
+		frappe.db.set_value("Marketplace Account", second_account.name, "connection", self.connection.name)
+		self._other_connection = other_connection.name
+		self._second_account = second_account.name
+
+		with self.assertRaises(frappe.PermissionError):
+			self._call_webhook(_envelope(self.connection), "test-webhook-secret")
+		enqueue.assert_not_called()
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_missing_required_envelope_field_is_rejected_before_enqueue(self, enqueue):
+		for mutate in (
+			lambda e: e.pop("event_type"),
+			lambda e: e["metadata"].pop("message_id"),
+			lambda e: e["metadata"].pop("project_code"),
+			lambda e: e.update(payload="not-an-object"),
+		):
+			envelope = _envelope(self.connection)
+			mutate(envelope)
+			with self.subTest(envelope=envelope):
+				with self.assertRaises(frappe.PermissionError):
+					self._call_webhook(envelope, "test-webhook-secret")
+		enqueue.assert_not_called()
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_unhandled_event_type_returns_success_without_enqueuing(self, enqueue):
+		envelope = _envelope(self.connection, event_type="FBPI::SOMETHING_ELSE")
+		result = self._call_webhook(envelope, "test-webhook-secret")
+
+		self.assertEqual(result, {"accepted": True})
+		enqueue.assert_not_called()
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_redelivered_message_id_still_uses_the_same_dedup_job_id(self, enqueue):
+		"""Redelivery (or a burst) of events for the same account always
+		targets the identical per-account job_id - the same job_id RQ's own
+		``deduplicate=True`` collapses, per #145's existing job-dedup
+		mechanism. This receiver intentionally adds no new dedup bookkeeping
+		of its own (#163 scope)."""
+		envelope = _envelope(self.connection, message_id="redelivered-msg")
+
+		self._call_webhook(envelope, "test-webhook-secret")
+		self._call_webhook(envelope, "test-webhook-secret")
+		self._call_webhook(_envelope(self.connection, message_id="a-different-message"), "test-webhook-secret")
+
+		self.assertEqual(enqueue.call_count, 3)
+		job_ids = {call.kwargs["job_id"] for call in enqueue.call_args_list}
+		self.assertEqual(job_ids, {f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{self.account.name}"})
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_payload_contents_are_never_read_stored_or_logged(self, enqueue):
+		envelope = _envelope(self.connection, message_id=f"payload-check-{frappe.generate_hash(length=8)}")
+
+		self._call_webhook(envelope, "test-webhook-secret")
+
+		log = frappe.get_last_doc(
+			"Marketplace Sync Log",
+			filters={"marketplace_account": self.account.name, "trigger_source": "Noon Webhook"},
+		)
+		self.assertNotIn(_SENTINEL_PAYLOAD_VALUE, log.request_data or "")
+		self.assertNotIn(_SENTINEL_PAYLOAD_VALUE, frappe.as_json(log.as_dict()))
+		self.assertEqual(
+			frappe.parse_json(log.request_data),
+			{
+				"message_id": envelope["metadata"]["message_id"],
+				"event_type": "FBPI::ORDER_SYNC",
+				"import_queued": True,
+			},
+		)
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_accepted_event_writes_one_committed_sync_log_row(self, enqueue):
+		message_id = f"log-check-{frappe.generate_hash(length=8)}"
+		envelope = _envelope(self.connection, message_id=message_id)
+
+		self._call_webhook(envelope, "test-webhook-secret")
+
+		self.assertEqual(
+			frappe.db.count(
+				"Marketplace Sync Log",
+				{
+					"marketplace_account": self.account.name,
+					"sync_type": "Order Import",
+					"trigger_source": "Noon Webhook",
+					"request_data": ["like", f"%{message_id}%"],
+				},
+			),
+			1,
+		)
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_unhandled_event_type_logs_import_queued_false(self, enqueue):
+		envelope = _envelope(self.connection, event_type="FBPI::SOMETHING_ELSE")
+
+		self._call_webhook(envelope, "test-webhook-secret")
+
+		log = frappe.get_last_doc(
+			"Marketplace Sync Log",
+			filters={"marketplace_account": self.account.name, "trigger_source": "Noon Webhook"},
+		)
+		self.assertEqual(frappe.parse_json(log.request_data)["import_queued"], False)
+
+	@patch.object(orders.frappe, "enqueue", return_value=None)
+	def test_deduplicated_delivery_logs_import_queued_false(self, enqueue):
+		envelope = _envelope(self.connection)
+
+		self._call_webhook(envelope, "test-webhook-secret")
+
+		log = frappe.get_last_doc(
+			"Marketplace Sync Log",
+			filters={"marketplace_account": self.account.name, "trigger_source": "Noon Webhook"},
+		)
+		self.assertEqual(frappe.parse_json(log.request_data)["import_queued"], False)
+
+	@patch.object(orders.frappe, "enqueue", side_effect=RuntimeError("redis down"))
+	def test_enqueue_failure_propagates_without_writing_a_success_log_row(self, enqueue):
+		envelope = _envelope(self.connection, message_id=f"enqueue-fails-{frappe.generate_hash(length=8)}")
+
+		with self.assertRaises(RuntimeError):
+			self._call_webhook(envelope, "test-webhook-secret")
+
+		self.assertEqual(
+			frappe.db.count(
+				"Marketplace Sync Log",
+				{
+					"marketplace_account": self.account.name,
+					"trigger_source": "Noon Webhook",
+					"request_data": ["like", f"%{envelope['metadata']['message_id']}%"],
+				},
+			),
+			0,
+		)

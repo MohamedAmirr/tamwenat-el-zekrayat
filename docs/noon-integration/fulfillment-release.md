@@ -29,6 +29,52 @@ issue that depends on #146.
 3. The Noon Fulfillment tab and its action buttons only appear on a
    Marketplace Order whose `platform` is `Noon`.
 
+## Noon event-notification webhook (#163)
+
+`api/noon_webhooks.py::event_notification` is a public, POST-only receiver
+for Noon's FBPI event notifications — see
+`docs/noon-integration/event-notifications.md` for the envelope shape,
+sourced from Noon's public docs and user-approved for this work. It is an
+additional, faster trigger for the
+same `run_order_import` job #145's hourly poll already enqueues — **the
+hourly poll stays on as the safety net**; nothing about it changes or is
+removed by this receiver.
+
+Setup, per Noon Connection:
+
+1. Set a `Webhook Secret` on the `Noon Connection` document (Password
+   field). This is a value you choose, not something Noon issues — pick any
+   sufficiently random string.
+2. In Noon's Integrator Configuration modal (Noon Partner Center), register
+   a destination pointing at this site's receiver URL:
+   `https://<your-site-domain>/api/method/marketplace_integrations.api.noon_webhooks.event_notification`
+3. In that same modal, add a custom header named `X-Noon-Webhook-Secret`
+   whose value is exactly the `Webhook Secret` you set on the `Noon
+   Connection` in step 1.
+4. Subscribe that destination to the `FBPI::ORDER_SYNC` event type. Any
+   other event type delivered to this receiver is acknowledged (200) and
+   ignored — it does not need to be excluded from the subscription, but
+   subscribing only to what's handled avoids pointless deliveries.
+5. The connection's `Project Code` field (already required for every Noon
+   Connection) is what this receiver uses to resolve an inbound event back
+   to the right connection/account — no separate configuration is needed for
+   that resolution.
+
+This receiver never parses `payload` as business data (see
+`docs/noon-integration/event-notifications.md`) — a handled event only re-triggers the
+existing #145 order-import job for the resolved account, which re-fetches
+current order state from Noon's own API rather than trusting anything in
+the notification body.
+
+**Accepted delay when an import is already running:** a webhook event that
+arrives while that account's import job is already queued/running does not
+queue a second job (the existing per-account job_id dedup collapses it) -
+the receiver still returns 200 and logs success, but that specific order
+isn't actually re-imported until the already-running job (or, in the worst
+case, the next hourly poll) picks it up, up to about an hour later. See
+`docs/noon-integration/event-notifications.md`'s "Accepted dedup gap" for
+the full explanation - this is accepted behavior, not a bug.
+
 ## Permissions
 
 **System Manager only.** `Marketplace Order`'s only configured DocPerm role
@@ -160,5 +206,7 @@ have been checked against a real Noon account.
   bulk AWB pre-generation, `CreateSandboxOrder` tooling.
 - Automatic Sales Order amendment or cancellation, Delivery Note, Sales
   Invoice, Payment Entry, Credit Note, or stock ledger entries.
-- A Noon webhook/event-notification receiver (#145's own deferral — this
-  release remains polling/manual-trigger only).
+- A Noon webhook/event-notification receiver was #145's own deferral at the
+  time this release shipped; it has since been built under #163 — see
+  "Noon event-notification webhook (#163)" above. The hourly poll remains
+  in place as a safety net regardless.

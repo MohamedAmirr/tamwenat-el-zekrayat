@@ -11,6 +11,7 @@
   "key_id",
   "private_key",
   "environment",
+  "webhook_secret",
   "enabled"
  ],
  "fields": [
@@ -54,6 +55,13 @@
    "reqd": 1
   },
   {
+   "description": "Shared secret this connection's FBPI event-notification webhook receiver requires on every inbound request's X-Noon-Webhook-Secret header. Paste the same value into Noon's Integrator Configuration modal.",
+   "fieldname": "webhook_secret",
+   "fieldtype": "Password",
+   "ignore_xss_filter": 1,
+   "label": "Webhook Secret"
+  },
+  {
    "default": "1",
    "fieldname": "enabled",
    "fieldtype": "Check",
@@ -63,7 +71,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-29 00:00:00.000000",
+ "modified": "2026-10-03 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Noon Connection",
