@@ -9,6 +9,8 @@ makes real HTTP calls. Fixture documents (Marketplace Account, Item, Mapping)
 are built directly via make_* helpers.
 """
 
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -808,6 +810,182 @@ class IntegrationTestNoonOrderImport(IntegrationTestCase):
 		self.assertEqual(order2.customer_formatted_address, "Dubai")
 
 
+class IntegrationTestNoonOrderImportConcurrency(IntegrationTestCase):
+	"""#146 decision 10's single most important test: a ``Marketplace Order
+	Shipment`` row committed by a concurrent fulfillment write mid-poll must
+	survive that poll's own later save of the same Marketplace Order.
+
+	``Document.save()`` -> ``update_children()`` re-syncs EVERY ``Table``
+	field on a parent doc on every save, deleting any child-table row of
+	that parent whose ``name`` is absent from the in-memory copy currently
+	being saved (confirmed directly against the installed
+	``frappe/model/document.py``). Before the #146 fix, a poll that read the
+	order's row BEFORE a concurrent fulfillment write committed would carry
+	a stale in-memory ``noon_shipments`` list for the rest of its own
+	transaction, and its own later ``doc.save()`` would silently delete the
+	fulfillment write's just-committed row - the fulfillment write and the
+	poll would never otherwise conflict or error, so this would fail
+	silently. The fix is ``frappe.db.get_value(..., for_update=True)`` as
+	the very FIRST read ``import_order()`` performs against this order row
+	(before even the ``existing_name``/``had_sales_order_before`` checks),
+	matched by the identical locking read at the top of every
+	``integrations/noon/fulfillment.py`` write (``_lock_and_load_order()``)
+	- this forces the poll to block until the concurrent writer's
+	transaction actually commits, so by the time the poll's own
+	``frappe.get_doc()`` call runs, it is guaranteed to observe the
+	writer's already-committed row rather than a stale snapshot.
+
+	This has to use two real OS threads, each opening its OWN real site
+	connection (``frappe.init()``/``frappe.connect()`` - the same pattern a
+	real RQ worker uses, confirmed against ``frappe/utils/background_jobs.py``'s
+	worker bootstrap) against the same MariaDB. A single-threaded/single-
+	connection test cannot exercise real InnoDB row locking at all: MariaDB
+	locks are tracked per actual client connection, not per Python object or
+	in-process transaction counter.
+	"""
+
+	def setUp(self):
+		self.warehouse_patch = patch(
+			"marketplace_integrations.integrations.noon.catalog.validate_warehouse_code"
+		)
+		self.warehouse_patch.start()
+		self.addCleanup(self.warehouse_patch.stop)
+		_start_noon_client_customer_data_patch(self)
+
+		suffix = frappe.generate_hash(length=8)
+		self.account = _make_noon_account(f"Concurrency {suffix}")
+		_make_item("ITEM-CONCURRENCY")
+		_make_mapping(self.account.name, "ITEM-CONCURRENCY", "SKU-CONCURRENCY")
+
+		self.payload = _order_payload(
+			fbpi_order_nr=f"ORD-CONC-{suffix}",
+			items=[
+				{
+					"mp_item_nr": 1,
+					"partner_sku": "SKU-CONCURRENCY",
+					"mp_status": "MP_ITEM_STATUS_CONFIRMED",
+					"integration_status": "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+					"delivered_invoice_price": 100.0,
+				}
+			],
+		)
+		order, _unmapped = import_order(self.account, self.payload)
+		frappe.db.commit()
+		self.order_name = order.name
+
+	def tearDown(self):
+		frappe.db.delete("Marketplace Order", filters={"marketplace_account": self.account.name})
+		frappe.db.delete("Marketplace Sync Log", filters={"marketplace_account": self.account.name})
+		frappe.db.delete("Marketplace Product Mapping", filters={"marketplace_account": self.account.name})
+		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
+		frappe.delete_doc("Noon Connection", self.account.connection, ignore_permissions=True, force=True)
+		frappe.db.commit()
+
+	def test_concurrent_fulfillment_write_survives_concurrent_poll_save(self):
+		from marketplace_integrations.integrations.noon import fulfillment
+
+		site = frappe.local.site
+		order_name = self.order_name
+		account_name = self.account.name
+		payload = self.payload
+
+		# writer_locked: writer thread signals once it holds the row lock.
+		# poll_about_to_read: poll thread signals right before it issues its
+		# own locking read against the same row - the writer thread then
+		# waits a further beat before committing, to give that read a real
+		# chance to actually reach MariaDB and start waiting on the lock
+		# (not just reach the Python call site) before the lock is released.
+		writer_locked = threading.Event()
+		poll_about_to_read = threading.Event()
+		errors = []
+
+		def writer_thread():
+			try:
+				frappe.init(site=site)
+				frappe.connect()
+				frappe.set_user("Administrator")
+				order = fulfillment._lock_and_load_order(order_name)
+				writer_locked.set()
+				if not poll_about_to_read.wait(timeout=5):
+					errors.append(("writer", "poll thread never signalled poll_about_to_read"))
+				time.sleep(0.2)
+				order.append(
+					"noon_shipments",
+					{"integration_shipment_nr": "CONC-SHIP-1", "status": "Pending", "awb_source": "Noon"},
+				)
+				order.save()
+				frappe.db.commit()
+			except Exception:
+				errors.append(("writer", frappe.get_traceback()))
+			finally:
+				frappe.destroy()
+
+		def poll_thread():
+			try:
+				frappe.init(site=site)
+				frappe.connect()
+				frappe.set_user("Administrator")
+				if not writer_locked.wait(timeout=5):
+					errors.append(("poll", "writer thread never signalled writer_locked"))
+				from marketplace_integrations.integrations.noon.catalog import get_account
+
+				account = get_account(account_name)
+				# #146 round-4 fix: mirrors the ``frappe.db.commit()`` real
+				# callers (``_run_import_for_account()``/``refresh_order()``)
+				# now issue immediately after their own setup reads and
+				# before the per-order savepoint/lock flow - without this,
+				# ``get_account()``'s plain read above (not
+				# ``import_order()``'s own locking read, which is already
+				# first-in-FUNCTION) is what establishes this transaction's
+				# read view, leaving the locking read below first-in-function
+				# but not first-in-transaction.
+				frappe.db.commit()
+				poll_about_to_read.set()
+				# import_order()'s very first statement against this order
+				# row is its own for_update=True locking read - this call
+				# must block here until the writer thread above commits.
+				import_order(account, payload)
+				frappe.db.commit()
+			except Exception:
+				errors.append(("poll", frappe.get_traceback()))
+			finally:
+				frappe.destroy()
+
+		t_writer = threading.Thread(target=writer_thread)
+		t_poll = threading.Thread(target=poll_thread)
+		t_writer.start()
+		t_poll.start()
+		t_writer.join(timeout=15)
+		t_poll.join(timeout=15)
+
+		self.assertFalse(errors, f"Concurrency test thread(s) raised: {errors}")
+
+		shipment_rows = frappe.get_all(
+			"Marketplace Order Shipment",
+			filters={"parenttype": "Marketplace Order", "parent": order_name},
+			fields=["integration_shipment_nr"],
+		)
+		self.assertEqual(
+			[row.integration_shipment_nr for row in shipment_rows],
+			["CONC-SHIP-1"],
+			"The concurrently committed shipment row must survive the poll's own save of the same order "
+			"(#146 decision 10). An empty result here means Document.save() -> update_children() deleted "
+			"it, i.e. the row lock did not actually serialize the two writers.",
+		)
+
+		# The poll's own normal work (no behavioral change to #145's
+		# idempotent re-import) must still have completed correctly despite
+		# being forced to wait on the lock.
+		item_rows = frappe.get_all(
+			"Marketplace Order Item",
+			filters={"parenttype": "Marketplace Order", "parent": order_name},
+			fields=["external_sku", "current_quantity"],
+		)
+		self.assertEqual(len(item_rows), 1)
+		self.assertEqual(item_rows[0].external_sku, "SKU-CONCURRENCY")
+		self.assertEqual(item_rows[0].current_quantity, 1)
+
+
 class IntegrationTestNoonOrderImportBatchIsolation(IntegrationTestCase):
 	"""Tests for import_orders_created_between() - per-order isolation, sync logging."""
 
@@ -1007,6 +1185,88 @@ class IntegrationTestNoonOrderImportBatchIsolation(IntegrationTestCase):
 			},
 		)
 		self.assertEqual(len(logs), 0)
+
+	def test_deadlock_on_locking_read_does_not_abort_the_batch(self):
+		"""#146 round-3 review finding #1: a previous version of
+		``import_order()`` retried once on ``frappe.QueryDeadlockError``
+		(MariaDB error 1020) instead of reordering its locking read to be
+		first. Swallowing that error inside ``import_order()`` meant the
+		caller's (``_import_order_isolated()``'s) own savepoint - already
+		destroyed by MariaDB's whole-transaction rollback when 1020 fired -
+		was released via a bare ``frappe.db.release_savepoint()`` call with no
+		surrounding try/except, raising "SAVEPOINT does not exist" and
+		aborting the ENTIRE per-account run, silently skipping every order
+		after the one that hit 1020.
+
+		This fix removed the retry-and-swallow entirely: the locking read is
+		now the first statement ``import_order()`` issues, which (per the
+		docstring) removes the race that caused 1020 in the first place.
+
+		Round-4 fix note: a later round found that being first-in-function
+		was not enough on its own - the race this test originally modeled
+		(an earlier plain read in the SAME transaction poisoning the locking
+		read) is now structurally closed by an explicit ``frappe.db.commit()``
+		each real caller (``_run_import_for_account()``, ``refresh_order()``)
+		issues right before the per-order savepoint/lock flow (see
+		``IntegrationTestNoonOrderImportConcurrency.
+		test_concurrent_fulfillment_write_survives_concurrent_poll_save``,
+		which now passes with zero errors, proving that race is closed, not
+		just caught). 1020 can therefore no longer fire via that exact
+		mechanism in a real run. This test still earns its keep as a
+		defense-in-depth check for a DIFFERENT/residual trigger - e.g. a
+		genuinely concurrent write landing in the narrow gap between the
+		caller's commit and this function's own lock, or any other source of
+		a 1020 this module hasn't anticipated - proving that catching and
+		logging a per-order exception during batch processing (rather than
+		letting it propagate and abort the whole run) is correct regardless
+		of what raised it, not specifically re-testing the now-closed race.
+		"""
+		real_sql = frappe.db.sql
+		state = {"fired": False}
+
+		def fake_sql(query, *args, **kwargs):
+			if not state["fired"] and isinstance(query, str) and "FOR UPDATE" in query:
+				state["fired"] = True
+				raise frappe.QueryDeadlockError("(1020, 'Record has changed since last read')")
+			# Forward args/kwargs as received instead of defaulting a missing
+			# `values` to None: frappe.db.sql()'s real default is a distinct
+			# EmptyQueryValues sentinel, and passing an explicit None turns
+			# into a stray (None,) query parameter, breaking parameterless
+			# calls like frappe.db.savepoint()'s `self.sql(f"savepoint ...")`.
+			return real_sql(query, *args, **kwargs)
+
+		def mock_list_orders(account, created_after=None, created_before=None):
+			yield _order_payload(fbpi_order_nr="ORD-DEADLOCK")
+			yield _order_payload(
+				fbpi_order_nr="ORD-AFTER-DEADLOCK",
+				items=[
+					{
+						"mp_item_nr": 1,
+						"partner_sku": "SKU-GOOD",
+						"mp_status": "MP_ITEM_STATUS_CONFIRMED",
+						"integration_status": "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+						"delivered_invoice_price": 100.0,
+					}
+				],
+			)
+
+		with (
+			patch(
+				"marketplace_integrations.integrations.noon.orders.list_orders",
+				side_effect=mock_list_orders,
+			),
+			patch.object(frappe.db, "sql", side_effect=fake_sql),
+		):
+			imported, errors = import_orders_created_between(
+				self.account, "2026-09-23T00:00:00Z", "2026-09-30T00:00:00Z"
+			)
+
+		self.assertEqual(len(errors), 1)
+		self.assertEqual(errors[0]["fbpi_order_nr"], "ORD-DEADLOCK")
+		self.assertEqual(len(imported), 1)
+		self.assertEqual(
+			imported[0], frappe.db.get_value("Marketplace Order", {"external_order_id": "ORD-AFTER-DEADLOCK"})
+		)
 
 
 class IntegrationTestNoonOrderPagination(IntegrationTestCase):

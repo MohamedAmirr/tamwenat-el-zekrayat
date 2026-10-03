@@ -356,7 +356,90 @@ def _build_sales_order_lines(order, account):
 def _build_order_lines(order, account):
 	if order.platform == "Shopify":
 		return _build_shopify_sales_order_lines(order, account)
+	if order.platform == "Noon":
+		return _build_noon_sales_order_lines(order, account)
 	return _build_sales_order_lines(order, account)
+
+
+# #146 decision 2: eligibility is at confirmation, not at Talabat's
+# "final"/FINAL_ITEM_STATUSES notion - a Noon unit counts iff its
+# external_status is exactly CONFIRMED, its integration_status is anything
+# other than OUT_OF_STOCK, and its current_quantity is positive. #145's
+# stale status-group rows are zeroed (not deleted) rather than removed, so
+# current_quantity > 0 is what actually excludes them here.
+NOON_ELIGIBLE_EXTERNAL_STATUS = "CONFIRMED"
+NOON_INELIGIBLE_INTEGRATION_STATUS = "OUT_OF_STOCK"
+
+
+def _build_noon_sales_order_lines(order, account):
+	"""Build Sales Order lines from Noon FBPI confirmed-and-shippable units.
+
+	#146 decision 3: eligible rows are grouped by ``external_sku`` into one
+	line keyed ``sku:<partner_sku>`` - NOT by the row's own status-bearing
+	``external_item_id`` (``sku:<partner_sku>:<mp_status>:<integration_status>``,
+	see #145's ``order_mapper._aggregate_items()``) - so a normal
+	ACKNOWLEDGED -> SHIPPED transition (a new #145 row under a new
+	``external_item_id``, the old one zeroed) never changes this snapshot's
+	hash or looks like a modification once already synced.
+	"""
+	currency = _resolved_currency(account)
+	if order.presentment_currency and order.presentment_currency != currency:
+		raise SyncBlocker(
+			_(
+				"Noon order {0}'s presentment currency ({1}) does not match the resolved ERPNext currency "
+				"({2}). Multi-currency Sales Order synchronization is not supported."
+			).format(order.name, order.presentment_currency, currency)
+		)
+
+	groups = {}
+	group_order = []
+	for row in order.items or []:
+		if row.external_status != NOON_ELIGIBLE_EXTERNAL_STATUS:
+			continue
+		if row.integration_status == NOON_INELIGIBLE_INTEGRATION_STATUS:
+			continue
+		if flt(row.current_quantity) <= 0:
+			continue
+		sku = cstr(row.external_sku).strip()
+		key = f"sku:{sku}"
+		group = groups.get(key)
+		if not group:
+			group = {"external_sku": sku, "qty": 0.0, "amount": 0.0}
+			groups[key] = group
+			group_order.append(key)
+		group["qty"] += flt(row.current_quantity)
+		group["amount"] += flt(row.transaction_amount)
+
+	lines = []
+	for key in group_order:
+		group = groups[key]
+		if group["qty"] <= 0:
+			continue
+		resolved = resolve_mapping_and_item(account.name, group["external_sku"])
+		if not resolved:
+			raise SyncBlocker(
+				_("No enabled Marketplace Product Mapping exists for Noon SKU {0}.").format(
+					group["external_sku"] or _("blank")
+				)
+			)
+		item_uom = resolved.get("sales_uom") or frappe.get_cached_value("Item", resolved["item"], "stock_uom")
+		amount = flt(group["amount"])
+		effective_rate = flt(amount / group["qty"], EFFECTIVE_RATE_PRECISION)
+		lines.append(
+			{
+				"external_item_id": key,
+				"item_code": resolved["item"],
+				"qty": group["qty"],
+				"uom": item_uom,
+				"warehouse": account.warehouse,
+				"fulfilled_total_price": amount,
+				"effective_rate": effective_rate,
+			}
+		)
+
+	if not lines:
+		raise SyncBlocker(_("No eligible Noon order lines are available to synchronize."))
+	return sorted(lines, key=lambda line: line["external_item_id"])
 
 
 def _build_shopify_sales_order_lines(order, account):
@@ -511,10 +594,10 @@ def _validate_platform_supported(order):
 	patch has not yet run) is treated as Talabat, matching every existing
 	Marketplace Order's real origin today - it is never a Shopify order.
 	"""
-	if order.platform and order.platform not in {"Talabat", "Shopify"}:
+	if order.platform and order.platform not in {"Talabat", "Shopify", "Noon"}:
 		raise SyncBlocker(
 			_(
-				"ERPNext Sales Order synchronization is only available for Talabat and Shopify orders. "
+				"ERPNext Sales Order synchronization is only available for Talabat, Shopify and Noon orders. "
 				"Marketplace Order {0} is a {1} order."
 			).format(order.name, order.platform)
 		)
@@ -1024,6 +1107,13 @@ def _delivery_date(order):
 		if not order.processed_on:
 			raise SyncBlocker(_("Shopify Processed On is required to set the ERPNext Sales Order Delivery Date."))
 		return getdate(order.processed_on)
+	if order.platform == "Noon":
+		# #146 decision 5: Noon documents no promised/delivery date, and
+		# ERPNext requires delivery_date >= transaction_date, so both are set
+		# to the same value (received_on).
+		if not order.received_on:
+			raise SyncBlocker(_("Noon Received On is required to set the ERPNext Sales Order Delivery Date."))
+		return getdate(order.received_on)
 	if not order.promised_for:
 		raise SyncBlocker(_("Talabat Promised For is required to set the ERPNext Sales Order Delivery Date."))
 	return getdate(order.promised_for)
@@ -1034,6 +1124,10 @@ def _transaction_date(order):
 		if not order.processed_on:
 			raise SyncBlocker(_("Shopify Processed On is required to set the ERPNext Sales Order Transaction Date."))
 		return getdate(order.processed_on)
+	if order.platform == "Noon":
+		if not order.received_on:
+			raise SyncBlocker(_("Noon Received On is required to set the ERPNext Sales Order Transaction Date."))
+		return getdate(order.received_on)
 	# received_on (Talabat order.sys.created_at) is not in openapi.json's
 	# required list for order.OrderSys, and the Marketplace Order field
 	# itself is read-only/non-mandatory - so this is not formally guaranteed

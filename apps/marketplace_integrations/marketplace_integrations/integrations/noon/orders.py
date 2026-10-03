@@ -32,7 +32,7 @@ from urllib.parse import quote
 
 import frappe
 from frappe import _
-from frappe.utils import cstr
+from frappe.utils import cstr, flt
 
 from marketplace_integrations.integrations.noon.catalog import get_account, validate_connection_enabled
 from marketplace_integrations.integrations.noon.client import NoonClient
@@ -152,13 +152,172 @@ def import_order(account, raw_order):
 	validation failure (decision 4) - the caller
 	(``_import_order_isolated()``) is what isolates one order's failure
 	from the rest of a run.
+
+	#146 decision 10 (concurrency hardening): ``Document.save()`` ->
+	``update_children()`` re-syncs EVERY ``Table`` field on a Marketplace
+	Order on every save, deleting any DB row of that child doctype absent
+	from the in-memory copy (confirmed directly against the installed
+	``frappe/model/document.py``: ``update_child_table()`` deletes every row
+	whose ``name`` is not in the parent's current in-memory list for that
+	exact ``parentfield``). A poll run that loaded this order's row under
+	ordinary REPEATABLE READ semantics could therefore silently delete a
+	``Marketplace Order Shipment``/``...Unit``/``...AWB`` row committed by a
+	concurrent fulfillment action (``integrations/noon/fulfillment.py``)
+	between this poll's own read and its own save - that concurrent write is
+	invisible to a plain snapshot read, but ``update_children()`` does not
+	know or care that it only ever touches ``items`` here; it iterates every
+	Table field on the doctype.
+
+	The fix is a **locking** read, not a plain one: ``frappe.db.sql(...,
+	FOR UPDATE)`` is an InnoDB locking read, which (unlike an ordinary
+	consistent/snapshot read under REPEATABLE READ) always reads the latest
+	COMMITTED row version and takes an exclusive row lock, blocking until any
+	other transaction holding that same lock (e.g. a concurrent fulfillment
+	write, which acquires the identical lock before it modifies a shipment
+	table - see ``integrations/noon/fulfillment.py``) releases it.
+
+	Round-3 review (#146 review finding #1) found the ordering half of this
+	fix was still wrong: this function used to call ``normalize_order()``
+	(which itself issues plain consistent reads against ``Marketplace
+	Product Mapping`` via ``resolve_mapping_and_item()``) BEFORE taking the
+	``FOR UPDATE`` lock below. Under MariaDB's ``innodb_snapshot_isolation=ON``,
+	ANY earlier consistent read in the same transaction - on any table, not
+	just this order's own row - establishes that transaction's read view;
+	a later locking read that then hits a row committed after that read view
+	was created raises error 1020 (``frappe.QueryDeadlockError``), which
+	MariaDB handles by rolling back the WHOLE transaction (same as a real
+	deadlock) - destroying ``_import_order_isolated()``/``refresh_order()``'s
+	open savepoint out from under them. The fix is ordering, not a retry: the
+	``FOR UPDATE`` lock below is now the very FIRST database statement this
+	function issues - before ``normalize_order()``, before the customer-
+	data/stale-status-group reads, and before ``upsert_marketplace_order()``'s
+	own ``frappe.get_doc()`` - so nothing in THIS FUNCTION can establish a
+	stale read view ahead of it. ``identity_key`` is therefore computed
+	directly from ``raw_order["fbpi_order_nr"]`` (plain dict access, not a DB
+	read) rather than from ``normalize_order()``'s output. A previous version
+	of this function retried once on 1020 instead of reordering - that
+	swallowed the error from this function's own perspective, but the
+	caller's savepoint was still gone, so its later (try/except-unprotected)
+	``release_savepoint()`` call raised "SAVEPOINT does not exist" and
+	aborted the entire per-account run. Locking first removes the race
+	instead of papering over its symptom.
+
+	Round-4 fix (post-round-3 review + ``test_concurrent_fulfillment_write_
+	survives_concurrent_poll_save``): being first-in-FUNCTION was still not
+	enough. MariaDB's snapshot-isolation read view is scoped to the whole
+	transaction, not to a function or savepoint - a savepoint does not open
+	a new read view, only a ``commit()``/``rollback()`` does. Round-4 tried
+	to close this by having each caller commit once, right after its own
+	setup reads and before entering the per-order savepoint/lock flow.
+
+	Round-5 fix (review finding #1): that was still not enough, because
+	every real caller does MORE than a fixed set of setup reads before
+	reaching this function's lock - ``list_orders()`` (called in a loop by
+	``import_orders_created_between()``, which both ``_run_import_for_account()``
+	and ``refresh_order()`` ultimately funnel through for each order) makes
+	its own plain consistent read on every paginated HTTP call it issues via
+	``NoonClient.request()`` (every Noon API call reads the ``Noon
+	Connection``/``__Auth`` row), and ``get_order()`` (``refresh_order()``'s
+	own single-order ``GetFbpiOrder`` call) does the same. A commit placed
+	once, before any of that, cannot stay valid once any later read happens
+	in the same still-open transaction - which is exactly what pagination/
+	per-order HTTP calls do. The lock below is therefore only actually
+	first-in-TRANSACTION because each caller that can reach this point now
+	commits as the LAST thing it does before the savepoint that leads here -
+	``_import_order_isolated()`` commits immediately before its own
+	savepoint (closing the gap for every order, including ones after
+	in-between pagination calls, not just the first one in a run), and
+	``refresh_order()`` commits immediately after ``get_order()`` returns and
+	before its own savepoint - never earlier than the last read, in either
+	case.
+
+	``_import_order_isolated()``/``refresh_order()`` additionally commit
+	immediately after each order (decision 10's "one commit per order", not
+	one commit for the whole run) so this lock is held only for the duration
+	of one order's import, not for an entire multi-order run.
 	"""
+	if not isinstance(raw_order, dict):
+		frappe.throw(_("Noon FBPI order payload must be an object."))
+	fbpi_order_nr = cstr(raw_order.get("fbpi_order_nr")).strip()
+	identity_key = compute_order_identity_key(account.name, fbpi_order_nr)
+
+	# Lock FIRST (#146 review finding #1) - no other DB read happens before
+	# this in this function. That alone is not sufficient (round-4 fix,
+	# see this function's docstring): this is only actually first-in-
+	# TRANSACTION because every caller that can reach this point
+	# (``_run_import_for_account()``, ``refresh_order()``) commits
+	# immediately after its own setup reads and before the per-order
+	# savepoint that leads here.
+	result = frappe.db.sql(
+		"""
+		SELECT `name` FROM `tabMarketplace Order`
+		WHERE `order_identity_key` = %s
+		FOR UPDATE
+		""",
+		(identity_key,),
+	)
+	existing_name = result[0][0] if result else None
+
 	normalized = normalize_order(account, raw_order)
 	unmapped_skus = normalized.pop("_unmapped_skus", [])
+
+	had_sales_order_before = False
+	had_eligible_before = False
+	if existing_name:
+		had_sales_order_before = bool(
+			frappe.db.get_value("Marketplace Order", existing_name, "erpnext_sales_order")
+		)
+		had_eligible_before = _has_eligible_units(existing_name)
+
 	_maybe_fetch_customer_data(account, normalized)
 	_zero_out_stale_status_groups(account, normalized)
 	order = upsert_marketplace_order(account.name, normalized)
+
+	# #146 decision 7: bump the Sales Order sync debounce ONLY on the first
+	# transition into eligibility - never on a later poll that merely
+	# confirms an order is still eligible (every hourly re-list would
+	# otherwise re-bump/re-log every already-eligible order forever), and
+	# never once a Sales Order is already linked (a later re-sync, if ever
+	# needed, is the manual "Send to ERPNext"/"Update ERPNext Order" button,
+	# not an automatic re-bump here).
+	if not had_sales_order_before and not had_eligible_before and _has_eligible_units(order.name):
+		from marketplace_integrations.services.sales_order_sync_debounce import bump_sync_debounce
+
+		bump_sync_debounce(order.name, "Noon Order Import")
+
 	return order, unmapped_skus
+
+
+def _has_eligible_units(order_name):
+	"""Return whether ``order_name`` currently has at least one Sales-Order-
+	eligible unit, per #146 decision 2 (``external_status ==
+	NOON_ELIGIBLE_EXTERNAL_STATUS``, ``integration_status !=
+	NOON_INELIGIBLE_INTEGRATION_STATUS``, ``current_quantity > 0``).
+
+	This reuses the exact same constants ``services/sales_order_sync.py``'s
+	Noon branch defines for the identical rule (#146 review finding #10 - a
+	previous version of this function duplicated the rule as two inline
+	string literals instead) as a cheap existence check (not a full line
+	build), imported lazily inside this function rather than at module load
+	time to avoid a circular import with ``services/sales_order_sync_debounce.py``,
+	which does not itself import this module - the same lazy-import pattern
+	``bump_sync_debounce()`` below already uses."""
+	from marketplace_integrations.services.sales_order_sync import (
+		NOON_ELIGIBLE_EXTERNAL_STATUS,
+		NOON_INELIGIBLE_INTEGRATION_STATUS,
+	)
+
+	rows = frappe.get_all(
+		"Marketplace Order Item",
+		filters={"parenttype": "Marketplace Order", "parent": order_name},
+		fields=["external_status", "integration_status", "current_quantity"],
+	)
+	return any(
+		row.external_status == NOON_ELIGIBLE_EXTERNAL_STATUS
+		and row.integration_status != NOON_INELIGIBLE_INTEGRATION_STATUS
+		and flt(row.current_quantity) > 0
+		for row in rows
+	)
 
 
 def _zero_out_stale_status_groups(account, normalized):
@@ -296,8 +455,24 @@ def _import_order_isolated(account, raw_order, trigger_source):
 	its failure from every other order in the same run - same per-order
 	isolation pattern as Shopify's ``_import_order_isolated()``/
 	``_log_order_import_failure()``.
+
+	Round-5 fix (review finding #1): commits HERE, immediately before the
+	savepoint/lock below, rather than relying on ``_run_import_for_account()``
+	to have committed at the right spot before the per-order loop started.
+	Everything between that caller's own commit and this one - the setup
+	reads it did before the loop, and ``list_orders()``'s own paginated HTTP
+	calls (each one a plain consistent read against the Noon Connection row,
+	inside ``NoonClient.request()``) made between every order it yields - is
+	a plain read in the same still-open transaction, any one of which could
+	otherwise establish a stale read view ahead of ``import_order()``'s
+	raw-SQL lock. Committing right here, with nothing between this commit and
+	the savepoint/lock but the savepoint call itself, is what actually
+	guarantees the lock is first-in-transaction for every order, not just the
+	first one in a run. See docs/frappe-conventions.md and
+	``import_order()``'s own docstring.
 	"""
 	fbpi_order_nr = cstr((raw_order or {}).get("fbpi_order_nr")).strip()
+	frappe.db.commit()
 	savepoint = "noon_order_import_" + frappe.generate_hash(length=10)
 	frappe.db.savepoint(savepoint)
 	try:
@@ -308,6 +483,11 @@ def _import_order_isolated(account, raw_order, trigger_source):
 		return None, fbpi_order_nr, str(exc)
 	else:
 		frappe.db.release_savepoint(savepoint)
+		# #146 decision 10: commit after each order's own savepoint, not once
+		# at the end of the whole run - releases import_order()'s row lock
+		# promptly and starts every order's import in a fresh transaction, so
+		# one order's lock is never held across the rest of the run.
+		frappe.db.commit()
 		if unmapped_skus:
 			_log_unmapped_skus(account, order, unmapped_skus, trigger_source)
 		return order, None, None
@@ -433,6 +613,18 @@ def _run_import_for_account(account_name, trigger_source):
 	validate_connection_enabled(account)
 	_validate_order_import_setup(account)
 
+	# Round-5 fix (review finding #1): a commit was previously issued here,
+	# right after the setup reads above and before the per-order loop. That
+	# was still not sufficient - ``import_orders_created_between()``'s
+	# ``list_orders()`` makes its own plain consistent read (via
+	# ``NoonClient.request()``) on every page it fetches while iterating, in
+	# the SAME transaction this commit opened, ahead of every order's own
+	# lock except the very first one. Committing here can therefore never be
+	# enough on its own; ``_import_order_isolated()`` now owns committing
+	# immediately before its own savepoint/lock instead, which is the only
+	# place that is actually guaranteed to have nothing else run between the
+	# commit and the lock. See ``docs/frappe-conventions.md`` and
+	# ``_import_order_isolated()``'s/``import_order()``'s own docstrings.
 	run_started = datetime.now(UTC)
 	created_after = _as_noon_timestamp(run_started - timedelta(days=ORDER_IMPORT_LOOKBACK_DAYS))
 	created_before = _as_noon_timestamp(run_started)
@@ -511,8 +703,22 @@ def refresh_order(marketplace_order_name):
 	if not fbpi_order_nr:
 		frappe.throw(_("Marketplace Order {0} has no Noon FBPI order number to refresh.").format(doc.name))
 
-	savepoint = "noon_order_refresh_" + frappe.generate_hash(length=10)
-	frappe.db.savepoint(savepoint)
+	# Round-5 fix (review finding #1): ``get_order()`` (the ``GetFbpiOrder``
+	# HTTP call) and the validation that depends on its response now run
+	# BEFORE the savepoint/lock below, not inside it, and the commit that
+	# used to sit here (right after the plain reads above) has moved to
+	# immediately after this call returns instead. That HTTP call makes its
+	# own plain consistent read (via ``NoonClient.request()``) against the
+	# Noon Connection row - committing before issuing it would not stop that
+	# read from re-establishing a stale-ahead-of-the-lock read view in the
+	# transaction the commit just opened; only a commit placed AFTER it,
+	# with nothing but the savepoint/lock between that commit and
+	# ``import_order()``'s raw-SQL lock, actually guarantees the lock is
+	# first-in-transaction. See docs/frappe-conventions.md and
+	# ``import_order()``'s own docstring. Nothing has been written yet at
+	# this point, so a failure here needs no savepoint of its own to roll
+	# back - it still logs and re-raises the same way a failure inside the
+	# savepoint below does.
 	try:
 		raw_order = get_order(account, fbpi_order_nr)
 		if not isinstance(raw_order, dict) or cstr(raw_order.get("mp_code")).strip() != "noon":
@@ -525,6 +731,15 @@ def refresh_order(marketplace_order_name):
 					"External Order ID {2}."
 				).format(returned_order_nr, doc.name, fbpi_order_nr)
 			)
+	except Exception as exc:
+		_log_order_import_failure(account, fbpi_order_nr, str(exc), "Manual")
+		raise
+
+	frappe.db.commit()
+
+	savepoint = "noon_order_refresh_" + frappe.generate_hash(length=10)
+	frappe.db.savepoint(savepoint)
+	try:
 		order, unmapped_skus = import_order(account, raw_order)
 	except Exception as exc:
 		frappe.db.rollback(save_point=savepoint)
@@ -532,6 +747,7 @@ def refresh_order(marketplace_order_name):
 		raise
 	else:
 		frappe.db.release_savepoint(savepoint)
+		frappe.db.commit()  # #146 decision 10: same per-order commit as above
 		if unmapped_skus:
 			_log_unmapped_skus(account, order, unmapped_skus, "Manual")
 		return {"name": order.name}

@@ -187,6 +187,87 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		)
 		return order, mapping
 
+	def _make_noon_account(self):
+		"""#146: a Noon Marketplace Account for Sales Order sync tests.
+		Mirrors integrations/noon/test_orders.py's own ``_make_noon_account()``
+		shape (dummy PEM, matching ``external_account_id``/project_code),
+		plus the erpnext_company/erpnext_selling_price_list/warehouse fields
+		every other platform's account fixture here already sets."""
+		unique_hash = frappe.generate_hash(length=8)
+		connection = frappe.get_doc(
+			{
+				"doctype": "Noon Connection",
+				"connection_name": f"Noon SO Sync {self.suffix}-{unique_hash}",
+				"project_code": f"noon-so-sync-{self.suffix}-{unique_hash}",
+				"key_id": "test-key-id",
+				"private_key": "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----",
+				"environment": "Static Sandbox",
+				"enabled": 1,
+			}
+		).insert()
+		with patch("marketplace_integrations.integrations.noon.catalog.validate_warehouse_code"):
+			account = frappe.get_doc(
+				{
+					"doctype": "Marketplace Account",
+					"account_name": f"Noon SO Sync Account {self.suffix}-{unique_hash}",
+					"platform": "Noon",
+					"external_account_id": f"noon-so-sync-{self.suffix}-{unique_hash}",
+					"connection_doctype": "Noon Connection",
+					"connection": connection.name,
+					"noon_warehouse_code": "NOON-WH-SO-SYNC",
+					"noon_country_code": "ae",
+					"erpnext_company": self.company,
+					"erpnext_selling_price_list": self.price_list,
+					"warehouse": self.warehouse,
+				}
+			).insert()
+		return account
+
+	def _make_noon_order(self, account, *, items=None, presentment_currency=None, create_mapping=True, sku="SKU-NOON"):
+		"""#146 decisions 1-6: build a Marketplace Order directly via
+		``upsert_marketplace_order()`` with raw Noon-shaped item rows (not
+		through ``order_mapper``/``import_order()`` - those are #145's own
+		concern, already covered by integrations/noon/test_orders.py). Each
+		row here is written exactly as `_build_noon_sales_order_lines()`
+		reads it: ``external_status`` (raw ``CONFIRMED``/``CANCELLED``),
+		``integration_status`` (raw ``ACKNOWLEDGED``/``SHIPPED``/
+		``OUT_OF_STOCK``/``UNSPECIFIED``), ``current_quantity``,
+		``transaction_amount``, ``external_sku``.
+		"""
+		mapping = None
+		if create_mapping:
+			mapping = frappe.get_doc(
+				{
+					"doctype": "Marketplace Product Mapping",
+					"marketplace_account": account.name,
+					"item": self.item.name,
+					"external_reference": sku,
+					"sales_uom": "Nos",
+				}
+			).insert()
+		if items is None:
+			items = [
+				{
+					"external_item_id": "sku:SKU-NOON:MP_ITEM_STATUS_CONFIRMED:INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+					"external_sku": sku,
+					"external_status": "CONFIRMED",
+					"integration_status": "ACKNOWLEDGED",
+					"current_quantity": 2,
+					"transaction_amount": 200.0,
+				}
+			]
+		order = upsert_marketplace_order(
+			account.name,
+			{
+				"external_order_id": f"noon-so-sync-order-{self.suffix}-{frappe.generate_hash(length=4)}",
+				"received_on": nowdate(),
+				"presentment_currency": presentment_currency,
+				"latest_payload": {"fbpi_order_nr": "ORD-NOON"},
+				"items": items,
+			},
+		)
+		return order, mapping
+
 	def _make_pricing_rule(self):
 		return frappe.get_doc(
 			{
@@ -876,7 +957,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.reload()
 
 		self.assertFalse(result["ok"])
-		self.assertIn("Talabat and Shopify", result["error"])
+		self.assertIn("Talabat, Shopify and Noon", result["error"])
 		self.assertFalse(order.erpnext_sales_order)
 		self.assertEqual(order.erpnext_sync_status, original_status)
 		self.assertNotEqual(order.erpnext_sync_status, "Sync Error")
@@ -1498,3 +1579,218 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertIn("RuntimeError", logs[0].traceback)
 		order.reload()
 		self.assertFalse(order.erpnext_sales_order)
+
+	# -------------------------------------------------------------------
+	# #146 decisions 1-6: Noon Sales Order eligibility and sync policy.
+	# -------------------------------------------------------------------
+
+	def test_noon_platform_passes_platform_gate(self):
+		order = self._make_order()
+		order.platform = "Noon"
+		_validate_platform_supported(order)
+
+	def test_noon_eligible_statuses_count_toward_the_sales_order(self):
+		"""Decision 2: CONFIRMED + {ACKNOWLEDGED, SHIPPED, raw UNSPECIFIED}
+		all count. Each case uses its own order/account so one subTest's
+		result can't leak into another's eligibility total."""
+		cases = ["ACKNOWLEDGED", "SHIPPED", "INTEGRATION_ITEM_STATUS_UNSPECIFIED"]
+		for integration_status in cases:
+			with self.subTest(integration_status=integration_status):
+				account = self._make_noon_account()
+				order, _mapping = self._make_noon_order(
+					account,
+					items=[
+						{
+							"external_item_id": f"sku:SKU-NOON:MP_ITEM_STATUS_CONFIRMED:{integration_status}",
+							"external_sku": "SKU-NOON",
+							"external_status": "CONFIRMED",
+							"integration_status": integration_status,
+							"current_quantity": 2,
+							"transaction_amount": 200.0,
+						}
+					],
+				)
+				result = sync_sales_order(order.name)
+				self.assertTrue(result["ok"], result.get("error"))
+				sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+				self.assertEqual(sales_order.items[0].qty, 2)
+				self.assertEqual(sales_order.items[0].amount, 200.0)
+
+	def test_noon_ineligible_statuses_never_count(self):
+		"""Decision 2: CANCELLED, raw MP_ITEM_STATUS_UNSPECIFIED and
+		OUT_OF_STOCK units never count - with no other eligible row, the
+		whole order has nothing to sync (SyncBlocker, decision 3's "no
+		eligible lines" case)."""
+		cases = [
+			{"external_status": "CANCELLED", "integration_status": "ACKNOWLEDGED"},
+			{"external_status": "MP_ITEM_STATUS_UNSPECIFIED", "integration_status": "ACKNOWLEDGED"},
+			{"external_status": "CONFIRMED", "integration_status": "OUT_OF_STOCK"},
+		]
+		for options in cases:
+			with self.subTest(options=options):
+				account = self._make_noon_account()
+				order, _mapping = self._make_noon_order(
+					account,
+					items=[
+						{
+							"external_item_id": "sku:SKU-NOON:x:y",
+							"external_sku": "SKU-NOON",
+							"current_quantity": 2,
+							"transaction_amount": 200.0,
+							**options,
+						}
+					],
+				)
+				result = sync_sales_order(order.name)
+				self.assertFalse(result["ok"])
+				self.assertFalse(order.erpnext_sales_order)
+
+	def test_noon_zeroed_stale_row_never_counts(self):
+		"""Decision 2: #145 zeroes (never deletes) a stale status-group row -
+		current_quantity=0 must exclude it even though external_status/
+		integration_status still read CONFIRMED/ACKNOWLEDGED."""
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(
+			account,
+			items=[
+				{
+					"external_item_id": "sku:SKU-NOON:MP_ITEM_STATUS_CONFIRMED:INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+					"external_sku": "SKU-NOON",
+					"external_status": "CONFIRMED",
+					"integration_status": "ACKNOWLEDGED",
+					"current_quantity": 0,
+					"transaction_amount": 0.0,
+				}
+			],
+		)
+		result = sync_sales_order(order.name)
+		self.assertFalse(result["ok"])
+		self.assertFalse(order.erpnext_sales_order)
+
+	def test_noon_status_transition_keeps_same_line_and_sync_status(self):
+		"""Decision 3: grouping by external_sku (not the status-bearing
+		external_item_id) means an ACKNOWLEDGED -> SHIPPED transition - the
+		old ACKNOWLEDGED row zeroed, a new SHIPPED row added, same SKU -
+		must NOT look like a modification once already synced."""
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(
+			account,
+			items=[
+				{
+					"external_item_id": "sku:SKU-NOON:MP_ITEM_STATUS_CONFIRMED:INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+					"external_sku": "SKU-NOON",
+					"external_status": "CONFIRMED",
+					"integration_status": "ACKNOWLEDGED",
+					"current_quantity": 2,
+					"transaction_amount": 200.0,
+				}
+			],
+		)
+		first = sync_sales_order(order.name)
+		self.assertTrue(first["ok"], first.get("error"))
+		so_name = first["sales_order"]
+
+		# Simulate the next poll's #145 zero-out + new SHIPPED row, same shape
+		# `integrations/noon/orders.py::_zero_out_stale_status_groups()` produces.
+		order.reload()
+		order.items[0].current_quantity = 0
+		order.items[0].transaction_amount = 0.0
+		order.append(
+			"items",
+			{
+				"external_item_id": "sku:SKU-NOON:MP_ITEM_STATUS_CONFIRMED:INTEGRATION_ITEM_STATUS_SHIPPED",
+				"external_sku": "SKU-NOON",
+				"external_status": "CONFIRMED",
+				"integration_status": "SHIPPED",
+				"current_quantity": 2,
+				"transaction_amount": 200.0,
+			},
+		)
+		order.save()
+
+		self.assertEqual(get_current_sync_status(order.name), "Synced")
+		order.reload()
+		self.assertEqual(order.erpnext_sales_order, so_name)
+
+	def test_noon_unmapped_sku_blocks_sync(self):
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(account, create_mapping=False)
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		self.assertIn("No enabled Marketplace Product Mapping", result["error"])
+		self.assertFalse(order.erpnext_sales_order)
+
+	def test_noon_currency_mismatch_blocks_sync(self):
+		"""Decision 6: presentment_currency must equal the resolved ERPNext
+		currency, on top of the existing single-currency account checks."""
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(account, presentment_currency="XAU")
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		self.assertIn("presentment currency", result["error"])
+		self.assertFalse(order.erpnext_sales_order)
+
+	def test_noon_dates_use_received_on_for_both_transaction_and_delivery(self):
+		"""Decision 5: Noon documents no promised/delivery date - both
+		Sales Order dates are set to received_on, never left to default to
+		Talabat's promised_for (which Noon orders never populate)."""
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(account)
+
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+
+		self.assertEqual(sales_order.transaction_date, getdate(order.received_on))
+		self.assertEqual(sales_order.delivery_date, getdate(order.received_on))
+
+	def test_noon_sync_sets_custom_marketplace_order_and_platform_fields(self):
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(account)
+
+		result = sync_sales_order(order.name)
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(sales_order.custom_marketplace_order, order.name)
+		self.assertEqual(sales_order.custom_marketplace_platform, "Noon")
+
+	def test_noon_uses_generic_account_customer(self):
+		"""Decision 4: Noon has no unique buyer key, so every order uses the
+		account's generic Customer - same non-Shopify path Talabat uses."""
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(account)
+
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+		account.reload()
+		self.assertEqual(
+			frappe.db.get_value("Sales Order", result["sales_order"], "customer"), account.erpnext_customer
+		)
+
+	def test_noon_submitted_order_unit_going_out_of_stock_sets_modified_after_sync(self):
+		"""Decision 8: after the Sales Order is auto-submitted (#131), a unit
+		later going OUT_OF_STOCK must surface as "Modified After Sync" - and
+		must never amend/cancel the already-submitted Sales Order itself."""
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(account)
+
+		first = sync_sales_order(order.name)
+		self.assertTrue(first["ok"], first.get("error"))
+		so_name = first["sales_order"]
+		self.assertEqual(frappe.db.get_value("Sales Order", so_name, "docstatus"), 1)
+
+		order.reload()
+		order.items[0].integration_status = "OUT_OF_STOCK"
+		order.save()
+
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sales_order, so_name)
+		# The submitted Sales Order itself is never touched by this.
+		self.assertEqual(frappe.db.get_value("Sales Order", so_name, "docstatus"), 1)
+		self.assertEqual(frappe.db.get_value("Sales Order Item", {"parent": so_name}, "qty"), 2)
