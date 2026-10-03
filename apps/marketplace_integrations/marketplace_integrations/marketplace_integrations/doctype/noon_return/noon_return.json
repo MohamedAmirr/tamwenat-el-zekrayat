@@ -1,0 +1,151 @@
+{
+ "actions": [],
+ "autoname": "NOONRET-.#####",
+ "creation": "2026-10-03 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "marketplace_account",
+  "purchase_item_nr",
+  "return_identity_key",
+  "partner_sku",
+  "order_nr",
+  "marketplace_order",
+  "mp_code",
+  "merchant_code",
+  "references",
+  "found_via",
+  "first_seen_on",
+  "last_seen_on"
+ ],
+ "fields": [
+  {
+   "fieldname": "marketplace_account",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Marketplace Account",
+   "options": "Marketplace Account",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "purchase_item_nr",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "in_list_view": 1,
+   "label": "Purchase Item Nr",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "return_identity_key",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Return Identity Key",
+   "length": 64,
+   "read_only": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "partner_sku",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "in_list_view": 1,
+   "label": "Partner SKU",
+   "read_only": 1
+  },
+  {
+   "fieldname": "order_nr",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Order Nr",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "description": "Exact match of Order Nr against this account's Marketplace Orders (External Order ID or Platform Order Reference). Blank when no exact match was found - never a fuzzy/best-guess link.",
+   "fieldname": "marketplace_order",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Marketplace Order",
+   "options": "Marketplace Order",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "mp_code",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "MP Code",
+   "read_only": 1
+  },
+  {
+   "fieldname": "merchant_code",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Merchant Code",
+   "read_only": 1
+  },
+  {
+   "description": "Full Noon ListReturnReferences references[] array (barcode, barcode_type), preserved without interpretation.",
+   "fieldname": "references",
+   "fieldtype": "JSON",
+   "ignore_xss_filter": 1,
+   "label": "References",
+   "read_only": 1
+  },
+  {
+   "fieldname": "found_via",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Found Via",
+   "options": "Manual Lookup\nAWB Scan",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "first_seen_on",
+   "fieldtype": "Datetime",
+   "label": "First Seen On",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "last_seen_on",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Last Seen On",
+   "read_only": 1,
+   "reqd": 1
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-10-03 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Marketplace Integrations",
+ "name": "Noon Return",
+ "naming_rule": "Expression",
+ "search_fields": "marketplace_account,purchase_item_nr,order_nr",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "purchase_item_nr",
+ "track_changes": 1
+}

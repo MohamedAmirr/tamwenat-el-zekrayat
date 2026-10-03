@@ -1,10 +1,11 @@
 # Noon FBPI fulfillment release notes (#146)
 
-Covers only the Noon Sales Order eligibility/sync policy and FBPI shipment
+Covers the Noon Sales Order eligibility/sync policy and FBPI shipment
 fulfillment (create/cancel/add-AWB/mark-out-of-stock/shipment invoice) built
-in #146. Returns import, the daily reconciliation job, and the reconciliation
-Script Report are explicitly **out of scope** here — they are a follow-up
-issue that depends on #146.
+in #146, plus the FBPI return reference lookup/evidence capture built in
+#153 (see "Returns: FBPI return reference lookup and evidence (#153)"
+below). The reconciliation Script Report remains out of scope — see
+"Out of scope" at the end of each section for what is and isn't covered.
 
 ## What this ships
 
@@ -198,10 +199,8 @@ on in production:
 Do not roll this out to production Noon fulfillment before these nine items
 have been checked against a real Noon account.
 
-## Out of scope (this issue)
+## Out of scope (#146)
 
-- Returns import, the daily reconciliation job, and the reconciliation
-  Script Report (follow-up issue, depends on #146).
 - Order-level `UploadFbpiOrderInvoice` (shipment-level was chosen instead),
   bulk AWB pre-generation, `CreateSandboxOrder` tooling.
 - Automatic Sales Order amendment or cancellation, Delivery Note, Sales
@@ -210,3 +209,99 @@ have been checked against a real Noon account.
   time this release shipped; it has since been built under #163 — see
   "Noon event-notification webhook (#163)" above. The hourly poll remains
   in place as a safety net regardless.
+
+## Returns: FBPI return reference lookup and evidence (#153)
+
+Pure evidence capture only — no Credit Note, Sales Invoice, Payment Entry,
+GL entry, stock ledger entry, or Sales Order change is ever created by this
+work. It records what Noon's `ListReturnReferences`
+(`POST /returns/v1/return-references/list`) returns, as a new standalone
+`Noon Return` doctype (not a Marketplace Order child table, so an unlinked
+return still persists as a real record).
+
+Two triggers:
+- **Manual barcode lookup**: the "Look Up Noon Return" button on a Noon
+  Marketplace Account (`marketplace_account.js`) prompts for a barcode and
+  calls the whitelisted `api/noon_returns.py::lookup_return()`, which
+  enqueues `integrations/noon/returns.py::run_manual_lookup()` on the `long`
+  queue (job ID deduplicated on account + barcode) — no Noon HTTP call
+  happens in the Desk request itself.
+- **Daily AWB scan (experimental)**: a `hooks.py` `scheduler_events["daily"]`
+  entry (`integrations.noon.returns.scan_awbs_all_accounts`) scans AWBs from
+  existing `Marketplace Order Shipment AWB` child rows and calls
+  `ListReturnReferences` per AWB, per enabled Noon account. This is built on
+  an **unverified assumption** that a response reference of type `awb_nr`
+  means the outbound shipment AWB this app itself generated — see item 2
+  below.
+
+Order linking is an exact match of the response's `order_nr` against either
+`external_order_id` or `platform_order_reference` on a Marketplace Order
+scoped to the same account and `platform == "Noon"` — no fuzzy fallback, and
+it additionally requires EXACTLY one match across both fields combined:
+zero matches or more than one match both leave the return unlinked rather
+than attaching to an arbitrary/best-guess order (review finding #5 — a
+`frappe.db.get_value()` lookup would otherwise silently pick a first match
+when more than one order satisfies `order_nr`). Dedupe key is
+`(marketplace_account, purchase_item_nr)`: a re-lookup updates the existing
+row's `last_seen_on`/`references`, never creates a duplicate — this is
+retry-based safety, not pure race-freedom: a duplicate-key collision or a
+1020/`QueryDeadlockError` from two concurrent lookups is caught, rolled
+back, and retried once as an update (review finding #2). Every
+`ListReturnReferences` call writes one committed `Marketplace Sync Log` row
+(`sync_type = "Return Lookup"`, `trigger_source` = `"Manual"` for a barcode
+lookup or `"Scheduled Reconciliation"` for the daily AWB scan).
+
+The daily AWB scan is bounded to AWBs from shipments that are not
+`Cancelled`/`Discarded` and were modified within the last 30 days (review
+finding #3) — it no longer re-scans every AWB an account has ever had. A
+failure on one AWB (a lookup failure or an `upsert_return_item()` failure)
+is logged and skipped, not fatal to the rest of that account's scan.
+
+### Returns verification checklist
+
+There is no sandbox access for this issue either — these five items must be
+confirmed against a real Noon account before this feature is relied on in
+production:
+
+1. **What `order_nr` actually is.** This release assumes it matches either
+   `external_order_id` (`fbpi_order_nr`) or `platform_order_reference`
+   (`mp_order_nr`) on a Marketplace Order — never confirmed against Noon's
+   own docs (the paired `.yml` entry for this endpoint is empty/unconfirmed).
+   Also confirm the "exactly one match or unlinked" ambiguity rule above
+   against real data — if `order_nr` is meant to be unique per field in
+   practice, a real multi-match case may indicate a mapping bug elsewhere
+   rather than genuine ambiguity.
+2. **What an `awb_nr`-typed reference actually means.** The daily AWB scan's
+   entire premise — that it refers to the outbound shipment AWB this app
+   recorded — is unverified; this is why that job is flagged experimental.
+3. **Whether `merchant_codes` behaves as documented, and whether the
+   derived list can go stale or inaccessible.** This release omits the
+   field (relying on the connection's `default_project_code` scoping) when
+   the account has no imported orders yet to derive codes from —
+   unconfirmed whether that fallback actually works as Noon's docs imply.
+   Separately, the derived list is capped at 200 (Noon's documented limit)
+   by keeping the 200 most-recently-seen `merchant_code` values across this
+   account's imported orders — if an account legitimately sells under more
+   than 200 distinct merchant codes, or a merchant code an order was placed
+   under becomes otherwise inaccessible/stale, older codes silently drop out
+   of scope rather than erroring. This has not been confirmed against a real
+   account with that many codes.
+4. **Error body shape.** Confirm `client.error_message()` produces a usable
+   message for this endpoint specifically, same caveat as fulfillment's own
+   item 9 above.
+5. **Behavior above 200 items.** Confirm how Noon's response behaves (e.g.
+   pagination, truncation, or an error) when a lookup's `items[]` would
+   otherwise exceed 200 entries — not documented in the checked-in contract.
+
+Do not roll this out to production Noon returns handling before these five
+items have been checked against a real Noon account.
+
+## Out of scope (#153)
+
+- Any ERPNext-side correction from a return (Credit Note, Sales Invoice
+  adjustment, Payment Entry, stock ledger entry, or Sales Order change) —
+  this issue is pure evidence capture only.
+- The reconciliation Script Report that would surface this evidence for
+  manual action (deferred to a follow-up issue).
+- Any write-path Noon call (e.g. acknowledging or resolving a return) —
+  `ListReturnReferences` is the only endpoint this issue calls.

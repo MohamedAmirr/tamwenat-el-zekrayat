@@ -197,6 +197,10 @@ scheduler_events = {
 		"marketplace_integrations.integrations.shopify.inventory_sync.reconcile_all_accounts",
 		"marketplace_integrations.integrations.shopify.orders.reconcile_all_accounts_orders",
 		"marketplace_integrations.marketplace_integrations.doctype.marketplace_sync_log.marketplace_sync_log.clear_old_logs",
+		# #153 (experimental): daily scan of existing shipment AWBs against
+		# Noon's ListReturnReferences - see integrations/noon/returns.py's
+		# module docstring for the unverified awb_nr assumption this relies on.
+		"marketplace_integrations.integrations.noon.returns.scan_awbs_all_accounts",
 	],
 }
 
