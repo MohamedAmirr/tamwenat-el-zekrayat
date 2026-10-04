@@ -50,6 +50,7 @@ if (typeof frappe !== "undefined") {
 			configure_shopify_location(frm);
 			configure_shopify_inventory(frm);
 			configure_noon(frm);
+			configure_view_shortcuts(frm);
 		},
 		platform(frm) {
 			update_connection_doctype_on_platform_change(frm);
@@ -385,6 +386,30 @@ function reconcile_shopify_inventory(frm) {
 	);
 }
 
+// #167: a pure-navigation "View" button group - no new business logic, just
+// routes to the existing Marketplace Order / Marketplace Product Mapping /
+// Marketplace Sync Log lists, each filtered to this one Marketplace Account.
+// Only shown on a saved document (frm.doc.name is what the filter needs).
+function configure_view_shortcuts(frm) {
+	if (frm.is_new()) return;
+
+	frm.add_custom_button(
+		__("Orders"),
+		() => frappe.set_route("List", "Marketplace Order", { marketplace_account: frm.doc.name }),
+		__("View")
+	);
+	frm.add_custom_button(
+		__("Product Mappings"),
+		() => frappe.set_route("List", "Marketplace Product Mapping", { marketplace_account: frm.doc.name }),
+		__("View")
+	);
+	frm.add_custom_button(
+		__("Sync Log"),
+		() => frappe.set_route("List", "Marketplace Sync Log", { marketplace_account: frm.doc.name }),
+		__("View")
+	);
+}
+
 function show_shopify_location_picker(frm) {
 	frappe
 		.call({
@@ -548,5 +573,6 @@ if (typeof module !== "undefined") {
 		configure_shopify_inventory,
 		reconcile_shopify_inventory,
 		RECONCILE_INVENTORY_LABEL,
+		configure_view_shortcuts,
 	};
 }

@@ -1,0 +1,48 @@
+{
+ "app": "marketplace_integrations",
+ "creation": "2026-10-04 00:00:00.000000",
+ "docstatus": 0,
+ "doctype": "Workspace Sidebar",
+ "header_icon": "shop",
+ "idx": 0,
+ "items": [
+  {
+   "child": 0,
+   "collapsible": 1,
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "Tamwenat Marketplaces",
+   "link_to": "Tamwenat Marketplaces",
+   "link_type": "Workspace",
+   "show_arrow": 0,
+   "type": "Link"
+  },
+  {
+   "child": 0,
+   "collapsible": 1,
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "Related",
+   "show_arrow": 0,
+   "type": "Section Break"
+  },
+  {
+   "child": 1,
+   "collapsible": 1,
+   "indent": 1,
+   "keep_closed": 0,
+   "label": "Shopify Reconciliation",
+   "link_to": "Shopify Reconciliation",
+   "link_type": "Workspace",
+   "show_arrow": 0,
+   "type": "Link"
+  }
+ ],
+ "modified": "2026-10-04 02:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Marketplace Integrations",
+ "name": "Tamwenat Marketplaces",
+ "owner": "Administrator",
+ "standard": 1,
+ "title": "Tamwenat Marketplaces"
+}
