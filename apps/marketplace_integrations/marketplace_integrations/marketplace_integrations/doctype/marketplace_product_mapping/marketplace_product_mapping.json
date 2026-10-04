@@ -7,6 +7,7 @@
  "engine": "InnoDB",
  "field_order": [
   "marketplace_account",
+  "platform",
   "item",
   "external_reference",
   "mapping_identity_key",
@@ -33,7 +34,16 @@
    "label": "Marketplace Account",
    "options": "Marketplace Account",
    "reqd": 1,
-   "search_index": 1
+   "search_index": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fetch_from": "marketplace_account.platform",
+   "fieldname": "platform",
+   "fieldtype": "Data",
+   "in_standard_filter": 1,
+   "label": "Platform",
+   "read_only": 1
   },
   {
    "fieldname": "item",
@@ -104,7 +114,8 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Sync Status",
-   "options": "Not Synced\nQueued\nSynced\nError"
+   "options": "Not Synced\nQueued\nSynced\nError",
+   "in_standard_filter": 1
   },
   {
    "fieldname": "last_sync_reference",
@@ -137,7 +148,8 @@
    "fieldtype": "Select",
    "label": "Inventory Sync Status",
    "options": "Not Synced\nSynced\nError",
-   "read_only": 1
+   "read_only": 1,
+   "in_standard_filter": 1
   },
   {
    "fieldname": "inventory_last_synced_on",
@@ -154,7 +166,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-09-24 00:00:00.000000",
+ "modified": "2026-10-04 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Marketplace Product Mapping",

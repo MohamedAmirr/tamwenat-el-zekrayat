@@ -290,9 +290,9 @@ def group_by_product(mappings):
 			local_errors.append(
 				(
 					mapping,
-					_("Marketplace Product Mapping {0} does not have a valid Shopify product variant GID.").format(
-						mapping.name
-					),
+					_(
+						"Marketplace Product Mapping {0} does not have a valid Shopify product variant GID."
+					).format(mapping.name),
 				)
 			)
 			continue
@@ -347,7 +347,16 @@ def queue_catalog_push(mapping_names):
 	"""
 	mapping_names = parse_mapping_names(mapping_names)
 	accounts = group_mappings_by_account(mapping_names)
+	return _enqueue_account_pushes(accounts)
 
+
+def _enqueue_account_pushes(accounts):
+	"""Validate each account's local config and enqueue its price-push job.
+
+	``accounts`` is ``{account_name: {"account": account_doc, "mapping_names": [...]}}``
+	as returned by ``group_mappings_by_account()`` or built directly by a caller
+	that already loaded the account and its mapping names.
+	"""
 	owner = frappe.session.user
 	jobs = []
 	skipped_accounts = []
@@ -395,6 +404,37 @@ def queue_catalog_push(mapping_names):
 	return {"jobs": jobs, "skipped_accounts": skipped_accounts}
 
 
+def queue_account_catalog_push(account_name):
+	"""Price-push every enabled Marketplace Product Mapping of one Shopify
+	Marketplace Account (the "Sync All" price leg, #168). Same per-account
+	job/skip shape and the same local-only validation as ``queue_catalog_push()``
+	(both enqueue through ``_enqueue_account_pushes()``), so the
+	no-HTTP-in-the-request and per-account error reporting guarantees are
+	inherited unchanged.
+
+	Authorization is one account-level write check plus one doctype-level write
+	check on Marketplace Product Mapping, instead of loading and checking every
+	mapping individually. The mapping names come from a single permission-scoped
+	``frappe.get_list``, and the account document is loaded once.
+	"""
+	account_doc = frappe.get_doc("Marketplace Account", account_name)
+	account_doc.check_permission("write")
+	if not frappe.has_permission(MAPPING_DOCTYPE, ptype="write"):
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
+	mapping_names = frappe.get_list(
+		MAPPING_DOCTYPE,
+		filters={"marketplace_account": account_doc.name, "enabled": 1},
+		pluck="name",
+		order_by="name asc",
+		limit_page_length=0,
+	)
+	if not mapping_names:
+		return {"jobs": [], "skipped_accounts": []}
+	return _enqueue_account_pushes(
+		{account_doc.name: {"account": account_doc, "mapping_names": list(mapping_names)}}
+	)
+
+
 def get_push_status(job_id):
 	state = frappe.cache().get_value(_push_cache_key(job_id))
 	if not state or state.get("owner") != frappe.session.user:
@@ -408,7 +448,9 @@ def push_catalog(job_id_for_result, owner, account_name, mapping_names):
 	grouped one mutation call per Shopify product. See module docstring for
 	the full worker shape and the idempotency mechanism."""
 	try:
-		_update_push_status(job_id_for_result, owner, status="running", processed=0, result=_push_result_payload([]))
+		_update_push_status(
+			job_id_for_result, owner, status="running", processed=0, result=_push_result_payload([])
+		)
 		account_doc, connection, price_list = validate_push_account(account_name)
 		client = ShopifyClient(connection.name)
 
@@ -421,7 +463,11 @@ def push_catalog(job_id_for_result, owner, account_name, mapping_names):
 			_mark_error(mapping.name, message)
 			results.append({"mapping_name": mapping.name, "ok": False, "error": message})
 		_update_push_status(
-			job_id_for_result, owner, status="running", processed=len(results), result=_push_result_payload(results)
+			job_id_for_result,
+			owner,
+			status="running",
+			processed=len(results),
+			result=_push_result_payload(results),
 		)
 
 		for group_index, (product_id, group_mappings) in enumerate(groups.items(), start=1):
@@ -538,7 +584,10 @@ def _push_product_group(client, price_list, product_id, group_mappings, item_by_
 			except Exception:
 				pass
 		frappe.db.commit()
-		return [{"mapping_name": mapping.name, "ok": False, "error": REMOTE_ERROR} for mapping, *_rest in all_results]
+		return [
+			{"mapping_name": mapping.name, "ok": False, "error": REMOTE_ERROR}
+			for mapping, *_rest in all_results
+		]
 	else:
 		frappe.db.release_savepoint(savepoint)
 		frappe.db.commit()

@@ -82,7 +82,7 @@
 	};
 
 	frappe.ui.ShopifyCatalogPushStatus = class ShopifyCatalogPushStatus {
-		constructor({ jobs, on_done, poll_interval = 1500, status_method, labels, result_link_route, result_column_label }) {
+		constructor({ jobs, on_done, on_close, poll_interval = 1500, status_method, labels, result_link_route, result_column_label }) {
 			this.status_method = status_method || DEFAULT_STATUS_METHOD;
 			this.labels = Object.assign({}, DEFAULT_LABELS, labels || {});
 			// Both default to the original price-push/inventory-sync behavior:
@@ -95,6 +95,7 @@
 			this.result_column_label = result_column_label;
 			this.jobs = jobs || [];
 			this.on_done = on_done;
+			this.on_close = on_close;
 			this.poll_interval = poll_interval;
 			this.job_states = {};
 			this.poll_error_counts = {};
@@ -115,6 +116,7 @@
 			// onhide hook, so this doesn't need its own bootstrap event binding.
 			this.dialog.onhide = () => {
 				this.stopped = true;
+				if (this.on_close) this.on_close();
 			};
 
 			if (!this.jobs.length) {

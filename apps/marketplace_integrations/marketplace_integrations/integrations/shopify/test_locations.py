@@ -17,6 +17,19 @@ from marketplace_integrations.integrations.shopify.locations import fetch_shop_a
 EXECUTE_TARGET = "marketplace_integrations.integrations.shopify.client.ShopifyClient.execute"
 
 
+# Records registered by make_connection(); drained by _cleanup_created() in tearDown.
+_CREATED = []
+
+
+def _cleanup_created():
+    """Delete the Shopify Connections make_connection() registered. Names are re-checked against the DB."""
+    names = [d.name for d in _CREATED]
+    _CREATED.clear()
+    for name in names:
+        if frappe.db.exists("Shopify Connection", name):
+            frappe.delete_doc("Shopify Connection", name, ignore_permissions=True, force=True)
+
+
 def make_connection(connection_name, **kwargs):
     # shop_domain defaults to a call-unique value - it carries a DB-level
     # unique: 1 constraint, and IntegrationTestCase only rolls back once at
@@ -30,12 +43,17 @@ def make_connection(connection_name, **kwargs):
         "client_secret": "test-client-secret",
     }
     doc.update(kwargs)
-    return frappe.get_doc(doc).insert()
+    doc = frappe.get_doc(doc).insert()
+    _CREATED.append(doc)
+    return doc
 
 
 class IntegrationTestFetchShopAndActiveLocations(IntegrationTestCase):
     def setUp(self):
         self.connection = make_connection("Test Locations Connection")
+
+    def tearDown(self):
+        _cleanup_created()
 
     def test_null_shop(self):
         with patch(EXECUTE_TARGET, return_value={"shop": None, "locations": {"edges": []}}):

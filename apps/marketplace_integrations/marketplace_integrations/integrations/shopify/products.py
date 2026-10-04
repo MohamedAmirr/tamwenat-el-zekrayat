@@ -82,6 +82,9 @@ from marketplace_integrations.integrations.shopify.constants import (
 	SHOPIFY_NODES_LOOKUP_CHUNK_SIZE,
 	SHOPIFY_VARIANTS_PAGE_SIZE,
 )
+from marketplace_integrations.marketplace_integrations.doctype.marketplace_product_mapping.marketplace_product_mapping import (
+	compute_mapping_identity_key,
+)
 
 MAPPING_DOCTYPE = "Marketplace Product Mapping"
 
@@ -219,11 +222,8 @@ def upsert_mapping(
 	item_doc = frappe.get_doc("Item", item)
 	item_doc.check_permission("read")
 
-	existing = frappe.db.get_value(
-		MAPPING_DOCTYPE,
-		{"marketplace_account": account.name, "external_reference": external_reference},
-		"name",
-	)
+	key = compute_mapping_identity_key(account.name, external_reference)
+	existing = frappe.db.get_value(MAPPING_DOCTYPE, {"mapping_identity_key": key}, "name")
 	if existing:
 		mapping = frappe.get_doc(MAPPING_DOCTYPE, existing)
 		mapping.check_permission("write")

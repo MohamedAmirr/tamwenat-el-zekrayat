@@ -48,6 +48,11 @@ class IntegrationTestTalabatCatalog(IntegrationTestCase):
 			}
 		).insert()
 
+	def tearDown(self):
+		frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": self.account.name})
+		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
+		frappe.delete_doc("Talabat Connection", self.connection.name, ignore_permissions=True, force=True)
+
 	def _make_item(self, item_code):
 		return frappe.get_doc(
 			{
@@ -111,6 +116,16 @@ class IntegrationTestTalabatCatalog(IntegrationTestCase):
 			frappe.get_doc("Marketplace Product Mapping", first["name"]).item, self.other_item.name
 		)
 
+	def test_upsert_case_variant_creates_a_new_mapping_and_keeps_the_original(self):
+		first = upsert_mapping(self.account.name, "abc-1", self.item.name)
+		second = upsert_mapping(self.account.name, "ABC-1", self.other_item.name)
+
+		self.assertNotEqual(first["name"], second["name"])
+		self.assertEqual(frappe.get_doc("Marketplace Product Mapping", first["name"]).item, self.item.name)
+		self.assertEqual(
+			frappe.get_doc("Marketplace Product Mapping", second["name"]).item, self.other_item.name
+		)
+
 	def test_disable_mapping_preserves_history_and_upsert_reenables_it(self):
 		created = upsert_mapping(self.account.name, "disable-me", self.item.name)
 
@@ -127,6 +142,17 @@ class IntegrationTestTalabatCatalog(IntegrationTestCase):
 		self.assertEqual(reenabled["name"], created["name"])
 		self.assertEqual(mapping.enabled, 1)
 		self.assertEqual(mapping.item, self.other_item.name)
+
+	def test_disable_mapping_uses_case_sensitive_identity_key(self):
+		lower = upsert_mapping(self.account.name, "abc-1", self.item.name)
+		upper = upsert_mapping(self.account.name, "ABC-1", self.other_item.name)
+		self.assertNotEqual(lower["name"], upper["name"])
+
+		result = disable_mapping(self.account.name, "ABC-1")
+
+		self.assertEqual(result["name"], upper["name"])
+		self.assertEqual(frappe.db.get_value("Marketplace Product Mapping", upper["name"], "enabled"), 0)
+		self.assertEqual(frappe.db.get_value("Marketplace Product Mapping", lower["name"], "enabled"), 1)
 
 	def test_disable_mapping_is_idempotent_and_rejects_missing_or_disabled_account_or_mapping(self):
 		created = upsert_mapping(self.account.name, "disable-me", self.item.name)

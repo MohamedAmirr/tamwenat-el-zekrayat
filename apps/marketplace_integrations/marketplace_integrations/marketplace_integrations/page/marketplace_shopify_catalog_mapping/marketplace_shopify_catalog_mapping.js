@@ -91,43 +91,19 @@ frappe.pages["marketplace-shopify-catalog-mapping"].on_page_load = function (wra
 	}
 
 	function watch_sweep(marketplace_account, job_id, seq) {
-		let timer;
-		const stop = () => {
-			clearInterval(timer);
-			if (frappe.realtime && frappe.realtime.off) {
-				frappe.realtime.off("marketplace_shopify_catalog_sweep_progress", on_progress);
-			}
-		};
-		const on_progress = (status) => {
-			if (!status || status.job_id !== job_id) return;
-			if (seq !== account_request_seq || job_id !== current_job_id) return stop();
-			if (status.status === "completed") {
-				stop();
-				render_results(marketplace_account, seq, status.result || {});
-			} else if (status.status === "failed") {
-				stop();
-				$status.text(status.error || __("The catalog sweep failed."));
-			} else {
-				$status.text(__("Catalog sweep running: {0} processed so far.", [status.processed || 0]));
-			}
-		};
-		const check_status = () => {
-			frappe
-				.call({
-					method: "marketplace_integrations.api.shopify_products.get_catalog_sweep_status",
-					args: { job_id },
-				})
-				.then((r) => on_progress({ job_id, ...(r.message || {}) }))
-				.catch(() => {
-					stop();
+		frappe.require("/assets/marketplace_integrations/js/shopify_catalog_sweep_watch.js").then(() => {
+			frappe.ui.watchShopifyCatalogSweep({
+				job_id,
+				is_current: () => seq === account_request_seq && job_id === current_job_id,
+				on_progress: (processed) =>
+					$status.text(__("Catalog sweep running: {0} processed so far.", [processed])),
+				on_complete: (result) => render_results(marketplace_account, seq, result),
+				on_failed: (error) => $status.text(error || __("The catalog sweep failed.")),
+				on_error: () => {
 					if (seq === account_request_seq) $status.text(__("Could not retrieve the catalog sweep status."));
-				});
-		};
-		if (frappe.realtime && frappe.realtime.on) {
-			frappe.realtime.on("marketplace_shopify_catalog_sweep_progress", on_progress);
-		}
-		timer = setInterval(check_status, 1500);
-		check_status();
+				},
+			});
+		});
 	}
 
 	function toast_mapping_saved(external_reference, item) {
