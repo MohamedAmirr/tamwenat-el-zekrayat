@@ -32,6 +32,20 @@ Before #168 implements Noon catalog import, use a sandbox or test Noon
 connection to explicitly scope and verify a small export. Do not create an
 export or make any write/change against the live Noon store.
 
+## Unresolved contract — do not infer (#168 blocker)
+
+The category-list response identifies the parameter names and whether they
+are required, but it does not provide:
+
+- the allowed values for `noon_status`;
+- the permitted format/value for `country`;
+- the created export's file format, field schema, pagination, or size limits.
+
+Do not call `POST /impex/v1/export/create` until Noon provides a documented
+example request or this contract is verified against the Static Sandbox.
+Until then, Noon catalog import is blocked; Talabat and Shopify product work
+may continue independently.
+
 ## Reference
 
 - `docs/noon-integration/noon_api_full.md` — Reports export endpoint snapshot.
