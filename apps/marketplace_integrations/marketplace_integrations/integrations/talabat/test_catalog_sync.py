@@ -9,6 +9,31 @@ from frappe.utils import add_days, nowdate
 
 from marketplace_integrations.integrations.talabat import catalog_sync
 
+# Records registered in setUp/tests; drained by _cleanup_created() in tearDown.
+_CREATED = []
+
+
+def _track(doc):
+	_CREATED.append(doc)
+	return doc
+
+
+def _cleanup_created():
+	"""Delete tracked Marketplace Accounts (with their Mappings) and then their Talabat Connections.
+	Names are re-checked against the DB so fixtures that never got inserted are skipped."""
+	accounts = [d.name for d in _CREATED if d.doctype == "Marketplace Account"]
+	connections = {d.name for d in _CREATED if d.doctype == "Talabat Connection"}
+	_CREATED.clear()
+	for name in accounts:
+		if not frappe.db.exists("Marketplace Account", name):
+			continue
+		connections.add(frappe.db.get_value("Marketplace Account", name, "connection"))
+		frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": name})
+		frappe.delete_doc("Marketplace Account", name, ignore_permissions=True, force=True)
+	for name in connections:
+		if name and frappe.db.exists("Talabat Connection", name):
+			frappe.delete_doc("Talabat Connection", name, ignore_permissions=True, force=True)
+
 
 def _response(body, status_code=202):
 	response = MagicMock()
@@ -36,6 +61,7 @@ class IntegrationTestTalabatCatalogSync(IntegrationTestCase):
 				"enabled": 1,
 			}
 		).insert()
+		_track(self.connection)
 		self.account = frappe.get_doc(
 			{
 				"doctype": "Marketplace Account",
@@ -49,6 +75,10 @@ class IntegrationTestTalabatCatalogSync(IntegrationTestCase):
 				"enabled": 1,
 			}
 		).insert()
+		_track(self.account)
+
+	def tearDown(self):
+		_cleanup_created()
 
 	def _make_item(self, marker, disabled=0, barcode=None, sales_uom=None, conversion_factor=None):
 		doc = frappe.get_doc(

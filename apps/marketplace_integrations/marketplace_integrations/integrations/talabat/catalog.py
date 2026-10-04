@@ -14,6 +14,10 @@ from frappe import _
 from frappe.utils import cint, cstr
 
 from marketplace_integrations.integrations.talabat.client import TalabatClient
+from marketplace_integrations.marketplace_integrations.doctype.marketplace_product_mapping.marketplace_product_mapping import (
+	compute_mapping_identity_key,
+)
+from marketplace_integrations.services.mappings import upsert_mapping_for_listing
 
 MAX_PAGE_SIZE = 500
 
@@ -108,29 +112,7 @@ def upsert_mapping(account_name, external_reference, item):
 
 	item_doc = frappe.get_doc("Item", item)
 	item_doc.check_permission("read")
-	existing = frappe.db.get_value(
-		"Marketplace Product Mapping",
-		{"marketplace_account": account.name, "external_reference": external_reference},
-		"name",
-	)
-	if existing:
-		mapping = frappe.get_doc("Marketplace Product Mapping", existing)
-		mapping.check_permission("write")
-		mapping.item = item_doc.name
-		mapping.enabled = 1
-		mapping.save()
-	else:
-		_require_mapping_permission("create")
-		mapping = frappe.get_doc(
-			{
-				"doctype": "Marketplace Product Mapping",
-				"marketplace_account": account.name,
-				"external_reference": external_reference,
-				"external_sku": external_reference,
-				"item": item_doc.name,
-			}
-		)
-		mapping.insert()
+	mapping = upsert_mapping_for_listing(account.name, external_reference, item_doc.name)
 	return {"name": mapping.name}
 
 
@@ -144,11 +126,8 @@ def disable_mapping(account_name, external_reference):
 	if not external_reference:
 		frappe.throw(_("Talabat SKU is required."))
 
-	mapping_name = frappe.db.get_value(
-		"Marketplace Product Mapping",
-		{"marketplace_account": account.name, "external_reference": external_reference},
-		"name",
-	)
+	key = compute_mapping_identity_key(account.name, external_reference)
+	mapping_name = frappe.db.get_value("Marketplace Product Mapping", {"mapping_identity_key": key}, "name")
 	if not mapping_name:
 		frappe.throw(_("No mapping exists for Talabat SKU {0}.").format(external_reference))
 

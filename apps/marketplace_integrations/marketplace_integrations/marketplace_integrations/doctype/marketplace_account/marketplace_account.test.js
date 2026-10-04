@@ -20,6 +20,7 @@ const {
 	configure_shopify_inventory,
 	reconcile_shopify_inventory,
 	RECONCILE_INVENTORY_LABEL,
+	configure_view_shortcuts,
 } = require("./marketplace_account.js");
 
 function make_frm(doc, { is_new = false } = {}) {
@@ -40,8 +41,9 @@ function make_frm(doc, { is_new = false } = {}) {
 		set_value(fieldname, value) {
 			this.doc[fieldname] = value;
 		},
-		add_custom_button(label) {
+		add_custom_button(label, action, group) {
 			buttons.push(label);
+			if (action) this.button_actions = { ...this.button_actions, [`${group || ""}:${label}`]: action };
 		},
 		remove_custom_button(label) {
 			const index = buttons.indexOf(label);
@@ -317,6 +319,32 @@ test("reconcile_shopify_inventory makes no call when the confirmation is decline
 	reconcile_shopify_inventory({ doc: { name: "MKTACC-1" } });
 
 	assert.equal(called, false);
+});
+
+test("View button group routes to the Marketplace Order/Product Mapping/Sync Log lists filtered by this account", () => {
+	const set_route_calls = [];
+	global.frappe = { set_route: (...args) => set_route_calls.push(args) };
+
+	const frm = make_frm({ name: "MKTACC-42" });
+	configure_view_shortcuts(frm);
+
+	assert.deepEqual(frm.buttons, ["Orders", "Product Mappings", "Sync Log"]);
+
+	frm.button_actions["View:Orders"]();
+	frm.button_actions["View:Product Mappings"]();
+	frm.button_actions["View:Sync Log"]();
+
+	assert.deepEqual(set_route_calls, [
+		["List", "Marketplace Order", { marketplace_account: "MKTACC-42" }],
+		["List", "Marketplace Product Mapping", { marketplace_account: "MKTACC-42" }],
+		["List", "Marketplace Sync Log", { marketplace_account: "MKTACC-42" }],
+	]);
+});
+
+test("View button group is not shown on an unsaved (new) Marketplace Account", () => {
+	const frm = make_frm({ name: "new-marketplace-account-1" }, { is_new: true });
+	configure_view_shortcuts(frm);
+	assert.deepEqual(frm.buttons, []);
 });
 
 test("reconcile_shopify_inventory shows the skipped account's real reason, escaped", async () => {

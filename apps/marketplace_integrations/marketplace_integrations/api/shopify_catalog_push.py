@@ -21,6 +21,14 @@ def queue_catalog_push(mapping_names):
 	return catalog_push.queue_catalog_push(mapping_names)
 
 
+@frappe.whitelist(methods=["POST"])
+def queue_account_catalog_push(account: str):
+	"""Authorize and enqueue a Shopify price push for every enabled mapping of
+	one Marketplace Account (#168 "Sync All"). See
+	integrations/shopify/catalog_push.py::queue_account_catalog_push()."""
+	return catalog_push.queue_account_catalog_push(account)
+
+
 @frappe.whitelist()
 def get_catalog_push_status(job_id: str):
 	"""Poll a previously queued catalog push job's status/progress/result.

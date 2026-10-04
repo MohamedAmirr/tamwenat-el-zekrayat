@@ -5,10 +5,14 @@
 
 import frappe
 from frappe import _
+from frappe.query_builder import DocType
+from frappe.utils import cstr
 
 from marketplace_integrations.integrations.noon.client import NoonClient
+from marketplace_integrations.services.mappings import upsert_mapping_for_listing
 
 WAREHOUSES_PATH = "/warehouse-platform/v1/warehouses/list"
+MAPPING_DOCTYPE = "Marketplace Product Mapping"
 
 
 def get_account(account_name):
@@ -83,3 +87,87 @@ def validate_warehouse_code(connection_name, warehouse_code):
 		frappe.throw(
 			_("Noon Warehouse {0} is not active on Connection {1}.").format(warehouse_code, connection_name)
 		)
+
+
+def list_unmapped_order_skus(account_name):
+	"""Return distinct Noon ``partner_sku`` values (stored as
+	``Marketplace Order Item.external_sku``) on this account's Marketplace
+	Orders that have no enabled Marketplace Product Mapping yet (#168 "Needs
+	Mapping" for Noon).
+
+	Order-derived only: it does NOT enumerate the Noon catalog (see
+	docs/noon-integration/catalog-export-capability.md - Noon catalog export is
+	blocked). No Noon HTTP call is made. A SKU is "unmapped" exactly when the
+	resolver ``services/mappings.py::_resolve()`` would find no enabled mapping
+	for it: an enabled mapping on an enabled account with the same
+	``external_reference`` (both are stored stripped, and resolution is exact,
+	so a Python set difference matches the resolver). Two set-based queries
+	replace a per-SKU resolver loop, and the child rows are joined to their
+	parents on the account/platform filters rather than read via an IN list of
+	every parent name.
+	"""
+	account = get_account(account_name)
+	account.check_permission("read")
+	if not frappe.has_permission(MAPPING_DOCTYPE, ptype="read"):
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
+	# Parent visibility stays permission-scoped via frappe.get_list. Marketplace
+	# Order has no row-level permission hook, so a visible parent here means the
+	# join below covers the same rows.
+	if not frappe.get_list(
+		"Marketplace Order",
+		filters={"marketplace_account": account.name, "platform": "Noon"},
+		pluck="name",
+		limit_page_length=1,
+	):
+		return []
+
+	ORDER = DocType("Marketplace Order")
+	ITEM = DocType("Marketplace Order Item")
+	MPM = DocType(MAPPING_DOCTYPE)
+	ACCOUNT = DocType("Marketplace Account")
+
+	order_skus = (
+		frappe.qb.from_(ITEM)
+		.join(ORDER)
+		.on(ORDER.name == ITEM.parent)
+		.select(ITEM.external_sku)
+		.distinct()
+		.where(ITEM.parenttype == "Marketplace Order")
+		.where(ORDER.marketplace_account == account.name)
+		.where(ORDER.platform == "Noon")
+		.run(as_dict=True)
+	)
+	mapped_references = (
+		frappe.qb.from_(MPM)
+		.join(ACCOUNT)
+		.on(ACCOUNT.name == MPM.marketplace_account)
+		.select(MPM.external_reference)
+		.where(MPM.marketplace_account == account.name)
+		.where(MPM.enabled == 1)
+		.where(ACCOUNT.enabled == 1)
+		.run(as_dict=True)
+	)
+	mapped = {cstr(row.external_reference).strip() for row in mapped_references}
+	return sorted({cstr(row.external_sku).strip() for row in order_skus} - mapped - {""})
+
+
+def upsert_mapping(account_name, external_reference, item):
+	"""Create or update one Noon ``partner_sku`` -> ERPNext Item mapping.
+
+	``external_reference`` is the Noon ``partner_sku`` exactly as
+	``integrations/noon/order_mapper.py`` resolves it, so the same value is
+	also written to ``external_sku``.
+	"""
+	account = get_account(account_name)
+	account.check_permission("read")
+	external_reference = cstr(external_reference).strip()
+	item = cstr(item).strip()
+	if not external_reference:
+		frappe.throw(_("Noon partner SKU is required."))
+	if not item:
+		frappe.throw(_("Item is required."))
+
+	item_doc = frappe.get_doc("Item", item)
+	item_doc.check_permission("read")
+	mapping = upsert_mapping_for_listing(account.name, external_reference, item_doc.name)
+	return {"name": mapping.name}

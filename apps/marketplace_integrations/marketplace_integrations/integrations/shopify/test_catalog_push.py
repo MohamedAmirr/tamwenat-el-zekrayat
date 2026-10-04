@@ -65,6 +65,10 @@ class IntegrationTestValidatePushAccount(IntegrationTestCase):
 		self.account.db_set("erpnext_selling_price_list", self.price_list, update_modified=False)
 		self.account.reload()
 
+	def tearDown(self):
+		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
+		frappe.delete_doc("Shopify Connection", self.account.connection, ignore_permissions=True, force=True)
+
 	def test_rejects_non_shopify_account(self):
 		self.account.db_set("platform", "Talabat", update_modified=False)
 
@@ -138,6 +142,14 @@ class IntegrationTestPushCatalog(IntegrationTestCase):
 		self.account.reload()
 		self.item = make_item(f"Push Catalog Item {self.suffix}")
 
+	def tearDown(self):
+		frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": self.account.name})
+		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
+		frappe.delete_doc("Shopify Connection", self.account.connection, ignore_permissions=True, force=True)
+		# push_catalog() commits per group, so this teardown must commit too
+		# or the class-level rollback would resurrect the committed rows.
+		frappe.db.commit()
+
 	def _make_price(self, rate):
 		frappe.get_doc(
 			{
@@ -169,7 +181,10 @@ class IntegrationTestPushCatalog(IntegrationTestCase):
 		with patch(
 			EXECUTE_TARGET,
 			side_effect=_execute_dispatcher(
-				bulk_response={"productVariants": [{"id": "gid://shopify/ProductVariant/1"}], "userErrors": []}
+				bulk_response={
+					"productVariants": [{"id": "gid://shopify/ProductVariant/1"}],
+					"userErrors": [],
+				}
 			),
 		):
 			catalog_push.push_catalog("job-1", "Administrator", self.account.name, [mapping.name])
@@ -349,7 +364,9 @@ class IntegrationTestPushCatalog(IntegrationTestCase):
 			self.assertEqual(call_variables["productId"], "gid://shopify/Product/1000")
 
 		for mapping_name in mapping_names:
-			self.assertEqual(frappe.db.get_value(catalog_push.MAPPING_DOCTYPE, mapping_name, "sync_status"), "Synced")
+			self.assertEqual(
+				frappe.db.get_value(catalog_push.MAPPING_DOCTYPE, mapping_name, "sync_status"), "Synced"
+			)
 
 	def test_pushed_variables_carry_the_correct_resolved_price_and_allow_partial_updates(self):
 		"""Review finding #4: assert the exact price string placed into the
@@ -470,6 +487,11 @@ class IntegrationTestQueueCatalogPush(IntegrationTestCase):
 			}
 		).insert()
 
+	def tearDown(self):
+		frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": self.account.name})
+		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
+		frappe.delete_doc("Shopify Connection", self.account.connection, ignore_permissions=True, force=True)
+
 	def test_groups_by_account_and_seeds_one_job_per_account(self):
 		fake_job = object()
 		with (
@@ -580,3 +602,116 @@ class IntegrationTestQueueCatalogPush(IntegrationTestCase):
 		self.assertIn("Selling Price List", result["skipped_accounts"][0]["reason"])
 		mocked_enqueue.assert_called_once()
 		self.assertEqual(mocked_enqueue.call_args.kwargs["account_name"], other_account.name)
+
+
+class IntegrationTestQueueAccountCatalogPush(IntegrationTestCase):
+	"""#168 "Sync All" price leg: the account-level push selects every enabled
+	mapping of one account and delegates to queue_catalog_push() unchanged."""
+
+	def setUp(self):
+		self.suffix = frappe.generate_hash(length=8)
+		self.price_list = (
+			frappe.get_doc(
+				{
+					"doctype": "Price List",
+					"price_list_name": f"Account Push Price List {self.suffix}",
+					"currency": "USD",
+					"selling": 1,
+					"enabled": 1,
+				}
+			)
+			.insert()
+			.name
+		)
+		self.account = make_shopify_account(f"Account Push Account {self.suffix}")
+		self.account.db_set("erpnext_selling_price_list", self.price_list, update_modified=False)
+		self.account.reload()
+		self.item = make_item(f"Account Push Item {self.suffix}")
+
+	def tearDown(self):
+		frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": self.account.name})
+		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
+		frappe.delete_doc("Shopify Connection", self.account.connection, ignore_permissions=True, force=True)
+
+	def _make_mapping(self, variant_number, enabled=1):
+		return frappe.get_doc(
+			{
+				"doctype": "Marketplace Product Mapping",
+				"marketplace_account": self.account.name,
+				"item": self.item,
+				"external_reference": f"gid://shopify/ProductVariant/{variant_number}",
+				"external_product_id": f"gid://shopify/Product/{variant_number}",
+				"enabled": enabled,
+			}
+		).insert()
+
+	def test_pushes_only_enabled_mappings_of_the_account(self):
+		enabled = self._make_mapping(201)
+		self._make_mapping(202, enabled=0)
+
+		with patch("frappe.enqueue", return_value=object()) as mocked_enqueue:
+			result = catalog_push.queue_account_catalog_push(self.account.name)
+
+		self.assertEqual(len(result["jobs"]), 1)
+		self.assertEqual(result["jobs"][0]["mapping_count"], 1)
+		self.assertEqual(mocked_enqueue.call_args.kwargs["mapping_names"], [enabled.name])
+
+	def test_account_push_never_loads_mapping_documents_one_by_one(self):
+		self._make_mapping(203)
+		self._make_mapping(204)
+		real_get_doc = frappe.get_doc
+		loaded_mappings = []
+
+		def spy_get_doc(*args, **kwargs):
+			if args and args[0] == "Marketplace Product Mapping":
+				loaded_mappings.append(args)
+			return real_get_doc(*args, **kwargs)
+
+		with (
+			patch("frappe.enqueue", return_value=object()),
+			patch.object(frappe, "get_doc", side_effect=spy_get_doc),
+		):
+			result = catalog_push.queue_account_catalog_push(self.account.name)
+
+		self.assertEqual(result["jobs"][0]["mapping_count"], 2)
+		self.assertEqual(loaded_mappings, [])
+
+	def test_account_without_mappings_queues_nothing(self):
+		with patch("frappe.enqueue") as mocked_enqueue:
+			result = catalog_push.queue_account_catalog_push(self.account.name)
+
+		self.assertEqual(result, {"jobs": [], "skipped_accounts": []})
+		mocked_enqueue.assert_not_called()
+
+	def test_requires_write_permission_on_the_account(self):
+		self._make_mapping(205)
+		# Both doctypes are System-Manager-only, so any role-less user (Guest)
+		# fails the account-level write check before anything is enqueued.
+		frappe.set_user("Guest")
+		self.addCleanup(frappe.set_user, "Administrator")
+
+		with patch("frappe.enqueue") as mocked_enqueue, self.assertRaises(frappe.PermissionError):
+			catalog_push.queue_account_catalog_push(self.account.name)
+
+		mocked_enqueue.assert_not_called()
+
+	def test_requires_write_permission_on_marketplace_product_mapping(self):
+		self._make_mapping(206)
+		real_has_permission = frappe.has_permission
+
+		def deny_mapping_write(doctype=None, ptype="read", *args, **kwargs):
+			if doctype == "Marketplace Product Mapping" and ptype == "write":
+				return False
+			return real_has_permission(doctype, ptype, *args, **kwargs)
+
+		# The account's own write check goes through frappe.permissions (not
+		# frappe.has_permission), so only the explicit doctype-level mapping
+		# check in queue_account_catalog_push() is denied here.
+		with (
+			patch.object(frappe, "has_permission", side_effect=deny_mapping_write),
+			patch("frappe.enqueue") as mocked_enqueue,
+			self.assertRaises(frappe.PermissionError),
+		):
+			catalog_push.queue_account_catalog_push(self.account.name)
+
+		mocked_enqueue.assert_not_called()

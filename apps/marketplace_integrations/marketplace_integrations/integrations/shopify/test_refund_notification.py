@@ -45,11 +45,46 @@ def _make_system_manager_user(suffix):
 	).insert(ignore_permissions=True)
 
 
+# Records registered in setUp; drained by _cleanup_created() in tearDown.
+_CREATED = []
+
+
+def _track(doc):
+	_CREATED.append(doc)
+	return doc
+
+
+def _cleanup_created():
+	"""Delete tracked Marketplace Accounts with their Orders (and Notification Logs for those
+	Orders), Sync Logs and Mappings, then the Shopify Connection. Names are re-checked against
+	the DB so fixtures that never got inserted are skipped."""
+	accounts = [d.name for d in _CREATED if d.doctype == "Marketplace Account"]
+	_CREATED.clear()
+	for name in accounts:
+		if not frappe.db.exists("Marketplace Account", name):
+			continue
+		connection = frappe.db.get_value("Marketplace Account", name, "connection")
+		# Orders have child tables, so delete them via delete_doc (db.delete would orphan those rows).
+		for order in frappe.get_all("Marketplace Order", {"marketplace_account": name}, pluck="name"):
+			frappe.db.delete(
+				"Notification Log", {"document_type": "Marketplace Order", "document_name": order}
+			)
+			frappe.delete_doc("Marketplace Order", order, ignore_permissions=True, force=True)
+		frappe.db.delete("Marketplace Sync Log", {"marketplace_account": name})
+		frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": name})
+		frappe.delete_doc("Marketplace Account", name, ignore_permissions=True, force=True)
+		if connection and frappe.db.exists("Shopify Connection", connection):
+			frappe.delete_doc("Shopify Connection", connection, ignore_permissions=True, force=True)
+
+
 class IntegrationTestRefundNotification(IntegrationTestCase):
 	def setUp(self):
 		suffix = frappe.generate_hash(length=8)
-		self.account = make_shopify_account(f"Refund Notify Account {suffix}")
+		self.account = _track(make_shopify_account(f"Refund Notify Account {suffix}"))
 		self.recipient = _make_system_manager_user(suffix)
+
+	def tearDown(self):
+		_cleanup_created()
 
 	def _notification_logs(self, order_name):
 		return frappe.get_all(

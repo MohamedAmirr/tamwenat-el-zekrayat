@@ -65,9 +65,7 @@ class UnitTestVerifyShopifyHmac(UnitTestCase):
 		import hmac
 
 		body = b'{"id":1}'
-		digest = base64.b64encode(
-			hmac.new(b"current", body, hashlib.sha256).digest()
-		).decode()
+		digest = base64.b64encode(hmac.new(b"current", body, hashlib.sha256).digest()).decode()
 		self.assertTrue(verify_shopify_hmac(body, "current", digest))
 		self.assertTrue(verify_shopify_hmac(body, "current", digest, previous_secret=None))
 
@@ -77,18 +75,12 @@ class UnitTestVerifyShopifyHmac(UnitTestCase):
 		import hmac
 
 		body = b'{"id":1}'
-		digest = base64.b64encode(
-			hmac.new(b"old-secret", body, hashlib.sha256).digest()
-		).decode()
-		self.assertTrue(
-			verify_shopify_hmac(body, "new-secret", digest, previous_secret="old-secret")
-		)
+		digest = base64.b64encode(hmac.new(b"old-secret", body, hashlib.sha256).digest()).decode()
+		self.assertTrue(verify_shopify_hmac(body, "new-secret", digest, previous_secret="old-secret"))
 
 	def test_wrong_hmac_rejected_against_both_secrets(self):
 		self.assertFalse(
-			verify_shopify_hmac(
-				b'{"id":1}', "current", "not-a-real-digest", previous_secret="old"
-			)
+			verify_shopify_hmac(b'{"id":1}', "current", "not-a-real-digest", previous_secret="old")
 		)
 
 	def test_non_ascii_provided_hmac_does_not_raise(self):
@@ -96,22 +88,22 @@ class UnitTestVerifyShopifyHmac(UnitTestCase):
 		# provided_hmac_b64 is attacker-controlled (werkzeug decodes headers
 		# as latin-1, so non-ASCII is reachable) - this must return False,
 		# never raise, per verify_shopify_hmac()'s own docstring promise.
-		self.assertFalse(
-			verify_shopify_hmac(b'{"id":1}', "shhh", "nöt-ascii-é")
-		)
-		self.assertFalse(
-			verify_shopify_hmac(
-				b'{"id":1}', "current", "nöt-ascii", previous_secret="old"
-			)
-		)
+		self.assertFalse(verify_shopify_hmac(b'{"id":1}', "shhh", "nöt-ascii-é"))
+		self.assertFalse(verify_shopify_hmac(b'{"id":1}', "current", "nöt-ascii", previous_secret="old"))
 
 
 class IntegrationTestSyncWebhookSubscriptions(IntegrationTestCase):
 	def setUp(self):
 		self.connection = make_connection(f"Sync Webhooks {frappe.generate_hash(length=8)}")
 
+	def tearDown(self):
+		frappe.delete_doc("Shopify Connection", self.connection.name, ignore_permissions=True, force=True)
+		frappe.db.commit()
+
 	def test_creates_only_missing_topics(self):
-		callback_url = "https://example.com/api/method/marketplace_integrations.api.shopify_webhooks.webhook_event"
+		callback_url = (
+			"https://example.com/api/method/marketplace_integrations.api.shopify_webhooks.webhook_event"
+		)
 		existing_response = {
 			"webhookSubscriptions": {
 				"edges": [
@@ -125,7 +117,9 @@ class IntegrationTestSyncWebhookSubscriptions(IntegrationTestCase):
 				]
 			}
 		}
-		create_response = {"webhookSubscriptionCreate": {"webhookSubscription": {"id": "x"}, "userErrors": []}}
+		create_response = {
+			"webhookSubscriptionCreate": {"webhookSubscription": {"id": "x"}, "userErrors": []}
+		}
 
 		with (
 			patch(
@@ -145,11 +139,19 @@ class IntegrationTestSyncWebhookSubscriptions(IntegrationTestCase):
 		self.assertEqual(self.connection.webhook_missing_topics, "")
 
 	def test_running_twice_creates_nothing_the_second_time(self):
-		callback_url = "https://example.com/api/method/marketplace_integrations.api.shopify_webhooks.webhook_event"
+		callback_url = (
+			"https://example.com/api/method/marketplace_integrations.api.shopify_webhooks.webhook_event"
+		)
 		all_registered_response = {
 			"webhookSubscriptions": {
 				"edges": [
-					{"node": {"id": f"gid://shopify/WebhookSubscription/{i}", "topic": t, "uri": callback_url}}
+					{
+						"node": {
+							"id": f"gid://shopify/WebhookSubscription/{i}",
+							"topic": t,
+							"uri": callback_url,
+						}
+					}
 					for i, t in enumerate(
 						[
 							"ORDERS_CREATE",
@@ -322,11 +324,19 @@ class IntegrationTestProcessShopifyWebhook(IntegrationTestCase):
 	def setUp(self):
 		self.connection = make_connection(f"Process Webhook {frappe.generate_hash(length=8)}")
 
+	def tearDown(self):
+		frappe.db.delete("Shopify Webhook Delivery", {"connection": self.connection.name})
+		frappe.delete_doc("Shopify Connection", self.connection.name, ignore_permissions=True, force=True)
+
 	def test_duplicate_webhook_id_is_harmless(self):
-		process_shopify_webhook(self.connection.name, "ORDERS_CREATE", "webhook-dup-1", "test-shop.myshopify.com")
+		process_shopify_webhook(
+			self.connection.name, "ORDERS_CREATE", "webhook-dup-1", "test-shop.myshopify.com"
+		)
 		# A second delivery of the same webhook_id must not raise and must not
 		# create a second Shopify Webhook Delivery record.
-		process_shopify_webhook(self.connection.name, "ORDERS_CREATE", "webhook-dup-1", "test-shop.myshopify.com")
+		process_shopify_webhook(
+			self.connection.name, "ORDERS_CREATE", "webhook-dup-1", "test-shop.myshopify.com"
+		)
 
 		count = frappe.db.count("Shopify Webhook Delivery", {"webhook_id": "webhook-dup-1"})
 		self.assertEqual(count, 1)
@@ -345,9 +355,7 @@ class IntegrationTestProcessShopifyWebhook(IntegrationTestCase):
 			order_gid="gid://shopify/Order/1",
 		)
 
-		delivery = frappe.get_doc(
-			"Shopify Webhook Delivery", {"webhook_id": "webhook-order-1"}
-		)
+		delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": "webhook-order-1"})
 		self.assertEqual(delivery.status, "Processed")
 		self.assertEqual(delivery.topic, "ORDERS_CREATE")
 
@@ -357,14 +365,18 @@ class IntegrationTestProcessShopifyWebhook(IntegrationTestCase):
 		self.assertTrue(self.connection.last_webhook_processed_at)
 
 	def test_app_uninstalled_disables_connection_idempotently(self):
-		process_shopify_webhook(self.connection.name, "APP_UNINSTALLED", "webhook-uninstall-1", "test-shop.myshopify.com")
+		process_shopify_webhook(
+			self.connection.name, "APP_UNINSTALLED", "webhook-uninstall-1", "test-shop.myshopify.com"
+		)
 
 		self.connection.reload()
 		self.assertFalse(self.connection.enabled)
 
 		# A second, distinct delivery (different webhook_id, same effective
 		# event) must be a safe no-op against an already-disabled connection.
-		process_shopify_webhook(self.connection.name, "APP_UNINSTALLED", "webhook-uninstall-2", "test-shop.myshopify.com")
+		process_shopify_webhook(
+			self.connection.name, "APP_UNINSTALLED", "webhook-uninstall-2", "test-shop.myshopify.com"
+		)
 		self.connection.reload()
 		self.assertFalse(self.connection.enabled)
 
@@ -482,6 +494,11 @@ def make_delivery(connection, webhook_id, **kwargs):
 class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
 	def setUp(self):
 		self.connection = make_connection(f"Retry Sweep {frappe.generate_hash(length=8)}")
+
+	def tearDown(self):
+		frappe.db.delete("Shopify Webhook Delivery", {"connection": self.connection.name})
+		frappe.delete_doc("Shopify Connection", self.connection.name, ignore_permissions=True, force=True)
+		frappe.db.commit()
 
 	@staticmethod
 	def _calls_for(mocked_handle_topic, connection_name):
@@ -670,6 +687,22 @@ class IntegrationTestHandleTopicRealOrderRouting(IntegrationTestCase):
 
 	def setUp(self):
 		self.connection = make_connection(f"Handle Topic Routing {frappe.generate_hash(length=8)}")
+
+	def tearDown(self):
+		for order in frappe.get_all(
+			"Marketplace Order",
+			{
+				"marketplace_account": [
+					"in",
+					frappe.get_all("Marketplace Account", {"connection": self.connection.name}, pluck="name"),
+				]
+			},
+			pluck="name",
+		):
+			frappe.delete_doc("Marketplace Order", order, ignore_permissions=True, force=True)
+		frappe.db.delete("Marketplace Account", {"connection": self.connection.name})
+		frappe.db.delete("Shopify Webhook Delivery", {"connection": self.connection.name})
+		frappe.delete_doc("Shopify Connection", self.connection.name, ignore_permissions=True, force=True)
 
 	def test_missing_order_gid_is_marked_error_for_every_order_topic(self):
 		for topic in SHOPIFY_ORDER_WEBHOOK_TOPICS:
@@ -915,6 +948,18 @@ class IntegrationTestShopifyWebhookDebouncedSyncTriggerSourceEndToEnd(Integratio
 			}
 		).insert()
 
+	def tearDown(self):
+		for order in frappe.get_all(
+			"Marketplace Order", {"marketplace_account": self.account.name}, pluck="name"
+		):
+			frappe.delete_doc("Marketplace Order", order, ignore_permissions=True, force=True)
+		frappe.db.delete("Marketplace Sync Log", {"marketplace_account": self.account.name})
+		frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": self.account.name})
+		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
+		frappe.db.delete("Shopify Webhook Delivery", {"connection": self.connection.name})
+		frappe.delete_doc("Shopify Connection", self.connection.name, ignore_permissions=True, force=True)
+		frappe.db.commit()
+
 	def test_webhook_driven_debounced_sync_logs_shopify_webhook_trigger_source_and_submits(self):
 		order_gid = f"gid://shopify/Order/{self.suffix}"
 		# displayFinancialStatus="PAID" and refunds=[]: the fixture's default
@@ -964,9 +1009,7 @@ class IntegrationTestShopifyWebhookDebouncedSyncTriggerSourceEndToEnd(Integratio
 			add_to_date(now_datetime(), seconds=-1),
 			update_modified=False,
 		)
-		expected_debounce_until = frappe.db.get_value(
-			"Marketplace Order", order.name, "sync_debounce_until"
-		)
+		expected_debounce_until = frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until")
 
 		_run_debounced_sync(order.name, expected_debounce_until)
 

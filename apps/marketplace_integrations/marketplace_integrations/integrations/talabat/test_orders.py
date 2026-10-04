@@ -99,6 +99,32 @@ def _response(body, status_code=200):
 	return response
 
 
+# Records registered by the helpers below; drained by _cleanup_created() in tearDown.
+_CREATED = []
+
+
+def _track(doc):
+	_CREATED.append(doc)
+	return doc
+
+
+def _cleanup_created():
+	"""Delete tracked Marketplace Accounts (with their Mappings) and then their Talabat Connections.
+	Names are re-checked against the DB so fixtures that never got inserted are skipped."""
+	accounts = [d.name for d in _CREATED if d.doctype == "Marketplace Account"]
+	connections = {d.name for d in _CREATED if d.doctype == "Talabat Connection"}
+	_CREATED.clear()
+	for name in accounts:
+		if not frappe.db.exists("Marketplace Account", name):
+			continue
+		connections.add(frappe.db.get_value("Marketplace Account", name, "connection"))
+		frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": name})
+		frappe.delete_doc("Marketplace Account", name, ignore_permissions=True, force=True)
+	for name in connections:
+		if name and frappe.db.exists("Talabat Connection", name):
+			frappe.delete_doc("Talabat Connection", name, ignore_permissions=True, force=True)
+
+
 def _make_connection(connection_name, **kwargs):
 	"""Helper to create a test Talabat Connection."""
 	doc = {
@@ -111,7 +137,7 @@ def _make_connection(connection_name, **kwargs):
 		"enabled": 1,
 	}
 	doc.update(kwargs)
-	return frappe.get_doc(doc).insert()
+	return _track(frappe.get_doc(doc).insert())
 
 
 def _make_account(account_name, connection, **kwargs):
@@ -126,11 +152,14 @@ def _make_account(account_name, connection, **kwargs):
 		"enabled": 1,
 	}
 	doc.update(kwargs)
-	return frappe.get_doc(doc).insert()
+	return _track(frappe.get_doc(doc).insert())
 
 
 class IntegrationTestTalabatOrdersAccountResolution(IntegrationTestCase):
 	"""Tests for account resolution and authorization."""
+
+	def tearDown(self):
+		_cleanup_created()
 
 	def test_get_account_resolves_valid_talabat_account_and_connection(self):
 		"""get_account resolves a valid account and returns both."""
@@ -210,6 +239,9 @@ class IntegrationTestTalabatOrdersRetrieval(IntegrationTestCase):
 		suffix = frappe.generate_hash(length=8)
 		self.connection = _make_connection(f"Test Order Retrieval Connection {suffix}")
 		self.account = _make_account(f"Test Order Retrieval Account {suffix}", self.connection)
+
+	def tearDown(self):
+		_cleanup_created()
 
 	@patch("marketplace_integrations.integrations.talabat.orders.TalabatClient.request")
 	def test_get_order_fetches_by_order_id(self, mock_request):

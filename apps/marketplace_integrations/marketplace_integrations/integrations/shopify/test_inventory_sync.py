@@ -180,14 +180,28 @@ class InventoryFixtureMixin:
 		self.warehouse = frappe.get_all(
 			"Warehouse", filters={"disabled": 0, "is_group": 0}, pluck="name", limit=1
 		)[0]
+		self._created_accounts = []
 		self.account = self._make_account("Main")
 		self.shopify = FakeShopify()
+
+	def tearDown(self):
+		for account_name in self._created_accounts:
+			frappe.cache().delete_value(inventory_sync._watermark_cache_key(account_name))
+			connection = frappe.db.get_value("Marketplace Account", account_name, "connection")
+			frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": account_name})
+			if frappe.db.exists("Marketplace Account", account_name):
+				frappe.delete_doc("Marketplace Account", account_name, ignore_permissions=True, force=True)
+			if connection and frappe.db.exists("Shopify Connection", connection):
+				frappe.delete_doc("Shopify Connection", connection, ignore_permissions=True, force=True)
+		frappe.db.commit()
+		super().tearDown()
 
 	def _make_account(self, marker):
 		account = make_shopify_account(f"Inventory {marker} Account {self.suffix}")
 		account.db_set("warehouse", self.warehouse, update_modified=False)
 		account.db_set("shopify_location_gid", LOCATION, update_modified=False)
 		account.reload()
+		self._created_accounts.append(account.name)
 		return account
 
 	def _make_item(self, marker, qty=None, disabled=0, is_stock_item=1, has_variants=0):
