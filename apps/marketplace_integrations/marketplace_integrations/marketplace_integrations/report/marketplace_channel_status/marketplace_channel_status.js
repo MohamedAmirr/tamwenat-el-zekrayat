@@ -39,6 +39,10 @@ frappe.query_reports["Marketplace Channel Status"] = {
 			return wrap_count_link(value, import_errors_url(data.account));
 		}
 
+		if (column.fieldname === "fulfillment_errors" && data.fulfillment_errors) {
+			return wrap_count_link(value, needs_attention_url(data.account));
+		}
+
 		return value;
 	},
 };
@@ -47,13 +51,14 @@ function wrap_count_link(value, href) {
 	return `<a href="${frappe.utils.escape_html(href)}">${value}</a>`;
 }
 
-// Marketplace Order's own erpnext_sync_status options that mean "a human
-// needs to look at this" (PLACEHOLDER_ORDER_ERROR_STATUSES in
-// services/marketplace_channels.py - kept in sync by hand since the report
-// JS has no server round-trip for this).
+// The order and import counts come from the same definition as the Marketplace
+// Needs Attention report (#169), so both link to that report for the account.
+function needs_attention_url(account) {
+	return `/app/query-report/Marketplace%20Needs%20Attention?${to_query_string({ account })}`;
+}
+
 function orders_needing_attention_url(account) {
-	const filters = { marketplace_account: account, erpnext_sync_status: ["in", ["Sync Error", "Modified After Sync"]] };
-	return `/app/marketplace-order?${to_query_string(filters)}`;
+	return needs_attention_url(account);
 }
 
 // Product Sync Errors covers sync_status=Error OR inventory_sync_status=Error
@@ -66,7 +71,7 @@ function product_sync_errors_url(account) {
 }
 
 function import_errors_url(account) {
-	return `/app/marketplace-sync-log?${to_query_string({ marketplace_account: account, status: "Error" })}`;
+	return needs_attention_url(account);
 }
 
 function to_query_string(filters) {

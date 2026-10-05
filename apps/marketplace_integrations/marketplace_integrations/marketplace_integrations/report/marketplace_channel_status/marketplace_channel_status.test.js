@@ -39,16 +39,16 @@ test("the formatter is registered under the report's exact name", () => {
 	assert.equal(typeof frappe.query_reports["Marketplace Channel Status"].formatter, "function");
 });
 
-test("orders_needing_attention_url filters by account and the two error statuses", () => {
-	const url = orders_needing_attention_url("MKTACC-1");
-	assert.match(url, /^\/app\/marketplace-order\?/);
-	assert.match(url, /marketplace_account=MKTACC-1/);
-	assert.match(url, /erpnext_sync_status=.*Sync%20Error.*Modified%20After%20Sync/);
+test("orders_needing_attention_url opens the Needs Attention report for the account", () => {
+	assert.equal(
+		orders_needing_attention_url("MKTACC-1"),
+		"/app/query-report/Marketplace%20Needs%20Attention?account=MKTACC-1"
+	);
 });
 
-test("product_sync_errors_url and import_errors_url scope to the account", () => {
+test("product_sync_errors_url scopes to the account; import_errors_url opens the Needs Attention report", () => {
 	assert.match(product_sync_errors_url("MKTACC-2"), /^\/app\/marketplace-product-mapping\?marketplace_account=MKTACC-2$/);
-	assert.match(import_errors_url("MKTACC-2"), /^\/app\/marketplace-sync-log\?marketplace_account=MKTACC-2&status=Error$/);
+	assert.equal(import_errors_url("MKTACC-2"), "/app/query-report/Marketplace%20Needs%20Attention?account=MKTACC-2");
 });
 
 test("to_query_string encodes special characters in account names", () => {
@@ -83,7 +83,7 @@ test("formatter links a non-zero count cell to the filtered list and leaves a ze
 		{ account: "MKTACC-3", orders_needing_attention: 3 },
 		default_formatter
 	);
-	assert.match(linked, /^<a href="\/app\/marketplace-order\?/);
+	assert.match(linked, /^<a href="\/app\/query-report\/Marketplace%20Needs%20Attention\?/);
 
 	const plain = formatter(
 		"0",
@@ -93,4 +93,16 @@ test("formatter links a non-zero count cell to the filtered list and leaves a ze
 		default_formatter
 	);
 	assert.equal(plain, "0");
+});
+
+test("formatter links a non-zero Fulfillment Errors count to the Needs Attention report", () => {
+	const formatter = frappe.query_reports["Marketplace Channel Status"].formatter;
+	const linked = formatter(
+		"2",
+		{},
+		{ fieldname: "fulfillment_errors" },
+		{ account: "MKTACC-4", fulfillment_errors: 2 },
+		(value) => value
+	);
+	assert.match(linked, /^<a href="\/app\/query-report\/Marketplace%20Needs%20Attention\?account=MKTACC-4"/);
 });
