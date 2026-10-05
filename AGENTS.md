@@ -60,6 +60,10 @@ load every document by default.
   Talabat-specific code — it now owns everything. `docs/talabat-integration/architecture.md`
   is frozen historical reference for the removed legacy app and is not
   updated for new work.
+- After updating docs, run `graphify update .` if `graphify-out/graph.json`
+  exists (skip silently if `graphify` is not installed). It rebuilds only the
+  code part of the graph; if the docs changed materially, tell the user to run
+  `/graphify . --update`.
 - All new functionality, including Talabat-specific work, belongs in
   `marketplace_integrations`. The legacy `talabat_integration` app no longer
   exists in this repository.
