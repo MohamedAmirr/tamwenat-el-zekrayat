@@ -1,0 +1,8 @@
+# graphify generated files: query via the graphify CLI, never read raw.
+# GRAPH_REPORT.md stays readable on purpose.
+graphify-out/cache/
+graphify-out/graph.json
+graphify-out/graph.html
+graphify-out/manifest.json
+graphify-out/cost.json
+graphify-out/.graphify_*

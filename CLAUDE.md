@@ -44,3 +44,13 @@ Typical flow per sub-issue: `feature-planner` (plan it) → `frappe-dev` (build 
 - Writing/running tests and linting → `frappe-test` agent (haiku — mechanical: write test files, run `bench run-tests`, run whatever linter is configured, fix trivial lint issues, report real failures rather than papering over them).
 - Reviewing a diff/PR before it lands → `frappe-review` agent (opus). Checks convention adherence, duplication/schema drift, inconsistent implementation, security, and framework best practices. Read-only — reports findings, doesn't fix them.
 - Git/GitHub work (commits, branches, pushing, PRs, repo settings, issues) → `git-ops` agent (haiku — mechanical once the rules in its own file are followed). Never commits `.env` or force-pushes without explicit instruction.
+
+## graphify
+
+`graphify-out/` holds a local knowledge graph of this repo (the `marketplace_integrations` app and its Talabat, Shopify and Noon code, plus `docs/`). It is generated, git-ignored and local to each machine. Scope comes from `.graphifyignore`.
+
+- **Use the graph first** for architecture, locating modules/files, dependency and call tracing, impact analysis and cross-module relationships: `graphify query "<question>"`, `graphify path "<A>" "<B>"`, `graphify explain "<concept>"`, `graphify affected "<symbol>"` (what breaks if this changes).
+- **The graph is a map, not the source.** Before implementing or changing behavior, Read the relevant source directly. INFERRED/AMBIGUOUS edges can be wrong. If the graph and the source disagree, trust the source and run `graphify update .`.
+- **It is a snapshot and can be stale** — Codex and other agents edit files here too.
+- **Never Read `graph.json`, `graph.html` or `cache/` raw** (see `.claudeignore`); query through the CLI. `GRAPH_REPORT.md` is fine to read for broad architecture review.
+- **Refresh:** git hooks rebuild the code graph (AST only, no LLM) after commits and branch switches. After code edits you can run `graphify update .` by hand. Doc or semantic changes need a manual `/graphify . --update`.
