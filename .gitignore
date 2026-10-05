@@ -27,3 +27,6 @@ sites/*
 # os / editor
 .DS_Store
 *.swp
+
+# graphify generated knowledge graph (rebuilt locally by graphify hooks)
+graphify-out/
