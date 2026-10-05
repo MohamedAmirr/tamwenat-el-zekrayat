@@ -259,8 +259,11 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 		mocked_bump.assert_called_once_with(order.name, trigger_source="Talabat Webhook")
 
 	@patch("marketplace_integrations.integrations.talabat.order_events.bump_sync_debounce")
+	@patch("frappe.db.commit")  # the failure-log write commits; keep this test's fixtures uncommitted
 	@patch("marketplace_integrations.integrations.talabat.order_events.upsert_marketplace_order")
-	def test_bump_sync_debounce_is_not_called_when_upsert_fails(self, upsert_marketplace_order, bump_sync_debounce):
+	def test_bump_sync_debounce_is_not_called_when_upsert_fails(
+		self, upsert_marketplace_order, _commit, bump_sync_debounce
+	):
 		upsert_marketplace_order.side_effect = frappe.ValidationError
 		payload = _payload(self.account)
 
@@ -270,8 +273,11 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 		bump_sync_debounce.assert_not_called()
 
 	@patch("marketplace_integrations.integrations.talabat.order_events.bump_sync_debounce")
+	@patch("frappe.db.commit")  # the failure-log write commits; keep this test's fixtures uncommitted
 	@patch("marketplace_integrations.integrations.talabat.order_events.normalize_order")
-	def test_bump_sync_debounce_is_not_called_on_malformed_payload(self, normalize_order, bump_sync_debounce):
+	def test_bump_sync_debounce_is_not_called_on_malformed_payload(
+		self, normalize_order, _commit, bump_sync_debounce
+	):
 		normalize_order.side_effect = frappe.ValidationError
 		payload = _payload(self.account)
 
@@ -279,6 +285,61 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 			process_order_event(self.account.name, payload)
 
 		bump_sync_debounce.assert_not_called()
+
+	@patch("frappe.db.commit")
+	@patch("marketplace_integrations.integrations.talabat.order_events.normalize_order")
+	def test_failed_worker_event_is_persisted_as_an_order_import_error_log(self, normalize_order, commit):
+		normalize_order.side_effect = frappe.ValidationError("bad order")
+		order_id = f"failing-{frappe.generate_hash(length=8)}"
+		payload = _payload(self.account, order_id=order_id)
+
+		with self.assertRaises(frappe.ValidationError):
+			process_order_event(self.account.name, payload)
+
+		logs = frappe.get_all(
+			"Marketplace Sync Log",
+			filters={
+				"marketplace_account": self.account.name,
+				"sync_type": "Order Import",
+				"status": "Error",
+			},
+			fields=["name", "trigger_source", "request_data"],
+		)
+		try:
+			self.assertEqual(len(logs), 1)
+			self.assertEqual(logs[0].trigger_source, "Talabat Webhook")
+			self.assertEqual(frappe.parse_json(logs[0].request_data)["order_id"], order_id)
+			commit.assert_called()
+		finally:
+			for log in logs:
+				frappe.delete_doc("Marketplace Sync Log", log.name, force=True)
+
+	@patch("frappe.db.commit")
+	@patch("frappe.db.rollback")
+	@patch("marketplace_integrations.integrations.talabat.order_events.normalize_order")
+	def test_deadlock_rollback_failure_falls_back_to_full_rollback_and_reraises_original(
+		self, normalize_order, rollback, commit
+	):
+		normalize_order.side_effect = frappe.ValidationError("original failure")
+
+		# The savepoint rollback raises (transaction already gone); the plain
+		# full rollback succeeds.
+		def fake_rollback(*args, **kwargs):
+			if kwargs.get("save_point"):
+				raise RuntimeError("savepoint does not exist")
+
+		rollback.side_effect = fake_rollback
+		payload = _payload(self.account, order_id=f"deadlock-{frappe.generate_hash(length=8)}")
+
+		with patch(
+			"marketplace_integrations.integrations.talabat.order_events.log_order_import_failure"
+		) as log_failure:
+			with self.assertRaises(frappe.ValidationError) as raised:
+				process_order_event(self.account.name, payload)
+
+		self.assertIn("original failure", str(raised.exception))
+		self.assertTrue(any(not call.kwargs.get("save_point") for call in rollback.call_args_list))
+		log_failure.assert_called_once()
 
 
 def _catalog_payload(account, job_id="job-001", **overrides):

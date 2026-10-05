@@ -66,6 +66,12 @@ def get_columns():
 			"width": 120,
 		},
 		{
+			"label": "Fulfillment Errors",
+			"fieldname": "fulfillment_errors",
+			"fieldtype": "Int",
+			"width": 130,
+		},
+		{
 			"label": "Last Checked",
 			"fieldname": "last_checked",
 			"fieldtype": "Datetime",

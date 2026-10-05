@@ -660,3 +660,39 @@ class IntegrationTestImportVendorOrders(IntegrationTestCase):
 
 		order = frappe.get_doc("Marketplace Order", result["imported"][0])
 		self.assertEqual(order.external_order_id, "order-002")
+
+	@patch("marketplace_integrations.api.talabat_orders.normalize_order")
+	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.get_vendor_orders")
+	def test_import_vendor_orders_persists_a_failure_as_an_order_import_error_log(
+		self, mock_get_vendor_orders, mock_normalize
+	):
+		"""#169: a failed order is written to Marketplace Sync Log (not just
+		returned in the response) so the Needs Attention report can show it."""
+		mock_get_vendor_orders.return_value = {
+			"orders": [{"order_id": "order-bad-001"}],
+			"page_number": 1,
+			"page_size": 20,
+			"total_pages": 1,
+		}
+		mock_normalize.side_effect = frappe.ValidationError("bad order")
+
+		result = import_vendor_orders(self.account.name, "2026-08-01", "2026-08-31")
+
+		self.assertEqual(len(result["errors"]), 1)
+		logs = frappe.get_all(
+			"Marketplace Sync Log",
+			filters={
+				"marketplace_account": self.account.name,
+				"sync_type": "Order Import",
+				"status": "Error",
+			},
+			fields=["name", "trigger_source", "request_data", "traceback"],
+		)
+		try:
+			self.assertEqual(len(logs), 1)
+			self.assertEqual(logs[0].trigger_source, "Manual")
+			self.assertEqual(frappe.parse_json(logs[0].request_data)["order_id"], "order-bad-001")
+			self.assertEqual(logs[0].traceback, result["errors"][0]["error"])
+		finally:
+			for log in logs:
+				frappe.delete_doc("Marketplace Sync Log", log.name, force=True)

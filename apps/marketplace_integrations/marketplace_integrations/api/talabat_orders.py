@@ -19,6 +19,7 @@ from frappe import _
 from frappe.utils import cint, cstr, flt
 
 from marketplace_integrations.integrations.talabat import orders as talabat_orders
+from marketplace_integrations.integrations.talabat.order_events import log_order_import_failure
 from marketplace_integrations.integrations.talabat.order_mapper import normalize_order
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 
@@ -113,6 +114,10 @@ def import_vendor_orders(account: str, start: str, end: str):
 			except (frappe.ValidationError, frappe.PermissionError, frappe.DuplicateEntryError) as exc:
 				frappe.db.rollback(save_point=savepoint_name)
 				errors.append({"order_id": order_id, "error": str(exc)})
+				# Persisted for the Needs Attention report (#169). Not
+				# committed here: the request commits at its end, like the
+				# successfully imported orders it sits beside.
+				log_order_import_failure(account_doc.name, order_id, str(exc), "Manual")
 			else:
 				frappe.db.release_savepoint(savepoint_name)
 				imported.append(updated.name)

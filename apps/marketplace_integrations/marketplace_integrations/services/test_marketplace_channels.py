@@ -20,8 +20,8 @@ from marketplace_integrations.marketplace_integrations.doctype.marketplace_accou
 	STAND_IN_CONNECTION_DOCTYPE,
 )
 from marketplace_integrations.services.marketplace_channels import (
+	get_account_counts,
 	get_channel_status,
-	get_placeholder_attention_counts,
 )
 
 
@@ -105,12 +105,12 @@ class IntegrationTestMarketplaceChannels(IntegrationTestCase):
 
 		self.make_order(account_b, erpnext_sync_status="Synced")
 
-		counts = get_placeholder_attention_counts([account_a.name, account_b.name])
+		counts = get_account_counts([account_a.name, account_b.name])
 
 		self.assertEqual(counts[account_a.name]["orders_needing_attention"], 2)
 		self.assertEqual(counts[account_a.name]["product_sync_errors"], 1)
 		self.assertEqual(counts[account_a.name]["import_errors"], 2)
-		self.assertEqual(counts[account_a.name]["import_errors_by_type"], {"Order Import": 2})
+		self.assertEqual(counts[account_a.name]["fulfillment_errors"], 0)
 
 		self.assertEqual(counts[account_b.name]["orders_needing_attention"], 0)
 		self.assertEqual(counts[account_b.name]["product_sync_errors"], 0)
@@ -124,12 +124,12 @@ class IntegrationTestMarketplaceChannels(IntegrationTestCase):
 		self.make_mapping(account, inventory_sync_status="Error")
 		self.make_mapping(account, sync_status="Synced", inventory_sync_status="Synced")
 
-		counts = get_placeholder_attention_counts([account.name])
+		counts = get_account_counts([account.name])
 
 		self.assertEqual(counts[account.name]["product_sync_errors"], 2)
 
 	def test_empty_account_list_returns_empty_dict(self):
-		self.assertEqual(get_placeholder_attention_counts([]), {})
+		self.assertEqual(get_account_counts([]), {})
 
 	def test_get_channel_status_returns_one_row_per_account_with_computed_level(self):
 		account = self.make_account(

@@ -17,7 +17,9 @@ for what this dashboard deliberately does NOT cover).
 
 ## Where to find it
 
-Desk sidebar → **Shopify Reconciliation** workspace. It shows 3 shortcuts:
+Desk sidebar → **Tamwenat Marketplaces** workspace → **Related** → **Shopify
+Reconciliation** (it is a child of the Tamwenat Marketplaces workspace). It
+shows 3 shortcuts:
 the **Shopify Reconciliation Summary** and **Shopify Order Import Failures**
 Script Reports, and the existing **Marketplace Shopify Catalog Mapping** page
 (for catalog-sweep access — see "Catalog Sweeps" below). For refunded orders,
