@@ -21,4 +21,6 @@ Docs go stale the moment code changes and nobody updates them — that's on you,
 - Discovered a non-obvious framework behavior or gotcha while implementing (something that cost you real investigation to figure out)? Add it to `docs/frappe-conventions.md` in the same PR, generalized beyond this one instance if it would apply elsewhere.
 Don't leave either for "a followup" — there usually isn't one.
 
+After updating any doc, refresh the knowledge graph: run `graphify update .` if `graphify-out/graph.json` exists (skip silently if the `graphify` command is missing). That only rebuilds the code part. If the docs changed materially, say so in your report so the user can run `/graphify . --update` to re-extract them.
+
 When reviewing existing code, check it against `docs/frappe-conventions.md` and call out concrete deviations with file:line, not general style opinions.
