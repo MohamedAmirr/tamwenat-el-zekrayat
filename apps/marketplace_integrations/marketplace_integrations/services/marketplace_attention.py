@@ -61,6 +61,7 @@ from marketplace_integrations.services.sales_order_sync import (
 	FINAL_ITEM_STATUSES,
 	NOON_ELIGIBLE_EXTERNAL_STATUS,
 	NOON_INELIGIBLE_INTEGRATION_STATUS,
+	_modified_after_sync_message,
 )
 
 SYNC_ERROR = "Sync Error"
@@ -262,7 +263,7 @@ def _collect_order_status_items(accounts):
 					account,
 					"Marketplace Order",
 					order.name,
-					_("The marketplace order changed after it was synced to ERPNext."),
+					order.last_sync_error or _modified_after_sync_message(),
 					order.modified,
 					NEXT_OPEN_ORDER,
 				)
@@ -386,7 +387,7 @@ def _collect_unmapped_items(accounts):
 def _parse_request_data(value):
 	try:
 		data = json.loads(value) if value else {}
-	except (TypeError, ValueError):
+	except TypeError, ValueError:
 		return {}
 	return data if isinstance(data, dict) else {}
 
@@ -469,7 +470,7 @@ def _fulfillment_message(log):
 	(as a JSON string) in response_data - never the raw traceback."""
 	try:
 		message = json.loads(log.response_data) if log.response_data else ""
-	except (TypeError, ValueError):
+	except TypeError, ValueError:
 		message = ""
 	message = cstr(message).strip() if isinstance(message, str) else ""
 	if not message or "Traceback" in message:
@@ -618,7 +619,7 @@ def _collect_exhausted_webhooks(accounts):
 def _pending_oos_count(value):
 	try:
 		units = json.loads(value) if isinstance(value, str) else value
-	except (TypeError, ValueError):
+	except TypeError, ValueError:
 		return 0
 	return len(units) if isinstance(units, list) else 0
 

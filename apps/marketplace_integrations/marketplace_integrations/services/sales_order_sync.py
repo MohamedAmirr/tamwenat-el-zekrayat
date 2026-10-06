@@ -10,8 +10,8 @@ submits it (#131) - a fresh Sales Order is never left in Draft.  Only the
 existing-Sales-Order UPDATE branch (re-syncing an order whose linked Sales
 Order is still Draft, e.g. one created before #131) leaves the document in
 whatever docstatus it already had; once that Sales Order is submitted, a
-later re-sync attempt is blocked by ``_save_submitted_blocker()`` rather than
-silently updating or re-submitting it.
+later re-sync is classified by the advisory reconciliation planner rather
+than silently updating or re-submitting it.
 
 Every ``sync_sales_order()`` attempt - success, an expected ``SyncBlocker``,
 or an unexpected exception - writes one ``Marketplace Sync Log`` row
@@ -39,6 +39,7 @@ source.
 
 import hashlib
 import json
+from copy import deepcopy
 
 import frappe
 from frappe import _
@@ -49,6 +50,14 @@ from marketplace_integrations.marketplace_integrations.doctype.marketplace_produ
 )
 from marketplace_integrations.services.account_warehouse import validate_account_warehouse
 from marketplace_integrations.services.mappings import resolve_mapping_and_item
+from marketplace_integrations.services.sales_order_reconciliation import (
+	NO_ACTION,
+	SalesOrderLinesMismatch,
+	plan,
+	read_erp_state,
+	snapshot_advanced_from,
+	snapshot_with_sales_order_item_names,
+)
 
 FINAL_ITEM_STATUSES = {"IN_CART", "ADDITION"}
 
@@ -91,6 +100,9 @@ FINAL_ITEM_STATUSES = {"IN_CART", "ADDITION"}
 EFFECTIVE_RATE_PRECISION = 6
 
 
+_FRESH_SALES_ORDER_SAVEPOINT = "marketplace_fresh_sales_order"
+
+
 class SyncBlocker(frappe.ValidationError):
 	"""A user-actionable prerequisite that prevents Sales Order synchronization."""
 
@@ -105,9 +117,9 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 
 	A fresh Sales Order (the ``.insert()`` branch) is immediately submitted
 	(#131) - unconditionally, for every caller, Talabat and Shopify alike.
-	Re-syncing an order whose Sales Order is already submitted continues to
-	hit ``_save_submitted_blocker()`` unchanged: this never re-submits or
-	double-submits anything.
+	Re-syncing an order whose Sales Order is already submitted uses the
+	read-only advisory planner: this never re-submits, double-submits, or
+	mutates that ERP document.
 
 	Every attempt - success, expected ``SyncBlocker``, or unexpected
 	exception - writes one ``Marketplace Sync Log`` row via
@@ -137,6 +149,18 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 	try:
 		account = _get_account(order)
 		_validate_sync_permissions(order, account)
+		sales_order = None
+		evidence = {}
+		if order.erpnext_sales_order:
+			# Fetched once: the linked Sales Order and the reconciliation evidence
+			# are reused below and by _save_success().
+			sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+			evidence = _reconciliation_evidence(order)
+			if _uses_stored_snapshot(sales_order.docstatus, evidence):
+				snapshot = _parse_last_synced_snapshot(order)
+				return _submitted_reconciliation_advisory(
+					order, sales_order, snapshot, evidence, trigger_source
+				)
 		_validate_account_configuration(account)
 		lines = _build_order_lines(order, account)
 		if order.platform == "Shopify":
@@ -148,34 +172,41 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 		snapshot = _make_snapshot(
 			account, customer, lines, _transaction_date(order), _delivery_date(order), address
 		)
-		current_hash = _snapshot_hash(snapshot)
+		current_hash = snapshot_hash(snapshot)
 
-		if order.erpnext_sales_order:
-			sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
-			if order.last_synced_hash == current_hash:
-				result = _save_success(order, current_hash, sales_order.name, updated=False)
-				_create_sync_log(order, trigger_source, "Success", snapshot, result)
-				return result
+		if sales_order:
 			if sales_order.docstatus != 0:
-				result = _save_submitted_blocker(order)
-				_create_sync_log(order, trigger_source, "Invalid", snapshot, result)
+				return _submitted_reconciliation_advisory(order, sales_order, snapshot, evidence, trigger_source)
+			if order.last_synced_hash == current_hash:
+				result = _save_success(order, current_hash, sales_order, updated=False, snapshot=snapshot)
+				_create_sync_log(order, trigger_source, "Success", snapshot, result)
 				return result
 			_apply_snapshot(sales_order, snapshot, order.name)
 			_verify_line_amounts(sales_order, snapshot, account)
 			sales_order.save()
-			result = _save_success(order, current_hash, sales_order.name, updated=True)
+			result = _save_success(order, current_hash, sales_order, updated=True, snapshot=snapshot)
 			_create_sync_log(order, trigger_source, "Success", snapshot, result)
 			return result
 
 		sales_order = frappe.new_doc("Sales Order")
 		_apply_snapshot(sales_order, snapshot, order.name)
 		_verify_line_amounts(sales_order, snapshot, account)
-		sales_order.insert()
+		# Verify the snapshot pairs with the inserted rows BEFORE submitting; on a
+		# mismatch roll the insert back so no orphan Sales Order is left unlinked
+		# (a retry would otherwise create a duplicate).
+		frappe.db.savepoint(_FRESH_SALES_ORDER_SAVEPOINT)
+		try:
+			sales_order.insert()
+			snapshot_with_sales_order_item_names(snapshot, sales_order)
+		except SalesOrderLinesMismatch as exc:
+			frappe.db.rollback(save_point=_FRESH_SALES_ORDER_SAVEPOINT)
+			raise SyncBlocker(str(exc)) from exc
 		sales_order.submit()
-		result = _save_success(order, current_hash, sales_order.name, updated=False)
+		result = _save_success(order, current_hash, sales_order, updated=False, snapshot=snapshot)
 		_create_sync_log(order, trigger_source, "Success", snapshot, result)
 		return result
-	except SyncBlocker as exc:
+	except (SyncBlocker, SalesOrderLinesMismatch) as exc:
+		# SalesOrderLinesMismatch carries a specific, user-actionable message.
 		result = _save_failure(order, str(exc))
 		_create_sync_log(order, trigger_source, "Invalid", snapshot, result)
 		return result
@@ -227,7 +258,9 @@ def build_sales_order_snapshot(order, account=None, customer=None):
 	lines = _build_order_lines(order, account)
 	if not customer:
 		if order.platform == "Shopify":
-			customer = _get_or_create_shopify_customer(order, account, create=False) or account.erpnext_customer
+			customer = (
+				_get_or_create_shopify_customer(order, account, create=False) or account.erpnext_customer
+			)
 			address = _resolve_shopify_address(order, customer, create=False) or {
 				"name": None,
 				"address_type": None,
@@ -241,9 +274,7 @@ def build_sales_order_snapshot(order, account=None, customer=None):
 			if order.platform == "Shopify"
 			else None
 		)
-	return _make_snapshot(
-		account, customer, lines, _transaction_date(order), _delivery_date(order), address
-	)
+	return _make_snapshot(account, customer, lines, _transaction_date(order), _delivery_date(order), address)
 
 
 def _build_sales_order_lines(order, account):
@@ -470,7 +501,9 @@ def _build_shopify_sales_order_lines(order, account):
 			raise SyncBlocker(_("Shopify line {0} has no transaction amount.").format(row.external_item_id))
 		transaction_amount = flt(row.transaction_amount)
 		if transaction_amount < 0:
-			raise SyncBlocker(_("Shopify line {0} has a negative transaction amount.").format(row.external_item_id))
+			raise SyncBlocker(
+				_("Shopify line {0} has a negative transaction amount.").format(row.external_item_id)
+			)
 		quantity = flt(row.current_quantity)
 		effective_rate = flt(transaction_amount / quantity, EFFECTIVE_RATE_PRECISION)
 		item_uom = resolved.get("sales_uom") or frappe.get_cached_value("Item", resolved["item"], "stock_uom")
@@ -563,12 +596,56 @@ def set_sync_status_from_current_snapshot(order, preserve_sync_error=False):
 		return
 	if not order.erpnext_sales_order or not order.last_synced_hash:
 		return
+	docstatus = frappe.db.get_value("Sales Order", order.erpnext_sales_order, "docstatus")
+	sales_order = None
 	try:
-		current_hash = _snapshot_hash(build_sales_order_snapshot(order))
-	except SyncBlocker:
+		evidence = _reconciliation_evidence(order)
+		if docstatus != 0:
+			sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		if _uses_stored_snapshot(docstatus, evidence):
+			current_snapshot = _parse_last_synced_snapshot(order) or {}
+		else:
+			current_snapshot = build_sales_order_snapshot(order)
+	except SyncBlocker as exc:
 		order.erpnext_sync_status = "Modified After Sync"
+		order.last_sync_error = cstr(exc).strip()[:500] or _modified_after_sync_message()
 		return
-	order.erpnext_sync_status = "Synced" if current_hash == order.last_synced_hash else "Modified After Sync"
+	if docstatus != 0:
+		reconciliation_plan = plan(
+			_parse_last_synced_snapshot(order), current_snapshot, evidence, read_erp_state(sales_order)
+		)
+		_apply_reconciliation_status(order, reconciliation_plan)
+		if reconciliation_plan["outcome"] == NO_ACTION:
+			# Runs inside Marketplace Order.before_save()/get_current_sync_status():
+			# in-memory only, persisted by the very save already in progress.
+			_advance_baseline(order, _parse_last_synced_snapshot(order), current_snapshot)
+		return
+	current_hash = snapshot_hash(current_snapshot)
+	if current_hash == order.last_synced_hash:
+		order.erpnext_sync_status = "Synced"
+		order.last_sync_error = None
+	else:
+		order.erpnext_sync_status = "Modified After Sync"
+		order.last_sync_error = _modified_after_sync_message()
+
+
+def _modified_after_sync_message():
+	return _("The marketplace order changed after it was synced to ERPNext.")
+
+
+def _uses_stored_snapshot(docstatus, evidence):
+	"""A submitted Sales Order with lifecycle evidence is judged against the stored baseline."""
+	return docstatus != 0 and bool(evidence)
+
+
+def _apply_reconciliation_status(order, reconciliation_plan):
+	"""Map a reconciliation outcome to the in-memory sync status and message."""
+	if reconciliation_plan["outcome"] == NO_ACTION:
+		order.erpnext_sync_status = "Synced"
+		order.last_sync_error = None
+	else:
+		order.erpnext_sync_status = "Modified After Sync"
+		order.last_sync_error = cstr(reconciliation_plan["message"]).strip()[:500]
 
 
 def get_current_sync_status(marketplace_order):
@@ -578,8 +655,14 @@ def get_current_sync_status(marketplace_order):
 		return order.erpnext_sync_status
 
 	previous_status = order.erpnext_sync_status
+	previous_sync_error = order.last_sync_error
+	previous_hash = order.last_synced_hash
 	set_sync_status_from_current_snapshot(order, preserve_sync_error=True)
-	if order.erpnext_sync_status != previous_status:
+	if (
+		order.erpnext_sync_status != previous_status
+		or order.last_sync_error != previous_sync_error
+		or order.last_synced_hash != previous_hash
+	):
 		order.flags.skip_sync_status_update = True
 		order.save()
 	return order.erpnext_sync_status
@@ -869,7 +952,7 @@ def _as_address_dict(value):
 		try:
 			parsed = json.loads(value)
 			return parsed if isinstance(parsed, dict) else {}
-		except (TypeError, ValueError):
+		except TypeError, ValueError:
 			return {}
 	return {}
 
@@ -1029,11 +1112,107 @@ def _verify_line_amounts(sales_order, snapshot, account):
 			)
 
 
-def _snapshot_hash(snapshot):
-	return hashlib.sha256(frappe.as_json(snapshot).encode()).hexdigest()
+def snapshot_hash(snapshot):
+	commercial_snapshot = deepcopy(snapshot)
+	for line in commercial_snapshot.get("items") or []:
+		line.pop("sales_order_item", None)
+	commercial_snapshot.pop("refund_ids", None)
+	return hashlib.sha256(frappe.as_json(commercial_snapshot).encode()).hexdigest()
 
 
-def _create_sync_log(order, trigger_source, status, snapshot, response, traceback_text=None):
+def _reconciliation_evidence(order):
+	"""Return only explicit, persisted marketplace lifecycle evidence.
+
+	No generic display status is interpreted here.  ``cancelled_at`` and
+	``refunds`` are Shopify's explicit normalized evidence; Talabat's documented
+	``CANCELLED`` status is likewise an explicit order cancellation signal.
+	"""
+	evidence = {}
+	if order.cancelled_at or (order.platform == "Talabat" and order.external_status == "CANCELLED"):
+		evidence["cancellation"] = "full"
+	if _unreflected_refund_ids(order):
+		evidence["refund"] = True
+	return evidence
+
+
+def _refund_ids(order):
+	"""Return the ids of every persisted Shopify refund on the order."""
+	refunds = order.refunds
+	if not refunds:
+		return []
+	try:
+		refunds = frappe.parse_json(refunds) if isinstance(refunds, str) else refunds
+	except TypeError, ValueError:
+		return []
+	if not isinstance(refunds, list):
+		return []
+	return [cstr(refund.get("id") if isinstance(refund, dict) else refund) for refund in refunds]
+
+
+def _unreflected_refund_ids(order):
+	"""Refund ids that are not already reflected in the stored baseline.
+
+	A refund recorded in the baseline's ``refund_ids`` (present when the order
+	was synced) is already part of the Sales Order quantities, so it is not new
+	evidence.  A legacy baseline without ``refund_ids`` has no known history, so
+	every current refund counts as new (conservative: the user is told, nothing
+	is silently accepted).
+	"""
+	current = _refund_ids(order)
+	if not current:
+		return []
+	known = (_parse_last_synced_snapshot(order) or {}).get("refund_ids")
+	if known is None:
+		return current
+	return [refund_id for refund_id in current if refund_id not in set(known)]
+
+
+def _advance_baseline(order, previous, current_snapshot):
+	"""Make an ERP-equivalent current snapshot the new in-memory baseline.
+
+	Does not save: callers are already saving the order.  A no-op when the
+	baseline hash already matches (e.g. the stored-snapshot path).
+	"""
+	current_hash = snapshot_hash(current_snapshot)
+	if not previous or current_hash == order.last_synced_hash:
+		return
+	advanced = snapshot_advanced_from(previous, current_snapshot)
+	if "refund_ids" not in advanced and not _refund_ids(order):
+		advanced["refund_ids"] = []
+	order.last_synced_hash = current_hash
+	order.last_synced_snapshot = frappe.as_json(advanced)
+
+
+def _submitted_reconciliation_advisory(order, sales_order, snapshot, evidence, trigger_source):
+	"""Persist one read-only submitted-order reconciliation result and audit row."""
+	erp_state = read_erp_state(sales_order)
+	previous = _parse_last_synced_snapshot(order)
+	reconciliation_plan = plan(previous, snapshot or {}, evidence, erp_state)
+	if reconciliation_plan["outcome"] == NO_ACTION and snapshot:
+		_advance_baseline(order, previous, snapshot)
+	result = _save_reconciliation_advisory(order, reconciliation_plan)
+	_create_sync_log(
+		order,
+		trigger_source,
+		"Success" if reconciliation_plan["outcome"] == NO_ACTION else "Invalid",
+		snapshot,
+		result,
+		reconciliation_plan=reconciliation_plan,
+		erp_state=erp_state,
+	)
+	return result
+
+
+def _create_sync_log(
+	order,
+	trigger_source,
+	status,
+	snapshot,
+	response,
+	traceback_text=None,
+	reconciliation_plan=None,
+	erp_state=None,
+):
 	"""Write one ``Marketplace Sync Log`` row for this attempt (#131).
 
 	``ignore_permissions=True``: this doctype's create permission is
@@ -1049,6 +1228,16 @@ def _create_sync_log(order, trigger_source, status, snapshot, response, tracebac
 	Marketplace Order name instead - there is nothing else to capture yet.
 	"""
 	now = now_datetime()
+	request_data = snapshot if snapshot is not None else {"marketplace_order": order.name}
+	if reconciliation_plan:
+		request_data = {
+			"snapshot": request_data,
+			"reconciliation": {
+				"action": reconciliation_plan["outcome"],
+				"changes": reconciliation_plan["changes"],
+				"erp_state": erp_state,
+			},
+		}
 	frappe.get_doc(
 		{
 			"doctype": "Marketplace Sync Log",
@@ -1057,37 +1246,53 @@ def _create_sync_log(order, trigger_source, status, snapshot, response, tracebac
 			"trigger_source": trigger_source,
 			"attempted_at": now,
 			"completed_at": now,
-			"request_data": json.dumps(
-				snapshot if snapshot is not None else {"marketplace_order": order.name},
-				ensure_ascii=False,
-				default=str,
-			),
+			"request_data": json.dumps(request_data, ensure_ascii=False, default=str),
 			"response_data": json.dumps(response, ensure_ascii=False, default=str),
 			"traceback": traceback_text,
 		}
 	).insert(ignore_permissions=True)
 
 
-def _save_success(order, snapshot_hash, sales_order, updated):
-	order.erpnext_sales_order = sales_order
-	order.last_synced_hash = snapshot_hash
+def _save_success(order, current_hash, sales_order, updated, snapshot):
+	# Pair first: a mismatch must raise before any link/baseline field is set, so
+	# the order is never left half-linked in memory.
+	persisted_snapshot = snapshot_with_sales_order_item_names(
+		snapshot, sales_order, refund_ids=_refund_ids(order)
+	)
+	order.erpnext_sales_order = sales_order.name
+	order.last_synced_hash = current_hash
+	order.last_synced_snapshot = frappe.as_json(persisted_snapshot)
 	order.last_erpnext_sync_on = now_datetime()
 	order.erpnext_sync_status = "Synced"
 	order.last_sync_error = None
 	order.flags.skip_sync_status_update = True
 	order.save()
-	return {"ok": True, "sales_order": sales_order, "updated": updated}
+	return {"ok": True, "sales_order": sales_order.name, "updated": updated}
 
 
-def _save_submitted_blocker(order):
-	message = _("ERPNext Sales Order {0} is submitted and cannot be updated from Marketplace Order.").format(
-		order.erpnext_sales_order
-	)
-	order.erpnext_sync_status = "Modified After Sync"
-	order.last_sync_error = message
+def _parse_last_synced_snapshot(order):
+	if not order.last_synced_snapshot:
+		return None
+	try:
+		parsed = frappe.parse_json(order.last_synced_snapshot)
+		return parsed if isinstance(parsed, dict) else None
+	except TypeError, ValueError:
+		return None
+
+
+def _save_reconciliation_advisory(order, reconciliation_plan):
+	_apply_reconciliation_status(order, reconciliation_plan)
+	message = order.last_sync_error
 	order.flags.skip_sync_status_update = True
 	order.save()
-	return {"ok": False, "status": order.erpnext_sync_status, "error": message}
+	return {
+		"ok": reconciliation_plan["outcome"] == NO_ACTION,
+		"status": order.erpnext_sync_status,
+		"sales_order": order.erpnext_sales_order,
+		"updated": False,
+		"error": None if reconciliation_plan["outcome"] == NO_ACTION else message,
+		"reconciliation": reconciliation_plan,
+	}
 
 
 def _save_failure(order, message):
@@ -1105,7 +1310,9 @@ def _line_identifier(row):
 def _delivery_date(order):
 	if order.platform == "Shopify":
 		if not order.processed_on:
-			raise SyncBlocker(_("Shopify Processed On is required to set the ERPNext Sales Order Delivery Date."))
+			raise SyncBlocker(
+				_("Shopify Processed On is required to set the ERPNext Sales Order Delivery Date.")
+			)
 		return getdate(order.processed_on)
 	if order.platform == "Noon":
 		# #146 decision 5: Noon documents no promised/delivery date, and
@@ -1122,11 +1329,15 @@ def _delivery_date(order):
 def _transaction_date(order):
 	if order.platform == "Shopify":
 		if not order.processed_on:
-			raise SyncBlocker(_("Shopify Processed On is required to set the ERPNext Sales Order Transaction Date."))
+			raise SyncBlocker(
+				_("Shopify Processed On is required to set the ERPNext Sales Order Transaction Date.")
+			)
 		return getdate(order.processed_on)
 	if order.platform == "Noon":
 		if not order.received_on:
-			raise SyncBlocker(_("Noon Received On is required to set the ERPNext Sales Order Transaction Date."))
+			raise SyncBlocker(
+				_("Noon Received On is required to set the ERPNext Sales Order Transaction Date.")
+			)
 		return getdate(order.received_on)
 	# received_on (Talabat order.sys.created_at) is not in openapi.json's
 	# required list for order.OrderSys, and the Marketplace Order field

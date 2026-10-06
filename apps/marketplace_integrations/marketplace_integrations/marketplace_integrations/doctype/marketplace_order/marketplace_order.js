@@ -636,8 +636,18 @@ function load_erpnext_sync_status(frm) {
 		method: "marketplace_integrations.api.marketplace_orders.get_erpnext_sync_status",
 		args: {marketplace_order: frm.doc.name},
 	}).then((response) => {
-		frm.doc.erpnext_sync_status = response.message.status;
-		frm.refresh_field("erpnext_sync_status");
+		const message = response.message;
+		if (message.saved && !frm.is_dirty()) {
+			// The server saved the order (new `modified`): reload the whole doc rather than
+			// patching it; the reload's refresh re-runs this check (a no-op save this time).
+			frm.reload_doc();
+			return;
+		}
+		frm.doc.erpnext_sync_status = message.status;
+		frm.doc.last_sync_error = message.last_sync_error || null;
+		// `modified` is deliberately never patched here: on a dirty form that was also saved
+		// server-side, Frappe's own "modified since you opened it" check must still fire.
+		frm.refresh_fields(["erpnext_sync_status", "last_sync_error"]);
 		add_erpnext_sync_action(frm);
 	});
 }
@@ -847,6 +857,7 @@ if (typeof module !== "undefined") {
 		add_generic_status_indicator,
 		add_status_indicators,
 		apply_platform_gating,
+		load_erpnext_sync_status,
 		JSON_EVIDENCE_FIELDS,
 		noon_unit_checklist_options,
 		mp_item_nrs_from_unit_indices,

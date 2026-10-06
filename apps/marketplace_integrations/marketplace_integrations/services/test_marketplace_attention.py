@@ -180,7 +180,11 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 	def test_sync_error_and_modified_after_sync_orders_are_listed_with_next_actions(self):
 		account = self.make_talabat_account()
 		errored = self.make_order(account, erpnext_sync_status="Sync Error", last_sync_error="No warehouse")
-		modified = self.make_order(account, erpnext_sync_status="Modified After Sync")
+		modified = self.make_order(
+			account,
+			erpnext_sync_status="Modified After Sync",
+			last_sync_error="Requested quantity is below the quantity already delivered in ERPNext.",
+		)
 		self.make_order(account, erpnext_sync_status="Synced")
 
 		rows = {row["reference_name"]: row for row in self.items_for(account)}
@@ -193,6 +197,10 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		self.assertEqual(rows[errored.name]["platform"], "Talabat")
 		self.assertEqual(rows[modified.name]["problem_type"], MODIFIED_AFTER_SYNC)
 		self.assertEqual(rows[modified.name]["next_action"], "Open Order")
+		self.assertEqual(
+			rows[modified.name]["explanation"],
+			"Requested quantity is below the quantity already delivered in ERPNext.",
+		)
 		self.assertTrue(rows[modified.name]["detected_at"])
 
 	# -- unmapped items ---------------------------------------------------
