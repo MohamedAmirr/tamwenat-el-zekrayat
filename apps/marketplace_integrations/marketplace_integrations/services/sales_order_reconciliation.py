@@ -1,0 +1,323 @@
+# Copyright (c) 2026, Tamwenat El Zekrayat and contributors
+# For license information, please see license.txt
+
+"""Read-only planning for reconciling submitted Marketplace Sales Orders.
+
+This module deliberately plans only.  A later issue may execute a supported
+plan through ERPNext's native submitted-document operations, but this layer
+must never mutate the Sales Order it inspects.
+"""
+
+from copy import deepcopy
+
+import frappe
+from frappe.utils import cstr, flt
+
+NO_ACTION = "NO_ACTION"
+UPDATE_SUBMITTED_ORDER = "UPDATE_SUBMITTED_ORDER"
+CANCEL_ORDER = "CANCEL_ORDER"
+CLOSE_REMAINDER = "CLOSE_REMAINDER"
+NEEDS_ATTENTION = "NEEDS_ATTENTION"
+UNSUPPORTED_COMPENSATING_TRANSACTION = "UNSUPPORTED_COMPENSATING_TRANSACTION"
+INACTIVE_ERP_ORDER_STATUSES = {"Cancelled", "Closed"}
+
+OUTCOMES = {
+	NO_ACTION,
+	UPDATE_SUBMITTED_ORDER,
+	CANCEL_ORDER,
+	CLOSE_REMAINDER,
+	NEEDS_ATTENTION,
+	UNSUPPORTED_COMPENSATING_TRANSACTION,
+}
+
+
+class SalesOrderLinesMismatch(ValueError):
+	"""The snapshot lines cannot be paired one-to-one with the Sales Order rows."""
+
+
+def read_erp_state(sales_order):
+	"""Return the execution facts a reconciliation decision may depend on."""
+	return {
+		"sales_order": sales_order.name,
+		"docstatus": sales_order.docstatus,
+		"status": sales_order.status,
+		"per_delivered": flt(sales_order.per_delivered),
+		"per_billed": flt(sales_order.per_billed),
+		"precision": {
+			"qty": frappe.get_precision("Sales Order Item", "qty"),
+			# Lines are compared by amount, at the precision the Sales Order's own
+			# currency gives the amount field (the rule `_verify_line_amounts()` uses).
+			"amount": frappe.get_precision("Sales Order Item", "amount", currency=sales_order.currency),
+		},
+		"lines": [
+			{
+				"sales_order_item": item.name,
+				"item_code": item.item_code,
+				"uom": item.uom,
+				"warehouse": item.warehouse,
+				"qty": flt(item.qty),
+				"delivered_qty": flt(item.delivered_qty),
+				"billed_amt": flt(item.billed_amt),
+				"rate": flt(item.rate),
+				"amount": flt(item.amount),
+			}
+			for item in sales_order.items
+		],
+	}
+
+
+def snapshot_with_sales_order_item_names(snapshot, sales_order, refund_ids=None):
+	"""Copy a successful commercial snapshot and attach ERP line identities.
+
+	The ERP child-row name and ``refund_ids`` (the marketplace refunds already
+	reflected in this baseline) are reconciliation evidence, not commercial
+	input; both are intentionally excluded from ``sales_order_sync.snapshot_hash()``
+	and from the header comparison in ``plan()``.  ``refund_ids=None`` leaves the
+	key out (a legacy baseline whose refund history is unknown).
+	"""
+	persisted = deepcopy(snapshot)
+	lines = persisted.get("items") or []
+	if len(lines) != len(sales_order.items):
+		raise SalesOrderLinesMismatch(
+			f"Sales Order {sales_order.name} has {len(sales_order.items)} item rows but the "
+			f"marketplace snapshot has {len(lines)} lines."
+		)
+	# Pair by item identity (item_code; identical item codes pair in row order)
+	# rather than by position, so a reordered Sales Order cannot mis-map names.
+	rows_by_item_code = {}
+	for sales_order_item in sales_order.items:
+		rows_by_item_code.setdefault(sales_order_item.item_code, []).append(sales_order_item.name)
+	for line in lines:
+		candidates = rows_by_item_code.get(line.get("item_code"))
+		if not candidates:
+			raise SalesOrderLinesMismatch(
+				f"Sales Order {sales_order.name} has no remaining item row for item "
+				f"{line.get('item_code')} (marketplace line {line.get('external_item_id')})."
+			)
+		line["sales_order_item"] = candidates.pop(0)
+	if refund_ids is not None:
+		persisted["refund_ids"] = sorted(refund_ids)
+	return persisted
+
+
+def snapshot_advanced_from(previous, current):
+	"""Copy ``current`` as the new baseline, keeping ``previous``'s ERP line identities.
+
+	Used when ERPNext already matches the current marketplace state (NO_ACTION):
+	the ERP rows are unchanged, so their names and the already-reflected refund
+	ids carry over from the previous baseline.
+	"""
+	advanced = deepcopy(current)
+	previous_items = _items_by_external_id(previous) or {}
+	for line in advanced.get("items") or []:
+		line["sales_order_item"] = (previous_items.get(cstr(line.get("external_item_id")).strip()) or {}).get(
+			"sales_order_item"
+		)
+	if "refund_ids" in previous:
+		advanced["refund_ids"] = previous["refund_ids"]
+	return advanced
+
+
+def plan(previous, current, evidence, erp_state):
+	"""Classify a desired commercial snapshot without applying any ERP change."""
+	evidence = evidence or {}
+	if not previous:
+		return _attention("No reconciled snapshot baseline is available for this Sales Order.")
+	# A refund needs a compensating ERP transaction only once the ERP order has
+	# delivery or billing; an untouched order falls through (e.g. CANCEL_ORDER).
+	# Return evidence always needs one.
+	if evidence.get("return") or (evidence.get("refund") and _has_execution(erp_state)):
+		return _result(
+			UNSUPPORTED_COMPENSATING_TRANSACTION,
+			"Marketplace return or refund evidence needs a compensating ERP transaction.",
+		)
+
+	previous_items = _items_by_external_id(previous)
+	current_items = _items_by_external_id(current)
+	if previous_items is None or current_items is None:
+		return _attention("The marketplace snapshot has duplicate or missing line identities.")
+	if erp_state.get("docstatus") != 1 or erp_state.get("status") in INACTIVE_ERP_ORDER_STATUSES:
+		if evidence.get("cancellation") == "full" and _inactive_order_converged(erp_state):
+			# The marketplace cancelled the order and ERPNext is already cancelled (or
+			# closed with nothing left to deliver): both sides agree, nothing to do.
+			return _result(
+				NO_ACTION, "The cancelled marketplace order is already cancelled or closed in ERPNext."
+			)
+		return _attention("The linked ERPNext Sales Order is no longer an active submitted document.")
+
+	header_changes = _header_changes(previous, current)
+	changes = _line_changes(previous_items, current_items)
+	if header_changes:
+		return _attention(
+			"A submitted Sales Order has structural commercial changes.", header_changes + changes
+		)
+	if any(change["kind"] in {"item_added", "item_removed"} for change in changes):
+		return _attention("A submitted Sales Order has structural line changes.", changes)
+
+	erp_lines = {line["sales_order_item"]: line for line in erp_state.get("lines") or []}
+	equivalent = _effectively_equivalent(
+		previous_items, current_items, erp_lines, erp_state.get("precision") or {}
+	)
+	if not equivalent and not changes:
+		return _attention("The ERPNext Sales Order no longer represents the reconciled marketplace state.")
+
+	cancelling = evidence.get("cancellation") == "full"
+	if equivalent and not cancelling:
+		# ERPNext already holds the current marketplace state (including after a
+		# manual ERP-side edit): nothing to do, whatever its billing/delivery.
+		return _result(NO_ACTION, "Marketplace and ERPNext commercial state are effectively equivalent.")
+	if cancelling and _has_execution(erp_state) and not _has_outstanding_remainder(erp_state):
+		# Fully delivered (billed or not): only a compensating transaction can undo it,
+		# so this takes precedence over the "already billed" blocker below.
+		return _result(
+			UNSUPPORTED_COMPENSATING_TRANSACTION,
+			"The cancelled marketplace order is already fully delivered in ERPNext; "
+			"a return or other compensating transaction is needed.",
+			changes,
+		)
+	if changes or cancelling:
+		# Delivery/billing only blocks when something would actually change; an
+		# unchanged, equivalent billed or delivered order is simply NO_ACTION.
+		for external_item_id, current_line in current_items.items():
+			previous_line = previous_items.get(external_item_id)
+			if not previous_line:
+				continue
+			erp_line = erp_lines.get(previous_line.get("sales_order_item"))
+			if not erp_line:
+				return _attention("The reconciled Sales Order line is missing from ERPNext.", changes)
+			if flt(current_line.get("qty")) < flt(erp_line.get("delivered_qty")):
+				return _attention(
+					"Requested quantity is below the quantity already delivered in ERPNext.", changes
+				)
+			if flt(erp_line.get("billed_amt")):
+				return _attention("A submitted Sales Order line is already billed in ERPNext.", changes)
+
+	if cancelling:
+		if not _has_execution(erp_state):
+			return _result(
+				CANCEL_ORDER, "The marketplace order is fully cancelled before ERP execution.", changes
+			)
+		if _has_outstanding_remainder(erp_state):
+			return _result(
+				CLOSE_REMAINDER, "Only the outstanding Sales Order remainder can be closed.", changes
+			)
+
+	if _has_execution(erp_state):
+		return _attention(
+			"ERPNext delivery or billing execution blocks an automatic submitted-order update.", changes
+		)
+	return _result(
+		UPDATE_SUBMITTED_ORDER,
+		"The submitted Sales Order changes are eligible for ERPNext validation.",
+		changes,
+	)
+
+
+def _items_by_external_id(snapshot):
+	items = {}
+	for line in snapshot.get("items") or []:
+		external_item_id = cstr(line.get("external_item_id")).strip()
+		if not external_item_id or external_item_id in items:
+			return None
+		items[external_item_id] = line
+	return items
+
+
+def _header_changes(previous, current):
+	ignored = {"items", "refund_ids"}
+	keys = (set(previous) | set(current)) - ignored
+	return [
+		{"kind": "header_changed", "field": key, "previous": previous.get(key), "current": current.get(key)}
+		for key in sorted(keys)
+		if not _same_value(previous.get(key), current.get(key))
+	]
+
+
+def _line_changes(previous_items, current_items):
+	changes = []
+	for external_item_id in sorted(set(previous_items) | set(current_items)):
+		previous = previous_items.get(external_item_id)
+		current = current_items.get(external_item_id)
+		if previous is None:
+			changes.append({"kind": "item_added", "external_item_id": external_item_id})
+		elif current is None:
+			changes.append({"kind": "item_removed", "external_item_id": external_item_id})
+		else:
+			for field in ("qty", "effective_rate", "fulfilled_total_price", "item_code", "uom", "warehouse"):
+				if not _same_value(previous.get(field), current.get(field)):
+					changes.append(
+						{
+							"kind": "line_changed",
+							"external_item_id": external_item_id,
+							"field": field,
+							"previous": previous.get(field),
+							"current": current.get(field),
+						}
+					)
+	return changes
+
+
+def _same_value(previous, current):
+	"""Compare persisted JSON values with the in-memory date values Frappe returns."""
+	if previous == current:
+		return True
+	return str(previous) == str(current)
+
+
+def _effectively_equivalent(previous_items, current_items, erp_lines, precision=None):
+	"""Define convergence once, per marketplace line and its ERP row.
+
+	Money is compared as the line amount against the marketplace fulfilled total
+	at currency precision, not as a rate: ERPNext cannot always reproduce a
+	marketplace total from a rate, but the amount is what posts.
+	"""
+	if len(current_items) != len(erp_lines):
+		return False
+	precision = precision or {}
+	qty_precision = precision.get("qty")
+	amount_precision = precision.get("amount")
+	for external_item_id, line in current_items.items():
+		sales_order_item = previous_items[external_item_id].get("sales_order_item")
+		erp_line = erp_lines.get(sales_order_item)
+		if not erp_line:
+			return False
+		if (
+			flt(line.get("qty"), qty_precision) != flt(erp_line.get("qty"), qty_precision)
+			or line.get("item_code") != erp_line.get("item_code")
+			or line.get("uom") != erp_line.get("uom")
+			or line.get("warehouse") != erp_line.get("warehouse")
+			or flt(line.get("fulfilled_total_price"), amount_precision) != flt(erp_line.get("amount"), amount_precision)
+		):
+			return False
+		if flt(erp_line.get("delivered_qty")) > flt(line.get("qty")):
+			return False
+	return True
+
+
+def _inactive_order_converged(erp_state):
+	"""ERP Cancelled/docstatus 2, or Closed with no outstanding delivery remainder."""
+	if erp_state.get("docstatus") == 2 or erp_state.get("status") == "Cancelled":
+		return True
+	return (
+		erp_state.get("docstatus") == 1
+		and erp_state.get("status") == "Closed"
+		and not _has_outstanding_remainder(erp_state)
+	)
+
+
+def _has_execution(erp_state):
+	return any(
+		flt(line.get("delivered_qty")) or flt(line.get("billed_amt")) for line in erp_state.get("lines") or []
+	)
+
+
+def _has_outstanding_remainder(erp_state):
+	return any(flt(line.get("qty")) > flt(line.get("delivered_qty")) for line in erp_state.get("lines") or [])
+
+
+def _attention(message, changes=None):
+	return _result(NEEDS_ATTENTION, message, changes)
+
+
+def _result(outcome, message, changes=None):
+	return {"outcome": outcome, "message": message, "changes": changes or []}

@@ -44,6 +44,7 @@ const {
 	add_generic_status_indicator,
 	add_status_indicators,
 	apply_platform_gating,
+	load_erpnext_sync_status,
 	JSON_EVIDENCE_FIELDS,
 } = require("./marketplace_order.js");
 
@@ -60,6 +61,8 @@ function make_frm(doc) {
 		set_df_property: () => {},
 		get_field: () => ({$wrapper: {empty: () => {}, append: () => {}}}),
 		refresh_field: () => {},
+		refresh_fields: () => {},
+		is_dirty: () => false,
 	};
 }
 
@@ -376,7 +379,40 @@ test("apply_platform_gating shows the full Talabat action set for a Talabat orde
 	assert.ok(!frm_calls.indicators.some((indicator) => indicator.label.startsWith("Fulfillment:")));
 });
 
-test("apply_platform_gating shows only the Refresh from Shopify control and the Financial/Fulfillment indicator pair for a Shopify order", () => {
+test("apply_platform_gating shows only Refresh from Shopify and the indicator pair for an already-synced Shopify order", () => {
+	frm_calls = {custom_buttons: [], indicators: []};
+	const frm = make_frm({
+		platform: "Shopify",
+		external_financial_status: "PAID",
+		external_fulfillment_status: "FULFILLED",
+		erpnext_sales_order: "SAL-ORD-2026-00001",
+	});
+
+	// Override the global frappe.call mock to return "Synced" for this test
+	const original_call = global.frappe.call;
+	global.frappe.call = (opts) => ({
+		then: (resolve) => {
+			if (opts && String(opts.method || "").includes("get_erpnext_sync_status") && typeof resolve === "function") {
+				resolve({message: {status: "Synced"}});
+			}
+			return {then: () => {}};
+		},
+	});
+
+	try {
+		apply_platform_gating(frm);
+	} finally {
+		global.frappe.call = original_call;
+	}
+
+	assert.deepEqual(frm_calls.custom_buttons, ["Refresh from Shopify"]);
+	assert.deepEqual(frm_calls.indicators, [
+		{label: "Financial: PAID", color: "gray"},
+		{label: "Fulfillment: FULFILLED", color: "gray"},
+	]);
+});
+
+test("apply_platform_gating shows Send to ERPNext for an unsynced Shopify order", () => {
 	frm_calls = {custom_buttons: [], indicators: []};
 	const frm = make_frm({
 		platform: "Shopify",
@@ -386,11 +422,61 @@ test("apply_platform_gating shows only the Refresh from Shopify control and the 
 
 	apply_platform_gating(frm);
 
-	assert.deepEqual(frm_calls.custom_buttons, ["Refresh from Shopify"]);
-	assert.deepEqual(frm_calls.indicators, [
-		{label: "Financial: PAID", color: "gray"},
-		{label: "Fulfillment: FULFILLED", color: "gray"},
-	]);
+	assert.ok(frm_calls.custom_buttons.includes("Send to ERPNext"));
+	assert.ok(frm_calls.custom_buttons.includes("Refresh from Shopify"));
+});
+
+function run_status_load({saved, dirty}) {
+	frm_calls = {custom_buttons: [], indicators: []};
+	const frm = make_frm({
+		platform: "Shopify",
+		name: "MO-1",
+		modified: "2026-01-01 00:00:00",
+		erpnext_sync_status: "Synced",
+		erpnext_sales_order: "SAL-ORD-2026-00001",
+	});
+	frm.is_dirty = () => dirty;
+	frm.reload_calls = 0;
+	frm.reload_doc = () => {
+		frm.reload_calls += 1;
+	};
+	const original_call = global.frappe.call;
+	global.frappe.call = () => ({
+		then: (resolve) => {
+			resolve({message: {status: "Modified After Sync", last_sync_error: "changed", saved}});
+			return {then: () => {}};
+		},
+	});
+	try {
+		load_erpnext_sync_status(frm);
+	} finally {
+		global.frappe.call = original_call;
+	}
+	return frm;
+}
+
+test("load_erpnext_sync_status reloads the form when the server saved and the form is clean", () => {
+	const frm = run_status_load({saved: true, dirty: false});
+	assert.equal(frm.reload_calls, 1);
+	assert.equal(frm.doc.modified, "2026-01-01 00:00:00");
+	assert.equal(frm.doc.erpnext_sync_status, "Synced");
+});
+
+test("load_erpnext_sync_status applies status without reload or modified change when the server saved a dirty form", () => {
+	const frm = run_status_load({saved: true, dirty: true});
+	assert.equal(frm.reload_calls, 0);
+	assert.equal(frm.doc.modified, "2026-01-01 00:00:00");
+	assert.equal(frm.doc.erpnext_sync_status, "Modified After Sync");
+});
+
+test("load_erpnext_sync_status applies status without reload when the server did not save", () => {
+	for (const dirty of [false, true]) {
+		const frm = run_status_load({saved: false, dirty});
+		assert.equal(frm.reload_calls, 0);
+		assert.equal(frm.doc.modified, "2026-01-01 00:00:00");
+		assert.equal(frm.doc.erpnext_sync_status, "Modified After Sync");
+		assert.equal(frm.doc.last_sync_error, "changed");
+	}
 });
 
 test("apply_platform_gating shows nothing at all for a blank/unrecognized platform (fails closed)", () => {

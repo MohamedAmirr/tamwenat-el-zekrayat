@@ -18,3 +18,6 @@ Drafting rules:
 - Ground every step in what actually exists: real file paths, real doctype/API names from the spec docs — not placeholders.
 
 Output: the epic title/label and each sub-issue's title/label/body, in creation order (sub-issues first, epic last), ready to be pasted into `gh issue create` calls. Don't create anything yourself — hand this off.
+
+## Graphify
+If `graphify-out/graph.json` exists, run `graphify query "<topic>"` to find existing modules and prior art before reading files or planning. Read the source it points to before relying on it. Do not update the graph. Rules: `docs/graphify-usage.md`.

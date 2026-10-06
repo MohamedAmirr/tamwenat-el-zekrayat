@@ -19,6 +19,8 @@ Keep this file short. Load these on demand rather than re-deriving them:
 - `docs/frappe-conventions.md` — Frappe/ERPNext framework conventions to follow for all custom app work: doctype structure, hooks.py, permissions, migrations/patches, whitelisted methods, client scripts, naming, plus hard-won gotchas (XSS-sanitizer field corruption, autoname/`_sync_autoname_field` traps, composite-uniqueness pattern).
 - `docs/marketplace-integrations/architecture.md` — target shared marketplace architecture: connection/account/mapping/inventory boundaries, import shapes, and migration rules. Read this for all new marketplace work.
 - `docs/talabat-integration/architecture.md` — historical map of the now-removed legacy `talabat_integration` app. Closed Talabat issues and this doc remain evidence of proven behavior/security decisions; consult them when touching Talabat code in `marketplace_integrations` so proven behavior isn't rediscovered or lost.
+- `docs/graphify-usage.md` — when to query the knowledge graph, when to refresh it, and what each agent should do.
+- `docs/user-actions.md` — steps only the user can do (semantic graph refresh, migrations, approvals) and their triggers. Remind the user in your reply whenever a trigger there fires, and update the list when a new one appears.
 - `docs/issue-conventions.md` — how features become GitHub issues: epic + ordered sub-issues, the token-efficient body template, label rules.
 
 ## Custom app strategy
@@ -53,4 +55,5 @@ Typical flow per sub-issue: `feature-planner` (plan it) → `frappe-dev` (build 
 - **The graph is a map, not the source.** Before implementing or changing behavior, Read the relevant source directly. INFERRED/AMBIGUOUS edges can be wrong. If the graph and the source disagree, trust the source and run `graphify update .`.
 - **It is a snapshot and can be stale** — Codex and other agents edit files here too.
 - **Never Read `graph.json`, `graph.html` or `cache/` raw** (see `.claudeignore`); query through the CLI. `GRAPH_REPORT.md` is fine to read for broad architecture review.
+- **Full query/update rules and per-agent expectations:** `docs/graphify-usage.md`. When spawning subagents for code work, tell them to use the graph first.
 - **Refresh:** git hooks rebuild the code graph (AST only, no LLM) after commits and branch switches. After code edits you can run `graphify update .` by hand. Doc or semantic changes need a manual `/graphify . --update`.
