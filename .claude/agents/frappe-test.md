@@ -21,3 +21,6 @@ Check whether the app has a linter configured (`pyproject.toml` with a `[tool.ru
 ## Reporting
 
 State plainly: which tests were added/run and their pass/fail result, and the linter's result (ran clean / fixed N trivial issues / found something that needs a human look). A failing test is not yours to make pass by weakening the assertion — report the failure and what you think it reveals about the code under test.
+
+## Graphify
+If `graphify-out/graph.json` exists, use `graphify query`/`graphify affected "<symbol>"` to find the code under test and its callers instead of grepping broadly, then Read the source. After adding or editing test/app files, run `graphify update .` (skip silently if `graphify` is missing). Rules: `docs/graphify-usage.md`.

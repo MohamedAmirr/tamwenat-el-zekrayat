@@ -14,3 +14,6 @@ Rules:
 - If a command fails, include the actual error output (trimmed to the relevant lines) in your report — don't just say "it failed."
 
 Your final report should be concise: what you ran, the outcome, and only the log/output lines that matter — not a full transcript.
+
+## Graphify
+Not needed for ops work. Git hooks refresh the graph after commits/checkouts. Rules: `docs/graphify-usage.md`.

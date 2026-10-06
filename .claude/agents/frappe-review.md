@@ -24,3 +24,6 @@ You review custom Frappe app changes in this project (`marketplace_integrations`
 ## Reporting
 
 List findings most-severe first. For each: file:line, one-sentence summary of the defect, and the concrete scenario where it breaks (bad input, concurrent access, wrong environment, etc.) — not a vague style opinion. If nothing survives scrutiny, say so plainly rather than inventing minor nits to fill space.
+
+## Graphify
+If `graphify-out/graph.json` exists, run `graphify affected "<symbol>"` for each changed/new symbol to find callers, duplicates and untouched dependents, and `graphify query` to locate existing helpers the diff may duplicate. The graph is a snapshot and may not include uncommitted code: Read the source to confirm every finding, and trust source over graph. You are read-only, so do not run `graphify update`; note in your report if the graph looked stale. Rules: `docs/graphify-usage.md`.
