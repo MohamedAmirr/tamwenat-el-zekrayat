@@ -144,6 +144,30 @@ bench --site test.localhost scheduler disable"
 
 Keep the test site's OWN `encryption_key` (a fresh site generates one; do not copy dev's `site_config.json` secrets or `host_name`): the restored Shopify/Talabat credentials are then undecryptable there, and with the scheduler off nothing on the test site can call a real marketplace. `default_site` in `common_site_config.json` stays `dev.localhost`.
 
+### Fast test loop
+
+The full `marketplace_integrations` suite takes about 50 seconds (990 tests, measured 2026-10-07). Waiting on an agent that migrates, re-reads files and retries is what made runs take 20-80 minutes, not the tests. Run them directly and print only the summary:
+
+```bash
+C=tamwenat-el-zekrayat-dev-frappe-1
+docker exec -w /home/frappe/bench-workspace/frappe-bench $C bash -lc \
+  "bench --site test.localhost run-tests --app marketplace_integrations > /tmp/suite.out 2>&1; \
+   grep -E '^(Ran|OK|FAILED)' /tmp/suite.out; grep -E '^ (FAIL|ERROR) ' /tmp/suite.out"
+```
+
+Narrow it while iterating (all flags are from `bench run-tests --help`):
+
+| Need | Flag |
+|---|---|
+| One module (seconds) | `--module marketplace_integrations.services.test_sales_order_sync` |
+| One test class | `--case IntegrationTestSalesOrderSync` (with `--module`) |
+| One test | `--module ... --test test_name` |
+| DB-free tests only (about 0.2s for 210 tests) | `--test-category unit` |
+| Stop at the first failure | `--failfast` |
+| Failure detail | `sed -n '/^ FAIL /,/^Ran /p' /tmp/suite.out` inside the container |
+
+Run the full suite once before handing work off. Migrate `test.localhost` (`bench --site test.localhost migrate`) only when a doctype JSON changed. `bench run-parallel-tests` exists but splits runs across builds for CI; it is not used here because all runs share the single `test.localhost` database, so parallel runs would clash. Run the JS test and `ruff check` / `ruff format --check` as separate quick commands.
+
 ## Running one-off Python against a site
 
 `bench console` is interactive (IPython-style), so feed it a script via `echo | ...`, not a heredoc directly on `docker exec` (that leaves the console waiting on a TTY it doesn't have):
