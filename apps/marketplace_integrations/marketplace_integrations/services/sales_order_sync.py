@@ -10,8 +10,10 @@ submits it (#131) - a fresh Sales Order is never left in Draft.  Only the
 existing-Sales-Order UPDATE branch (re-syncing an order whose linked Sales
 Order is still Draft, e.g. one created before #131) leaves the document in
 whatever docstatus it already had; once that Sales Order is submitted, a
-later re-sync is classified by the advisory reconciliation planner rather
-than silently updating or re-submitting it.
+later re-sync is classified by the reconciliation planner; supported outcomes
+(cancel, close the remainder, update quantities/rates) are executed against the
+submitted Sales Order (#179), everything else is an advisory.  It is never
+re-submitted.
 
 Every ``sync_sales_order()`` attempt - success, an expected ``SyncBlocker``,
 or an unexpected exception - writes one ``Marketplace Sync Log`` row
@@ -64,6 +66,7 @@ from marketplace_integrations.services.sales_order_reconciliation import (
 	plan,
 	read_erp_state,
 	snapshot_advanced_from,
+	snapshot_with_line_rows,
 	snapshot_with_sales_order_item_names,
 )
 
@@ -120,8 +123,8 @@ EFFECTIVE_RATE_PRECISION = 6
 _FRESH_SALES_ORDER_SAVEPOINT = "marketplace_fresh_sales_order"
 _RECONCILE_EXECUTE_SAVEPOINT = "marketplace_reconcile_execute"
 
-# Plan outcomes `_reconcile_submitted_order()` applies to ERPNext (#179).  Slice B adds
-# UPDATE_SUBMITTED_ORDER here (and handles it in `execute()`); every other outcome stays
+# Plan outcomes `_reconcile_submitted_order()` executes against ERPNext (#179): cancel,
+# close the undelivered remainder, and update quantities/rates; every other outcome stays
 # an advisory.  Form load/save (`set_sync_status_from_current_snapshot`) never executes.
 _EXECUTABLE_OUTCOMES = {CANCEL_ORDER, CLOSE_REMAINDER, UPDATE_SUBMITTED_ORDER}
 
@@ -141,8 +144,9 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 	A fresh Sales Order (the ``.insert()`` branch) is immediately submitted
 	(#131) - unconditionally, for every caller, Talabat and Shopify alike.
 	Re-syncing an order whose Sales Order is already submitted uses the
-	read-only advisory planner: this never re-submits, double-submits, or
-	mutates that ERP document.
+	reconciliation planner: supported outcomes (cancel, close the undelivered
+	remainder, update qty/rate) are executed against that ERP document inside a
+	savepoint (#179); anything else is an advisory.  It is never re-submitted.
 
 	Every attempt - success, expected ``SyncBlocker``, or unexpected
 	exception - writes one ``Marketplace Sync Log`` row via
@@ -1294,10 +1298,41 @@ def _execute_reconciliation_plan(
 			reconciliation_plan, sales_order.name, _parse_last_synced_snapshot(order), snapshot or {}
 		)
 		if outcome == UPDATE_SUBMITTED_ORDER:
-			# Pair the current snapshot to the updated rows before anything is persisted.
-			advanced = snapshot_with_sales_order_item_names(
-				snapshot, frappe.get_doc("Sales Order", sales_order.name), refund_ids=_refund_ids(order)
+			# Carry the exact line-to-row names execute() used (no re-pairing).
+			order.last_synced_hash = snapshot_hash(snapshot)
+			order.last_synced_snapshot = frappe.as_json(
+				snapshot_with_line_rows(snapshot, executed["line_rows"], refund_ids=_refund_ids(order))
 			)
+		order.last_erpnext_sync_on = now_datetime()
+		order.erpnext_sync_status = "Synced"
+		order.last_sync_error = None
+		order.flags.skip_sync_status_update = True
+		order.save()
+		result = {
+			"ok": True,
+			"status": order.erpnext_sync_status,
+			"sales_order": order.erpnext_sales_order,
+			"updated": False,
+			"error": None,
+			"reconciliation": reconciliation_plan,
+			"executed": executed,
+			"executed_action": outcome,
+			"executed_message": _executed_message(outcome, order.erpnext_sales_order),
+		}
+		_create_sync_log(
+			order,
+			trigger_source,
+			"Success",
+			snapshot,
+			result,
+			reconciliation_plan=reconciliation_plan,
+			erp_state=erp_state,
+			action=outcome,
+		)
+		# Released last, and strictly: a missing savepoint here means the transaction was
+		# already rolled back, which must end as a Sync Error, not a Success.
+		frappe.db.release_savepoint(_RECONCILE_EXECUTE_SAVEPOINT)
+		return result
 	except ReconciliationMismatch as exc:
 		_rollback_reconcile_savepoint()
 		frappe.clear_messages()
@@ -1347,35 +1382,14 @@ def _execute_reconciliation_plan(
 			erp_state=erp_state,
 		)
 		return result
-	_release_reconcile_savepoint()
-	if outcome == UPDATE_SUBMITTED_ORDER:
-		order.last_synced_hash = snapshot_hash(snapshot)
-		order.last_synced_snapshot = frappe.as_json(advanced)
-	order.last_erpnext_sync_on = now_datetime()
-	order.erpnext_sync_status = "Synced"
-	order.last_sync_error = None
-	order.flags.skip_sync_status_update = True
-	order.save()
-	result = {
-		"ok": True,
-		"status": order.erpnext_sync_status,
-		"sales_order": order.erpnext_sales_order,
-		"updated": False,
-		"error": None,
-		"reconciliation": reconciliation_plan,
-		"executed": executed,
-	}
-	_create_sync_log(
-		order,
-		trigger_source,
-		"Success",
-		snapshot,
-		result,
-		reconciliation_plan=reconciliation_plan,
-		erp_state=erp_state,
-		action=outcome,
-	)
-	return result
+
+
+def _executed_message(outcome, sales_order_name):
+	if outcome == CANCEL_ORDER:
+		return _("Sales Order {0} was cancelled").format(sales_order_name)
+	if outcome == CLOSE_REMAINDER:
+		return _("Sales Order {0} was closed").format(sales_order_name)
+	return _("Sales Order {0} was updated").format(sales_order_name)
 
 
 def _rollback_reconcile_savepoint():
@@ -1384,14 +1398,6 @@ def _rollback_reconcile_savepoint():
 	except Exception as exc:
 		# The savepoint can already be gone (e.g. MariaDB rolled the whole transaction
 		# back on a deadlock); anything else is a real error.
-		if "SAVEPOINT" not in cstr(exc).upper():
-			raise
-
-
-def _release_reconcile_savepoint():
-	try:
-		frappe.db.release_savepoint(_RECONCILE_EXECUTE_SAVEPOINT)
-	except Exception as exc:
 		if "SAVEPOINT" not in cstr(exc).upper():
 			raise
 

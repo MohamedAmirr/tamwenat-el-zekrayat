@@ -89,6 +89,7 @@ function order_server_message_text(error) {
 function summarize_retry_results(names, results) {
 	const succeeded = [];
 	const failed = [];
+	const executed = [];
 	results.forEach((result, index) => {
 		if (result.status === "fulfilled") {
 			const value = (result.value && result.value.message) || {};
@@ -96,6 +97,7 @@ function summarize_retry_results(names, results) {
 				failed.push({ name: names[index], text: value.error || __("The sync was not completed.") });
 			} else {
 				succeeded.push(names[index]);
+				if (value.executed_action) executed.push(value.executed_message || value.executed_action);
 			}
 		} else {
 			const reason = result.reason;
@@ -105,13 +107,18 @@ function summarize_retry_results(names, results) {
 			});
 		}
 	});
-	return { succeeded, failed };
+	return { succeeded, failed, executed };
 }
 
-function format_retry_summary({ succeeded, failed }) {
+function format_retry_summary({ succeeded, failed, executed = [] }) {
 	const lines = [__("Succeeded: {0}", [succeeded.length]), __("Failed: {0}", [failed.length])].map(
 		(line) => `<p>${frappe.utils.escape_html(line)}</p>`
 	);
+	if (executed.length) {
+		lines.push(
+			"<ul>" + executed.map((text) => `<li>${frappe.utils.escape_html(text)}</li>`).join("") + "</ul>"
+		);
+	}
 	if (failed.length) {
 		lines.push(
 			"<ul>" +

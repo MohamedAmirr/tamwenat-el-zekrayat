@@ -108,6 +108,16 @@ def snapshot_with_sales_order_item_names(snapshot, sales_order, refund_ids=None)
 	return persisted
 
 
+def snapshot_with_line_rows(snapshot, line_rows, refund_ids=None):
+	"""Copy ``snapshot`` attaching the exact ERP row per line (``line_rows`` from ``execute()``)."""
+	persisted = deepcopy(snapshot)
+	for line in persisted.get("items") or []:
+		line["sales_order_item"] = line_rows.get(cstr(line.get("external_item_id")).strip())
+	if refund_ids is not None:
+		persisted["refund_ids"] = sorted(refund_ids)
+	return persisted
+
+
 def snapshot_advanced_from(previous, current):
 	"""Copy ``current`` as the new baseline, keeping ``previous``'s ERP line identities.
 
@@ -213,7 +223,13 @@ def plan(previous, current, evidence, erp_state):
 	if not equivalent and not changes:
 		return _attention("The ERPNext Sales Order no longer represents the reconciled marketplace state.")
 
-	cancelling = evidence.get("cancellation") == "full" or all_zero
+	explicit_cancellation = evidence.get("cancellation") == "full"
+	if all_zero and not explicit_cancellation and _has_delivery(erp_state):
+		return _attention(
+			"All lines are zero but the order was already delivered; explicit cancellation is required.",
+			changes,
+		)
+	cancelling = explicit_cancellation or all_zero
 	if equivalent and not cancelling:
 		# ERPNext already holds the current marketplace state (including after a
 		# manual ERP-side edit): nothing to do, whatever its billing/delivery.
@@ -222,6 +238,15 @@ def plan(previous, current, evidence, erp_state):
 		blocked_reason = _lifecycle_block_reason(evidence, changes)
 		if blocked_reason:
 			return _attention(blocked_reason, changes)
+		if any(
+			change["kind"] == "line_changed" and change["field"] in _MAPPING_SOURCED_LINE_FIELDS
+			for change in changes
+		):
+			return _attention(
+				"The item, unit of measure or warehouse of a line changed (mapping or account change); "
+				"this cannot be applied automatically.",
+				changes,
+			)
 	if cancelling and _has_execution(erp_state) and not _has_outstanding_remainder(erp_state):
 		# Fully delivered (billed or not): only a compensating transaction can undo it,
 		# so this takes precedence over the "already billed" blocker below.
@@ -365,6 +390,7 @@ def _effectively_equivalent(previous_items, current_items, erp_lines, precision=
 # ``warehouse`` come from this app's mapping/account configuration, so the marketplace
 # lifecycle has no say over them and must not block a change to them.
 _MARKETPLACE_SOURCED_LINE_FIELDS = {"qty", "effective_rate", "fulfilled_total_price"}
+_MAPPING_SOURCED_LINE_FIELDS = {"item_code", "uom", "warehouse"}
 
 
 def _lifecycle_block_reason(evidence, changes):
@@ -461,6 +487,9 @@ def execute(reconciliation_plan, sales_order_name, previous=None, current=None):
 	if outcome == CANCEL_ORDER:
 		sales_order.cancel()
 	else:
+		# SalesOrder.update_status() itself performs no permission check (ERPNext's
+		# whitelisted wrapper does); closing needs submit permission like cancel does.
+		sales_order.check_permission("submit")
 		sales_order.update_status("Closed")
 	return {"outcome": outcome, "sales_order": sales_order.name, "status": sales_order.status}
 
@@ -472,18 +501,24 @@ def _execute_update(sales_order, previous, current):
 	current_items = _items_by_external_id(current) or {}
 	rows = {row.name: row for row in sales_order.items}
 	trans_items = []
+	line_rows = {}
 	for external_item_id, line in current_items.items():
 		if flt(line.get("qty")) <= 0:
+			line_rows[external_item_id] = None
 			continue  # omitted rows are deleted by ERPNext
 		row = rows.get((previous_items.get(external_item_id) or {}).get("sales_order_item"))
 		if not row:
 			raise ReconciliationMismatch(
 				f"The Sales Order row for marketplace line {external_item_id} was not found."
 			)
+		line_rows[external_item_id] = row.name
 		trans_items.append(
 			{
 				"docname": row.name,
 				"item_code": row.item_code,
+				# update_child_qty_rate assigns description = d.get("description"), so
+				# omitting it wipes the row's description.
+				"description": row.description,
 				"qty": flt(line.get("qty")),
 				"rate": flt(line.get("effective_rate"), 6),
 				"uom": row.uom,
@@ -503,4 +538,6 @@ def _execute_update(sales_order, previous, current):
 		"outcome": UPDATE_SUBMITTED_ORDER,
 		"sales_order": sales_order.name,
 		"status": sales_order.status,
+		# marketplace external_item_id -> Sales Order row name (None: line removed)
+		"line_rows": line_rows,
 	}

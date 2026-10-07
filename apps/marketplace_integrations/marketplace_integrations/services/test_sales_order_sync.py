@@ -575,6 +575,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 		self.assertTrue(result["ok"], result.get("error"))
 		self.assertEqual(result["reconciliation"]["outcome"], "UPDATE_SUBMITTED_ORDER")
+		self.assertEqual(result["executed_action"], "UPDATE_SUBMITTED_ORDER")
+		self.assertIn("was updated", result["executed_message"])
 		self.assertEqual(order.erpnext_sync_status, "Synced")
 		self.assertEqual(frappe.db.get_value("Sales Order Item", {"parent": sales_order.name}, "qty"), 3)
 
@@ -600,6 +602,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 		self.assertTrue(result["ok"])
 		self.assertEqual(result["reconciliation"]["outcome"], "NO_ACTION")
+		self.assertNotIn("executed_action", result)
 		self.assertEqual(order.erpnext_sync_status, "Synced")
 		self.assertFalse(order.last_sync_error)
 
@@ -615,6 +618,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 		self.assertTrue(result["ok"], result.get("error"))
 		self.assertEqual(result["reconciliation"]["outcome"], "CANCEL_ORDER")
+		self.assertEqual(result["executed_action"], "CANCEL_ORDER")
+		self.assertIn(sales_order.name, result["executed_message"])
 		self.assertEqual(frappe.db.get_value("Sales Order", sales_order.name, "docstatus"), 2)
 		self.assertEqual(order.erpnext_sync_status, "Synced")
 		self.assertFalse(order.last_sync_error)
@@ -705,6 +710,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 		self.assertTrue(result["ok"], result.get("error"))
 		self.assertEqual(result["reconciliation"]["outcome"], "CLOSE_REMAINDER")
+		self.assertEqual(result["executed_action"], "CLOSE_REMAINDER")
+		self.assertIn(sales_order.name, result["executed_message"])
 		self.assertEqual(order.erpnext_sync_status, "Synced")
 		self.assertEqual(frappe.db.get_value("Sales Order", sales_order.name, "status"), "Closed")
 		self.assertEqual(frappe.db.get_value("Sales Order", sales_order.name, "per_delivered"), per_delivered)
@@ -1004,6 +1011,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.reload()
 
 		execute.assert_not_called()
+		self.assertNotIn("executed_action", result)
 		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
 		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
 		self.assertEqual(frappe.db.get_value("Sales Order", sales_order.name, "docstatus"), 1)
@@ -1306,6 +1314,176 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		)
 		self.assertEqual((row.qty, row.amount), (3, 300))
 		self.assertEqual(sync_sales_order(order.name)["reconciliation"]["outcome"], "NO_ACTION")
+
+	# --- #179 review-fix pass 1 -------------------------------------------------
+
+	def _low_privilege_user(self):
+		"""A real user who may sync (System Manager) and write, but not submit, Sales Orders."""
+		role = f"SO Sync Writer {self.suffix}"
+		frappe.get_doc({"doctype": "Role", "role_name": role}).insert(ignore_permissions=True)
+		perm = frappe.get_doc(
+			{
+				"doctype": "Custom DocPerm",
+				"parent": "Sales Order",
+				"parenttype": "DocType",
+				"parentfield": "permissions",
+				"role": role,
+				"permlevel": 0,
+				"read": 1,
+				"write": 1,
+			}
+		).insert(ignore_permissions=True)
+		email = f"so-sync-lowpriv-{self.suffix}@example.com"
+		user = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": "Lowpriv",
+				"send_welcome_email": 0,
+				"roles": [{"role": "System Manager"}, {"role": role}],
+			}
+		).insert(ignore_permissions=True)
+
+		def cleanup():
+			frappe.set_user("Administrator")
+			frappe.delete_doc("User", user.name, force=True, ignore_permissions=True)
+			frappe.delete_doc("Custom DocPerm", perm.name, force=True, ignore_permissions=True)
+			frappe.delete_doc("Role", role, force=True, ignore_permissions=True)
+			frappe.clear_cache(doctype="Sales Order")
+
+		self.addCleanup(cleanup)
+		frappe.clear_cache(doctype="Sales Order")
+		self.assertTrue(frappe.has_permission("Sales Order", "write", user=email))
+		self.assertFalse(frappe.has_permission("Sales Order", "submit", user=email))
+		return email
+
+	def test_update_keeps_the_sales_order_item_description(self):
+		order = self._synced_talabat_order()
+		row = frappe.get_doc("Sales Order", order.erpnext_sales_order).items[0].name
+		frappe.db.set_value("Sales Order Item", row, "description", "Real item description")
+		self._change_talabat_line(order, 3, 1500)
+
+		self.assertTrue(sync_sales_order(order.name)["ok"])
+
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		self.assertEqual(sales_order.items[0].qty, 3)
+		self.assertEqual(sales_order.items[0].description, "Real item description")
+
+	def test_close_remainder_without_submit_permission_is_a_sync_error(self):
+		order = self._make_order()
+		sales_order = self._sync_and_set_item_fields(order, delivered_qty=1)
+		order.external_status = "CANCELLED"
+		order.save()
+		baseline = (order.last_synced_hash, order.last_synced_snapshot)
+		frappe.set_user(self._low_privilege_user())
+
+		result = sync_sales_order(order.name)
+		frappe.set_user("Administrator")
+
+		self.assertEqual(result["reconciliation"]["outcome"], "CLOSE_REMAINDER")
+		self._assert_rejected_and_untouched(order, sales_order, baseline, result)
+		self.assertNotEqual(frappe.db.get_value("Sales Order", sales_order.name, "status"), "Closed")
+		self.assertIn("permission", result["error"])
+
+	def test_update_without_permission_shows_a_clear_sync_error(self):
+		# ERPNext's check_doc_permissions re-throws as a ValidationError; its text is kept
+		# ("You do not have permissions to ...") instead of our PermissionError wording.
+		order = self._synced_talabat_order()
+		self._change_talabat_line(order, 3, 1500)
+		baseline = self._baseline(order)
+		frappe.set_user(self._low_privilege_user())
+
+		result = sync_sales_order(order.name)
+		frappe.set_user("Administrator")
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertIn("permission", order.last_sync_error.lower())
+		self.assertEqual(self._baseline(order), baseline)
+		self.assertEqual(
+			frappe.db.get_value("Sales Order Item", {"parent": order.erpnext_sales_order}, "qty"), 2
+		)
+
+	def test_missing_savepoint_on_release_ends_as_sync_error(self):
+		order, sales_order = self._cancelled_talabat_order()
+		baseline = (order.last_synced_hash, order.last_synced_snapshot)
+
+		with patch(
+			"marketplace_integrations.services.sales_order_sync.frappe.db.release_savepoint",
+			side_effect=Exception("SAVEPOINT marketplace_reconcile_execute does not exist"),
+		):
+			result = sync_sales_order(order.name)
+
+		self._assert_rejected_and_untouched(order, sales_order, baseline, result)
+		self.assertNotEqual(order.erpnext_sync_status, "Synced")
+
+	def test_failure_persisting_after_execution_rolls_back_the_erp_change_and_baseline(self):
+		order = self._synced_talabat_order()
+		self._change_talabat_line(order, 3, 1500)
+		baseline = self._baseline(order)
+		from marketplace_integrations.services import sales_order_sync as module
+
+		real_log = module._create_sync_log
+		calls = []
+
+		def failing_first_success_log(*args, **kwargs):
+			if args[2] == "Success" and not calls:
+				calls.append(1)
+				raise RuntimeError("log failed")
+			return real_log(*args, **kwargs)
+
+		with patch.object(module, "_create_sync_log", side_effect=failing_first_success_log):
+			result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertEqual(self._baseline(order), baseline)
+		self.assertEqual(
+			frappe.db.get_value("Sales Order Item", {"parent": order.erpnext_sales_order}, "qty"), 2
+		)
+
+	def test_update_carries_the_exact_row_names_for_lines_sharing_an_item(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, transaction_amount=10, current_quantity=1)
+		order.append(
+			"items",
+			{
+				"external_item_id": f"gid://shopify/LineItem/second-{self.suffix}",
+				"external_variant_id": order.items[0].external_variant_id,
+				"current_quantity": 1,
+				"unfulfilled_quantity": 1,
+				"non_fulfillable_quantity": 0,
+				"fulfillment_quantities_known": 1,
+				"transaction_amount": 10,
+			},
+		)
+		order.save()
+		self.assertTrue(sync_sales_order(order.name)["ok"])
+		order.reload()
+		snapshot = frappe.parse_json(order.last_synced_snapshot)
+		row_one, row_two = (line["sales_order_item"] for line in snapshot["items"])
+		# Pair the marketplace lines with the ERP rows in the OPPOSITE order to row order.
+		snapshot["items"][0]["sales_order_item"] = row_two
+		snapshot["items"][1]["sales_order_item"] = row_one
+		frappe.db.set_value("Marketplace Order", order.name, "last_synced_snapshot", frappe.as_json(snapshot))
+		order.reload()
+		order.items[1].current_quantity = 2
+		order.items[1].unfulfilled_quantity = 2
+		order.items[1].transaction_amount = 20
+		order.save()
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["reconciliation"]["outcome"], "UPDATE_SUBMITTED_ORDER")
+		lines = frappe.parse_json(order.last_synced_snapshot)["items"]
+		self.assertEqual([line["sales_order_item"] for line in lines], [row_two, row_one])
+		rows = {row.name: row for row in frappe.get_doc("Sales Order", order.erpnext_sales_order).items}
+		self.assertEqual(rows[row_one].qty, 2)
+		self.assertEqual(rows[row_two].qty, 1)
 
 	def test_status_checks_never_execute_an_update(self):
 		order = self._synced_talabat_order()

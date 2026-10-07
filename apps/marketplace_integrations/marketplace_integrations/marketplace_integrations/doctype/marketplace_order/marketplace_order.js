@@ -234,7 +234,7 @@ function noon_confirm_if_submitted_sales_order(frm, proceed) {
 	}
 	frappe.confirm(
 		__(
-			"ERPNext Sales Order {0} is linked to this order and will be updated, closed or cancelled automatically only if nothing has been delivered or billed; otherwise the order is flagged in Needs Attention. Continue?",
+			"ERPNext Sales Order {0} is linked to this order and may be updated or cancelled (or its undelivered remainder closed) when ERPNext and the marketplace stage allow it; otherwise the order is flagged in Needs Attention. Continue?",
 			[frappe.utils.escape_html(frm.doc.erpnext_sales_order)]
 		),
 		proceed
@@ -669,6 +669,12 @@ function add_erpnext_sync_action(frm) {
 					message: frappe.utils.escape_html(response.message.error),
 					indicator: "red",
 					title: __("ERPNext Sync Blocked"),
+				});
+			} else if (response.message.executed_action) {
+				// Server text embeds the Sales Order name; escape as above.
+				frappe.show_alert({
+					message: frappe.utils.escape_html(response.message.executed_message || ""),
+					indicator: "green",
 				});
 			}
 			frm.reload_doc();

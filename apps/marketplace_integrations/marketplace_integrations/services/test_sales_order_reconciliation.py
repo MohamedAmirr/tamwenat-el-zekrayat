@@ -306,8 +306,9 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 		):
 			with self.subTest(evidence=evidence):
 				result = plan(self.previous, current, evidence, self.erp_state)
-				self.assertEqual(result["outcome"], UPDATE_SUBMITTED_ORDER)
-				self.assertEqual(result["changes"][0]["field"], "warehouse")
+				# The lifecycle is not blamed; the mapping gate (D4) reports it instead.
+				self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+				self.assertIn("cannot be applied automatically", result["message"])
 
 	def test_marketplace_sourced_change_alongside_a_mapping_change_is_still_gated(self):
 		current = self._quantity_change()
@@ -416,15 +417,39 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 		current = self._current()
 		current["items"][0]["qty"] = 0
 		self.erp_state["lines"][0]["delivered_qty"] = 1
-		result = plan(self.previous, current, {}, self.erp_state)
+		result = plan(self.previous, current, {"cancellation": "full"}, self.erp_state)
 		self.assertEqual(result["outcome"], CLOSE_REMAINDER)
+
+	def test_all_lines_zero_after_delivery_without_cancellation_needs_attention(self):
+		current = self._current()
+		current["items"][0]["qty"] = 0
+		self.erp_state["lines"][0]["delivered_qty"] = 1
+		result = plan(self.previous, current, {}, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertIn("explicit cancellation is required", result["message"])
+
+	def _assert_mapping_change_needs_attention(self, field, value):
+		current = self._current()
+		current["items"][0][field] = value
+		result = plan(self.previous, current, {}, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertIn("cannot be applied automatically", result["message"])
+
+	def test_item_code_change_needs_attention(self):
+		self._assert_mapping_change_needs_attention("item_code", "OTHER-ITEM")
+
+	def test_uom_change_needs_attention(self):
+		self._assert_mapping_change_needs_attention("uom", "Box")
+
+	def test_warehouse_change_needs_attention(self):
+		self._assert_mapping_change_needs_attention("warehouse", "Other WH - X")
 
 	def test_all_lines_zero_with_billing_and_remainder_needs_attention(self):
 		current = self._current()
 		current["items"][0]["qty"] = 0
 		self.erp_state["lines"][0]["delivered_qty"] = 1
 		self.erp_state["lines"][0]["billed_amt"] = 50
-		result = plan(self.previous, current, {}, self.erp_state)
+		result = plan(self.previous, current, {"cancellation": "full"}, self.erp_state)
 		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
 
 	def test_zero_quantity_line_is_expected_absent_from_erp(self):
