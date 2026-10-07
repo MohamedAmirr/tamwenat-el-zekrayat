@@ -184,6 +184,7 @@ scheduler_events = {
 		"marketplace_integrations.integrations.shopify.webhooks.retry_errored_webhook_deliveries",
 		"marketplace_integrations.integrations.noon.sweep.sweep_all_accounts",
 		"marketplace_integrations.integrations.noon.orders.poll_all_accounts",
+		"marketplace_integrations.services.sales_order_sync_debounce.sweep_stuck_sales_order_reconciliations",
 	],
 	"cron": {
 		SHOPIFY_INVENTORY_SWEEP_CRON: [

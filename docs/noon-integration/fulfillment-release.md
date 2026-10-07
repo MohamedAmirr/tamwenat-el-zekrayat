@@ -159,8 +159,11 @@ What surfaces this:
   `set_sync_status_from_current_snapshot()`, which detects the eligible-line
   hash changed and
   sets `erpnext_sync_status = "Modified After Sync"`.
-- Later: the daily reconciliation job and Script Report, both deferred to
-  the follow-up issue.
+- The hourly Noon order import bumps a changed linked order, and the
+  platform-neutral hourly `sweep_stuck_sales_order_reconciliations` (#180)
+  re-checks stuck (Modified After Sync / Sync Error) or Closed linked orders
+  with trigger source `Scheduled Sweep`. The reconciliation Script Report
+  stays deferred to the follow-up issue.
 - The Desk UI shows a confirmation warning before `Mark Out of Stock` and
   `Cancel Shipment` when a submitted Sales Order (`erpnext_sales_order`) is
   already linked, but this is advisory only — it does not block the action.

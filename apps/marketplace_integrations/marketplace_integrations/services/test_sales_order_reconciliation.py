@@ -101,10 +101,9 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
 		self.assertEqual(result["changes"][0]["kind"], "header_changed")
 
-	def test_cancelled_or_repriced_erp_order_needs_attention_even_when_marketplace_is_unchanged(self):
+	def test_cancelled_or_drifted_erp_order_needs_attention_even_when_marketplace_is_unchanged(self):
 		for field, value in (
 			("status", "Cancelled"),
-			("status", "Closed"),
 			("amount", 120),
 			("item_code", "ITEM-2"),
 		):
@@ -159,18 +158,105 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 		result = plan(self.previous, self._current(), {"cancellation": "full"}, self.erp_state)
 		self.assertEqual(result["outcome"], NO_ACTION)
 
-	def test_closed_erp_order_without_delivery_needs_attention(self):
+	def test_closed_erp_order_without_delivery_and_full_cancellation_is_cancelled_after_reopen(self):
 		self.erp_state.update({"status": "Closed"})
 		result = plan(self.previous, self._current(), {"cancellation": "full"}, self.erp_state)
-		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertEqual(result["outcome"], CANCEL_ORDER)
+		self.assertTrue(result["reopen"])
 
-	def test_inactive_erp_order_without_cancellation_evidence_needs_attention(self):
-		for status in ("Cancelled", "Closed"):
-			with self.subTest(status=status):
-				erp_state = deepcopy(self.erp_state)
-				erp_state["status"] = status
-				result = plan(self.previous, self._current(), {}, erp_state)
+	def test_closed_erp_order_with_advance_payment_is_not_reopened_for_cancellation(self):
+		self.erp_state.update({"status": "Closed", "advance_paid": 10})
+		result = plan(self.previous, self._current(), {"cancellation": "full"}, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertFalse(result.get("reopen"))
+
+	def test_closed_erp_order_with_qty_or_rate_change_is_updated_after_reopen(self):
+		self.erp_state.update({"status": "Closed"})
+		for field, value in (("qty", 1), ("effective_rate", 60)):
+			with self.subTest(field=field):
+				current = self._current()
+				current["items"][0][field] = value
+				current["items"][0]["fulfilled_total_price"] = (
+					current["items"][0]["qty"] * current["items"][0]["effective_rate"]
+				)
+				result = plan(self.previous, current, {}, self.erp_state)
+				self.assertEqual(result["outcome"], UPDATE_SUBMITTED_ORDER)
+				self.assertTrue(result["reopen"])
+
+	def test_closed_erp_order_update_respects_the_lifecycle_gate(self):
+		self.erp_state.update({"status": "Closed"})
+		current = self._current()
+		current["items"][0]["qty"] = 1
+		result = plan(
+			self.previous,
+			current,
+			{"lifecycle_permits_change": False, "lifecycle_reason": "Too late."},
+			self.erp_state,
+		)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertFalse(result.get("reopen"))
+
+	def test_closed_erp_order_item_uom_or_warehouse_change_needs_attention(self):
+		self.erp_state.update({"status": "Closed"})
+		for field, value in (("item_code", "ITEM-2"), ("uom", "Box"), ("warehouse", "Other")):
+			with self.subTest(field=field):
+				current = self._current()
+				current["items"][0][field] = value
+				result = plan(self.previous, current, {}, self.erp_state)
 				self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+				self.assertFalse(result.get("reopen"))
+
+	def test_closed_erp_order_structural_changes_need_attention(self):
+		self.erp_state.update({"status": "Closed"})
+		header = self._current()
+		header["customer"] = "Other Customer"
+		added = self._current()
+		added["items"].append({**added["items"][0], "external_item_id": "line-2"})
+		for current in (header, added):
+			result = plan(self.previous, current, {}, self.erp_state)
+			self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+			self.assertFalse(result.get("reopen"))
+
+	def test_closed_erp_order_equivalent_to_the_marketplace_needs_no_action(self):
+		self.erp_state.update({"status": "Closed"})
+		result = plan(self.previous, self._current(), {}, self.erp_state)
+		self.assertEqual(result["outcome"], NO_ACTION)
+		self.assertFalse(result.get("reopen"))
+
+	def test_closed_erp_order_with_delivery_is_never_reopened_for_a_change(self):
+		self.erp_state.update({"status": "Closed"})
+		self.erp_state["lines"][0]["delivered_qty"] = 1
+		current = self._current()
+		current["items"][0]["qty"] = 3
+		result = plan(self.previous, current, {}, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertFalse(result.get("reopen"))
+
+	def test_closed_erp_order_refund_or_return_evidence_keeps_priority(self):
+		self.erp_state.update({"status": "Closed"})
+		result = plan(self.previous, self._current(), {"return": True}, self.erp_state)
+		self.assertEqual(result["outcome"], UNSUPPORTED_COMPENSATING_TRANSACTION)
+		self.erp_state["lines"][0]["delivered_qty"] = 1
+		result = plan(self.previous, self._current(), {"refund": True}, self.erp_state)
+		self.assertEqual(result["outcome"], UNSUPPORTED_COMPENSATING_TRANSACTION)
+
+	def test_cancelled_erp_order_is_never_reopened(self):
+		for docstatus, status in ((1, "Cancelled"), (2, "Cancelled")):
+			with self.subTest(docstatus=docstatus):
+				erp_state = deepcopy(self.erp_state)
+				erp_state.update({"docstatus": docstatus, "status": status})
+				current = self._current()
+				current["items"][0]["qty"] = 1
+				for evidence, candidate in (({}, current), ({"cancellation": "full"}, current)):
+					result = plan(self.previous, candidate, evidence, erp_state)
+					self.assertFalse(result.get("reopen"))
+				self.assertEqual(plan(self.previous, current, {}, erp_state)["outcome"], NEEDS_ATTENTION)
+
+	def test_cancelled_erp_order_without_cancellation_evidence_needs_attention(self):
+		erp_state = deepcopy(self.erp_state)
+		erp_state["status"] = "Cancelled"
+		result = plan(self.previous, self._current(), {}, erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
 
 	def test_full_cancellation_before_execution_is_advisory_cancel(self):
 		result = plan(self.previous, self._current(), {"cancellation": "full"}, self.erp_state)
@@ -479,6 +565,29 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 
 		with self.assertRaises(ValueError):
 			execute({"outcome": NO_ACTION}, "SO-1")
+
+	def test_reopen_checks_permission_before_reopening_and_comments_after(self):
+		from unittest.mock import MagicMock
+
+		from marketplace_integrations.services.sales_order_reconciliation import reopen_closed_order
+
+		order = MagicMock()
+		order.check_permission.side_effect = PermissionError
+		with self.assertRaises(PermissionError):
+			reopen_closed_order(order, CANCEL_ORDER, "MKT-1")
+		order.update_status.assert_not_called()
+
+		order = MagicMock()
+		reopen_closed_order(order, CANCEL_ORDER, "MKT-1")
+		order.check_permission.assert_called_once_with("submit")
+		order.update_status.assert_called_once_with("Draft")
+		order.reload.assert_called_once()
+		self.assertIn("MKT-1", order.add_comment.call_args.args[1])
+
+	def test_reopen_plan_message_says_the_order_will_be_reopened_first(self):
+		self.erp_state.update({"status": "Closed"})
+		result = plan(self.previous, self._current(), {"cancellation": "full"}, self.erp_state)
+		self.assertIn("reopened first", result["message"])
 
 	def test_this_module_is_platform_neutral(self):
 		import inspect

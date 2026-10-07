@@ -273,3 +273,59 @@ def _run_debounced_sync(marketplace_order, expected_debounce_until):
 		# together - defensive fallback to sync_sales_order()'s own "Manual"
 		# default rather than crashing.
 		sync_sales_order(marketplace_order)
+
+
+# #180 scheduled reconciliation sweep (platform-neutral).
+RECONCILIATION_SWEEP_BATCH = 200
+# A persistent Attention status (Modified After Sync / Sync Error) is re-evaluated at most daily.
+ATTENTION_RECHECK_HOURS = 24
+# A Closed linked Sales Order whose order is otherwise Synced is re-checked at most every 24 hours (a converged Closed order would otherwise be re-bumped forever).
+CLOSED_RECHECK_HOURS = 24
+_ATTENTION_STATUSES = ("Modified After Sync", "Sync Error")
+
+
+def _stuck_reconciliation_candidates(limit):
+	"""Cheap SQL pre-filter only (no planning, no snapshot rebuild): linked Marketplace
+	Orders with no pending debounce that are either in an Attention status or whose
+	submitted Sales Order is Closed, and whose back-off window has elapsed.  Oldest
+	check first (never-checked orders first)."""
+	order = frappe.qb.DocType(ORDER_DOCTYPE)
+	so = frappe.qb.DocType("Sales Order")
+	now = now_datetime()
+	checked = order.last_reconciliation_check_on
+	attention_due = order.erpnext_sync_status.isin(_ATTENTION_STATUSES) & (
+		checked.isnull() | (checked <= add_to_date(now, hours=-ATTENTION_RECHECK_HOURS))
+	)
+	closed_due = (
+		(so.docstatus == 1)
+		& (so.status == "Closed")
+		& order.erpnext_sync_status.notin(_ATTENTION_STATUSES)
+		& (checked.isnull() | (checked <= add_to_date(now, hours=-CLOSED_RECHECK_HOURS)))
+	)
+	rows = (
+		frappe.qb.from_(order)
+		.left_join(so)
+		.on(so.name == order.erpnext_sales_order)
+		.select(order.name)
+		.where(order.erpnext_sales_order.isnotnull() & (order.erpnext_sales_order != ""))
+		.where(order.sync_debounce_until.isnull())
+		.where(attention_due | closed_due)
+		.orderby(order.last_reconciliation_check_on)
+		.orderby(order.name)
+		.limit(limit)
+	).run()
+	return [row[0] for row in rows]
+
+
+def sweep_stuck_sales_order_reconciliations():
+	"""Hourly (``hooks.py`` ``scheduler_events["hourly"]``): find linked Marketplace Orders
+	stuck in Modified After Sync / Sync Error or whose Sales Order was Closed, and bump
+	their debounce with ``Scheduled Sweep``.  The minute job ``sweep_due_sales_order_syncs``
+	then runs the single sync path; this function never syncs or plans itself.  Idempotent:
+	a bumped order has a pending debounce (skipped) and a fresh check time (backed off)."""
+	checked_on = now_datetime()
+	for name in _stuck_reconciliation_candidates(RECONCILIATION_SWEEP_BATCH):
+		bump_sync_debounce(name, "Scheduled Sweep")
+		frappe.db.set_value(
+			ORDER_DOCTYPE, name, "last_reconciliation_check_on", checked_on, update_modified=False
+		)

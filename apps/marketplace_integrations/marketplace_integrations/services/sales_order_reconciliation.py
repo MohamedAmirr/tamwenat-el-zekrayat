@@ -153,6 +153,10 @@ def plan(previous, current, evidence, erp_state):
 	- ``fulfillment_started``: ``{external_item_id: bool}`` per line, or one bool for
 	  the whole order.
 	- ``source``: where the evidence comes from (e.g. ``"marketplace"``); informational.
+
+	A Closed order with no delivery or billing is judged as if it were open; a resulting
+	``CANCEL_ORDER`` / ``UPDATE_SUBMITTED_ORDER`` plan then carries ``reopen: True``
+	(the executor must reopen it first).  Cancelled orders are never reopened.
 	"""
 	evidence = evidence or {}
 	if not previous:
@@ -182,6 +186,16 @@ def plan(previous, current, evidence, erp_state):
 			"A marketplace line returned to a positive quantity; this needs a structural change."
 		)
 	if erp_state.get("docstatus") != 1 or erp_state.get("status") in INACTIVE_ERP_ORDER_STATUSES:
+		if _is_reopenable_closed_order(erp_state):
+			# Closed with no delivery or billing: judge it as the open order it would be after
+			# a reopen; only a cancel/update result carries the reopen flag (#180).
+			reopened = plan(previous, current, evidence, {**erp_state, "status": "To Deliver and Bill"})
+			if reopened["outcome"] in (CANCEL_ORDER, UPDATE_SUBMITTED_ORDER):
+				reopened["reopen"] = True
+				reopened["message"] = (
+					f"{reopened['message']} The Sales Order is Closed; it will be reopened first."
+				)
+			return reopened
 		if (evidence.get("cancellation") == "full" or all_zero) and _inactive_order_converged(erp_state):
 			# The marketplace cancelled the order and ERPNext is already cancelled (or
 			# closed with nothing left to deliver): both sides agree, nothing to do.
@@ -433,13 +447,21 @@ def _lifecycle_block_reason(evidence, changes):
 def _inactive_order_converged(erp_state):
 	"""ERP Cancelled/docstatus 2, or Closed after delivery (what ``CLOSE_REMAINDER`` leaves).
 
-	A Closed order with no delivery is not converged: reopening it is a separate
-	decision (#180).
+	A Closed order with no delivery is not converged: ``plan()`` may reopen it (#180).
 	"""
 	if erp_state.get("docstatus") == 2 or erp_state.get("status") == "Cancelled":
 		return True
 	return (
 		erp_state.get("docstatus") == 1 and erp_state.get("status") == "Closed" and _has_delivery(erp_state)
+	)
+
+
+def _is_reopenable_closed_order(erp_state):
+	"""A submitted, Closed order with no delivery and no billing (reopening loses nothing)."""
+	return (
+		erp_state.get("docstatus") == 1
+		and erp_state.get("status") == "Closed"
+		and not _has_execution(erp_state)
 	)
 
 
@@ -469,7 +491,24 @@ class ReconciliationMismatch(Exception):
 	"""ERPNext, after an update, still does not hold the marketplace amounts."""
 
 
-def execute(reconciliation_plan, sales_order_name, previous=None, current=None):
+def reopen_closed_order(sales_order, outcome, marketplace_order=None):
+	"""Reopen a Closed Sales Order inside the caller's savepoint (#180); never commits.
+
+	``update_status("Draft")`` performs no permission check, so submit permission is
+	required here.  ERPNext records neither who closed the order nor the reopen (no
+	Version row), so the audit is a Sales Order Comment.  Reloads the document.
+	"""
+	sales_order.check_permission("submit")
+	sales_order.update_status("Draft")
+	sales_order.reload()
+	sales_order.add_comment(
+		"Comment",
+		f"Reopened by marketplace reconciliation ({outcome}) for Marketplace Order "
+		f"{marketplace_order or ''}; ERPNext does not record who closed it (closed by: unknown).",
+	)
+
+
+def execute(reconciliation_plan, sales_order_name, previous=None, current=None, marketplace_order=None):
 	"""Apply a supported plan to a freshly loaded Sales Order and return what happened.
 
 	Raises whatever ERPNext raises; the caller owns the savepoint, the Marketplace
@@ -482,8 +521,13 @@ def execute(reconciliation_plan, sales_order_name, previous=None, current=None):
 	if outcome not in (CANCEL_ORDER, CLOSE_REMAINDER, UPDATE_SUBMITTED_ORDER):
 		raise ValueError(f"Reconciliation outcome {outcome} is not executable.")
 	sales_order = frappe.get_doc("Sales Order", sales_order_name)
+	reopened = bool(reconciliation_plan.get("reopen"))
+	if reopened:
+		reopen_closed_order(sales_order, outcome, marketplace_order)
 	if outcome == UPDATE_SUBMITTED_ORDER:
-		return _execute_update(sales_order, previous or {}, current or {})
+		executed = _execute_update(sales_order, previous or {}, current or {})
+		executed["reopened"] = reopened
+		return executed
 	if outcome == CANCEL_ORDER:
 		sales_order.cancel()
 	else:
@@ -491,7 +535,12 @@ def execute(reconciliation_plan, sales_order_name, previous=None, current=None):
 		# whitelisted wrapper does); closing needs submit permission like cancel does.
 		sales_order.check_permission("submit")
 		sales_order.update_status("Closed")
-	return {"outcome": outcome, "sales_order": sales_order.name, "status": sales_order.status}
+	return {
+		"outcome": outcome,
+		"sales_order": sales_order.name,
+		"status": sales_order.status,
+		"reopened": reopened,
+	}
 
 
 def _execute_update(sales_order, previous, current):

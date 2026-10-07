@@ -1295,7 +1295,11 @@ def _execute_reconciliation_plan(
 	frappe.db.savepoint(_RECONCILE_EXECUTE_SAVEPOINT)
 	try:
 		executed = execute(
-			reconciliation_plan, sales_order.name, _parse_last_synced_snapshot(order), snapshot or {}
+			reconciliation_plan,
+			sales_order.name,
+			_parse_last_synced_snapshot(order),
+			snapshot or {},
+			marketplace_order=order.name,
 		)
 		if outcome == UPDATE_SUBMITTED_ORDER:
 			# Carry the exact line-to-row names execute() used (no re-pairing).
@@ -1319,6 +1323,17 @@ def _execute_reconciliation_plan(
 			"executed_action": outcome,
 			"executed_message": _executed_message(outcome, order.erpnext_sales_order),
 		}
+		if executed.get("reopened"):
+			_create_sync_log(
+				order,
+				trigger_source,
+				"Success",
+				snapshot,
+				{"before_status": "Closed", "reason": reconciliation_plan["message"], "closed_by": "unknown"},
+				reconciliation_plan=reconciliation_plan,
+				erp_state=erp_state,
+				action="Reopen",
+			)
 		_create_sync_log(
 			order,
 			trigger_source,
@@ -1354,7 +1369,7 @@ def _execute_reconciliation_plan(
 		)
 		return result
 	except Exception as exc:
-		_rollback_reconcile_savepoint()
+		rolled_back = _rollback_reconcile_savepoint()
 		traceback_text = None
 		if isinstance(exc, frappe.PermissionError):
 			message = _("You do not have permission to change the linked Sales Order in ERPNext.")
@@ -1369,6 +1384,31 @@ def _execute_reconciliation_plan(
 			log_status = "Error"
 		frappe.clear_messages()
 		order.reload()
+		if reconciliation_plan.get("reopen"):
+			if rolled_back:
+				message = _("Reopening the Closed Sales Order failed; it was left Closed. {0}").format(
+					message
+				)
+			else:
+				attention = {
+					"outcome": NEEDS_ATTENTION,
+					"message": _(
+						"The Sales Order may have been left open after a failed reopen; review it in ERPNext."
+					),
+					"changes": reconciliation_plan["changes"],
+				}
+				result = _save_reconciliation_advisory(order, attention)
+				_create_sync_log(
+					order,
+					trigger_source,
+					"Error",
+					snapshot,
+					result,
+					traceback_text=traceback_text,
+					reconciliation_plan=attention,
+					erp_state=erp_state,
+				)
+				return result
 		result = _save_failure(order, message)
 		result["reconciliation"] = reconciliation_plan
 		_create_sync_log(
@@ -1393,6 +1433,7 @@ def _executed_message(outcome, sales_order_name):
 
 
 def _rollback_reconcile_savepoint():
+	"""Roll back to the savepoint; False when it was already gone (nothing was undone)."""
 	try:
 		frappe.db.rollback(save_point=_RECONCILE_EXECUTE_SAVEPOINT)
 	except Exception as exc:
@@ -1400,6 +1441,8 @@ def _rollback_reconcile_savepoint():
 		# back on a deadlock); anything else is a real error.
 		if "SAVEPOINT" not in cstr(exc).upper():
 			raise
+		return False
+	return True
 
 
 def _create_sync_log(
