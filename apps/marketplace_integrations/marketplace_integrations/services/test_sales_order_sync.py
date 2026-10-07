@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import frappe
+from erpnext.selling.doctype.sales_order.sales_order import SalesOrder
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, cstr, getdate, nowdate
 
@@ -646,6 +647,272 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(order.erpnext_sync_status, "Synced")
 		self.assertEqual(sync_sales_order(order.name)["reconciliation"]["outcome"], "NO_ACTION")
 
+	# --- #180 slice 2: reopen executor ------------------------------------------
+
+	def _closed_cancelled_order(self):
+		order = self._make_order()
+		first = sync_sales_order(order.name)
+		frappe.db.set_value("Sales Order", first["sales_order"], "status", "Closed", update_modified=False)
+		order.reload()
+		order.external_status = "CANCELLED"
+		order.save()
+		order.reload()
+		return order, first["sales_order"]
+
+	def _reopen_log_actions(self, order):
+		logs = frappe.get_all(
+			"Marketplace Sync Log",
+			filters={"marketplace_order": order.name},
+			fields=["request_data", "creation", "name"],
+			order_by="creation asc, name asc",
+		)
+		return [frappe.parse_json(log.request_data).get("action") for log in logs]
+
+	def _reopen_comments(self, sales_order_name):
+		return frappe.get_all(
+			"Comment",
+			filters={
+				"reference_doctype": "Sales Order",
+				"reference_name": sales_order_name,
+				"content": ["like", "%Reopened by marketplace reconciliation%"],
+			},
+			pluck="content",
+		)
+
+	def test_closed_undelivered_cancelled_order_is_reopened_and_cancelled(self):
+		order, sales_order = self._closed_cancelled_order()
+		baseline = (order.last_synced_hash, order.last_synced_snapshot)
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["executed_action"], "CANCEL_ORDER")
+		self.assertTrue(result["executed"]["reopened"])
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 2)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual((order.last_synced_hash, order.last_synced_snapshot), baseline)
+		comments = self._reopen_comments(sales_order)
+		self.assertEqual(len(comments), 1)
+		self.assertIn("unknown", comments[0])
+		self.assertEqual(self._reopen_log_actions(order), [None, "Reopen", "CANCEL_ORDER"])
+		self.assertEqual(sync_sales_order(order.name)["reconciliation"]["outcome"], "NO_ACTION")
+
+	def test_closed_undelivered_changed_order_is_reopened_and_updated(self):
+		order = self._synced_talabat_order()
+		frappe.db.set_value(
+			"Sales Order", order.erpnext_sales_order, "status", "Closed", update_modified=False
+		)
+		self._change_talabat_line(order, 3, 1500)
+		baseline = self._baseline(order)
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["executed_action"], "UPDATE_SUBMITTED_ORDER")
+		self.assertEqual(
+			frappe.db.get_value("Sales Order Item", {"parent": order.erpnext_sales_order}, "qty"), 3
+		)
+		self.assertNotEqual(frappe.db.get_value("Sales Order", order.erpnext_sales_order, "status"), "Closed")
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertNotEqual((order.last_synced_hash, order.last_synced_snapshot), baseline)
+		self.assertEqual(self._reopen_log_actions(order), [None, "Reopen", "UPDATE_SUBMITTED_ORDER"])
+		self.assertEqual(len(self._reopen_comments(order.erpnext_sales_order)), 1)
+		self.assertEqual(sync_sales_order(order.name)["reconciliation"]["outcome"], "NO_ACTION")
+
+	def test_failed_reopen_rolls_back_and_leaves_the_order_closed(self):
+		order, sales_order = self._closed_cancelled_order()
+		baseline = (order.last_synced_hash, order.last_synced_snapshot)
+		real_update_status = SalesOrder.update_status
+
+		def failing(doc, status):
+			if status == "Draft":
+				# Writes before failing, to prove the savepoint restores them.
+				doc.add_comment("Comment", "Reopened by marketplace reconciliation (probe)")
+				frappe.throw("Credit limit crossed for customer")
+			return real_update_status(doc, status)
+
+		with patch.object(SalesOrder, "update_status", failing):
+			result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertIn("Credit limit", order.last_sync_error)
+		self.assertIn("Reopen and cancel failed; the Sales Order was left Closed.", order.last_sync_error)
+		self.assertEqual((order.last_synced_hash, order.last_synced_snapshot), baseline)
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "status"), "Closed")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 1)
+		self.assertEqual(self._reopen_comments(sales_order), [])
+		self.assertNotIn("Reopen", self._reopen_log_actions(order))
+		self.assertTrue(
+			frappe.db.exists("Marketplace Sync Log", {"marketplace_order": order.name, "status": "Invalid"})
+		)
+
+	def test_reopen_without_submit_permission_is_a_sync_error_and_stays_closed(self):
+		order, sales_order = self._closed_cancelled_order()
+		baseline = (order.last_synced_hash, order.last_synced_snapshot)
+		self.addCleanup(frappe.set_user, frappe.session.user)
+		frappe.set_user(self._low_privilege_user())
+
+		result = sync_sales_order(order.name)
+		frappe.set_user("Administrator")
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertEqual((order.last_synced_hash, order.last_synced_snapshot), baseline)
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "status"), "Closed")
+		self.assertEqual(self._reopen_comments(sales_order), [])
+
+	def test_reopen_rollback_failure_needs_attention_and_asks_to_verify_the_state(self):
+		order, _sales_order = self._closed_cancelled_order()
+
+		with (
+			patch.object(SalesOrder, "update_status", side_effect=frappe.ValidationError("rejected")),
+			patch(
+				"marketplace_integrations.services.sales_order_sync._rollback_reconcile_savepoint",
+				return_value=False,
+			),
+		):
+			result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertIn("already rolled back; verify the Sales Order state", order.last_sync_error)
+
+	def test_failure_after_a_successful_reopen_rolls_the_reopen_back(self):
+		order, sales_order = self._closed_cancelled_order()
+		baseline = (order.last_synced_hash, order.last_synced_snapshot)
+
+		with patch.object(SalesOrder, "cancel", side_effect=frappe.ValidationError("cancel rejected")):
+			result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertIn("Reopen and cancel failed; the Sales Order was left Closed.", order.last_sync_error)
+		self.assertIn("cancel rejected", order.last_sync_error)
+		self.assertEqual((order.last_synced_hash, order.last_synced_snapshot), baseline)
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "status"), "Closed")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 1)
+		self.assertEqual(self._reopen_comments(sales_order), [])
+		self.assertNotIn("Reopen", self._reopen_log_actions(order))
+		self.assertTrue(
+			frappe.db.exists("Marketplace Sync Log", {"marketplace_order": order.name, "status": "Invalid"})
+		)
+
+	def test_manual_close_with_an_unchanged_snapshot_needs_attention(self):
+		order = self._synced_talabat_order()
+		sales_order = order.erpnext_sales_order
+		baseline = self._baseline(order)
+		frappe.db.set_value("Sales Order", sales_order, "status", "Closed", update_modified=False)
+
+		status = get_current_sync_status(order.name)
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertEqual(status, "Modified After Sync")
+		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+		self.assertNotIn("reopen", result["reconciliation"])
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertIn("still expects fulfillment", order.last_sync_error)
+		self.assertEqual(self._baseline(order), baseline)
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "status"), "Closed")
+
+	def test_closed_order_with_delivery_is_never_reopened(self):
+		order = self._make_order()
+		sales_order = self._sync_and_set_item_fields(order, delivered_qty=1)
+		frappe.db.set_value("Sales Order", sales_order.name, "status", "Closed", update_modified=False)
+		order.external_status = "CANCELLED"
+		order.save()
+
+		with patch.object(SalesOrder, "update_status") as update_status:
+			result = sync_sales_order(order.name)
+
+		update_status.assert_not_called()
+		self.assertNotIn("executed_action", result)
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order.name, "status"), "Closed")
+
+	def test_closed_order_with_advance_payment_is_not_reopened(self):
+		order, sales_order = self._closed_cancelled_order()
+		frappe.db.set_value("Sales Order", sales_order, "advance_paid", 50)
+
+		with patch.object(SalesOrder, "update_status") as update_status:
+			result = sync_sales_order(order.name)
+
+		update_status.assert_not_called()
+		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "status"), "Closed")
+
+	def test_status_checks_for_a_reopen_plan_are_plan_only(self):
+		order, sales_order = self._closed_cancelled_order()
+
+		with (
+			patch("marketplace_integrations.services.sales_order_sync.execute") as execute,
+			patch.object(SalesOrder, "update_status") as update_status,
+		):
+			status = get_current_sync_status(order.name)
+			order.customer_phone_number = "another save"
+			order.save()
+		order.reload()
+
+		execute.assert_not_called()
+		update_status.assert_not_called()
+		self.assertEqual(status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertIn("reopened", order.last_sync_error)
+		self.assertNotIn("not yet enabled", order.last_sync_error)
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "status"), "Closed")
+
+	def test_shopify_closed_order_is_reopened_and_cancelled(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account)
+		first = sync_sales_order(order.name)
+		frappe.db.set_value("Sales Order", first["sales_order"], "status", "Closed", update_modified=False)
+		order.reload()
+		order.cancelled_at = nowdate()
+		order.save()
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["executed_action"], "CANCEL_ORDER")
+		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "docstatus"), 2)
+		self.assertEqual(self._reopen_log_actions(order), [None, "Reopen", "CANCEL_ORDER"])
+
+	def test_noon_closed_order_is_reopened_and_cancelled(self):
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(account)
+		first = sync_sales_order(order.name)
+		frappe.db.set_value("Sales Order", first["sales_order"], "status", "Closed", update_modified=False)
+		order.reload()
+		order.items[0].external_status = "CANCELLED"
+		order.items[0].integration_status = "OUT_OF_STOCK"
+		order.latest_payload = frappe.as_json(
+			{
+				"items": [
+					self._noon_payload_unit(
+						"1", "MP_ITEM_STATUS_CANCELLED", "INTEGRATION_ITEM_STATUS_OUT_OF_STOCK"
+					),
+					self._noon_payload_unit(
+						"2", "MP_ITEM_STATUS_CANCELLED", "INTEGRATION_ITEM_STATUS_OUT_OF_STOCK"
+					),
+				]
+			}
+		)
+		order.save()
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["executed_action"], "CANCEL_ORDER")
+		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "docstatus"), 2)
+		self.assertEqual(self._reopen_log_actions(order), [None, "Reopen", "CANCEL_ORDER"])
+
 	def test_closed_partly_delivered_cancelled_order_converges_to_synced(self):
 		# #179: Closed after delivery is what CLOSE_REMAINDER leaves, so it is converged.
 		order = self._make_order()
@@ -946,7 +1213,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		first = sync_sales_order(order.name)
 		sales_order = frappe.get_doc("Sales Order", first["sales_order"])
 
-		for field, value in (("amount", sales_order.items[0].amount + 1), ("status", "Closed")):
+		for field, value in (("amount", sales_order.items[0].amount + 1), ("status", "Cancelled")):
 			with self.subTest(field=field):
 				if field == "amount":
 					frappe.db.set_value("Sales Order Item", sales_order.items[0].name, field, value)
@@ -1055,7 +1322,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order, _sales_order = self._cancelled_talabat_order()
 		seen = {}
 
-		def fake_execute(*args):
+		def fake_execute(*args, **kwargs):
 			seen["status"] = frappe.db.get_value("Marketplace Order", order.name, "erpnext_sync_status")
 			raise frappe.ValidationError("nope")
 
@@ -1375,6 +1642,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.external_status = "CANCELLED"
 		order.save()
 		baseline = (order.last_synced_hash, order.last_synced_snapshot)
+		self.addCleanup(frappe.set_user, frappe.session.user)
 		frappe.set_user(self._low_privilege_user())
 
 		result = sync_sales_order(order.name)
@@ -1391,6 +1659,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order = self._synced_talabat_order()
 		self._change_talabat_line(order, 3, 1500)
 		baseline = self._baseline(order)
+		self.addCleanup(frappe.set_user, frappe.session.user)
 		frappe.set_user(self._low_privilege_user())
 
 		result = sync_sales_order(order.name)
@@ -1530,7 +1799,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		rate_drift_reason = order.last_sync_error
 		self.assertIn("no longer represents", rate_drift_reason)
 
-		frappe.db.set_value("Sales Order", sales_order.name, "status", "Closed")
+		# Cancelled (not Closed: a Closed order is judged as the open order it would be, #180).
+		frappe.db.set_value("Sales Order", sales_order.name, "status", "Cancelled")
 		self.assertEqual(get_current_sync_status(order.name), "Modified After Sync")
 		order.reload()
 

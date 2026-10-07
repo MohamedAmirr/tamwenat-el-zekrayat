@@ -101,6 +101,7 @@ class TestMarketplaceSyncLog(IntegrationTestCase):
 				"Scheduled Reconciliation",
 				"Noon Order Import",
 				"Noon Webhook",
+				"Scheduled Sweep",
 			],
 		)
 		self.assertEqual(fields["trigger_source"].default, "Manual")

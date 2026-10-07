@@ -71,18 +71,22 @@ SYNC_DEBOUNCE_SECONDS = 45
 _SYNC_RQ_JOB_ID_PREFIX = "marketplace-sync"
 
 
-def bump_sync_debounce(marketplace_order, trigger_source, delay_seconds=SYNC_DEBOUNCE_SECONDS):
+def bump_sync_debounce(
+	marketplace_order, trigger_source, delay_seconds=SYNC_DEBOUNCE_SECONDS, extra_values=None
+):
 	"""Push ``marketplace_order``'s sync debounce window forward to
 	``now + delay_seconds`` and record ``trigger_source`` as the pending sync's
 	origin (#135). Always pushes forward, even if a window is already pending -
 	never enqueues anything itself. If a window is already pending when this
 	is called again (e.g. two webhooks touching the same order in quick
 	succession), the LATEST call's ``trigger_source`` simply overwrites the
-	previous one - no merge logic."""
+	previous one - no merge logic. ``extra_values`` are written in the same
+	``set_value`` call (one atomic write), e.g. the sweep's check time."""
 	frappe.db.set_value(
 		ORDER_DOCTYPE,
 		marketplace_order,
 		{
+			**(extra_values or {}),
 			"sync_debounce_until": add_to_date(now_datetime(), seconds=delay_seconds),
 			"pending_sync_trigger_source": trigger_source,
 		},
@@ -273,3 +277,64 @@ def _run_debounced_sync(marketplace_order, expected_debounce_until):
 		# together - defensive fallback to sync_sales_order()'s own "Manual"
 		# default rather than crashing.
 		sync_sales_order(marketplace_order)
+
+
+# #180 scheduled reconciliation sweep (platform-neutral).
+RECONCILIATION_SWEEP_BATCH = 200
+# A persistent Attention status (Modified After Sync / Sync Error) is re-evaluated at most daily.
+ATTENTION_RECHECK_HOURS = 24
+# A Closed linked Sales Order whose order is otherwise Synced is re-checked at most every 24 hours (a converged Closed order would otherwise be re-bumped forever).
+CLOSED_RECHECK_HOURS = 24
+_ATTENTION_STATUSES = ("Modified After Sync", "Sync Error")
+
+
+def _stuck_reconciliation_candidates(limit):
+	"""Cheap SQL pre-filter only (no planning, no snapshot rebuild): linked Marketplace
+	Orders with no pending debounce that are either in an Attention status or whose
+	submitted Sales Order is Closed, and whose back-off window has elapsed.  Oldest
+	check first (never-checked orders first)."""
+	order = frappe.qb.DocType(ORDER_DOCTYPE)
+	so = frappe.qb.DocType("Sales Order")
+	now = now_datetime()
+	checked = order.last_reconciliation_check_on
+	attention_due = order.erpnext_sync_status.isin(_ATTENTION_STATUSES) & (
+		checked.isnull() | (checked <= add_to_date(now, hours=-ATTENTION_RECHECK_HOURS))
+	)
+	closed_due = (
+		(so.docstatus == 1)
+		& (so.status == "Closed")
+		# Closed with delivery/billing never reopens and already converges (#179): not re-checked.
+		& (so.per_delivered == 0)
+		& (so.per_billed == 0)
+		& order.erpnext_sync_status.notin(_ATTENTION_STATUSES)
+		& (checked.isnull() | (checked <= add_to_date(now, hours=-CLOSED_RECHECK_HOURS)))
+	)
+	rows = (
+		frappe.qb.from_(order)
+		.left_join(so)
+		.on(so.name == order.erpnext_sales_order)
+		.select(order.name)
+		.where(order.erpnext_sales_order.isnotnull() & (order.erpnext_sales_order != ""))
+		.where(order.sync_debounce_until.isnull())
+		.where(attention_due | closed_due)
+		.orderby(order.last_reconciliation_check_on)
+		.orderby(order.name)
+		.limit(limit)
+	).run()
+	return [row[0] for row in rows]
+
+
+def sweep_stuck_sales_order_reconciliations():
+	"""Hourly (``hooks.py`` ``scheduler_events["hourly"]``): find linked Marketplace Orders
+	stuck in Modified After Sync / Sync Error or whose Sales Order was Closed, and bump
+	their debounce with ``Scheduled Sweep``.  The minute job ``sweep_due_sales_order_syncs``
+	then runs the single sync path; this function never syncs or plans itself.  Idempotent:
+	a bumped order has a pending debounce (skipped) and a fresh check time (backed off)."""
+	checked_on = now_datetime()
+	for name in _stuck_reconciliation_candidates(RECONCILIATION_SWEEP_BATCH):
+		# A webhook may have bumped this order since the candidate query: its sync runs
+		# anyway, so leave its trigger source alone rather than overwrite it.
+		if frappe.db.get_value(ORDER_DOCTYPE, name, "sync_debounce_until"):
+			continue
+		# One write: the check time can never advance without the bump.
+		bump_sync_debounce(name, "Scheduled Sweep", extra_values={"last_reconciliation_check_on": checked_on})
