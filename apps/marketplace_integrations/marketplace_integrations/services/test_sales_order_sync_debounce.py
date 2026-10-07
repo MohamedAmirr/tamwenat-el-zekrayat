@@ -13,6 +13,7 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_to_date, now_datetime
 
 from marketplace_integrations.services import sales_order_sync_debounce as debounce
+from marketplace_integrations.services.linked_sales_order_fixture import LinkedSalesOrderFixture
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 
 SYNC_TARGET = "marketplace_integrations.services.sales_order_sync_debounce.sync_sales_order"
@@ -173,9 +174,7 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 
 		mocked_sync.assert_called_once_with(order.name, trigger_source="Talabat Webhook")
 		self.assertIsNone(frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until"))
-		self.assertIsNone(
-			frappe.db.get_value("Marketplace Order", order.name, "pending_sync_trigger_source")
-		)
+		self.assertIsNone(frappe.db.get_value("Marketplace Order", order.name, "pending_sync_trigger_source"))
 
 	def test_run_debounced_sync_passes_through_shopify_webhook_trigger_source(self):
 		order = self._make_order()
@@ -265,3 +264,145 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 		self.assertEqual(calls[0].kwargs["job_id"], calls[1].kwargs["job_id"])
 		self.assertTrue(calls[0].kwargs["deduplicate"])
 		self.assertTrue(calls[1].kwargs["deduplicate"])
+
+	# -------------------------------------------------------------------
+	# #178 part 3: bump_if_linked_order_changed() / order_evidence_fingerprint()
+	# -------------------------------------------------------------------
+
+	def _link(self, order):
+		# A REAL Sales Order (not a made-up name), so link validation on any later save passes.
+		fixture = LinkedSalesOrderFixture()
+		self.addCleanup(fixture.cleanup)
+		fixture.link(order.name)
+
+	def _fingerprint_before(self, order):
+		return debounce.linked_order_fingerprint(order.marketplace_account, order.external_order_id)
+
+	def _debounce_state(self, order):
+		return frappe.db.get_value(
+			"Marketplace Order",
+			order.name,
+			["sync_debounce_until", "pending_sync_trigger_source"],
+			as_dict=True,
+		)
+
+	def test_changed_fingerprint_on_a_linked_order_bumps_once_with_the_trigger_source(self):
+		order = self._make_order()
+		self._link(order)
+		before = self._fingerprint_before(order)
+		frappe.db.set_value("Marketplace Order", order.name, "external_status", "CANCELLED")
+
+		bumped = debounce.bump_if_linked_order_changed(order.name, before, "Noon Order Import")
+
+		self.assertTrue(bumped)
+		state = self._debounce_state(order)
+		self.assertIsNotNone(state.sync_debounce_until)
+		self.assertEqual(state.pending_sync_trigger_source, "Noon Order Import")
+
+	def test_unchanged_fingerprint_does_not_bump_and_a_replay_does_not_bump_again(self):
+		order = self._make_order()
+		self._link(order)
+		before = self._fingerprint_before(order)
+
+		self.assertFalse(debounce.bump_if_linked_order_changed(order.name, before, "Noon Order Import"))
+		self.assertIsNone(self._debounce_state(order).sync_debounce_until)
+
+		frappe.db.set_value("Marketplace Order", order.name, "external_status", "CANCELLED")
+		self.assertTrue(debounce.bump_if_linked_order_changed(order.name, before, "Noon Order Import"))
+		# Replay: the next import starts from the already-changed state.
+		replay_before = self._fingerprint_before(order)
+		frappe.db.set_value("Marketplace Order", order.name, "sync_debounce_until", None)
+		self.assertFalse(
+			debounce.bump_if_linked_order_changed(order.name, replay_before, "Noon Order Import")
+		)
+		self.assertIsNone(self._debounce_state(order).sync_debounce_until)
+
+	def test_unlinked_order_never_bumps(self):
+		order = self._make_order()
+		before = self._fingerprint_before(order)
+		self.assertIsNone(before)
+		frappe.db.set_value("Marketplace Order", order.name, "external_status", "CANCELLED")
+
+		self.assertFalse(debounce.bump_if_linked_order_changed(order.name, before, "Noon Order Import"))
+		self.assertIsNone(self._debounce_state(order).sync_debounce_until)
+
+	def test_volatile_field_only_change_does_not_bump(self):
+		order = self._make_order()
+		self._link(order)
+		before = self._fingerprint_before(order)
+		frappe.db.set_value(
+			"Marketplace Order",
+			order.name,
+			{
+				"last_platform_update_on": now_datetime(),
+				"latest_payload": frappe.as_json({"order_id": "external-order", "updated_at": "2099-01-01"}),
+			},
+		)
+
+		self.assertFalse(debounce.bump_if_linked_order_changed(order.name, before, "Noon Order Import"))
+
+	def test_fingerprint_ignores_zeroed_noon_rows_but_sees_status_and_shipment_changes(self):
+		def row(**values):
+			return frappe._dict({"external_item_id": "sku:A:x:y", "external_sku": "A", **values})
+
+		base = frappe._dict(
+			platform="Noon",
+			items=[row(external_status="CONFIRMED", integration_status="ACKNOWLEDGED", current_quantity=2)],
+			noon_shipments=[],
+			noon_shipment_units=[],
+			refunds=None,
+		)
+		with_stale = frappe._dict(
+			base, items=base["items"] + [row(external_item_id="sku:A:z", current_quantity=0)]
+		)
+		shipped = frappe._dict(
+			base, items=[row(external_status="CONFIRMED", integration_status="SHIPPED", current_quantity=2)]
+		)
+		in_shipment = frappe._dict(
+			base,
+			noon_shipments=[frappe._dict(integration_shipment_nr="S-1", status="Created")],
+			noon_shipment_units=[frappe._dict(integration_shipment_nr="S-1", mp_item_nr="1")],
+		)
+		fingerprint = debounce.order_evidence_fingerprint
+
+		self.assertEqual(fingerprint(base), fingerprint(with_stale))
+		self.assertNotEqual(fingerprint(base), fingerprint(shipped))
+		self.assertNotEqual(fingerprint(base), fingerprint(in_shipment))
+
+	def test_linked_refunded_order_does_not_bump_when_unchanged_and_bumps_on_a_new_refund(self):
+		"""The "before" side is built from the same document + builder as the "after"
+		side, so refund evidence is symmetric: an unchanged re-import of a refunded
+		linked order never bumps, a newly persisted refund does."""
+		order = self._make_order()
+		self._link(order)
+		frappe.db.set_value("Marketplace Order", order.name, "refunds", frappe.as_json([{"id": "R-1"}]))
+		before = self._fingerprint_before(order)
+
+		self.assertFalse(debounce.bump_if_linked_order_changed(order.name, before, "Manual"))
+
+		frappe.db.set_value(
+			"Marketplace Order", order.name, "refunds", frappe.as_json([{"id": "R-1"}, {"id": "R-2"}])
+		)
+		self.assertTrue(debounce.bump_if_linked_order_changed(order.name, before, "Manual"))
+
+	def test_fingerprint_sees_snapshot_inputs_dates_currency_and_missing_flags(self):
+		def row(**values):
+			return frappe._dict({"external_item_id": "line-1", "external_sku": "A", **values})
+
+		base = frappe._dict(platform="Talabat", items=[row(fulfilled_total_price=10)], refunds=None)
+		fingerprint = debounce.order_evidence_fingerprint
+		variants = [
+			frappe._dict(base, received_on="2026-09-01 10:00:00"),
+			frappe._dict(base, processed_on="2026-09-01 10:00:00"),
+			frappe._dict(base, promised_for="2026-09-02 10:00:00"),
+			frappe._dict(base, presentment_currency="USD"),
+			frappe._dict(base, items=[row(fulfilled_total_price=10, fulfilled_total_price_missing=1)]),
+			frappe._dict(base, items=[row(fulfilled_total_price=10, transaction_amount_missing=1)]),
+		]
+		for variant in variants:
+			self.assertNotEqual(fingerprint(base), fingerprint(variant))
+
+		# A time-of-day-only change does not change the snapshot's date, so no bump.
+		dated = frappe._dict(base, received_on="2026-09-01 10:00:00")
+		same_day = frappe._dict(base, received_on="2026-09-01 23:59:59")
+		self.assertEqual(fingerprint(dated), fingerprint(same_day))

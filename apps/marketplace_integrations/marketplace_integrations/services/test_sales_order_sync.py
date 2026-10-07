@@ -177,6 +177,11 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 						"external_item_id": f"gid://shopify/LineItem/{self.suffix}",
 						"external_variant_id": variant_gid,
 						"current_quantity": current_quantity,
+						# #178: both fulfillment quantities read from Shopify, nothing fulfilled
+						# yet; without them the lifecycle stage is unknown and blocks changes.
+						"unfulfilled_quantity": current_quantity,
+						"non_fulfillable_quantity": 0,
+						"fulfillment_quantities_known": 1,
 						"transaction_amount": transaction_amount,
 						"transaction_amount_missing": transaction_amount_missing,
 						**(
@@ -321,6 +326,9 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			{
 				"external_order_id": f"sales-order-sync-order-{self.suffix}-{frappe.generate_hash(length=4)}",
 				"latest_payload": {"order_id": "external-order"},
+				# #178: Talabat lifecycle evidence is read from the status; a blank status
+				# is "unknown" and would block any change after sync.
+				"external_status": "RECEIVED",
 				"received_on": nowdate(),
 				"promised_for": add_days(nowdate(), 1),
 				"customer_first_name": "Talabat Customer",
@@ -701,6 +709,49 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(result["reconciliation"]["outcome"], "UNSUPPORTED_COMPENSATING_TRANSACTION")
 		self.assertIn("compensating transaction", result["error"])
 
+	def _assert_cancelled_talabat_order_was_blocked(self, order, result):
+		order.reload()
+		self.assertFalse(result["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertEqual(order.last_sync_error, "Cancelled Talabat orders cannot be synchronized.")
+		self.assertFalse(order.erpnext_sales_order)
+		self.assertFalse(frappe.db.exists("Sales Order", {"custom_marketplace_order": order.name}))
+		logs = frappe.get_all(
+			"Marketplace Sync Log", filters={"marketplace_order": order.name}, fields=["status"]
+		)
+		self.assertEqual([log.status for log in logs], ["Invalid"])
+
+	def test_never_synced_cancelled_talabat_order_does_not_create_a_sales_order(self):
+		order = self._make_order()
+		order.external_status = "CANCELLED"
+		order.save()
+
+		result = sync_sales_order(order.name)
+
+		self._assert_cancelled_talabat_order_was_blocked(order, result)
+
+	def test_never_synced_cancelled_talabat_order_is_blocked_through_the_debounced_path(self):
+		from marketplace_integrations.services import sales_order_sync_debounce as debounce
+
+		order = self._make_order()
+		order.external_status = "CANCELLED"
+		order.save()
+		debounce.bump_sync_debounce(order.name, trigger_source="Talabat Webhook", delay_seconds=45)
+		expected = frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until")
+
+		debounce._run_debounced_sync(order.name, expected)
+
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertEqual(order.last_sync_error, "Cancelled Talabat orders cannot be synchronized.")
+		self.assertFalse(order.erpnext_sales_order)
+		logs = frappe.get_all(
+			"Marketplace Sync Log",
+			filters={"marketplace_order": order.name},
+			fields=["status", "trigger_source"],
+		)
+		self.assertEqual([(log.status, log.trigger_source) for log in logs], [("Invalid", "Talabat Webhook")])
+
 	def _converge_erp_with_changed_marketplace_order(self, order):
 		"""Marketplace qty 2 -> 3 (same rate), then ERPNext is edited to match and is billed/delivered."""
 		sales_order = self._sync_and_set_item_fields(order)
@@ -942,7 +993,9 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(request_data["reconciliation"]["action"], "CANCEL_ORDER")
 		self.assertIn("erp_state", request_data["reconciliation"])
 
-	def test_submitted_shopify_refund_is_planned_without_rebuilding_a_snapshot(self):
+	def test_submitted_shopify_refund_with_delivery_is_planned_from_a_rebuilt_snapshot(self):
+		# #178: only cancellation uses the stored baseline now; refund evidence is judged
+		# against a rebuilt snapshot (here unchanged, so the refund evidence decides).
 		account = self._make_shopify_account()
 		order, _mapping = self._make_shopify_order(account)
 		sync_sales_order(order.name)
@@ -968,6 +1021,220 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		result = sync_sales_order(order.name)
 
 		self.assertEqual(result["reconciliation"]["outcome"], "CANCEL_ORDER")
+
+	def test_submitted_shopify_refund_that_zeroes_a_line_is_judged_not_blocked(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account)
+		sync_sales_order(order.name)
+		order.reload()
+		self._set_first_item_fields(order, delivered_qty=1)
+		order.items[0].current_quantity = 0
+		order.refunds = frappe.as_json([{"id": f"refund-{self.suffix}"}])
+		order.save()
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertEqual(result["reconciliation"]["outcome"], "UNSUPPORTED_COMPENSATING_TRANSACTION")
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+
+	def test_submitted_shopify_refund_that_zeroes_an_undelivered_line_is_an_update(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account)
+		sync_sales_order(order.name)
+		order.reload()
+		order.items[0].current_quantity = 0
+		order.refunds = frappe.as_json([{"id": f"refund-{self.suffix}"}])
+		order.save()
+
+		result = sync_sales_order(order.name)
+
+		self.assertEqual(result["reconciliation"]["outcome"], "UPDATE_SUBMITTED_ORDER")
+
+	def test_linked_submitted_order_with_refunded_status_flows_to_the_refund_planner(self):
+		account = self._make_shopify_account()
+		for status in ("REFUNDED", "PARTIALLY_REFUNDED"):
+			with self.subTest(status=status):
+				order, _mapping = self._make_shopify_order(account)
+				sync_sales_order(order.name)
+				order.reload()
+				self._set_first_item_fields(order, delivered_qty=1)
+				order.external_financial_status = status
+				order.refunds = frappe.as_json([{"id": f"refund-{status}-{self.suffix}"}])
+				order.save()
+
+				result = sync_sales_order(order.name)
+
+				self.assertEqual(result["reconciliation"]["outcome"], "UNSUPPORTED_COMPENSATING_TRANSACTION")
+
+	def test_refund_reflected_before_delivery_stops_counting_as_evidence(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account)
+		sync_sales_order(order.name)
+		order.reload()
+		order.refunds = frappe.as_json([{"id": f"refund-{self.suffix}"}])
+		order.save()
+		order.reload()
+
+		# Nothing was delivered when the refund arrived and ERPNext already matches:
+		# NO_ACTION stores the CURRENT refund ids, so the refund is now "reflected".
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertIn(f"refund-{self.suffix}", frappe.parse_json(order.last_synced_snapshot)["refund_ids"])
+
+		self._set_first_item_fields(order, delivered_qty=1)
+		order.customer_city = "Later Save City"
+		order.save()
+		order.reload()
+
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(sync_sales_order(order.name)["reconciliation"]["outcome"], "NO_ACTION")
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+
+	def test_refund_evidence_outranks_a_rebuild_blocker_on_a_delivered_order(self):
+		account = self._make_shopify_account()
+		order, mapping = self._make_shopify_order(account)
+		sync_sales_order(order.name)
+		order.reload()
+		self._set_first_item_fields(order, delivered_qty=1)
+		order.refunds = frappe.as_json([{"id": f"refund-{self.suffix}"}])
+		order.save()
+		frappe.db.set_value("Marketplace Product Mapping", mapping.name, "enabled", 0)
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["reconciliation"]["outcome"], "UNSUPPORTED_COMPENSATING_TRANSACTION")
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertIn("compensating", order.last_sync_error)
+		# The status check on every save/form load agrees.
+		order.customer_email = f"disabled-mapping-{self.suffix}@example.com"
+		order.save()
+		order.reload()
+		self.assertIn("compensating", order.last_sync_error)
+
+	def test_rebuild_blocker_without_refund_evidence_still_surfaces(self):
+		account = self._make_shopify_account()
+		order, mapping = self._make_shopify_order(account)
+		sync_sales_order(order.name)
+		order.reload()
+		self._set_first_item_fields(order, delivered_qty=1)
+		frappe.db.set_value("Marketplace Product Mapping", mapping.name, "enabled", 0)
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		self.assertNotIn("compensating", result["error"])
+
+	def test_never_synced_refunded_shopify_order_still_blocks(self):
+		account = self._make_shopify_account()
+		for status in ("REFUNDED", "PARTIALLY_REFUNDED"):
+			with self.subTest(status=status):
+				order, _mapping = self._make_shopify_order(account, financial_status=status)
+
+				result = sync_sales_order(order.name)
+				order.reload()
+
+				self.assertFalse(result["ok"])
+				self.assertIn("financially eligible", result["error"])
+				self.assertFalse(order.erpnext_sales_order)
+
+	def test_never_synced_zero_quantity_shopify_line_still_blocks(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, current_quantity=0)
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertFalse(order.erpnext_sales_order)
+
+	def test_talabat_change_after_pickup_status_needs_attention_with_the_lifecycle_reason(self):
+		for status in ("READY_FOR_PICKUP", "DISPATCHED", "DELIVERED"):
+			with self.subTest(status=status):
+				order = self._make_order()
+				sync_sales_order(order.name)
+				order.reload()
+				order.external_status = status
+				order.items[0].fulfilled_quantity = 3
+				order.items[0].fulfilled_total_price = 1500
+				order.save()
+
+				result = sync_sales_order(order.name)
+				order.reload()
+
+				self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+				self.assertIn(status, result["error"])
+				self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+
+	def test_talabat_unchanged_order_after_pickup_status_stays_synced(self):
+		order = self._make_order()
+		sync_sales_order(order.name)
+		order.reload()
+		order.external_status = "DISPATCHED"
+		order.save()
+
+		result = sync_sales_order(order.name)
+
+		self.assertEqual(result["reconciliation"]["outcome"], "NO_ACTION")
+
+	def test_talabat_change_with_unrecognized_status_needs_attention(self):
+		order = self._make_order()
+		sync_sales_order(order.name)
+		order.reload()
+		order.external_status = "CANCELED"  # only the documented CANCELLED spelling is accepted
+		order.items[0].fulfilled_quantity = 3
+		order.items[0].fulfilled_total_price = 1500
+		order.save()
+
+		result = sync_sales_order(order.name)
+
+		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+		self.assertIn("not recognized", result["error"])
+
+	def test_talabat_cancelled_after_pickup_is_compensating_only_with_erp_delivery(self):
+		for delivered_qty, expected in ((1, "UNSUPPORTED_COMPENSATING_TRANSACTION"), (0, "NEEDS_ATTENTION")):
+			with self.subTest(delivered_qty=delivered_qty):
+				order = self._make_order()
+				self._sync_and_set_item_fields(order, delivered_qty=delivered_qty)
+				order.external_status = "CANCELLED"
+				order.post_picked_up = 1
+				order.save()
+
+				result = sync_sales_order(order.name)
+
+				self.assertEqual(result["reconciliation"]["outcome"], expected)
+
+	def test_talabat_cancelled_after_pickup_converges_when_erp_order_is_closed_without_remainder(self):
+		order = self._make_order()
+		sales_order = self._sync_and_set_item_fields(order, delivered_qty=2)
+		frappe.db.set_value("Sales Order", sales_order.name, "status", "Closed", update_modified=False)
+		order.external_status = "CANCELLED"
+		order.post_picked_up = 1
+		order.save()
+
+		result = sync_sales_order(order.name)
+
+		self.assertEqual(result["reconciliation"]["outcome"], "NO_ACTION")
+
+	def test_promotion_only_refresh_is_not_an_edit(self):
+		order = self._make_order()
+		sync_sales_order(order.name)
+		order.reload()
+		first_hash = order.last_synced_hash
+		order.promotion_status = "AVAILABLE"
+		order.items[0].container_deposit = 1
+		order.items[0].promotions = frappe.as_json(
+			[{"name": "Promo", "type": "PERCENT", "discount_amount": 5, "sponsorships": []}]
+		)
+		order.save()
+		order.reload()
+
+		self.assertEqual(snapshot_hash(build_sales_order_snapshot(order)), first_hash)
+		self.assertEqual(order.last_synced_hash, first_hash)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(sync_sales_order(order.name)["reconciliation"]["outcome"], "NO_ACTION")
 
 	def test_talabat_only_changes_do_not_dirty_the_sales_order_snapshot(self):
 		order = self._make_order()
@@ -1123,6 +1390,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		caller that has not gone through a real Marketplace Order save/reload.
 		"""
 		order = SimpleNamespace(
+			external_status="IN_CART",
 			items=[
 				frappe._dict(
 					external_status="IN_CART",
@@ -1133,7 +1401,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 					fulfilled_total_price=None,
 					fulfilled_total_price_missing=1,
 				)
-			]
+			],
 		)
 
 		with self.assertRaises(SyncBlocker):
@@ -2211,3 +2479,65 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		# The submitted Sales Order itself is never touched by this.
 		self.assertEqual(frappe.db.get_value("Sales Order", so_name, "docstatus"), 1)
 		self.assertEqual(frappe.db.get_value("Sales Order Item", {"parent": so_name}, "qty"), 2)
+
+	# -------------------------------------------------------------------
+	# #178 part 3: Noon evidence + snapshot builder for a linked order.
+	# -------------------------------------------------------------------
+
+	def _noon_payload_unit(self, mp_item_nr, mp_status, integration_status, sku="SKU-NOON"):
+		return {
+			"mp_item_nr": mp_item_nr,
+			"partner_sku": sku,
+			"mp_status": mp_status,
+			"integration_status": integration_status,
+		}
+
+	def test_noon_linked_order_with_every_unit_cancelled_plans_cancel_order_without_raising(self):
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(account)
+		first = sync_sales_order(order.name)
+		self.assertTrue(first["ok"], first.get("error"))
+		order.reload()
+		order.items[0].external_status = "CANCELLED"
+		order.items[0].integration_status = "OUT_OF_STOCK"
+		order.latest_payload = frappe.as_json(
+			{
+				"items": [
+					self._noon_payload_unit(
+						"1", "MP_ITEM_STATUS_CANCELLED", "INTEGRATION_ITEM_STATUS_OUT_OF_STOCK"
+					),
+					self._noon_payload_unit(
+						"2", "MP_ITEM_STATUS_CANCELLED", "INTEGRATION_ITEM_STATUS_OUT_OF_STOCK"
+					),
+				]
+			}
+		)
+		order.save()
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["reconciliation"]["outcome"], "CANCEL_ORDER")
+		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "docstatus"), 1)
+
+	def test_noon_never_synced_order_with_no_eligible_lines_still_blocks(self):
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(
+			account,
+			items=[
+				{
+					"external_item_id": "sku:SKU-NOON:x:y",
+					"external_sku": "SKU-NOON",
+					"external_status": "CANCELLED",
+					"integration_status": "OUT_OF_STOCK",
+					"current_quantity": 2,
+					"transaction_amount": 200.0,
+				}
+			],
+		)
+
+		with self.assertRaises(SyncBlocker):
+			build_sales_order_snapshot(order, for_submitted_order=False)
+		result = sync_sales_order(order.name)
+		self.assertFalse(result["ok"])
+		self.assertIn("No eligible Noon order lines", result["error"])

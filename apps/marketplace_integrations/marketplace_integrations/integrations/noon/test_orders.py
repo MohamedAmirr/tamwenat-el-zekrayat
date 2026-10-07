@@ -25,6 +25,7 @@ from marketplace_integrations.integrations.noon.orders import (
 	poll_all_accounts,
 	refresh_order,
 )
+from marketplace_integrations.services.linked_sales_order_fixture import LinkedSalesOrderFixture
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 
 _DEFAULT_ITEMS = object()
@@ -519,6 +520,7 @@ class IntegrationTestNoonOrderImport(IntegrationTestCase):
 
 		_start_noon_client_customer_data_patch(self)
 
+		self._fixtures = []
 		suffix = frappe.generate_hash(length=8)
 		self.account = _make_noon_account(f"Order Import {suffix}")
 		_make_item("ITEM-MAPPED")
@@ -530,7 +532,14 @@ class IntegrationTestNoonOrderImport(IntegrationTestCase):
 		shopify/test_orders.py for the naming-series revert-on-delete gotcha:
 		orders must be deleted BEFORE the account to avoid corrupting the next
 		test's name allocation."""
-		frappe.db.delete("Marketplace Order", filters={"marketplace_account": self.account.name})
+		# delete_doc (not frappe.db.delete) so child rows go too - this teardown commits.
+		for order_name in frappe.get_all(
+			"Marketplace Order", filters={"marketplace_account": self.account.name}, pluck="name"
+		):
+			frappe.delete_doc("Marketplace Order", order_name, ignore_permissions=True, force=True)
+		# Linked Sales Orders (#178 tests): after the orders, before the commit below.
+		for fixture in self._fixtures:
+			fixture.cleanup()
 		frappe.db.delete(
 			"Marketplace Sync Log",
 			filters={
@@ -809,6 +818,129 @@ class IntegrationTestNoonOrderImport(IntegrationTestCase):
 		self.assertEqual(order2.customer_city, "Dubai")
 		self.assertEqual(order2.customer_formatted_address, "Dubai")
 
+	# #178 part 3 reverses #146 decision 7's "never bump once a Sales Order is
+	# linked": a poll that CHANGES a linked order bumps the sync debounce, a poll
+	# that merely re-confirms it (or only changes volatile fields) does not.
+
+	def _item(self, integration_status="INTEGRATION_ITEM_STATUS_ACKNOWLEDGED"):
+		return [
+			{
+				"mp_item_nr": 1,
+				"partner_sku": "SKU-MAPPED",
+				"mp_status": "MP_ITEM_STATUS_CONFIRMED",
+				"integration_status": integration_status,
+				"delivered_invoice_price": 50.0,
+			}
+		]
+
+	def _linked_order(self, fbpi_order_nr):
+		order, _ = import_order(self.account, _order_payload(fbpi_order_nr=fbpi_order_nr, items=self._item()))
+		# A REAL Sales Order (not a made-up name) so link validation on re-import passes.
+		fixture = LinkedSalesOrderFixture()
+		self._fixtures.append(fixture)
+		fixture.link(order.name)
+		return order
+
+	def _debounce(self, order):
+		return frappe.db.get_value(
+			"Marketplace Order",
+			order.name,
+			["sync_debounce_until", "pending_sync_trigger_source"],
+			as_dict=True,
+		)
+
+	def test_import_of_a_changed_linked_order_bumps_once_with_noon_order_import(self):
+		order = self._linked_order("ORD-LINKED-CHANGED")
+
+		import_order(
+			self.account,
+			_order_payload(
+				fbpi_order_nr="ORD-LINKED-CHANGED", items=self._item("INTEGRATION_ITEM_STATUS_SHIPPED")
+			),
+		)
+
+		state = self._debounce(order)
+		self.assertIsNotNone(state.sync_debounce_until)
+		self.assertEqual(state.pending_sync_trigger_source, "Noon Order Import")
+
+	def test_replayed_import_of_a_linked_order_does_not_bump_again(self):
+		order = self._linked_order("ORD-LINKED-REPLAY")
+		payload = _order_payload(
+			fbpi_order_nr="ORD-LINKED-REPLAY", items=self._item("INTEGRATION_ITEM_STATUS_SHIPPED")
+		)
+		import_order(self.account, payload)
+		frappe.db.set_value("Marketplace Order", order.name, "sync_debounce_until", None)
+
+		import_order(self.account, payload)
+
+		self.assertIsNone(self._debounce(order).sync_debounce_until)
+
+	def test_unchanged_reimport_of_a_linked_order_does_not_bump(self):
+		order = self._linked_order("ORD-LINKED-SAME")
+
+		import_order(self.account, _order_payload(fbpi_order_nr="ORD-LINKED-SAME", items=self._item()))
+
+		self.assertIsNone(self._debounce(order).sync_debounce_until)
+
+	def test_reimport_with_a_same_day_order_created_at_change_does_not_bump(self):
+		order = self._linked_order("ORD-LINKED-VOLATILE")
+
+		import_order(
+			self.account,
+			_order_payload(
+				fbpi_order_nr="ORD-LINKED-VOLATILE",
+				items=self._item(),
+				order_created_at="2026-09-30T10:00:01Z",
+			),
+		)
+
+		self.assertIsNone(self._debounce(order).sync_debounce_until)
+
+	def test_reimport_with_a_different_day_order_created_at_bumps(self):
+		"""received_on feeds the Sales Order transaction/delivery date, so a changed date
+		is snapshot-relevant evidence (a same-day change is not)."""
+		order = self._linked_order("ORD-LINKED-DATE")
+
+		import_order(
+			self.account,
+			_order_payload(
+				fbpi_order_nr="ORD-LINKED-DATE", items=self._item(), order_created_at="2026-10-05T10:00:00Z"
+			),
+		)
+
+		self.assertIsNotNone(self._debounce(order).sync_debounce_until)
+
+	def test_self_initiated_import_labels_its_bump_with_the_given_trigger_source(self):
+		"""Our own create-shipment / mark-out-of-stock / refresh re-imports pass
+		bump_trigger_source="Manual" so their sync is not mislabelled "Noon Order Import"."""
+		order = self._linked_order("ORD-LINKED-SELF")
+
+		import_order(
+			self.account,
+			_order_payload(
+				fbpi_order_nr="ORD-LINKED-SELF", items=self._item("INTEGRATION_ITEM_STATUS_SHIPPED")
+			),
+			bump_trigger_source="Manual",
+		)
+
+		state = self._debounce(order)
+		self.assertIsNotNone(state.sync_debounce_until)
+		self.assertEqual(state.pending_sync_trigger_source, "Manual")
+
+	def test_unlinked_changed_order_only_bumps_on_first_eligibility(self):
+		order, _ = import_order(
+			self.account, _order_payload(fbpi_order_nr="ORD-UNLINKED", items=self._item())
+		)
+		self.assertEqual(self._debounce(order).pending_sync_trigger_source, "Noon Order Import")
+		frappe.db.set_value("Marketplace Order", order.name, "sync_debounce_until", None)
+
+		import_order(
+			self.account,
+			_order_payload(fbpi_order_nr="ORD-UNLINKED", items=self._item("INTEGRATION_ITEM_STATUS_SHIPPED")),
+		)
+
+		self.assertIsNone(self._debounce(order).sync_debounce_until)
+
 
 class IntegrationTestNoonOrderImportConcurrency(IntegrationTestCase):
 	"""#146 decision 10's single most important test: a ``Marketplace Order
@@ -1026,15 +1158,18 @@ class IntegrationTestNoonOrderImportBatchIsolation(IntegrationTestCase):
 				fbpi_order_nr="ORD-BAD",
 				warehouse_code="WRONG-WH",  # Will fail warehouse validation
 			)
-			yield _order_payload(fbpi_order_nr="ORD-GOOD", items=[
-				{
-					"mp_item_nr": 1,
-					"partner_sku": "SKU-GOOD",
-					"mp_status": "MP_ITEM_STATUS_CONFIRMED",
-					"integration_status": "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
-					"delivered_invoice_price": 100.0,
-				}
-			])
+			yield _order_payload(
+				fbpi_order_nr="ORD-GOOD",
+				items=[
+					{
+						"mp_item_nr": 1,
+						"partner_sku": "SKU-GOOD",
+						"mp_status": "MP_ITEM_STATUS_CONFIRMED",
+						"integration_status": "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+						"delivered_invoice_price": 100.0,
+					}
+				],
+			)
 
 		with patch(
 			"marketplace_integrations.integrations.noon.orders.list_orders",
@@ -1048,7 +1183,9 @@ class IntegrationTestNoonOrderImportBatchIsolation(IntegrationTestCase):
 		self.assertEqual(errors[0]["fbpi_order_nr"], "ORD-BAD")
 		self.assertIn("warehouse", errors[0]["error"].lower())
 		self.assertEqual(len(_imported), 1)
-		self.assertEqual(_imported[0], frappe.db.get_value("Marketplace Order", {"external_order_id": "ORD-GOOD"}))
+		self.assertEqual(
+			_imported[0], frappe.db.get_value("Marketplace Order", {"external_order_id": "ORD-GOOD"})
+		)
 
 	def test_per_order_failure_writes_sync_log_with_error_status(self):
 		"""Each failed order import writes a Marketplace Sync Log row
@@ -1157,15 +1294,19 @@ class IntegrationTestNoonOrderImportBatchIsolation(IntegrationTestCase):
 
 		def mock_list_orders(account, created_after=None, created_before=None):
 			yield _order_payload(fbpi_order_nr="ORD-NAMSHI", mp_code="namshi_v2")
-			yield _order_payload(fbpi_order_nr="ORD-NOON", mp_code="noon", items=[
-				{
-					"mp_item_nr": 1,
-					"partner_sku": "SKU-GOOD",
-					"mp_status": "MP_ITEM_STATUS_CONFIRMED",
-					"integration_status": "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
-					"delivered_invoice_price": 100.0,
-				}
-			])
+			yield _order_payload(
+				fbpi_order_nr="ORD-NOON",
+				mp_code="noon",
+				items=[
+					{
+						"mp_item_nr": 1,
+						"partner_sku": "SKU-GOOD",
+						"mp_status": "MP_ITEM_STATUS_CONFIRMED",
+						"integration_status": "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+						"delivered_invoice_price": 100.0,
+					}
+				],
+			)
 
 		with patch(
 			"marketplace_integrations.integrations.noon.orders.list_orders",
@@ -1312,9 +1453,7 @@ class IntegrationTestNoonOrderPagination(IntegrationTestCase):
 				}
 			return response
 
-		with patch(
-			"marketplace_integrations.integrations.noon.orders.NoonClient"
-		) as client_class:
+		with patch("marketplace_integrations.integrations.noon.orders.NoonClient") as client_class:
 			client = client_class.return_value
 			client.request.side_effect = mock_request
 			orders = list(list_orders(self.account))
@@ -1335,9 +1474,7 @@ class IntegrationTestNoonOrderPagination(IntegrationTestCase):
 			}
 			return response
 
-		with patch(
-			"marketplace_integrations.integrations.noon.orders.NoonClient"
-		) as client_class:
+		with patch("marketplace_integrations.integrations.noon.orders.NoonClient") as client_class:
 			client = client_class.return_value
 			client.request.side_effect = mock_request
 			with self.assertRaises(frappe.ValidationError) as cm:
@@ -1355,9 +1492,7 @@ class IntegrationTestNoonOrderPagination(IntegrationTestCase):
 			self.assertEqual(json["warehouse_code"], self.account.noon_warehouse_code)
 			return response
 
-		with patch(
-			"marketplace_integrations.integrations.noon.orders.NoonClient"
-		) as client_class:
+		with patch("marketplace_integrations.integrations.noon.orders.NoonClient") as client_class:
 			client = client_class.return_value
 			client.request.side_effect = mock_request
 			list(list_orders(self.account))
@@ -1391,26 +1526,29 @@ class IntegrationTestNoonOrderRefresh(IntegrationTestCase):
 				}
 			],
 		)
-		self.order = upsert_marketplace_order(self.account.name, {
-			"external_order_id": "ORD-REFRESH",
-			"platform_order_reference": "MP-001",
-			"order_code": "MP-001",
-			"presentment_currency": "AED",
-			"items": [
-				{
-					"external_item_id": "sku:SKU-TEST:MP_ITEM_STATUS_CONFIRMED:INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
-					"external_sku": "SKU-TEST",
-					"pricing_type": "UNIT",
-					"original_quantity": 1,
-					"fulfilled_quantity": 1,
-					"current_quantity": 1,
-					"transaction_amount": 100.0,
-					"external_status": "CONFIRMED",
-					"integration_status": "ACKNOWLEDGED",
-				}
-			],
-			"latest_payload": payload,
-		})
+		self.order = upsert_marketplace_order(
+			self.account.name,
+			{
+				"external_order_id": "ORD-REFRESH",
+				"platform_order_reference": "MP-001",
+				"order_code": "MP-001",
+				"presentment_currency": "AED",
+				"items": [
+					{
+						"external_item_id": "sku:SKU-TEST:MP_ITEM_STATUS_CONFIRMED:INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+						"external_sku": "SKU-TEST",
+						"pricing_type": "UNIT",
+						"original_quantity": 1,
+						"fulfilled_quantity": 1,
+						"current_quantity": 1,
+						"transaction_amount": 100.0,
+						"external_status": "CONFIRMED",
+						"integration_status": "ACKNOWLEDGED",
+					}
+				],
+				"latest_payload": payload,
+			},
+		)
 
 	def tearDown(self):
 		frappe.db.delete("Marketplace Order", filters={"marketplace_account": self.account.name})
@@ -1570,8 +1708,7 @@ class IntegrationTestNoonPoll(IntegrationTestCase):
 		# accounts from prior test runs - see Shopify's tearDown pattern in
 		# shopify/test_orders.py's IntegrationTestImportOrdersUpdatedBetween).
 		relevant_calls = [
-			call for call in enqueue.call_args_list
-			if call.kwargs.get("account_name") == self.account.name
+			call for call in enqueue.call_args_list if call.kwargs.get("account_name") == self.account.name
 		]
 		self.assertEqual(len(relevant_calls), 1)
 
@@ -1613,7 +1750,8 @@ class IntegrationTestNoonPoll(IntegrationTestCase):
 			# Filter enqueue calls to only the two accounts created by this test
 			# (ignore any stale accounts from prior test runs - see Shopify's pattern).
 			relevant_calls = [
-				call for call in enqueue.call_args_list
+				call
+				for call in enqueue.call_args_list
 				if call.kwargs.get("account_name") in (self.account.name, account_b.name)
 			]
 			self.assertEqual(len(relevant_calls), 2)

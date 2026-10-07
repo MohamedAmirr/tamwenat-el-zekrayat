@@ -38,9 +38,7 @@ class UnitTestShopifyOrderMapper(UnitTestCase):
 						"currentQuantity": 2,
 						"variant": {"id": "gid://shopify/ProductVariant/1"},
 						"originalUnitPriceSet": {"shopMoney": {"amount": "20.00"}},
-						"discountAllocations": [
-							{"allocatedAmountSet": {"shopMoney": {"amount": "3.50"}}}
-						],
+						"discountAllocations": [{"allocatedAmountSet": {"shopMoney": {"amount": "3.50"}}}],
 					}
 				],
 			},
@@ -60,6 +58,25 @@ class UnitTestShopifyOrderMapper(UnitTestCase):
 		self.assertEqual(result["items"][0]["external_variant_id"], "gid://shopify/ProductVariant/1")
 		self.assertEqual(result["items"][0]["current_quantity"], 2)
 		self.assertEqual(result["items"][0]["net_amount"], Decimal("36.50"))
+
+	def test_maps_fulfillment_quantities_and_marks_them_known(self):
+		order = self.order()
+		order["lineItems"]["nodes"][0].update({"unfulfilledQuantity": 1, "nonFulfillableQuantity": 0})
+
+		item = normalize_order(order)["items"][0]
+
+		self.assertEqual(item["unfulfilled_quantity"], 1)
+		self.assertEqual(item["non_fulfillable_quantity"], 0)
+		self.assertEqual(item["fulfillment_quantities_known"], 1)
+
+	def test_absent_or_null_fulfillment_quantities_are_not_known(self):
+		cases = ({}, {"unfulfilledQuantity": 1}, {"unfulfilledQuantity": None, "nonFulfillableQuantity": 0})
+		for overrides in cases:
+			with self.subTest(overrides=overrides):
+				order = self.order()
+				order["lineItems"]["nodes"][0].update(overrides)
+
+				self.assertEqual(normalize_order(order)["items"][0]["fulfillment_quantities_known"], 0)
 
 	def test_null_variant_is_supported(self):
 		order = self.order()
@@ -117,7 +134,12 @@ class UnitTestShopifyOrderMapper(UnitTestCase):
 		self.assertIsNone(result["shipping_address"])
 
 	def test_billing_address_is_used_when_shipping_address_is_absent(self):
-		billing = {"city": "Alexandria", "latitude": 31.2, "longitude": 29.9, "formatted": ["Alexandria", "Egypt"]}
+		billing = {
+			"city": "Alexandria",
+			"latitude": 31.2,
+			"longitude": 29.9,
+			"formatted": ["Alexandria", "Egypt"],
+		}
 		result = normalize_order(self.order(billingAddress=billing))
 
 		self.assertEqual(result["customer_formatted_address"], "Alexandria, Egypt")

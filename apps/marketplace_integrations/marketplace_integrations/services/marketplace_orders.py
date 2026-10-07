@@ -90,6 +90,9 @@ ITEM_FIELDS = (
 	"fulfilled_total_price",
 	"fulfilled_total_price_missing",
 	"current_quantity",
+	"unfulfilled_quantity",
+	"non_fulfillable_quantity",
+	"fulfillment_quantities_known",
 	"net_amount",
 	"transaction_amount",
 	"transaction_amount_missing",
@@ -168,6 +171,7 @@ def _upsert_order_items(doc, items):
 	if not isinstance(items, list):
 		frappe.throw(_("Normalized marketplace order items must be a list."))
 
+	item_meta = frappe.get_meta("Marketplace Order Item")
 	by_external_item_id = {cstr(row.external_item_id).strip(): row for row in doc.items or []}
 	seen_external_item_ids = set()
 	for values in items:
@@ -186,7 +190,17 @@ def _upsert_order_items(doc, items):
 			by_external_item_id[external_item_id] = row
 		row.external_item_id = external_item_id
 		for fieldname in ITEM_FIELDS:
-			row.set(fieldname, values.get(fieldname))
+			value = values.get(fieldname)
+			if value is None:
+				# On insert Frappe fills an unset Select with its first option (e.g. a
+				# Shopify row's external_status "NOT_PROCESSED", pricing_type "UNIT"), but
+				# not on update, so a re-import would blank it and look like a change to
+				# the evidence fingerprint. Store the same value both times.
+				field = item_meta.get_field(fieldname)
+				value = field.default
+				if value is None and field.fieldtype == "Select" and field.options:
+					value = field.options.split("\n")[0]
+			row.set(fieldname, value)
 		for fieldname in JSON_ITEM_FIELDS:
 			row.set(fieldname, _as_json(values.get(fieldname)))
 
