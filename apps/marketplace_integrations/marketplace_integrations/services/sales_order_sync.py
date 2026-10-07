@@ -1349,12 +1349,16 @@ def _execute_reconciliation_plan(
 		frappe.db.release_savepoint(_RECONCILE_EXECUTE_SAVEPOINT)
 		return result
 	except ReconciliationMismatch as exc:
-		_rollback_reconcile_savepoint()
+		rolled_back = _rollback_reconcile_savepoint()
 		frappe.clear_messages()
 		order.reload()
 		attention = {
 			"outcome": NEEDS_ATTENTION,
-			"message": cstr(exc),
+			"message": cstr(exc)
+			if rolled_back
+			else _(
+				"The database transaction was already rolled back; verify the Sales Order state in ERPNext."
+			),
 			"changes": reconciliation_plan["changes"],
 		}
 		result = _save_reconciliation_advisory(order, attention)
@@ -1386,14 +1390,17 @@ def _execute_reconciliation_plan(
 		order.reload()
 		if reconciliation_plan.get("reopen"):
 			if rolled_back:
-				message = _("Reopening the Closed Sales Order failed; it was left Closed. {0}").format(
-					message
+				operation = _("cancel") if outcome == CANCEL_ORDER else _("update")
+				message = _("Reopen and {0} failed; the Sales Order was left Closed. {1}").format(
+					operation, message
 				)
 			else:
+				# The savepoint was already gone: MariaDB rolled the whole transaction back,
+				# so the Sales Order is still Closed; the state just needs a human check.
 				attention = {
 					"outcome": NEEDS_ATTENTION,
 					"message": _(
-						"The Sales Order may have been left open after a failed reopen; review it in ERPNext."
+						"The database transaction was already rolled back; verify the Sales Order state in ERPNext."
 					),
 					"changes": reconciliation_plan["changes"],
 				}

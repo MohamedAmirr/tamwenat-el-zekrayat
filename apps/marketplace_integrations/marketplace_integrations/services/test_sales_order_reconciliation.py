@@ -217,11 +217,32 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 			self.assertEqual(result["outcome"], NEEDS_ATTENTION)
 			self.assertFalse(result.get("reopen"))
 
-	def test_closed_erp_order_equivalent_to_the_marketplace_needs_no_action(self):
+	def test_closed_erp_order_equivalent_to_the_marketplace_needs_attention_without_reopen(self):
 		self.erp_state.update({"status": "Closed"})
 		result = plan(self.previous, self._current(), {}, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertIn("still expects fulfillment", result["message"])
+		self.assertIn("reopen it or review the order", result["message"])
+		self.assertNotIn("reopen", result)
+
+	def test_closed_undelivered_order_with_all_zero_snapshot_is_cancelled_after_reopen(self):
+		self.erp_state.update({"status": "Closed"})
+		current = self._current()
+		for line in current["items"]:
+			line["qty"] = 0
+		result = plan(self.previous, current, {}, self.erp_state)
+		self.assertEqual(result["outcome"], CANCEL_ORDER)
+		self.assertTrue(result["reopen"])
+
+	def test_closed_delivered_order_equivalent_to_the_marketplace_is_unchanged(self):
+		self.erp_state.update({"status": "Closed"})
+		self.erp_state["lines"][0]["delivered_qty"] = 1
+		# #179 behavior is unchanged: not reopened; converged only with cancellation evidence.
+		result = plan(self.previous, self._current(), {}, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertNotIn("reopen", result)
+		result = plan(self.previous, self._current(), {"cancellation": "full"}, self.erp_state)
 		self.assertEqual(result["outcome"], NO_ACTION)
-		self.assertFalse(result.get("reopen"))
 
 	def test_closed_erp_order_with_delivery_is_never_reopened_for_a_change(self):
 		self.erp_state.update({"status": "Closed"})

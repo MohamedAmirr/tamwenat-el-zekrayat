@@ -411,7 +411,15 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 	# #180: sweep_stuck_sales_order_reconciliations()
 	# -------------------------------------------------------------------
 
-	def _stuck_order(self, status="Synced", so_closed=False, platform=None, checked_hours_ago=None):
+	def _stuck_order(
+		self,
+		status="Synced",
+		so_closed=False,
+		platform=None,
+		checked_hours_ago=None,
+		per_delivered=0,
+		per_billed=0,
+	):
 		order = self._make_order()
 		fixture = LinkedSalesOrderFixture()
 		self.addCleanup(fixture.cleanup)
@@ -423,7 +431,16 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 			values["last_reconciliation_check_on"] = add_to_date(now_datetime(), hours=-checked_hours_ago)
 		frappe.db.set_value("Marketplace Order", order.name, values, update_modified=False)
 		if so_closed:
-			frappe.db.set_value("Sales Order", fixture.name, {"docstatus": 1, "status": "Closed"})
+			frappe.db.set_value(
+				"Sales Order",
+				fixture.name,
+				{
+					"docstatus": 1,
+					"status": "Closed",
+					"per_delivered": per_delivered,
+					"per_billed": per_billed,
+				},
+			)
 			# LIFO: runs before fixture.cleanup, which cannot delete a submitted Sales Order.
 			self.addCleanup(
 				frappe.db.set_value, "Sales Order", fixture.name, {"docstatus": 0, "status": "Draft"}
@@ -448,6 +465,83 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 			self.assertIn(order.name, names)
 		self.assertNotIn(ignored.name, names)
 		self.assertNotIn(unlinked.name, names)
+
+	def test_closed_orders_with_delivery_or_billing_are_not_candidates(self):
+		delivered = self._stuck_order(so_closed=True, per_delivered=50)
+		billed = self._stuck_order(so_closed=True, per_billed=100)
+		undelivered = self._stuck_order(so_closed=True)
+		names = self._candidates()
+		self.assertNotIn(delivered.name, names)
+		self.assertNotIn(billed.name, names)
+		self.assertIn(undelivered.name, names)
+
+	def test_sweep_does_not_overwrite_a_webhook_bump_made_after_the_candidate_query(self):
+		order = self._stuck_order(status="Sync Error")
+		real = debounce._stuck_reconciliation_candidates
+
+		def candidates_then_webhook_bump(limit):
+			names = real(limit)
+			debounce.bump_sync_debounce(order.name, "Talabat Webhook")
+			return names
+
+		with patch.object(debounce, "_stuck_reconciliation_candidates", candidates_then_webhook_bump):
+			debounce.sweep_stuck_sales_order_reconciliations()
+		state = frappe.db.get_value(
+			"Marketplace Order",
+			order.name,
+			["pending_sync_trigger_source", "last_reconciliation_check_on"],
+			as_dict=True,
+		)
+		self.assertEqual(state.pending_sync_trigger_source, "Talabat Webhook")
+		self.assertFalse(state.last_reconciliation_check_on)
+
+	def test_failed_bump_leaves_the_check_time_unset(self):
+		order = self._stuck_order(status="Sync Error")
+		with (
+			patch.object(debounce, "_stuck_reconciliation_candidates", return_value=[order.name]),
+			patch.object(debounce.frappe.db, "set_value", side_effect=RuntimeError("boom")),
+			self.assertRaises(RuntimeError),
+		):
+			debounce.sweep_stuck_sales_order_reconciliations()
+		self.assertFalse(frappe.db.get_value("Marketplace Order", order.name, "last_reconciliation_check_on"))
+
+	def test_sweep_end_to_end_bumps_syncs_once_and_second_pass_changes_nothing(self):
+		order = self._stuck_order(so_closed=True, status="Synced")
+		so_name = frappe.db.get_value("Marketplace Order", order.name, "erpnext_sales_order")
+		mutations = []
+
+		def fake_sync(name, trigger_source="Manual"):
+			# Stands in for reopen + cancel: one mutation, ends Synced and no longer Closed.
+			mutations.append((name, trigger_source))
+			frappe.db.set_value("Sales Order", so_name, "status", "Cancelled")
+			frappe.db.set_value("Marketplace Order", name, "erpnext_sync_status", "Synced")
+
+		debounce.sweep_stuck_sales_order_reconciliations()
+		until = frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until")
+		with patch(SYNC_TARGET, side_effect=fake_sync):
+			debounce._run_debounced_sync(order.name, until)
+		self.assertEqual(mutations, [(order.name, "Scheduled Sweep")])
+
+		# Advance past the 24h back-off and sweep again: nothing is stuck any more.
+		frappe.db.set_value(
+			"Marketplace Order",
+			order.name,
+			"last_reconciliation_check_on",
+			add_to_date(now_datetime(), hours=-25),
+			update_modified=False,
+		)
+		self.assertNotIn(order.name, self._candidates())
+		debounce.sweep_stuck_sales_order_reconciliations()
+		state = frappe.db.get_value(
+			"Marketplace Order",
+			order.name,
+			["sync_debounce_until", "pending_sync_trigger_source"],
+			as_dict=True,
+		)
+		self.assertFalse(state.sync_debounce_until)
+		self.assertFalse(state.pending_sync_trigger_source)
+		self.assertEqual(len(mutations), 1)
+		self.assertEqual(frappe.db.get_value("Sales Order", so_name, "status"), "Cancelled")
 
 	def test_stuck_sweep_skips_orders_with_a_pending_debounce(self):
 		order = self._stuck_order(status="Sync Error")

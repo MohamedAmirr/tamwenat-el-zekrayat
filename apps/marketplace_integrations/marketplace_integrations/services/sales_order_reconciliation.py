@@ -195,6 +195,13 @@ def plan(previous, current, evidence, erp_state):
 				reopened["message"] = (
 					f"{reopened['message']} The Sales Order is Closed; it will be reopened first."
 				)
+			elif reopened["outcome"] == NO_ACTION:
+				# Equivalent to the marketplace while it still expects fulfillment (a cancelling
+				# intent never yields NO_ACTION): a manual close is divergence. Advisory only.
+				return _attention(
+					"The Sales Order is Closed in ERPNext but the marketplace still expects fulfillment; "
+					"reopen it or review the order."
+				)
 			return reopened
 		if (evidence.get("cancellation") == "full" or all_zero) and _inactive_order_converged(erp_state):
 			# The marketplace cancelled the order and ERPNext is already cancelled (or
