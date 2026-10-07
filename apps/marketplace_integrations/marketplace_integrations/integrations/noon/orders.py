@@ -145,8 +145,14 @@ def get_order(account, fbpi_order_nr):
 	return data
 
 
-def import_order(account, raw_order):
+def import_order(account, raw_order, bump_trigger_source="Noon Order Import"):
 	"""Normalize and upsert one raw Noon FBPI order object.
+
+	``bump_trigger_source`` is the sync-debounce trigger source recorded if this import
+	bumps (#178): the poller keeps "Noon Order Import"; a self-initiated re-import (our
+	own create-shipment / mark-out-of-stock actions, ``refresh_order()``) passes "Manual"
+	so its Sales Order sync is not mislabelled as a poll. Still bumps either way - the
+	planner must see the change those actions made.
 
 	Returns ``(marketplace_order_doc, unmapped_skus)``. Raises on any
 	validation failure (decision 4) - the caller
@@ -261,29 +267,37 @@ def import_order(account, raw_order):
 	normalized = normalize_order(account, raw_order)
 	unmapped_skus = normalized.pop("_unmapped_skus", [])
 
+	from marketplace_integrations.services.sales_order_sync_debounce import (
+		bump_if_linked_order_changed,
+		bump_sync_debounce,
+		linked_order_fingerprint,
+	)
+
 	had_sales_order_before = False
 	had_eligible_before = False
+	fingerprint_before = None
 	if existing_name:
 		had_sales_order_before = bool(
 			frappe.db.get_value("Marketplace Order", existing_name, "erpnext_sales_order")
 		)
 		had_eligible_before = _has_eligible_units(existing_name)
+		fingerprint_before = linked_order_fingerprint(account.name, fbpi_order_nr)
 
 	_maybe_fetch_customer_data(account, normalized)
 	_zero_out_stale_status_groups(account, normalized)
 	order = upsert_marketplace_order(account.name, normalized)
 
-	# #146 decision 7: bump the Sales Order sync debounce ONLY on the first
-	# transition into eligibility - never on a later poll that merely
-	# confirms an order is still eligible (every hourly re-list would
-	# otherwise re-bump/re-log every already-eligible order forever), and
-	# never once a Sales Order is already linked (a later re-sync, if ever
-	# needed, is the manual "Send to ERPNext"/"Update ERPNext Order" button,
-	# not an automatic re-bump here).
+	# #146 decision 7 bumped ONLY on the first transition into eligibility and never
+	# once a Sales Order was linked.  #178 part 3 reverses the linked half: a poll
+	# that changes a LINKED order (units cancelled/out of stock/shipped, shipment
+	# membership, ...) now bumps too, so the reconciliation planner sees it
+	# (``bump_if_linked_order_changed()``: only when the evidence fingerprint
+	# changed, so a poll that merely re-confirms an order never re-bumps).  The
+	# first-eligibility bump for a not-yet-linked order is unchanged.
 	if not had_sales_order_before and not had_eligible_before and _has_eligible_units(order.name):
-		from marketplace_integrations.services.sales_order_sync_debounce import bump_sync_debounce
-
-		bump_sync_debounce(order.name, "Noon Order Import")
+		bump_sync_debounce(order.name, bump_trigger_source)
+	else:
+		bump_if_linked_order_changed(order.name, fingerprint_before, bump_trigger_source)
 
 	return order, unmapped_skus
 
@@ -301,7 +315,7 @@ def _has_eligible_units(order_name):
 	build), imported lazily inside this function rather than at module load
 	time to avoid a circular import with ``services/sales_order_sync_debounce.py``,
 	which does not itself import this module - the same lazy-import pattern
-	``bump_sync_debounce()`` below already uses."""
+	``import_order()`` uses for the debounce helpers."""
 	from marketplace_integrations.services.sales_order_sync import (
 		NOON_ELIGIBLE_EXTERNAL_STATUS,
 		NOON_INELIGIBLE_INTEGRATION_STATUS,
@@ -493,7 +507,9 @@ def _import_order_isolated(account, raw_order, trigger_source):
 		return order, None, None
 
 
-def import_orders_created_between(account, created_after, created_before, on_progress=None, trigger_source="Manual"):
+def import_orders_created_between(
+	account, created_after, created_before, on_progress=None, trigger_source="Manual"
+):
 	"""List orders created in ``[created_after, created_before]`` and
 	import each one, with per-order savepoint isolation (decision 6) - the
 	one shared "list, then import" path both ``run_order_import()`` (manual)
@@ -757,7 +773,7 @@ def refresh_order(marketplace_order_name):
 	savepoint = "noon_order_refresh_" + frappe.generate_hash(length=10)
 	frappe.db.savepoint(savepoint)
 	try:
-		order, unmapped_skus = import_order(account, raw_order)
+		order, unmapped_skus = import_order(account, raw_order, bump_trigger_source="Manual")
 	except Exception as exc:
 		frappe.db.rollback(save_point=savepoint)
 		_log_order_import_failure(account, fbpi_order_nr, str(exc), "Manual")

@@ -79,6 +79,10 @@ def _normalize_item(item):
 	unit_price = _money(item.get("originalUnitPriceSet"))
 	quantity = item.get("quantity")
 	current_quantity = item.get("currentQuantity")
+	# Absent/null stays None (unknown): the Float columns coerce it to 0, so
+	# ``fulfillment_quantities_known`` is what records that both were really read.
+	unfulfilled_quantity = item.get("unfulfilledQuantity")
+	non_fulfillable_quantity = item.get("nonFulfillableQuantity")
 	net_amount = _decimal(unit_price) * _decimal(current_quantity)
 	for allocation in item.get("discountAllocations") or []:
 		net_amount -= _decimal(_money(allocation.get("allocatedAmountSet")))
@@ -97,6 +101,11 @@ def _normalize_item(item):
 		"product_name": item.get("name"),
 		"original_quantity": quantity,
 		"current_quantity": current_quantity,
+		"unfulfilled_quantity": unfulfilled_quantity,
+		"non_fulfillable_quantity": non_fulfillable_quantity,
+		"fulfillment_quantities_known": int(
+			unfulfilled_quantity is not None and non_fulfillable_quantity is not None
+		),
 		"original_unit_price": unit_price,
 		"original_total_price": _decimal(unit_price) * _decimal(quantity),
 		"net_amount": net_amount,
@@ -110,7 +119,9 @@ def _normalize_item(item):
 def _nodes(order, fieldname):
 	connection = order.get(fieldname) or {}
 	if connection.get("pageInfo", {}).get("hasNextPage"):
-		frappe.throw(_("Shopify order {0} exceeds the supported {1} page size.").format(order.get("id"), fieldname))
+		frappe.throw(
+			_("Shopify order {0} exceeds the supported {1} page size.").format(order.get("id"), fieldname)
+		)
 	nodes = connection.get("nodes")
 	if nodes is not None:
 		return nodes
@@ -143,7 +154,7 @@ def _money(value):
 def _decimal(value):
 	try:
 		return Decimal(str(value or 0))
-	except (InvalidOperation, ValueError):
+	except InvalidOperation, ValueError:
 		return Decimal(0)
 
 

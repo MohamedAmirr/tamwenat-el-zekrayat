@@ -140,7 +140,7 @@ def _latest_payload_items(order):
 			if isinstance(order.latest_payload, str)
 			else order.latest_payload
 		)
-	except (TypeError, ValueError):
+	except TypeError, ValueError:
 		return []
 	if not isinstance(payload, dict):
 		return []
@@ -172,7 +172,7 @@ def _pending_oos_units(order):
 		return set()
 	try:
 		units = json.loads(raw) if isinstance(raw, str) else raw
-	except (TypeError, ValueError):
+	except TypeError, ValueError:
 		frappe.throw(_("Pending Noon Out of Stock Units is invalid."))
 	if not isinstance(units, list) or any(not isinstance(unit, str) or not unit for unit in units):
 		frappe.throw(_("Pending Noon Out of Stock Units is invalid."))
@@ -392,7 +392,7 @@ def run_create_shipment(marketplace_order_name, integration_shipment_nr):
 	savepoint = "noon_create_shipment_import_" + frappe.generate_hash(length=10)
 	frappe.db.savepoint(savepoint)
 	try:
-		import_order(account, raw_order)
+		import_order(account, raw_order, bump_trigger_source="Manual")
 	except Exception:
 		frappe.db.rollback(save_point=savepoint)
 		order = _fail_shipment_by_name(
@@ -902,7 +902,9 @@ def discard_shipment(marketplace_order_name, integration_shipment_nr):
 	shipment.last_error = None
 	order.save()
 	frappe.db.commit()
-	_log_fulfillment(order, "DiscardShipment", "Success", {"integration_shipment_nr": integration_shipment_nr})
+	_log_fulfillment(
+		order, "DiscardShipment", "Success", {"integration_shipment_nr": integration_shipment_nr}
+	)
 	return {"discarded": True}
 
 
@@ -1320,7 +1322,7 @@ def run_mark_out_of_stock(marketplace_order_name, mp_item_nrs):
 			savepoint = "noon_oos_refresh_" + frappe.generate_hash(length=10)
 			frappe.db.savepoint(savepoint)
 			try:
-				import_order(account, raw_order)
+				import_order(account, raw_order, bump_trigger_source="Manual")
 			except Exception:
 				frappe.db.rollback(save_point=savepoint)
 				raise
@@ -1335,7 +1337,9 @@ def run_mark_out_of_stock(marketplace_order_name, mp_item_nrs):
 	except Exception:
 		order = _lock_and_load_order(marketplace_order_name)
 		frappe.db.commit()
-		_log_fulfillment(order, "UpdateOrder", "Error", {"mp_item_nrs": mp_item_nrs}, traceback_text=frappe.get_traceback())
+		_log_fulfillment(
+			order, "UpdateOrder", "Error", {"mp_item_nrs": mp_item_nrs}, traceback_text=frappe.get_traceback()
+		)
 	finally:
 		_release_pending_oos_units(marketplace_order_name, mp_item_nrs)
 

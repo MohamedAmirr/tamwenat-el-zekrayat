@@ -230,7 +230,9 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 
 	def test_fractional_line_is_compared_by_amount_at_currency_precision(self):
 		# 0.75 x 13.33 = 9.9975, which ERPNext posts as 10.00 and which matches the total.
-		self.previous["items"][0].update({"qty": 0.75, "effective_rate": 13.333333, "fulfilled_total_price": 10})
+		self.previous["items"][0].update(
+			{"qty": 0.75, "effective_rate": 13.333333, "fulfilled_total_price": 10}
+		)
 		self.erp_state["lines"][0].update({"qty": 0.75, "amount": 10.0})
 		self.erp_state["precision"] = {"qty": 3, "amount": 2}
 
@@ -259,6 +261,147 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 		self.assertEqual(advanced["items"][0]["qty"], 3)
 		self.assertEqual(advanced["refund_ids"], ["r1"])
 		self.assertEqual(plan(advanced, current, {}, self.erp_state)["changes"], [])
+
+	def _quantity_change(self):
+		current = self._current()
+		current["items"][0]["qty"] = 3
+		current["items"][0]["fulfilled_total_price"] = 150
+		return current
+
+	def test_evidence_without_the_new_keys_is_unchanged(self):
+		for evidence in ({}, {"source": "marketplace"}):
+			with self.subTest(evidence=evidence):
+				result = plan(self.previous, self._quantity_change(), evidence, self.erp_state)
+				self.assertEqual(result["outcome"], UPDATE_SUBMITTED_ORDER)
+
+	def test_permitting_lifecycle_before_fulfillment_allows_the_update(self):
+		evidence = {"lifecycle_permits_change": True, "fulfillment_started": {"line-1": False}}
+		result = plan(self.previous, self._quantity_change(), evidence, self.erp_state)
+		self.assertEqual(result["outcome"], UPDATE_SUBMITTED_ORDER)
+
+	def test_lifecycle_that_forbids_change_needs_attention_with_its_reason(self):
+		evidence = {"lifecycle_permits_change": False, "lifecycle_reason": "Order already handed over."}
+		result = plan(self.previous, self._quantity_change(), evidence, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertEqual(result["message"], "Order already handed over.")
+
+	def test_lifecycle_that_forbids_change_is_irrelevant_when_nothing_changed(self):
+		evidence = {"lifecycle_permits_change": False, "lifecycle_reason": "Order already handed over."}
+		result = plan(self.previous, self._current(), evidence, self.erp_state)
+		self.assertEqual(result["outcome"], NO_ACTION)
+
+	def test_mapping_sourced_change_is_not_blamed_on_the_lifecycle(self):
+		current = self._current()
+		current["items"][0]["warehouse"] = "Other Warehouse"
+		for evidence in (
+			{"lifecycle_permits_change": False, "lifecycle_reason": "Order already handed over."},
+			{"lifecycle_permits_change": None, "lifecycle_reason": "Unknown stage."},
+			{"lifecycle_permits_change": True, "fulfillment_started": {"line-1": True}},
+		):
+			with self.subTest(evidence=evidence):
+				result = plan(self.previous, current, evidence, self.erp_state)
+				self.assertEqual(result["outcome"], UPDATE_SUBMITTED_ORDER)
+				self.assertEqual(result["changes"][0]["field"], "warehouse")
+
+	def test_marketplace_sourced_change_alongside_a_mapping_change_is_still_gated(self):
+		current = self._quantity_change()
+		current["items"][0]["warehouse"] = "Other Warehouse"
+		evidence = {"lifecycle_permits_change": False, "lifecycle_reason": "Order already handed over."}
+		result = plan(self.previous, current, evidence, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertEqual(result["message"], "Order already handed over.")
+
+	def test_refund_and_return_keep_priority_over_the_lifecycle_gate(self):
+		erp_state = deepcopy(self.erp_state)
+		erp_state["lines"][0]["delivered_qty"] = 1
+		for base in ({"refund": True}, {"return": True}):
+			with self.subTest(evidence=base):
+				evidence = {**base, "lifecycle_permits_change": False, "lifecycle_reason": "Handed over."}
+				result = plan(self.previous, self._quantity_change(), evidence, erp_state)
+				self.assertEqual(result["outcome"], UNSUPPORTED_COMPENSATING_TRANSACTION)
+
+	def test_changed_line_with_fulfillment_started_needs_attention(self):
+		for started in ({"line-1": True}, True):
+			with self.subTest(started=started):
+				evidence = {"lifecycle_permits_change": True, "fulfillment_started": started}
+				result = plan(self.previous, self._quantity_change(), evidence, self.erp_state)
+				self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+				self.assertIn("line-1", result["message"])
+
+	def test_fulfillment_started_on_another_line_does_not_block(self):
+		evidence = {"fulfillment_started": {"line-2": True}}
+		result = plan(self.previous, self._quantity_change(), evidence, self.erp_state)
+		self.assertEqual(result["outcome"], UPDATE_SUBMITTED_ORDER)
+
+	def test_unknown_lifecycle_meeting_a_change_needs_attention(self):
+		evidence = {"lifecycle_permits_change": None, "lifecycle_reason": "Unknown stage."}
+		result = plan(self.previous, self._quantity_change(), evidence, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertEqual(result["message"], "Unknown stage.")
+
+	def test_unknown_lifecycle_without_a_change_needs_no_action(self):
+		result = plan(self.previous, self._current(), {"lifecycle_permits_change": None}, self.erp_state)
+		self.assertEqual(result["outcome"], NO_ACTION)
+
+	def test_cancellation_is_not_blocked_by_the_lifecycle_gate(self):
+		evidence = {"cancellation": "full", "lifecycle_permits_change": None}
+		result = plan(self.previous, self._current(), evidence, self.erp_state)
+		self.assertEqual(result["outcome"], CANCEL_ORDER)
+
+	def test_cancellation_after_fulfillment_depends_on_erp_delivery(self):
+		evidence = {"cancellation": "full", "cancelled_after_fulfillment": True}
+		self.assertEqual(
+			plan(self.previous, self._current(), evidence, self.erp_state)["outcome"], NEEDS_ATTENTION
+		)
+		for delivered_qty in (1, 2):
+			with self.subTest(delivered_qty=delivered_qty):
+				erp_state = deepcopy(self.erp_state)
+				erp_state["lines"][0]["delivered_qty"] = delivered_qty
+				result = plan(self.previous, self._current(), evidence, erp_state)
+				self.assertEqual(result["outcome"], UNSUPPORTED_COMPENSATING_TRANSACTION)
+
+	def test_post_pickup_cancellation_converges_when_erp_order_already_cancelled(self):
+		evidence = {"cancellation": "full", "cancelled_after_fulfillment": True}
+		for docstatus, status in ((1, "Cancelled"), (2, "Cancelled")):
+			with self.subTest(docstatus=docstatus):
+				erp_state = deepcopy(self.erp_state)
+				erp_state.update({"docstatus": docstatus, "status": status})
+				erp_state["lines"][0]["delivered_qty"] = 1  # delivery must not override convergence
+				result = plan(self.previous, self._current(), evidence, erp_state)
+				self.assertEqual(result["outcome"], NO_ACTION)
+
+	def test_post_pickup_cancellation_converges_when_erp_order_closed_without_remainder(self):
+		self.erp_state.update({"status": "Closed"})
+		self.erp_state["lines"][0]["delivered_qty"] = 2
+		evidence = {"cancellation": "full", "cancelled_after_fulfillment": True}
+		result = plan(self.previous, self._current(), evidence, self.erp_state)
+		self.assertEqual(result["outcome"], NO_ACTION)
+
+	def test_post_pickup_cancellation_with_closed_remainder_does_not_converge(self):
+		self.erp_state.update({"status": "Closed"})
+		self.erp_state["lines"][0]["delivered_qty"] = 1
+		evidence = {"cancellation": "full", "cancelled_after_fulfillment": True}
+		result = plan(self.previous, self._current(), evidence, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+
+	def test_cancellation_after_fulfillment_with_billing_but_no_delivery_needs_attention(self):
+		self.erp_state["lines"][0]["billed_amt"] = 50
+		evidence = {"cancellation": "full", "cancelled_after_fulfillment": True}
+		result = plan(self.previous, self._current(), evidence, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+
+	def test_plain_cancellation_is_unchanged_by_the_new_keys(self):
+		result = plan(self.previous, self._current(), {"cancellation": "full"}, self.erp_state)
+		self.assertEqual(result["outcome"], CANCEL_ORDER)
+
+	def test_this_module_is_platform_neutral(self):
+		import inspect
+
+		from marketplace_integrations.services import sales_order_reconciliation
+
+		source = inspect.getsource(sales_order_reconciliation).lower()
+		for platform in ("talabat", "shopify", "noon"):
+			self.assertNotIn(platform, source)
 
 	def _current(self):
 		current = deepcopy(self.previous)

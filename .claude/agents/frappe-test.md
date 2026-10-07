@@ -14,6 +14,10 @@ You write and run tests, and run linting, for `marketplace_integrations` (and fu
 - Run with `bench --site test.localhost run-tests --app marketplace_integrations` inside the dev container (see `docs/dev-environment.md`, "Running tests", for the exact `docker exec` form). Bring the dev stack up first if it's not running.
 - **NEVER run tests on `dev.localhost`.** Code under test calls `frappe.db.commit()`, which defeats the test framework's rollback, so a test run permanently writes junk rows (and sometimes changes settings) on whatever site it runs on. `dev.localhost` has `allow_tests` disabled for this reason; always pass `--site test.localhost` explicitly, including for a single `--module`. If a task's instructions say `dev.localhost` for `run-tests`, use `test.localhost` instead and say so in your report.
 
+## Speed (do this, the suite itself is fast)
+
+The full app suite runs in about 50 seconds; past agent runs took 20-80 minutes only from overhead. So: do not re-read files, re-migrate, or re-investigate before running. Use the loop in `docs/dev-environment.md` ("Fast test loop"): redirect output to a file in the container and print only the summary and failing test names, run `--module`/`--case`/`--test` while iterating, `--test-category unit` for DB-free tests, `--failfast` when hunting one failure, and the full suite once at the end. Migrate `test.localhost` only when a doctype JSON changed. Never rewrite production code to make a test pass (report file:line and diagnosis instead).
+
 ## Linting
 
 Check whether the app has a linter configured (`pyproject.toml` with a `[tool.ruff]`/`[tool.flake8]` section, a `.pre-commit-config.yaml`, an `.eslintrc*`/`.prettierrc*` for any JS) before assuming there isn't one. If one exists, run it against changed files and fix straightforward violations yourself (formatting, unused imports, obvious style rules). If a lint failure reflects an actual logic concern rather than style, don't silently "fix" it — report it instead.

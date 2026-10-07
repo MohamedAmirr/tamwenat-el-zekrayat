@@ -45,6 +45,7 @@ import frappe
 from frappe import _
 from frappe.utils import cstr, flt, getdate, now_datetime
 
+from marketplace_integrations.integrations.shopify.order_reconciliation import refund_ids as _refund_ids
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_product_mapping.marketplace_product_mapping import (
 	compute_mapping_identity_key,
 )
@@ -52,6 +53,7 @@ from marketplace_integrations.services.account_warehouse import validate_account
 from marketplace_integrations.services.mappings import resolve_mapping_and_item
 from marketplace_integrations.services.sales_order_reconciliation import (
 	NO_ACTION,
+	UNSUPPORTED_COMPENSATING_TRANSACTION,
 	SalesOrderLinesMismatch,
 	plan,
 	read_erp_state,
@@ -60,6 +62,15 @@ from marketplace_integrations.services.sales_order_reconciliation import (
 )
 
 FINAL_ITEM_STATUSES = {"IN_CART", "ADDITION"}
+
+# Platform -> dotted path of its pure ``build_evidence(order)`` (#178).  Resolved
+# lazily (``frappe.get_attr``) so this module never imports an integration at
+# import time.  A blank platform is Talabat, like ``_validate_platform_supported``.
+_RECONCILIATION_EVIDENCE_BUILDERS = {
+	"Talabat": "marketplace_integrations.integrations.talabat.order_reconciliation.build_evidence",
+	"Shopify": "marketplace_integrations.integrations.shopify.order_reconciliation.build_evidence",
+	"Noon": "marketplace_integrations.integrations.noon.order_reconciliation.build_evidence",
+}
 
 # `effective_rate = fulfilled_total_price / fulfilled_quantity` is an
 # intermediate value that ERPNext later multiplies back by `qty` and rounds
@@ -161,14 +172,24 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 				return _submitted_reconciliation_advisory(
 					order, sales_order, snapshot, evidence, trigger_source
 				)
-		_validate_account_configuration(account)
-		lines = _build_order_lines(order, account)
-		if order.platform == "Shopify":
-			customer = _get_or_create_shopify_customer(order, account)
-			address = _resolve_shopify_address(order, customer) or {"name": None, "address_type": None}
-		else:
-			customer = _get_or_create_customer(account)
-			address = None
+		try:
+			_validate_account_configuration(account)
+			lines = _build_order_lines(
+				order, account, tolerate_zero_quantity=bool(sales_order and sales_order.docstatus != 0)
+			)
+			if order.platform == "Shopify":
+				customer = _get_or_create_shopify_customer(order, account)
+				address = _resolve_shopify_address(order, customer) or {"name": None, "address_type": None}
+			else:
+				customer = _get_or_create_customer(account)
+				address = None
+		except SyncBlocker:
+			# Refund/return evidence keeps priority over a rebuild blocker (e.g. a
+			# disabled mapping): a delivered/billed order still needs the compensating
+			# transaction, which matters more to tell the merchant.
+			if _compensating_plan_outranks_blocker(order, sales_order, evidence):
+				return _submitted_reconciliation_advisory(order, sales_order, None, evidence, trigger_source)
+			raise
 		snapshot = _make_snapshot(
 			account, customer, lines, _transaction_date(order), _delivery_date(order), address
 		)
@@ -176,7 +197,9 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 
 		if sales_order:
 			if sales_order.docstatus != 0:
-				return _submitted_reconciliation_advisory(order, sales_order, snapshot, evidence, trigger_source)
+				return _submitted_reconciliation_advisory(
+					order, sales_order, snapshot, evidence, trigger_source
+				)
 			if order.last_synced_hash == current_hash:
 				result = _save_success(order, current_hash, sales_order, updated=False, snapshot=snapshot)
 				_create_sync_log(order, trigger_source, "Success", snapshot, result)
@@ -233,7 +256,7 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 		return result
 
 
-def build_sales_order_snapshot(order, account=None, customer=None):
+def build_sales_order_snapshot(order, account=None, customer=None, for_submitted_order=False):
 	"""Return the deterministic ERPNext-commercial input for an order.
 
 	No Talabat customer PII, status, address, raw payload, or current Item
@@ -252,10 +275,15 @@ def build_sales_order_snapshot(order, account=None, customer=None):
 	``sync_sales_order()`` (the actual explicit-sync path) never calls this
 	function; it resolves the buyer Customer/Address itself with
 	``create=True``.
+
+	``for_submitted_order`` is set when the order is linked to a submitted Sales
+	Order: a line the marketplace has reduced to zero units (e.g. a refund) is
+	then represented as a zero-quantity line instead of blocking, so the
+	reconciliation planner can see the change.  A never-synced order still blocks.
 	"""
 	account = account or _get_account(order)
 	_validate_account_configuration(account)
-	lines = _build_order_lines(order, account)
+	lines = _build_order_lines(order, account, tolerate_zero_quantity=for_submitted_order)
 	if not customer:
 		if order.platform == "Shopify":
 			customer = (
@@ -305,8 +333,14 @@ def _build_sales_order_lines(order, account):
 	price on the same row is strong evidence the total was supposed to be
 	nonzero too. A row where both are genuinely `0` still passes through as a
 	legitimate free item.
+	A CANCELLED Talabat order never produces a Sales Order (mirrors the Shopify
+	``cancelled_at`` block).  An order already linked to a submitted Sales Order
+	never reaches here for cancellation: ``_uses_stored_snapshot()`` judges it
+	against the stored baseline instead.
 	"""
 
+	if cstr(order.external_status).strip() == "CANCELLED":
+		raise SyncBlocker(_("Cancelled Talabat orders cannot be synchronized."))
 	lines = []
 	for row in order.items or []:
 		if row.external_status not in FINAL_ITEM_STATUSES:
@@ -384,11 +418,11 @@ def _build_sales_order_lines(order, account):
 	return sorted(lines, key=lambda line: line["external_item_id"])
 
 
-def _build_order_lines(order, account):
+def _build_order_lines(order, account, tolerate_zero_quantity=False):
 	if order.platform == "Shopify":
-		return _build_shopify_sales_order_lines(order, account)
+		return _build_shopify_sales_order_lines(order, account, tolerate_zero_quantity)
 	if order.platform == "Noon":
-		return _build_noon_sales_order_lines(order, account)
+		return _build_noon_sales_order_lines(order, account, tolerate_zero_quantity)
 	return _build_sales_order_lines(order, account)
 
 
@@ -402,7 +436,7 @@ NOON_ELIGIBLE_EXTERNAL_STATUS = "CONFIRMED"
 NOON_INELIGIBLE_INTEGRATION_STATUS = "OUT_OF_STOCK"
 
 
-def _build_noon_sales_order_lines(order, account):
+def _build_noon_sales_order_lines(order, account, tolerate_zero_quantity=False):
 	"""Build Sales Order lines from Noon FBPI confirmed-and-shippable units.
 
 	#146 decision 3: eligible rows are grouped by ``external_sku`` into one
@@ -412,6 +446,10 @@ def _build_noon_sales_order_lines(order, account):
 	ACKNOWLEDGED -> SHIPPED transition (a new #145 row under a new
 	``external_item_id``, the old one zeroed) never changes this snapshot's
 	hash or looks like a modification once already synced.
+
+	``tolerate_zero_quantity`` (linked, submitted Sales Order only, #178) returns
+	no lines instead of raising when no unit is eligible any more, so the
+	reconciliation planner sees the removal; a never-synced order still raises.
 	"""
 	currency = _resolved_currency(account)
 	if order.presentment_currency and order.presentment_currency != currency:
@@ -468,16 +506,24 @@ def _build_noon_sales_order_lines(order, account):
 			}
 		)
 
-	if not lines:
+	if not lines and not tolerate_zero_quantity:
 		raise SyncBlocker(_("No eligible Noon order lines are available to synchronize."))
 	return sorted(lines, key=lambda line: line["external_item_id"])
 
 
-def _build_shopify_sales_order_lines(order, account):
-	"""Build immutable Sales Order lines from Shopify transaction evidence."""
+def _build_shopify_sales_order_lines(order, account, tolerate_zero_quantity=False):
+	"""Build immutable Sales Order lines from Shopify transaction evidence.
+
+	``tolerate_zero_quantity`` (linked, submitted Sales Order only) keeps a line the
+	marketplace has reduced to zero units as a zero-quantity, zero-amount line, and
+	lets a REFUNDED/PARTIALLY_REFUNDED order through to the refund planner (#178).
+	"""
 	if order.cancelled_at:
 		raise SyncBlocker(_("Cancelled Shopify orders cannot be synchronized."))
-	if order.external_financial_status not in {"PAID", "PARTIALLY_PAID"}:
+	eligible_statuses = {"PAID", "PARTIALLY_PAID"}
+	if tolerate_zero_quantity:
+		eligible_statuses |= {"REFUNDED", "PARTIALLY_REFUNDED"}
+	if order.external_financial_status not in eligible_statuses:
 		raise SyncBlocker(
 			_("Shopify order {0} is not financially eligible for synchronization ({1}).").format(
 				order.name, order.external_financial_status or _("unknown status")
@@ -486,7 +532,8 @@ def _build_shopify_sales_order_lines(order, account):
 
 	lines = []
 	for row in order.items or []:
-		if flt(row.current_quantity) <= 0:
+		zero_quantity = flt(row.current_quantity) <= 0
+		if zero_quantity and not tolerate_zero_quantity:
 			raise SyncBlocker(
 				_("Shopify line {0} is fully refunded or has no current quantity.").format(
 					row.external_item_id
@@ -497,6 +544,20 @@ def _build_shopify_sales_order_lines(order, account):
 			raise SyncBlocker(
 				_("No enabled Shopify variant mapping exists for line {0}.").format(row.external_item_id)
 			)
+		if zero_quantity:
+			lines.append(
+				{
+					"external_item_id": cstr(row.external_item_id).strip(),
+					"item_code": resolved["item"],
+					"qty": 0.0,
+					"uom": resolved.get("sales_uom")
+					or frappe.get_cached_value("Item", resolved["item"], "stock_uom"),
+					"warehouse": account.warehouse,
+					"fulfilled_total_price": 0.0,
+					"effective_rate": 0.0,
+				}
+			)
+			continue
 		if row.transaction_amount_missing or row.transaction_amount is None:
 			raise SyncBlocker(_("Shopify line {0} has no transaction amount.").format(row.external_item_id))
 		transaction_amount = flt(row.transaction_amount)
@@ -598,6 +659,7 @@ def set_sync_status_from_current_snapshot(order, preserve_sync_error=False):
 		return
 	docstatus = frappe.db.get_value("Sales Order", order.erpnext_sales_order, "docstatus")
 	sales_order = None
+	evidence = {}
 	try:
 		evidence = _reconciliation_evidence(order)
 		if docstatus != 0:
@@ -605,8 +667,13 @@ def set_sync_status_from_current_snapshot(order, preserve_sync_error=False):
 		if _uses_stored_snapshot(docstatus, evidence):
 			current_snapshot = _parse_last_synced_snapshot(order) or {}
 		else:
-			current_snapshot = build_sales_order_snapshot(order)
+			current_snapshot = build_sales_order_snapshot(order, for_submitted_order=docstatus != 0)
 	except SyncBlocker as exc:
+		if _compensating_plan_outranks_blocker(order, sales_order, evidence):
+			_apply_reconciliation_status(
+				order, plan(_parse_last_synced_snapshot(order), {}, evidence, read_erp_state(sales_order))
+			)
+			return
 		order.erpnext_sync_status = "Modified After Sync"
 		order.last_sync_error = cstr(exc).strip()[:500] or _modified_after_sync_message()
 		return
@@ -629,13 +696,33 @@ def set_sync_status_from_current_snapshot(order, preserve_sync_error=False):
 		order.last_sync_error = _modified_after_sync_message()
 
 
+def _compensating_plan_outranks_blocker(order, sales_order, evidence):
+	"""True when refund/return evidence on a delivered/billed submitted order must win.
+
+	A rebuild ``SyncBlocker`` (disabled mapping, missing price, ...) must not hide
+	``UNSUPPORTED_COMPENSATING_TRANSACTION``; ``plan()`` checks that evidence before
+	it looks at the (here unavailable) current snapshot, so an empty one is enough.
+	"""
+	if not sales_order or sales_order.docstatus == 0 or not evidence:
+		return False
+	if not (evidence.get("refund") or evidence.get("return")):
+		return False
+	reconciliation_plan = plan(_parse_last_synced_snapshot(order), {}, evidence, read_erp_state(sales_order))
+	return reconciliation_plan["outcome"] == UNSUPPORTED_COMPENSATING_TRANSACTION
+
+
 def _modified_after_sync_message():
 	return _("The marketplace order changed after it was synced to ERPNext.")
 
 
 def _uses_stored_snapshot(docstatus, evidence):
-	"""A submitted Sales Order with lifecycle evidence is judged against the stored baseline."""
-	return docstatus != 0 and bool(evidence)
+	"""A submitted Sales Order with full-cancellation evidence is judged against the stored baseline.
+
+	A cancelled order can no longer be rebuilt into a snapshot, so only cancellation
+	uses the stored baseline.  Every other evidence (refund, return, lifecycle) is
+	judged against a freshly rebuilt snapshot.
+	"""
+	return docstatus != 0 and evidence.get("cancellation") == "full"
 
 
 def _apply_reconciliation_status(order, reconciliation_plan):
@@ -1121,64 +1208,39 @@ def snapshot_hash(snapshot):
 
 
 def _reconciliation_evidence(order):
-	"""Return only explicit, persisted marketplace lifecycle evidence.
+	"""Return the platform adapter's explicit, persisted lifecycle evidence (#178).
 
-	No generic display status is interpreted here.  ``cancelled_at`` and
-	``refunds`` are Shopify's explicit normalized evidence; Talabat's documented
-	``CANCELLED`` status is likewise an explicit order cancellation signal.
+	Interpretation of platform statuses/fields lives in each platform's
+	``integrations/<platform>/order_reconciliation.build_evidence``; no generic
+	display status is interpreted here.  A blank platform is Talabat.
 	"""
-	evidence = {}
-	if order.cancelled_at or (order.platform == "Talabat" and order.external_status == "CANCELLED"):
-		evidence["cancellation"] = "full"
-	if _unreflected_refund_ids(order):
-		evidence["refund"] = True
-	return evidence
-
-
-def _refund_ids(order):
-	"""Return the ids of every persisted Shopify refund on the order."""
-	refunds = order.refunds
-	if not refunds:
-		return []
-	try:
-		refunds = frappe.parse_json(refunds) if isinstance(refunds, str) else refunds
-	except TypeError, ValueError:
-		return []
-	if not isinstance(refunds, list):
-		return []
-	return [cstr(refund.get("id") if isinstance(refund, dict) else refund) for refund in refunds]
-
-
-def _unreflected_refund_ids(order):
-	"""Refund ids that are not already reflected in the stored baseline.
-
-	A refund recorded in the baseline's ``refund_ids`` (present when the order
-	was synced) is already part of the Sales Order quantities, so it is not new
-	evidence.  A legacy baseline without ``refund_ids`` has no known history, so
-	every current refund counts as new (conservative: the user is told, nothing
-	is silently accepted).
-	"""
-	current = _refund_ids(order)
-	if not current:
-		return []
-	known = (_parse_last_synced_snapshot(order) or {}).get("refund_ids")
-	if known is None:
-		return current
-	return [refund_id for refund_id in current if refund_id not in set(known)]
+	builder_path = _RECONCILIATION_EVIDENCE_BUILDERS.get(order.platform or "Talabat")
+	if not builder_path:
+		return {}
+	return frappe.get_attr(builder_path)(order)
 
 
 def _advance_baseline(order, previous, current_snapshot):
 	"""Make an ERP-equivalent current snapshot the new in-memory baseline.
 
-	Does not save: callers are already saving the order.  A no-op when the
-	baseline hash already matches (e.g. the stored-snapshot path).
+	Does not save: callers are already saving the order.  ERPNext matches the current
+	marketplace state here (NO_ACTION), so the order's CURRENT refund ids are stored as
+	``refund_ids``: a refund the merchant already reflected in the Sales Order must stop
+	counting as unreflected evidence.  A no-op when the baseline hash already matches
+	and its stored refund ids already equal the current ones (e.g. the stored-snapshot
+	path).
 	"""
 	current_hash = snapshot_hash(current_snapshot)
-	if not previous or current_hash == order.last_synced_hash:
+	if not previous:
+		return
+	current_refund_ids = sorted(_refund_ids(order))
+	if (
+		current_hash == order.last_synced_hash
+		and sorted(previous.get("refund_ids") or []) == current_refund_ids
+	):
 		return
 	advanced = snapshot_advanced_from(previous, current_snapshot)
-	if "refund_ids" not in advanced and not _refund_ids(order):
-		advanced["refund_ids"] = []
+	advanced["refund_ids"] = current_refund_ids
 	order.last_synced_hash = current_hash
 	order.last_synced_snapshot = frappe.as_json(advanced)
 

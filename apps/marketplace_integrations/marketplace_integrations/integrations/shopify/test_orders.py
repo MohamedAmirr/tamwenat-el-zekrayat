@@ -16,6 +16,7 @@ from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.integrations.shopify import orders
 from marketplace_integrations.integrations.shopify.test_products import make_shopify_account
+from marketplace_integrations.services.linked_sales_order_fixture import LinkedSalesOrderFixture
 
 EXECUTE_TARGET = "marketplace_integrations.integrations.shopify.client.ShopifyClient.execute"
 
@@ -101,6 +102,8 @@ def make_order_payload(order_gid, updated_at="2026-09-27T10:05:00Z", **overrides
 					"sku": "COFFEE-1",
 					"quantity": 3,
 					"currentQuantity": 2,
+					"unfulfilledQuantity": 2,
+					"nonFulfillableQuantity": 0,
 					"variant": {"id": "gid://shopify/ProductVariant/1"},
 					"originalUnitPriceSet": {"shopMoney": {"amount": "20.00", "currencyCode": "EGP"}},
 					"discountAllocations": [],
@@ -127,9 +130,7 @@ class IntegrationTestImportOrderNoSideEffects(IntegrationTestCase):
 		self.assertTrue(result)
 		self.assertEqual(result.doctype, "Marketplace Order")
 		for doctype in NO_SIDE_EFFECT_DOCTYPES:
-			self.assertEqual(
-				frappe.db.count(doctype), before[doctype], f"{doctype} row count changed"
-			)
+			self.assertEqual(frappe.db.count(doctype), before[doctype], f"{doctype} row count changed")
 
 	def test_refund_evidence_is_persisted_without_interpretation(self):
 		order_gid = _order_gid(frappe.generate_hash(length=8))
@@ -141,9 +142,7 @@ class IntegrationTestImportOrderNoSideEffects(IntegrationTestCase):
 		result.reload()
 		refunds = frappe.parse_json(result.refunds)
 		self.assertEqual(len(refunds), 1)
-		restock_types = [
-			node["restockType"] for node in refunds[0]["refundLineItems"]["nodes"]
-		]
+		restock_types = [node["restockType"] for node in refunds[0]["refundLineItems"]["nodes"]]
 		self.assertEqual(restock_types, ["RESTOCK"])
 
 
@@ -214,6 +213,7 @@ class IntegrationTestImportOrdersUpdatedBetween(IntegrationTestCase):
 
 	def setUp(self):
 		self.account = make_shopify_account(f"Order Range {frappe.generate_hash(length=8)}")
+		self._fixtures = []
 
 	def tearDown(self):
 		# _log_order_import_failure()'s frappe.db.commit() (review finding
@@ -235,7 +235,15 @@ class IntegrationTestImportOrdersUpdatedBetween(IntegrationTestCase):
 		# handed back that exact same Account/Connection name. A leftover
 		# order still carrying the old (reused) name then reads as if it
 		# belongs to the new account, corrupting the next test's counts.
-		frappe.db.delete("Marketplace Order", filters={"marketplace_account": self.account.name})
+		# delete_doc (not frappe.db.delete) so child rows go too - this teardown commits.
+		for order_name in frappe.get_all(
+			"Marketplace Order", filters={"marketplace_account": self.account.name}, pluck="name"
+		):
+			frappe.delete_doc("Marketplace Order", order_name, ignore_permissions=True, force=True)
+		# Linked Sales Orders (#178 tests) go after the orders that point at them and
+		# before the commit below.
+		for fixture in self._fixtures:
+			fixture.cleanup()
 		frappe.db.delete(
 			"Marketplace Sync Log",
 			filters={
@@ -245,9 +253,7 @@ class IntegrationTestImportOrdersUpdatedBetween(IntegrationTestCase):
 			},
 		)
 		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
-		frappe.delete_doc(
-			"Shopify Connection", self.account.connection, ignore_permissions=True, force=True
-		)
+		frappe.delete_doc("Shopify Connection", self.account.connection, ignore_permissions=True, force=True)
 		# The commit() above (if a test reached it) already made this test's
 		# account/connection/log rows permanent - these deletes must be
 		# committed too, in the SAME way, or they'd only land in a fresh
@@ -258,10 +264,15 @@ class IntegrationTestImportOrdersUpdatedBetween(IntegrationTestCase):
 	def test_one_bad_order_does_not_stop_the_rest(self):
 		good_gid = _order_gid(frappe.generate_hash(length=8))
 		bad_gid = _order_gid(frappe.generate_hash(length=8))
-		nodes = {"orders": {"pageInfo": {"hasNextPage": False}, "nodes": [
-			{"id": bad_gid, "updatedAt": "2026-09-27T10:00:00Z"},
-			{"id": good_gid, "updatedAt": "2026-09-27T10:01:00Z"},
-		]}}
+		nodes = {
+			"orders": {
+				"pageInfo": {"hasNextPage": False},
+				"nodes": [
+					{"id": bad_gid, "updatedAt": "2026-09-27T10:00:00Z"},
+					{"id": good_gid, "updatedAt": "2026-09-27T10:01:00Z"},
+				],
+			}
+		}
 
 		def fake_execute(query, variables=None):
 			if "ShopifyOrderIds" in query:
@@ -309,7 +320,11 @@ class IntegrationTestImportOrdersUpdatedBetween(IntegrationTestCase):
 		# methods in this class write.
 		logs = frappe.get_all(
 			"Marketplace Sync Log",
-			filters={"sync_type": "Order Import", "status": "Error", "request_data": ["like", f"%{bad_gid}%"]},
+			filters={
+				"sync_type": "Order Import",
+				"status": "Error",
+				"request_data": ["like", f"%{bad_gid}%"],
+			},
 			fields=["name", "trigger_source", "marketplace_order", "traceback"],
 		)
 		self.assertEqual(len(logs), 1)
@@ -341,11 +356,140 @@ class IntegrationTestImportOrdersUpdatedBetween(IntegrationTestCase):
 		# test_per_order_failure_writes_a_marketplace_sync_log_row above.
 		logs = frappe.get_all(
 			"Marketplace Sync Log",
-			filters={"sync_type": "Order Import", "status": "Error", "request_data": ["like", f"%{bad_gid}%"]},
+			filters={
+				"sync_type": "Order Import",
+				"status": "Error",
+				"request_data": ["like", f"%{bad_gid}%"],
+			},
 			fields=["trigger_source"],
 		)
 		self.assertEqual(len(logs), 1)
 		self.assertEqual(logs[0].trigger_source, "Scheduled Reconciliation")
+
+	# #178 part 3: only the SCHEDULED sweep (bump_linked_changes=True) bumps the sync
+	# debounce, and only when a LINKED order's evidence changed.  A manual range
+	# import never bumps.
+
+	def _import_range(
+		self,
+		gid,
+		payload_overrides=None,
+		trigger_source="Scheduled Reconciliation",
+		bump_linked_changes=True,
+		extra_nodes=None,
+	):
+		nodes = {
+			"orders": {
+				"pageInfo": {"hasNextPage": False},
+				"nodes": [{"id": gid, "updatedAt": "2026-09-27T10:01:00Z"}, *(extra_nodes or [])],
+			}
+		}
+
+		def fake_execute(query, variables=None):
+			if "ShopifyOrderIds" in query:
+				return nodes
+			order_gid = (variables or {}).get("id") or gid
+			return {"order": make_order_payload(order_gid, **(payload_overrides or {}))}
+
+		with patch(EXECUTE_TARGET, side_effect=fake_execute):
+			client = orders.ShopifyClient(self.account.connection)
+			return orders.import_orders_updated_between(
+				self.account,
+				client,
+				"2026-09-01T00:00:00Z",
+				trigger_source=trigger_source,
+				bump_linked_changes=bump_linked_changes,
+			)
+
+	def _linked_order(self, gid):
+		self._import_range(gid)
+		name = frappe.db.get_value("Marketplace Order", {"external_order_id": gid}, "name")
+		fixture = LinkedSalesOrderFixture()
+		self._fixtures.append(fixture)
+		fixture.link(name)
+		return name
+
+	def _debounce(self, name):
+		return frappe.db.get_value(
+			"Marketplace Order", name, ["sync_debounce_until", "pending_sync_trigger_source"], as_dict=True
+		)
+
+	def test_scheduled_import_of_a_changed_linked_order_bumps_and_a_replay_does_not(self):
+		gid = _order_gid(frappe.generate_hash(length=8))
+		name = self._linked_order(gid)
+
+		self._import_range(gid, {"cancelledAt": "2026-09-27T10:02:00Z"})
+
+		state = self._debounce(name)
+		self.assertIsNotNone(state.sync_debounce_until)
+		self.assertEqual(state.pending_sync_trigger_source, "Scheduled Reconciliation")
+
+		frappe.db.set_value("Marketplace Order", name, "sync_debounce_until", None)
+		self._import_range(gid, {"cancelledAt": "2026-09-27T10:02:00Z"})
+		self.assertIsNone(self._debounce(name).sync_debounce_until)
+
+	def test_manual_import_of_a_changed_linked_order_does_not_bump(self):
+		gid = _order_gid(frappe.generate_hash(length=8))
+		name = self._linked_order(gid)
+
+		# What run_order_import() does: "Manual" trigger, bump_linked_changes left at its default.
+		self._import_range(
+			gid,
+			{"cancelledAt": "2026-09-27T10:02:00Z"},
+			trigger_source="Manual",
+			bump_linked_changes=False,
+		)
+
+		self.assertIsNone(self._debounce(name).sync_debounce_until)
+
+	def test_unchanged_linked_order_does_not_bump(self):
+		gid = _order_gid(frappe.generate_hash(length=8))
+		name = self._linked_order(gid)
+
+		self._import_range(gid)
+
+		self.assertIsNone(self._debounce(name).sync_debounce_until)
+
+	def test_unlinked_order_does_not_bump(self):
+		gid = _order_gid(frappe.generate_hash(length=8))
+		self._import_range(gid)
+		name = frappe.db.get_value("Marketplace Order", {"external_order_id": gid}, "name")
+
+		self._import_range(gid, {"cancelledAt": "2026-09-27T10:02:00Z"})
+
+		self.assertIsNone(self._debounce(name).sync_debounce_until)
+
+	def test_fingerprint_or_bump_failure_for_one_order_does_not_stop_the_others(self):
+		bad_gid = _order_gid(frappe.generate_hash(length=8))
+		good_gid = _order_gid(frappe.generate_hash(length=8))
+		bad_name = self._linked_order(bad_gid)
+		good_name = self._linked_order(good_gid)
+		overrides = {"cancelledAt": "2026-09-27T10:02:00Z"}
+
+		real_fingerprint = orders.linked_order_fingerprint
+
+		def flaky_fingerprint(account_name, order_gid):
+			if order_gid == bad_gid:
+				raise frappe.ValidationError("boom: fingerprint read failed")
+			return real_fingerprint(account_name, order_gid)
+
+		with patch.object(orders, "linked_order_fingerprint", side_effect=flaky_fingerprint):
+			imported, errors = self._import_range(
+				bad_gid, overrides, extra_nodes=[{"id": good_gid, "updatedAt": "2026-09-27T10:01:30Z"}]
+			)
+
+		self.assertEqual([error["order_gid"] for error in errors], [bad_gid])
+		self.assertEqual(len(imported), 1)
+		self.assertIsNone(self._debounce(bad_name).sync_debounce_until)
+		self.assertIsNotNone(self._debounce(good_name).sync_debounce_until)
+
+	def test_run_order_import_does_not_ask_for_bumping(self):
+		with patch.object(orders, "import_orders_updated_between", return_value=([], [])) as mocked:
+			orders.run_order_import(
+				f"job-{frappe.generate_hash(length=6)}", "Administrator", self.account.name, "s", "e"
+			)
+
+		self.assertFalse(mocked.call_args.kwargs.get("bump_linked_changes", False))
 
 
 class IntegrationTestReconcileAllAccountsOrders(IntegrationTestCase):
@@ -412,3 +556,11 @@ class IntegrationTestReconcileAllAccountsOrders(IntegrationTestCase):
 		self.assertEqual(
 			frappe.db.count("Marketplace Order", {"marketplace_account": self.account_a.name}), 0
 		)
+
+	def test_scheduled_sweep_is_the_only_caller_that_asks_for_bumping(self):
+		with patch.object(orders, "import_orders_updated_between", return_value=([], [])) as mocked:
+			orders.reconcile_all_accounts_orders()
+
+		self.assertTrue(mocked.call_args_list)
+		for call in mocked.call_args_list:
+			self.assertIs(call.kwargs.get("bump_linked_changes"), True)

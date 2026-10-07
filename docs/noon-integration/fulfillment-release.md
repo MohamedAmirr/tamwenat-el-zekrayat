@@ -147,9 +147,17 @@ Sales Order keeps overstating the order, and nothing in #146 corrects it
 automatically.**
 
 What surfaces this:
-- Immediately: the next poll's save runs `before_save` →
+- #178 part 3: the poll now also bumps the Sales Order sync debounce when a
+  LINKED order's evidence fingerprint changed (units cancelled/out of stock/
+  shipped, shipment membership), and `integrations/noon/order_reconciliation.py`
+  turns the per-unit states into reconciliation evidence (full cancellation,
+  per-line fulfillment started, unknown stage for `UNSPECIFIED`). `Noon Return`
+  rows are not consumed yet (deferred); an own `Mark Out of Stock` is not
+  distinguishable from a customer cancel. The ERP side is still corrected
+  manually.
+- Immediately (a linked, submitted order with no eligible unit left yields an empty snapshot for the reconciliation planner instead of raising `SyncBlocker`; a never-synced order still raises): the next poll's save runs `before_save` →
   `set_sync_status_from_current_snapshot()`, which detects the eligible-line
-  hash changed (or raises `SyncBlocker` if no eligible units remain) and
+  hash changed and
   sets `erpnext_sync_status = "Modified After Sync"`.
 - Later: the daily reconciliation job and Script Report, both deferred to
   the follow-up issue.

@@ -104,8 +104,9 @@ def snapshot_advanced_from(previous, current):
 	"""Copy ``current`` as the new baseline, keeping ``previous``'s ERP line identities.
 
 	Used when ERPNext already matches the current marketplace state (NO_ACTION):
-	the ERP rows are unchanged, so their names and the already-reflected refund
-	ids carry over from the previous baseline.
+	the ERP rows are unchanged, so their names carry over from the previous baseline.
+	The previous ``refund_ids`` are copied as a default; the caller that knows the
+	order's current refunds (``sales_order_sync._advance_baseline()``) overwrites them.
 	"""
 	advanced = deepcopy(current)
 	previous_items = _items_by_external_id(previous) or {}
@@ -119,7 +120,22 @@ def snapshot_advanced_from(previous, current):
 
 
 def plan(previous, current, evidence, erp_state):
-	"""Classify a desired commercial snapshot without applying any ERP change."""
+	"""Classify a desired commercial snapshot without applying any ERP change.
+
+	``evidence`` is the platform-neutral dict an integration adapter builds; every
+	key is optional and an absent key means "no such evidence":
+
+	- ``cancellation``: ``"full"`` when the marketplace cancelled the whole order.
+	- ``cancelled_after_fulfillment``: with ``cancellation``, the marketplace says the
+	  goods had already left the merchant.
+	- ``refund`` / ``return``: bool, compensating-transaction evidence.
+	- ``lifecycle_permits_change``: ``True``/``False`` whether the marketplace
+	  lifecycle still allows the order to change; ``None`` (key present) means the
+	  stage is unknown.  ``lifecycle_reason`` is the merchant-readable explanation.
+	- ``fulfillment_started``: ``{external_item_id: bool}`` per line, or one bool for
+	  the whole order.
+	- ``source``: where the evidence comes from (e.g. ``"marketplace"``); informational.
+	"""
 	evidence = evidence or {}
 	if not previous:
 		return _attention("No reconciled snapshot baseline is available for this Sales Order.")
@@ -145,6 +161,22 @@ def plan(previous, current, evidence, erp_state):
 			)
 		return _attention("The linked ERPNext Sales Order is no longer an active submitted document.")
 
+	if evidence.get("cancellation") == "full" and evidence.get("cancelled_after_fulfillment"):
+		# Reached only while the ERP order is still active (an already cancelled or
+		# closed order converged above). The marketplace cancelled after the goods
+		# left: only a delivery recorded in ERPNext makes this a compensating (return)
+		# transaction; otherwise a person has to reconcile what physically happened.
+		if _has_delivery(erp_state):
+			return _result(
+				UNSUPPORTED_COMPENSATING_TRANSACTION,
+				"The marketplace order was cancelled after fulfillment and ERPNext already has delivery; "
+				"a return or other compensating transaction is needed.",
+			)
+		return _attention(
+			"The marketplace order was cancelled after fulfillment, but ERPNext has no recorded delivery; "
+			"review what happened to the goods."
+		)
+
 	header_changes = _header_changes(previous, current)
 	changes = _line_changes(previous_items, current_items)
 	if header_changes:
@@ -166,6 +198,10 @@ def plan(previous, current, evidence, erp_state):
 		# ERPNext already holds the current marketplace state (including after a
 		# manual ERP-side edit): nothing to do, whatever its billing/delivery.
 		return _result(NO_ACTION, "Marketplace and ERPNext commercial state are effectively equivalent.")
+	if not cancelling:
+		blocked_reason = _lifecycle_block_reason(evidence, changes)
+		if blocked_reason:
+			return _attention(blocked_reason, changes)
 	if cancelling and _has_execution(erp_state) and not _has_outstanding_remainder(erp_state):
 		# Fully delivered (billed or not): only a compensating transaction can undo it,
 		# so this takes precedence over the "already billed" blocker below.
@@ -286,12 +322,56 @@ def _effectively_equivalent(previous_items, current_items, erp_lines, precision=
 			or line.get("item_code") != erp_line.get("item_code")
 			or line.get("uom") != erp_line.get("uom")
 			or line.get("warehouse") != erp_line.get("warehouse")
-			or flt(line.get("fulfilled_total_price"), amount_precision) != flt(erp_line.get("amount"), amount_precision)
+			or flt(line.get("fulfilled_total_price"), amount_precision)
+			!= flt(erp_line.get("amount"), amount_precision)
 		):
 			return False
 		if flt(erp_line.get("delivered_qty")) > flt(line.get("qty")):
 			return False
 	return True
+
+
+# Line fields whose value comes from the marketplace order.  ``item_code``, ``uom`` and
+# ``warehouse`` come from this app's mapping/account configuration, so the marketplace
+# lifecycle has no say over them and must not block a change to them.
+_MARKETPLACE_SOURCED_LINE_FIELDS = {"qty", "effective_rate", "fulfilled_total_price"}
+
+
+def _lifecycle_block_reason(evidence, changes):
+	"""Why the marketplace lifecycle does not allow applying ``changes``, or ``None``.
+
+	Only marketplace-sourced changes (quantity and price/amount) are judged; a change
+	confined to item, UOM or warehouse is never blamed on the marketplace lifecycle.
+	"""
+	if "lifecycle_permits_change" not in evidence and not evidence.get("fulfillment_started"):
+		return None
+	changes = [
+		change
+		for change in changes
+		if change.get("kind") == "line_changed" and change.get("field") in _MARKETPLACE_SOURCED_LINE_FIELDS
+	]
+	if not changes:
+		return None
+	permits = evidence.get("lifecycle_permits_change", True)
+	reason = cstr(evidence.get("lifecycle_reason")).strip()
+	if permits is False:
+		return reason or "The marketplace order can no longer change, so the change was not applied."
+	started = evidence.get("fulfillment_started")
+	for change in changes:
+		line_started = (
+			started.get(cstr(change.get("external_item_id")).strip())
+			if isinstance(started, dict)
+			else bool(started)
+		)
+		if line_started:
+			return (
+				reason
+				or f"Marketplace line {change['external_item_id']} already started fulfillment, "
+				"so its change was not applied."
+			)
+	if permits is None:
+		return reason or "The marketplace order stage is unknown, so the change was not applied."
+	return None
 
 
 def _inactive_order_converged(erp_state):
@@ -309,6 +389,10 @@ def _has_execution(erp_state):
 	return any(
 		flt(line.get("delivered_qty")) or flt(line.get("billed_amt")) for line in erp_state.get("lines") or []
 	)
+
+
+def _has_delivery(erp_state):
+	return any(flt(line.get("delivered_qty")) for line in erp_state.get("lines") or [])
 
 
 def _has_outstanding_remainder(erp_state):

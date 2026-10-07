@@ -50,9 +50,16 @@ matching ``enqueue_account_sync()``'s own dedup guarantee. No per-account or
 global concurrency cap - debounce is strictly per Marketplace Order.
 """
 
-import frappe
-from frappe.utils import add_to_date, now_datetime
+import hashlib
+import json
 
+import frappe
+from frappe.utils import add_to_date, cstr, flt, getdate, now_datetime
+
+from marketplace_integrations.integrations.shopify.order_reconciliation import refund_ids
+from marketplace_integrations.marketplace_integrations.doctype.marketplace_order.marketplace_order import (
+	compute_order_identity_key,
+)
 from marketplace_integrations.services.sales_order_sync import sync_sales_order
 
 ORDER_DOCTYPE = "Marketplace Order"
@@ -81,6 +88,115 @@ def bump_sync_debounce(marketplace_order, trigger_source, delay_seconds=SYNC_DEB
 		},
 		update_modified=False,
 	)
+
+
+_FINGERPRINT_ITEM_FIELDS = (
+	"external_item_id",
+	"external_sku",
+	"external_status",
+	"integration_status",
+	"fulfilled_quantity",
+	"fulfilled_total_price",
+	"current_quantity",
+	"unfulfilled_quantity",
+	"non_fulfillable_quantity",
+	"transaction_amount",
+	# Snapshot blockers/amounts read these (sales_order_sync.py line builders).
+	"pricing_type",
+	"fulfilled_unit_price",
+	"fulfilled_total_price_missing",
+	"transaction_amount_missing",
+)
+
+
+def _fingerprint_value(row, field):
+	if field.endswith(("quantity", "price", "amount")):
+		return flt(row.get(field), 6)
+	if field.endswith("_missing"):
+		return int(bool(row.get(field)))
+	return cstr(row.get(field))
+
+
+def order_evidence_fingerprint(order):
+	"""Pure: a hash of what could change a linked order's Sales Order snapshot or its
+	reconciliation evidence (#178), so an import can tell a real change from a refresh.
+
+	Covers line ids/SKUs/quantities/amounts/statuses and Shopify fulfillment
+	quantities, whether the order is cancelled (the timestamp itself is not hashed),
+	refund ids, Talabat/Shopify order statuses, and Noon shipment/unit membership.
+	Also the snapshot's transaction/delivery date sources (``processed_on``,
+	``received_on``, ``promised_for``, as dates), ``presentment_currency`` and the
+	per-line ``*_missing`` flags, since the snapshot builder reads all of them.
+	Deliberately excludes volatile fields (``last_platform_update_on``,
+	``latest_payload`` timestamps, ``modified``), and, for Noon, the zero-quantity
+	stale status-group rows the importer zeroes instead of deleting.
+	"""
+	is_noon = order.platform == "Noon"
+	items = []
+	for row in order.get("items") or []:
+		if is_noon and flt(row.get("current_quantity")) <= 0:
+			continue
+		items.append(
+			[_fingerprint_value(row, field) for field in _FINGERPRINT_ITEM_FIELDS]
+			+ [int(bool(row.get("fulfillment_quantities_known")))]
+		)
+	payload = {
+		"platform": cstr(order.platform),
+		"external_status": cstr(order.external_status),
+		"financial_status": cstr(order.external_financial_status),
+		"post_picked_up": int(bool(order.post_picked_up)),
+		"cancelled": bool(order.cancelled_at),
+		"dates": [
+			cstr(getdate(order.get(field))) if order.get(field) else ""
+			for field in ("processed_on", "received_on", "promised_for")
+		],
+		"presentment_currency": cstr(order.get("presentment_currency")),
+		"refund_ids": sorted(refund_ids(order)),
+		"items": sorted(items),
+		"shipments": sorted(
+			[cstr(row.integration_shipment_nr), cstr(row.status)] for row in order.get("noon_shipments") or []
+		),
+		"shipment_units": sorted(
+			[cstr(row.integration_shipment_nr), cstr(row.mp_item_nr)]
+			for row in order.get("noon_shipment_units") or []
+		),
+	}
+	return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def linked_order_fingerprint(marketplace_account, external_order_id):
+	"""Fingerprint of an existing Marketplace Order that already has a linked Sales
+	Order, else ``None`` (no order yet, or not linked: nothing for a re-sync to reconcile).
+	"""
+	name = frappe.db.get_value(
+		"Marketplace Order",
+		{"order_identity_key": compute_order_identity_key(marketplace_account, external_order_id)},
+		"name",
+	)
+	if not name or not frappe.db.get_value("Marketplace Order", name, "erpnext_sales_order"):
+		return None
+	# Same builder as the "after" side (``bump_if_linked_order_changed()``), so an
+	# unchanged or replayed import hashes identically.  ``frappe.get_doc(doctype, name)``
+	# does not validate links on load, and it reads child rows directly (no
+	# permission-checked ``get_list``), so this also works for a non-Administrator
+	# caller such as a manual import run as the queuing user.
+	return order_evidence_fingerprint(frappe.get_doc(ORDER_DOCTYPE, name))
+
+
+def bump_if_linked_order_changed(order_name, before_fingerprint, trigger_source):
+	"""Bump the sync debounce when an import changed a linked order (#178).
+
+	``before_fingerprint`` comes from ``linked_order_fingerprint()`` taken before the
+	import; ``None`` (new or unlinked order) never bumps here.  Same transaction as the
+	import: ``bump_sync_debounce()`` is a plain ``frappe.db.set_value()``.
+	"""
+	if before_fingerprint is None:
+		return False
+	after = order_evidence_fingerprint(frappe.get_doc(ORDER_DOCTYPE, order_name))
+	if after == before_fingerprint:
+		return False
+	bump_sync_debounce(order_name, trigger_source)
+	return True
 
 
 def sweep_due_sales_order_syncs():

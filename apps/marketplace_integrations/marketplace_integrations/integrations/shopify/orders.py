@@ -19,6 +19,10 @@ from marketplace_integrations.integrations.shopify.constants import (
 )
 from marketplace_integrations.integrations.shopify.order_mapper import normalize_order
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
+from marketplace_integrations.services.sales_order_sync_debounce import (
+	bump_if_linked_order_changed,
+	linked_order_fingerprint,
+)
 
 ORDER_IMPORT_RESULT_TTL = 60 * 60
 MAX_ORDER_IMPORT_DAYS = 60
@@ -91,7 +95,7 @@ query ShopifyOrder($id: ID!, $lineItemsFirst: Int!, $transactionsFirst: Int!, $r
     lineItems(first: $lineItemsFirst) {
       pageInfo { hasNextPage }
       nodes {
-        id name sku quantity currentQuantity variant { id }
+        id name sku quantity currentQuantity unfulfilledQuantity nonFulfillableQuantity variant { id }
         originalUnitPriceSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }
         priceAfterAllDiscountsBeforeTaxesSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }
         discountAllocations { allocatedAmountSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } } }
@@ -159,15 +163,17 @@ def import_order(account, order_gid):
 		if isinstance(stored_payload, str):
 			try:
 				stored_payload = frappe.parse_json(stored_payload)
-			except (TypeError, ValueError):
+			except TypeError, ValueError:
 				return False
-		stored_updated_at = (stored_payload or {}).get("updatedAt") if isinstance(stored_payload, dict) else None
+		stored_updated_at = (
+			(stored_payload or {}).get("updatedAt") if isinstance(stored_payload, dict) else None
+		)
 		incoming_updated_at = order.get("updatedAt")
 		if not stored_updated_at or not incoming_updated_at:
 			return False
 		try:
 			return get_datetime(incoming_updated_at) < get_datetime(stored_updated_at)
-		except (TypeError, ValueError):
+		except TypeError, ValueError:
 			return False
 
 	return upsert_marketplace_order(account.name, normalized, is_stale=is_stale)
@@ -190,8 +196,7 @@ def list_order_ids_updated_since(client, since, until=None):
 			{"first": SHOPIFY_ORDERS_PAGE_SIZE, "after": after, "query": query},
 		)
 		connection = data.get("orders") or {}
-		for node in connection.get("nodes") or []:
-			yield node
+		yield from connection.get("nodes") or []
 		page_info = connection.get("pageInfo") or {}
 		if not page_info.get("hasNextPage"):
 			return
@@ -200,17 +205,27 @@ def list_order_ids_updated_since(client, since, until=None):
 			return
 
 
-def _import_order_isolated(account, order_gid):
+def _import_order_isolated(account, order_gid, bump_linked_changes=False, trigger_source="Manual"):
 	"""Import one order under its own DB savepoint, isolating its failure
 	from every other order in the same range-import/reconciliation run (#109
 	decision 6/review finding #2) - the same per-order isolation
 	run_order_import() already used, now shared by both callers rather than
 	duplicated. Returns (order_or_None, error_message_or_None).
+
+	#178: when ``bump_linked_changes`` is true, the "before" evidence fingerprint
+	read and the debounce bump also run INSIDE this savepoint, so a failure in
+	either is reported as this order's error (and rolled back with its import)
+	instead of escaping and ending the whole run before the watermark advances.
 	"""
 	savepoint = "shopify_order_import_" + frappe.generate_hash(length=10)
 	frappe.db.savepoint(savepoint)
 	try:
+		fingerprint_before = (
+			linked_order_fingerprint(account.name, order_gid) if bump_linked_changes else None
+		)
 		order = import_order(account, order_gid)
+		if bump_linked_changes and order:
+			bump_if_linked_order_changed(order.name, fingerprint_before, trigger_source)
 	except Exception as exc:
 		frappe.db.rollback(save_point=savepoint)
 		return None, str(exc)
@@ -219,7 +234,9 @@ def _import_order_isolated(account, order_gid):
 		return order, None
 
 
-def import_orders_updated_between(account, client, start, end=None, on_progress=None, trigger_source="Manual"):
+def import_orders_updated_between(
+	account, client, start, end=None, on_progress=None, trigger_source="Manual", bump_linked_changes=False
+):
 	"""List order ids updated in ``[start, end]`` (``end`` defaults to no
 	upper bound) via ``list_order_ids_updated_since()`` and ``import_order()``
 	each one, with per-order savepoint isolation - the one shared "list then
@@ -246,6 +263,11 @@ def import_orders_updated_between(account, client, start, end=None, on_progress=
 	distinguishes a manual range import (run_order_import(), the default
 	"Manual") from the scheduled sweep (reconcile_all_accounts_orders() passes
 	"Scheduled Reconciliation").
+
+	#178: ``bump_linked_changes`` (default False) is passed True ONLY by the scheduled
+	sweep, reconcile_all_accounts_orders(): it then bumps the sales-order sync
+	debounce for an already-linked order whose evidence fingerprint changed. A manual
+	range import (run_order_import()) never bumps, regardless of ``trigger_source``.
 	"""
 	imported = []
 	errors = []
@@ -253,7 +275,13 @@ def import_orders_updated_between(account, client, start, end=None, on_progress=
 		if end and node.get("updatedAt") and node["updatedAt"] > end:
 			break
 		order_gid = node.get("id")
-		order, error = _import_order_isolated(account, order_gid)
+		# #178: the fingerprint read and bump happen inside _import_order_isolated()
+		# (per-order isolation), and only when ``bump_linked_changes`` (scheduled sweep).
+		# The webhook path imports through import_order() directly and already bumps
+		# unconditionally, so it is deliberately not touched here (no double bump).
+		order, error = _import_order_isolated(
+			account, order_gid, bump_linked_changes=bump_linked_changes, trigger_source=trigger_source
+		)
 		if error:
 			errors.append({"order_gid": order_gid, "error": error})
 			_log_order_import_failure(account, order_gid, error, trigger_source)
@@ -351,6 +379,7 @@ def reconcile_all_accounts_orders():
 				ShopifyClient(account.connection),
 				_as_shopify_timestamp(start),
 				trigger_source="Scheduled Reconciliation",
+				bump_linked_changes=True,
 			)
 			# Advance the watermark only after a successful run (decision 8) -
 			# per-order failures are already isolated above and don't count as
@@ -407,7 +436,9 @@ def queue_order_import(account_name, start, end):
 	)
 	if job is None:
 		frappe.cache().delete_value(_import_cache_key(job_id))
-		frappe.throw(_("A Shopify order import is already running for Marketplace Account {0}.").format(account.name))
+		frappe.throw(
+			_("A Shopify order import is already running for Marketplace Account {0}.").format(account.name)
+		)
 	return {"job_id": job_id, "status": "queued"}
 
 
@@ -425,7 +456,9 @@ def run_order_import(job_id_for_result, owner, account_name, start, end):
 		client = ShopifyClient(account.connection)
 
 		def report(imported, errors):
-			_set_import_status(job_id_for_result, {"owner": owner, "status": "running", "processed": len(imported)})
+			_set_import_status(
+				job_id_for_result, {"owner": owner, "status": "running", "processed": len(imported)}
+			)
 
 		# Shares import_orders_updated_between() with reconcile_all_accounts_orders()
 		# (#109 decision 6) - the manual range job and the scheduled
@@ -442,7 +475,9 @@ def run_order_import(job_id_for_result, owner, account_name, start, end):
 			},
 		)
 	except Exception as exc:
-		_set_import_status(job_id_for_result, {"owner": owner, "status": "failed", "processed": 0, "error": str(exc)})
+		_set_import_status(
+			job_id_for_result, {"owner": owner, "status": "failed", "processed": 0, "error": str(exc)}
+		)
 		raise
 
 
