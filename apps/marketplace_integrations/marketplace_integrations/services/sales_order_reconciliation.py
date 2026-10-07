@@ -3,9 +3,10 @@
 
 """Read-only planning for reconciling submitted Marketplace Sales Orders.
 
-This module deliberately plans only.  A later issue may execute a supported
-plan through ERPNext's native submitted-document operations, but this layer
-must never mutate the Sales Order it inspects.
+``plan()`` and ``read_erp_state()`` never mutate the Sales Order they inspect.
+``execute()`` (#179) is the only mutating entry point: it applies a supported
+plan through ERPNext's native submitted-document operations and leaves
+persistence of the Marketplace Order, savepoints and audit logging to the caller.
 """
 
 from copy import deepcopy
@@ -43,6 +44,7 @@ def read_erp_state(sales_order):
 		"status": sales_order.status,
 		"per_delivered": flt(sales_order.per_delivered),
 		"per_billed": flt(sales_order.per_billed),
+		"advance_paid": flt(sales_order.advance_paid),
 		"precision": {
 			"qty": frappe.get_precision("Sales Order Item", "qty"),
 			# Lines are compared by amount, at the precision the Sales Order's own
@@ -76,7 +78,13 @@ def snapshot_with_sales_order_item_names(snapshot, sales_order, refund_ids=None)
 	key out (a legacy baseline whose refund history is unknown).
 	"""
 	persisted = deepcopy(snapshot)
-	lines = persisted.get("items") or []
+	all_lines = persisted.get("items") or []
+	# A zero-quantity line (refunded to zero) is expected to be absent from the Sales
+	# Order; it is kept in the baseline without an ERP row identity.
+	lines = [line for line in all_lines if flt(line.get("qty")) > 0]
+	for line in all_lines:
+		if flt(line.get("qty")) <= 0:
+			line["sales_order_item"] = None
 	if len(lines) != len(sales_order.items):
 		raise SalesOrderLinesMismatch(
 			f"Sales Order {sales_order.name} has {len(sales_order.items)} item rows but the "
@@ -152,8 +160,19 @@ def plan(previous, current, evidence, erp_state):
 	current_items = _items_by_external_id(current)
 	if previous_items is None or current_items is None:
 		return _attention("The marketplace snapshot has duplicate or missing line identities.")
+	# Every line gone or at zero quantity is the same decision as a full cancellation.
+	# An absent "items" key means "no current snapshot" (not "no lines").
+	all_zero = "items" in current and not any(flt(line.get("qty")) > 0 for line in current["items"] or [])
+	if any(
+		flt(previous_items[external_item_id].get("qty")) <= 0 < flt(line.get("qty"))
+		for external_item_id, line in current_items.items()
+		if external_item_id in previous_items
+	):
+		return _attention(
+			"A marketplace line returned to a positive quantity; this needs a structural change."
+		)
 	if erp_state.get("docstatus") != 1 or erp_state.get("status") in INACTIVE_ERP_ORDER_STATUSES:
-		if evidence.get("cancellation") == "full" and _inactive_order_converged(erp_state):
+		if (evidence.get("cancellation") == "full" or all_zero) and _inactive_order_converged(erp_state):
 			# The marketplace cancelled the order and ERPNext is already cancelled (or
 			# closed with nothing left to deliver): both sides agree, nothing to do.
 			return _result(
@@ -183,7 +202,8 @@ def plan(previous, current, evidence, erp_state):
 		return _attention(
 			"A submitted Sales Order has structural commercial changes.", header_changes + changes
 		)
-	if any(change["kind"] in {"item_added", "item_removed"} for change in changes):
+	structural_kinds = {"item_added"} if all_zero else {"item_added", "item_removed"}
+	if any(change["kind"] in structural_kinds for change in changes):
 		return _attention("A submitted Sales Order has structural line changes.", changes)
 
 	erp_lines = {line["sales_order_item"]: line for line in erp_state.get("lines") or []}
@@ -193,7 +213,7 @@ def plan(previous, current, evidence, erp_state):
 	if not equivalent and not changes:
 		return _attention("The ERPNext Sales Order no longer represents the reconciled marketplace state.")
 
-	cancelling = evidence.get("cancellation") == "full"
+	cancelling = evidence.get("cancellation") == "full" or all_zero
 	if equivalent and not cancelling:
 		# ERPNext already holds the current marketplace state (including after a
 		# manual ERP-side edit): nothing to do, whatever its billing/delivery.
@@ -214,14 +234,16 @@ def plan(previous, current, evidence, erp_state):
 	if changes or cancelling:
 		# Delivery/billing only blocks when something would actually change; an
 		# unchanged, equivalent billed or delivered order is simply NO_ACTION.
-		for external_item_id, current_line in current_items.items():
-			previous_line = previous_items.get(external_item_id)
-			if not previous_line:
-				continue
+		for external_item_id, previous_line in previous_items.items():
+			if flt(previous_line.get("qty")) <= 0:
+				continue  # never had an ERP row
+			current_line = current_items.get(external_item_id) or {}
 			erp_line = erp_lines.get(previous_line.get("sales_order_item"))
 			if not erp_line:
 				return _attention("The reconciled Sales Order line is missing from ERPNext.", changes)
-			if flt(current_line.get("qty")) < flt(erp_line.get("delivered_qty")):
+			# An all-zero order closes whatever remains after delivery; only an
+			# individual line reduction must stay above what was delivered.
+			if not all_zero and flt(current_line.get("qty")) < flt(erp_line.get("delivered_qty")):
 				return _attention(
 					"Requested quantity is below the quantity already delivered in ERPNext.", changes
 				)
@@ -230,6 +252,12 @@ def plan(previous, current, evidence, erp_state):
 
 	if cancelling:
 		if not _has_execution(erp_state):
+			if flt(erp_state.get("advance_paid")) > 0:
+				return _attention(
+					"An advance payment exists on the Sales Order; reallocate or cancel it "
+					"before the order can be cancelled.",
+					changes,
+				)
 			return _result(
 				CANCEL_ORDER, "The marketplace order is fully cancelled before ERP execution.", changes
 			)
@@ -307,6 +335,8 @@ def _effectively_equivalent(previous_items, current_items, erp_lines, precision=
 	at currency precision, not as a rate: ERPNext cannot always reproduce a
 	marketplace total from a rate, but the amount is what posts.
 	"""
+	# Zero-quantity lines are expected absent from the Sales Order.
+	current_items = {key: line for key, line in current_items.items() if flt(line.get("qty")) > 0}
 	if len(current_items) != len(erp_lines):
 		return False
 	precision = precision or {}
@@ -375,13 +405,15 @@ def _lifecycle_block_reason(evidence, changes):
 
 
 def _inactive_order_converged(erp_state):
-	"""ERP Cancelled/docstatus 2, or Closed with no outstanding delivery remainder."""
+	"""ERP Cancelled/docstatus 2, or Closed after delivery (what ``CLOSE_REMAINDER`` leaves).
+
+	A Closed order with no delivery is not converged: reopening it is a separate
+	decision (#180).
+	"""
 	if erp_state.get("docstatus") == 2 or erp_state.get("status") == "Cancelled":
 		return True
 	return (
-		erp_state.get("docstatus") == 1
-		and erp_state.get("status") == "Closed"
-		and not _has_outstanding_remainder(erp_state)
+		erp_state.get("docstatus") == 1 and erp_state.get("status") == "Closed" and _has_delivery(erp_state)
 	)
 
 
@@ -405,3 +437,70 @@ def _attention(message, changes=None):
 
 def _result(outcome, message, changes=None):
 	return {"outcome": outcome, "message": message, "changes": changes or []}
+
+
+class ReconciliationMismatch(Exception):
+	"""ERPNext, after an update, still does not hold the marketplace amounts."""
+
+
+def execute(reconciliation_plan, sales_order_name, previous=None, current=None):
+	"""Apply a supported plan to a freshly loaded Sales Order and return what happened.
+
+	Raises whatever ERPNext raises; the caller owns the savepoint, the Marketplace
+	Order persistence and the audit log.  Never commits.  ``previous`` (the baseline
+	with Sales Order item names) and ``current`` snapshots are needed for
+	``UPDATE_SUBMITTED_ORDER``, which raises ``ReconciliationMismatch`` when ERPNext
+	cannot reproduce the marketplace amounts (the caller rolls back).
+	"""
+	outcome = reconciliation_plan["outcome"]
+	if outcome not in (CANCEL_ORDER, CLOSE_REMAINDER, UPDATE_SUBMITTED_ORDER):
+		raise ValueError(f"Reconciliation outcome {outcome} is not executable.")
+	sales_order = frappe.get_doc("Sales Order", sales_order_name)
+	if outcome == UPDATE_SUBMITTED_ORDER:
+		return _execute_update(sales_order, previous or {}, current or {})
+	if outcome == CANCEL_ORDER:
+		sales_order.cancel()
+	else:
+		sales_order.update_status("Closed")
+	return {"outcome": outcome, "sales_order": sales_order.name, "status": sales_order.status}
+
+
+def _execute_update(sales_order, previous, current):
+	from erpnext.controllers.accounts_controller import update_child_qty_rate
+
+	previous_items = _items_by_external_id(previous) or {}
+	current_items = _items_by_external_id(current) or {}
+	rows = {row.name: row for row in sales_order.items}
+	trans_items = []
+	for external_item_id, line in current_items.items():
+		if flt(line.get("qty")) <= 0:
+			continue  # omitted rows are deleted by ERPNext
+		row = rows.get((previous_items.get(external_item_id) or {}).get("sales_order_item"))
+		if not row:
+			raise ReconciliationMismatch(
+				f"The Sales Order row for marketplace line {external_item_id} was not found."
+			)
+		trans_items.append(
+			{
+				"docname": row.name,
+				"item_code": row.item_code,
+				"qty": flt(line.get("qty")),
+				"rate": flt(line.get("effective_rate"), 6),
+				"uom": row.uom,
+				"conversion_factor": row.conversion_factor,
+				"delivery_date": cstr(row.delivery_date) if row.delivery_date else None,
+			}
+		)
+	update_child_qty_rate("Sales Order", frappe.as_json(trans_items), sales_order.name)
+	sales_order = frappe.get_doc("Sales Order", sales_order.name)
+	state = read_erp_state(sales_order)
+	erp_lines = {line["sales_order_item"]: line for line in state["lines"]}
+	if not _effectively_equivalent(previous_items, current_items, erp_lines, state["precision"]):
+		raise ReconciliationMismatch(
+			"ERPNext cannot reproduce the marketplace amounts for the changed lines."
+		)
+	return {
+		"outcome": UPDATE_SUBMITTED_ORDER,
+		"sales_order": sales_order.name,
+		"status": sales_order.status,
+	}

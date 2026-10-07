@@ -43,7 +43,7 @@ from copy import deepcopy
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, flt, getdate, now_datetime
+from frappe.utils import cstr, flt, getdate, now_datetime, strip_html
 
 from marketplace_integrations.integrations.shopify.order_reconciliation import refund_ids as _refund_ids
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_product_mapping.marketplace_product_mapping import (
@@ -52,9 +52,15 @@ from marketplace_integrations.marketplace_integrations.doctype.marketplace_produ
 from marketplace_integrations.services.account_warehouse import validate_account_warehouse
 from marketplace_integrations.services.mappings import resolve_mapping_and_item
 from marketplace_integrations.services.sales_order_reconciliation import (
+	CANCEL_ORDER,
+	CLOSE_REMAINDER,
+	NEEDS_ATTENTION,
 	NO_ACTION,
 	UNSUPPORTED_COMPENSATING_TRANSACTION,
+	UPDATE_SUBMITTED_ORDER,
+	ReconciliationMismatch,
 	SalesOrderLinesMismatch,
+	execute,
 	plan,
 	read_erp_state,
 	snapshot_advanced_from,
@@ -112,6 +118,12 @@ EFFECTIVE_RATE_PRECISION = 6
 
 
 _FRESH_SALES_ORDER_SAVEPOINT = "marketplace_fresh_sales_order"
+_RECONCILE_EXECUTE_SAVEPOINT = "marketplace_reconcile_execute"
+
+# Plan outcomes `_reconcile_submitted_order()` applies to ERPNext (#179).  Slice B adds
+# UPDATE_SUBMITTED_ORDER here (and handles it in `execute()`); every other outcome stays
+# an advisory.  Form load/save (`set_sync_status_from_current_snapshot`) never executes.
+_EXECUTABLE_OUTCOMES = {CANCEL_ORDER, CLOSE_REMAINDER, UPDATE_SUBMITTED_ORDER}
 
 
 class SyncBlocker(frappe.ValidationError):
@@ -169,9 +181,7 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 			evidence = _reconciliation_evidence(order)
 			if _uses_stored_snapshot(sales_order.docstatus, evidence):
 				snapshot = _parse_last_synced_snapshot(order)
-				return _submitted_reconciliation_advisory(
-					order, sales_order, snapshot, evidence, trigger_source
-				)
+				return _reconcile_submitted_order(order, sales_order, snapshot, evidence, trigger_source)
 		try:
 			_validate_account_configuration(account)
 			lines = _build_order_lines(
@@ -188,7 +198,7 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 			# disabled mapping): a delivered/billed order still needs the compensating
 			# transaction, which matters more to tell the merchant.
 			if _compensating_plan_outranks_blocker(order, sales_order, evidence):
-				return _submitted_reconciliation_advisory(order, sales_order, None, evidence, trigger_source)
+				return _reconcile_submitted_order(order, sales_order, None, evidence, trigger_source)
 			raise
 		snapshot = _make_snapshot(
 			account, customer, lines, _transaction_date(order), _delivery_date(order), address
@@ -197,9 +207,7 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 
 		if sales_order:
 			if sales_order.docstatus != 0:
-				return _submitted_reconciliation_advisory(
-					order, sales_order, snapshot, evidence, trigger_source
-				)
+				return _reconcile_submitted_order(order, sales_order, snapshot, evidence, trigger_source)
 			if order.last_synced_hash == current_hash:
 				result = _save_success(order, current_hash, sales_order, updated=False, snapshot=snapshot)
 				_create_sync_log(order, trigger_source, "Success", snapshot, result)
@@ -1245,11 +1253,16 @@ def _advance_baseline(order, previous, current_snapshot):
 	order.last_synced_snapshot = frappe.as_json(advanced)
 
 
-def _submitted_reconciliation_advisory(order, sales_order, snapshot, evidence, trigger_source):
-	"""Persist one read-only submitted-order reconciliation result and audit row."""
+def _reconcile_submitted_order(order, sales_order, snapshot, evidence, trigger_source):
+	"""Plan one submitted-order reconciliation; execute it if supported, else record an advisory."""
 	erp_state = read_erp_state(sales_order)
 	previous = _parse_last_synced_snapshot(order)
 	reconciliation_plan = plan(previous, snapshot or {}, evidence, erp_state)
+	# Single dispatch point between "act on ERPNext" and "advise only".
+	if reconciliation_plan["outcome"] in _EXECUTABLE_OUTCOMES:
+		return _execute_reconciliation_plan(
+			order, sales_order, snapshot, reconciliation_plan, erp_state, trigger_source
+		)
 	if reconciliation_plan["outcome"] == NO_ACTION and snapshot:
 		_advance_baseline(order, previous, snapshot)
 	result = _save_reconciliation_advisory(order, reconciliation_plan)
@@ -1265,6 +1278,124 @@ def _submitted_reconciliation_advisory(order, sales_order, snapshot, evidence, t
 	return result
 
 
+def _execute_reconciliation_plan(
+	order, sales_order, snapshot, reconciliation_plan, erp_state, trigger_source
+):
+	"""Apply an executable plan inside a savepoint; persist state only after success.
+
+	Runs in the caller's transaction (the Marketplace Order row is already locked and
+	``erp_state`` was read after that lock); never commits.  The stored baseline is kept
+	as is for cancel/close (not re-snapshotted); an update advances it.
+	"""
+	outcome = reconciliation_plan["outcome"]
+	frappe.db.savepoint(_RECONCILE_EXECUTE_SAVEPOINT)
+	try:
+		executed = execute(
+			reconciliation_plan, sales_order.name, _parse_last_synced_snapshot(order), snapshot or {}
+		)
+		if outcome == UPDATE_SUBMITTED_ORDER:
+			# Pair the current snapshot to the updated rows before anything is persisted.
+			advanced = snapshot_with_sales_order_item_names(
+				snapshot, frappe.get_doc("Sales Order", sales_order.name), refund_ids=_refund_ids(order)
+			)
+	except ReconciliationMismatch as exc:
+		_rollback_reconcile_savepoint()
+		frappe.clear_messages()
+		order.reload()
+		attention = {
+			"outcome": NEEDS_ATTENTION,
+			"message": cstr(exc),
+			"changes": reconciliation_plan["changes"],
+		}
+		result = _save_reconciliation_advisory(order, attention)
+		_create_sync_log(
+			order,
+			trigger_source,
+			"Invalid",
+			snapshot,
+			result,
+			reconciliation_plan=attention,
+			erp_state=erp_state,
+		)
+		return result
+	except Exception as exc:
+		_rollback_reconcile_savepoint()
+		traceback_text = None
+		if isinstance(exc, frappe.PermissionError):
+			message = _("You do not have permission to change the linked Sales Order in ERPNext.")
+			log_status = "Invalid"
+		elif isinstance(exc, frappe.ValidationError):
+			message = strip_html(cstr(exc)) or _("ERPNext rejected the Sales Order change.")
+			log_status = "Invalid"
+		else:
+			frappe.log_error(title=_("Marketplace Sales Order reconciliation"))
+			traceback_text = frappe.get_traceback()
+			message = _("ERPNext could not apply the Sales Order change. Please review it and try again.")
+			log_status = "Error"
+		frappe.clear_messages()
+		order.reload()
+		result = _save_failure(order, message)
+		result["reconciliation"] = reconciliation_plan
+		_create_sync_log(
+			order,
+			trigger_source,
+			log_status,
+			snapshot,
+			result,
+			traceback_text=traceback_text,
+			reconciliation_plan=reconciliation_plan,
+			erp_state=erp_state,
+		)
+		return result
+	_release_reconcile_savepoint()
+	if outcome == UPDATE_SUBMITTED_ORDER:
+		order.last_synced_hash = snapshot_hash(snapshot)
+		order.last_synced_snapshot = frappe.as_json(advanced)
+	order.last_erpnext_sync_on = now_datetime()
+	order.erpnext_sync_status = "Synced"
+	order.last_sync_error = None
+	order.flags.skip_sync_status_update = True
+	order.save()
+	result = {
+		"ok": True,
+		"status": order.erpnext_sync_status,
+		"sales_order": order.erpnext_sales_order,
+		"updated": False,
+		"error": None,
+		"reconciliation": reconciliation_plan,
+		"executed": executed,
+	}
+	_create_sync_log(
+		order,
+		trigger_source,
+		"Success",
+		snapshot,
+		result,
+		reconciliation_plan=reconciliation_plan,
+		erp_state=erp_state,
+		action=outcome,
+	)
+	return result
+
+
+def _rollback_reconcile_savepoint():
+	try:
+		frappe.db.rollback(save_point=_RECONCILE_EXECUTE_SAVEPOINT)
+	except Exception as exc:
+		# The savepoint can already be gone (e.g. MariaDB rolled the whole transaction
+		# back on a deadlock); anything else is a real error.
+		if "SAVEPOINT" not in cstr(exc).upper():
+			raise
+
+
+def _release_reconcile_savepoint():
+	try:
+		frappe.db.release_savepoint(_RECONCILE_EXECUTE_SAVEPOINT)
+	except Exception as exc:
+		if "SAVEPOINT" not in cstr(exc).upper():
+			raise
+
+
 def _create_sync_log(
 	order,
 	trigger_source,
@@ -1274,6 +1405,7 @@ def _create_sync_log(
 	traceback_text=None,
 	reconciliation_plan=None,
 	erp_state=None,
+	action=None,
 ):
 	"""Write one ``Marketplace Sync Log`` row for this attempt (#131).
 
@@ -1300,6 +1432,8 @@ def _create_sync_log(
 				"erp_state": erp_state,
 			},
 		}
+		if action:
+			request_data["action"] = action
 	frappe.get_doc(
 		{
 			"doctype": "Marketplace Sync Log",

@@ -223,13 +223,10 @@ function noon_created_shipment_options(frm) {
 		}));
 }
 
-// #146 decision 8: a submitted Sales Order is never amended/cancelled by
-// this app, so Marking Out of Stock or Cancelling a shipment after one
-// exists is a real, documented divergence risk - warn and require
-// confirmation before either action proceeds, rather than silently
-// queueing it. erpnext_sales_order being set is the only client-visible
-// signal: #131 means the linked Sales Order is submitted immediately on
-// sync, so its mere presence here already implies "submitted".
+// Marking Out of Stock or Cancelling a shipment after a Sales Order exists
+// is a divergence risk, so warn and require confirmation before proceeding.
+// erpnext_sales_order being set is the only client-visible signal: #131
+// means the linked Sales Order is submitted immediately on sync.
 function noon_confirm_if_submitted_sales_order(frm, proceed) {
 	if (!frm.doc.erpnext_sales_order) {
 		proceed();
@@ -237,7 +234,7 @@ function noon_confirm_if_submitted_sales_order(frm, proceed) {
 	}
 	frappe.confirm(
 		__(
-			"ERPNext Sales Order {0} already exists for this order and will NOT be automatically amended or cancelled. Continue?",
+			"ERPNext Sales Order {0} is linked to this order and will be updated, closed or cancelled automatically only if nothing has been delivered or billed; otherwise the order is flagged in Needs Attention. Continue?",
 			[frappe.utils.escape_html(frm.doc.erpnext_sales_order)]
 		),
 		proceed

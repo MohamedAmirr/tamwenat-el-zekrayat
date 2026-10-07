@@ -459,11 +459,9 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
 		self.assertEqual(sales_order.items[0].rate, 499.5)
 
-	def test_fulfilled_total_price_change_after_auto_submit_blocks_resync(self):
-		"""#131: the first sync auto-submits the Sales Order, so a later
-		Talabat-side change that dirties the hash can no longer update it
-		in-place - it now hits `_submitted_reconciliation_advisory()` instead, and the
-		already-submitted Sales Order's rate/amount are left untouched."""
+	def test_fulfilled_total_price_change_after_auto_submit_updates_the_submitted_order(self):
+		"""#179: a later Talabat-side price change on the auto-submitted Sales
+		Order is applied through ERPNext's native submitted-order update."""
 		order = self._make_order()
 		first = sync_sales_order(order.name)
 		order.reload()
@@ -476,11 +474,11 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		sales_order = frappe.get_doc("Sales Order", first["sales_order"])
 		order.reload()
 
-		self.assertFalse(second["ok"])
+		self.assertTrue(second["ok"], second.get("error"))
 		self.assertEqual(sales_order.docstatus, 1)
-		self.assertEqual(sales_order.items[0].rate, 499.5)
-		self.assertEqual(sales_order.items[0].amount, 999)
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(sales_order.items[0].rate, 250)
+		self.assertEqual(sales_order.items[0].amount, 500)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
 
 	def test_retry_does_not_create_a_second_sales_order(self):
 		order = self._make_order()
@@ -492,11 +490,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(first["sales_order"], second["sales_order"])
 		self.assertEqual(frappe.db.count("Sales Order", {"name": first["sales_order"]}), 1)
 
-	def test_changed_fulfilled_quantity_after_auto_submit_blocks_resync(self):
-		"""#131: same reasoning as
-		test_fulfilled_total_price_change_after_auto_submit_blocks_resync -
-		the first sync's auto-submit means a later qty/total change can no
-		longer be applied in-place."""
+	def test_changed_fulfilled_quantity_after_auto_submit_updates_the_submitted_order(self):
+		"""#179: a later qty/total change is applied to the submitted Sales Order."""
 		order = self._make_order()
 		first = sync_sales_order(order.name)
 		order.reload()
@@ -510,10 +505,10 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		sales_order = frappe.get_doc("Sales Order", first["sales_order"])
 		order.reload()
 
-		self.assertFalse(second["ok"])
-		self.assertEqual(sales_order.items[0].qty, 2)
-		self.assertEqual(sales_order.items[0].rate, 499.5)
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertTrue(second["ok"], second.get("error"))
+		self.assertEqual(sales_order.items[0].qty, 3)
+		self.assertEqual(sales_order.items[0].rate, 500)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
 
 	def test_update_branch_still_reapplies_snapshot_for_a_legacy_draft_sales_order(self):
 		"""#131's auto-submit means the existing-Sales-Order UPDATE branch
@@ -563,7 +558,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertFalse(result["ok"])
 		self.assertIn("KG", result["error"])
 
-	def test_submitted_sales_order_remains_modified_after_sync(self):
+	def test_submitted_sales_order_is_updated_by_sync(self):
 		# #131: the first sync already auto-submits the Sales Order - no
 		# manual .submit() call needed (and calling it again here would raise).
 		order = self._make_order()
@@ -578,10 +573,10 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		result = sync_sales_order(order.name)
 		order.reload()
 
-		self.assertFalse(result["ok"])
+		self.assertTrue(result["ok"], result.get("error"))
 		self.assertEqual(result["reconciliation"]["outcome"], "UPDATE_SUBMITTED_ORDER")
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
-		self.assertIn("submitted", result["error"])
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(frappe.db.get_value("Sales Order Item", {"parent": sales_order.name}, "qty"), 3)
 
 	def _set_first_item_fields(self, order, **fields):
 		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
@@ -608,15 +603,25 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(order.erpnext_sync_status, "Synced")
 		self.assertFalse(order.last_sync_error)
 
-	def test_talabat_cancelled_before_execution_plans_cancel_order(self):
+	def test_talabat_cancelled_before_execution_cancels_the_sales_order(self):
 		order = self._make_order()
-		self._sync_and_set_item_fields(order)
+		sales_order = self._sync_and_set_item_fields(order)
 		order.external_status = "CANCELLED"
 		order.save()
+		baseline = (order.last_synced_hash, order.last_synced_snapshot)
 
 		result = sync_sales_order(order.name)
+		order.reload()
 
+		self.assertTrue(result["ok"], result.get("error"))
 		self.assertEqual(result["reconciliation"]["outcome"], "CANCEL_ORDER")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order.name, "docstatus"), 2)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertFalse(order.last_sync_error)
+		self.assertEqual((order.last_synced_hash, order.last_synced_snapshot), baseline)
+		log = frappe.get_doc("Marketplace Sync Log", {"marketplace_order": order.name, "status": "Success"})
+		self.assertEqual(frappe.parse_json(log.request_data)["action"], "CANCEL_ORDER")
+		self.assertEqual(sync_sales_order(order.name)["reconciliation"]["outcome"], "NO_ACTION")
 
 	def test_cancelled_and_closed_order_converges_and_stays_synced(self):
 		order = self._make_order()
@@ -636,7 +641,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(order.erpnext_sync_status, "Synced")
 		self.assertEqual(sync_sales_order(order.name)["reconciliation"]["outcome"], "NO_ACTION")
 
-	def test_closed_order_with_outstanding_remainder_stays_modified_after_sync(self):
+	def test_closed_partly_delivered_cancelled_order_converges_to_synced(self):
+		# #179: Closed after delivery is what CLOSE_REMAINDER leaves, so it is converged.
 		order = self._make_order()
 		sales_order = self._sync_and_set_item_fields(order, delivered_qty=1)
 		frappe.db.set_value("Sales Order", sales_order.name, "status", "Closed", update_modified=False)
@@ -644,7 +650,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.save()
 		order.reload()
 
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Synced")
 
 	def test_lines_mismatch_on_fresh_insert_blocks_with_specific_message_and_leaves_no_half_link(self):
 		order = self._make_order()
@@ -686,17 +692,24 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertIn("specific mismatch message", result["error"])
 		self.assertEqual((order.last_synced_hash, order.last_synced_snapshot), baseline)
 
-	def test_talabat_cancelled_with_outstanding_remainder_plans_close_remainder(self):
+	def test_talabat_cancelled_with_outstanding_remainder_closes_the_remainder(self):
 		order = self._make_order()
-		self._sync_and_set_item_fields(order, delivered_qty=1)
+		sales_order = self._sync_and_set_item_fields(order, delivered_qty=1)
 		order.external_status = "CANCELLED"
 		order.save()
+		baseline = (order.last_synced_hash, order.last_synced_snapshot)
+		per_delivered = frappe.db.get_value("Sales Order", sales_order.name, "per_delivered")
 
 		result = sync_sales_order(order.name)
 		order.reload()
 
+		self.assertTrue(result["ok"], result.get("error"))
 		self.assertEqual(result["reconciliation"]["outcome"], "CLOSE_REMAINDER")
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order.name, "status"), "Closed")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order.name, "per_delivered"), per_delivered)
+		self.assertEqual((order.last_synced_hash, order.last_synced_snapshot), baseline)
+		self.assertEqual(sync_sales_order(order.name)["reconciliation"]["outcome"], "NO_ACTION")
 
 	def test_talabat_cancelled_after_full_delivery_needs_compensating_transaction(self):
 		order = self._make_order()
@@ -942,6 +955,390 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 					"Sales Order Item", sales_order.items[0].name, "amount", sales_order.items[0].amount
 				)
 
+	# -------------------------------------------------------------------
+	# #179 slice A: executing CANCEL_ORDER / CLOSE_REMAINDER.
+	# -------------------------------------------------------------------
+
+	def _cancelled_talabat_order(self, **item_fields):
+		order = self._make_order()
+		sales_order = self._sync_and_set_item_fields(order, **item_fields)
+		order.external_status = "CANCELLED"
+		order.save()
+		return order, sales_order
+
+	def _assert_rejected_and_untouched(self, order, sales_order, baseline, result):
+		order.reload()
+		self.assertFalse(result["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertTrue(order.last_sync_error)
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order.name, "docstatus"), 1)
+		self.assertEqual((order.last_synced_hash, order.last_synced_snapshot), baseline)
+		self.assertTrue(
+			frappe.db.exists(
+				"Marketplace Sync Log", {"marketplace_order": order.name, "status": ["!=", "Success"]}
+			)
+		)
+
+	def test_cancel_with_a_linked_delivery_note_is_rejected_and_rolled_back(self):
+		from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
+
+		order, sales_order = self._cancelled_talabat_order()
+		delivery_note = make_delivery_note(sales_order.name)
+		delivery_note.insert()
+		delivery_note.submit()
+		# Hide the delivery from the planner so it still plans CANCEL_ORDER, while the
+		# Delivery Note link makes ERPNext refuse the cancel.
+		frappe.db.set_value("Sales Order Item", sales_order.items[0].name, "delivered_qty", 0)
+		baseline = (order.last_synced_hash, order.last_synced_snapshot)
+
+		result = sync_sales_order(order.name)
+
+		self._assert_rejected_and_untouched(order, sales_order, baseline, result)
+
+	def test_cancel_is_blocked_by_an_advance_payment_without_calling_erpnext(self):
+		order, sales_order = self._cancelled_talabat_order()
+		frappe.db.set_value("Sales Order", sales_order.name, "advance_paid", 50)
+
+		with patch("marketplace_integrations.services.sales_order_sync.execute") as execute:
+			result = sync_sales_order(order.name)
+		order.reload()
+
+		execute.assert_not_called()
+		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order.name, "docstatus"), 1)
+
+	def test_permission_error_during_execution_becomes_sync_error(self):
+		order, sales_order = self._cancelled_talabat_order()
+		baseline = (order.last_synced_hash, order.last_synced_snapshot)
+
+		with patch(
+			"marketplace_integrations.services.sales_order_sync.execute",
+			side_effect=frappe.PermissionError,
+		):
+			result = sync_sales_order(order.name)
+
+		self._assert_rejected_and_untouched(order, sales_order, baseline, result)
+		self.assertIn("permission", result["error"])
+
+	def test_unexpected_error_during_execution_becomes_sync_error_and_is_logged(self):
+		order, sales_order = self._cancelled_talabat_order()
+		baseline = (order.last_synced_hash, order.last_synced_snapshot)
+
+		with (
+			patch(
+				"marketplace_integrations.services.sales_order_sync.execute", side_effect=RuntimeError("boom")
+			),
+			patch("marketplace_integrations.services.sales_order_sync.frappe.log_error") as log_error,
+		):
+			result = sync_sales_order(order.name)
+
+		log_error.assert_called_once()
+		self._assert_rejected_and_untouched(order, sales_order, baseline, result)
+		self.assertEqual(
+			frappe.db.get_value(
+				"Marketplace Sync Log", {"marketplace_order": order.name, "status": "Error"}, "name"
+			)
+			is not None,
+			True,
+		)
+
+	def test_baseline_is_written_only_after_a_successful_execution(self):
+		order, _sales_order = self._cancelled_talabat_order()
+		seen = {}
+
+		def fake_execute(*args):
+			seen["status"] = frappe.db.get_value("Marketplace Order", order.name, "erpnext_sync_status")
+			raise frappe.ValidationError("nope")
+
+		with patch("marketplace_integrations.services.sales_order_sync.execute", side_effect=fake_execute):
+			result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		self.assertNotEqual(seen["status"], "Synced")
+
+	def test_no_action_never_calls_execute(self):
+		order = self._make_order()
+		sync_sales_order(order.name)
+
+		with patch("marketplace_integrations.services.sales_order_sync.execute") as execute:
+			result = sync_sales_order(order.name)
+
+		execute.assert_not_called()
+		self.assertEqual(result["reconciliation"]["outcome"], "NO_ACTION")
+
+	# --- #179 slice B: UPDATE_SUBMITTED_ORDER execution ---------------------------
+
+	def _synced_talabat_order(self):
+		order = self._make_order()
+		self.assertTrue(sync_sales_order(order.name)["ok"])
+		order.reload()
+		return order
+
+	def _change_talabat_line(self, order, qty, total):
+		order.reload()
+		order.items[0].fulfilled_quantity = qty
+		order.items[0].fulfilled_total_price = total
+		order.items[0].fulfilled_unit_price = total / qty
+		order.save()
+		order.reload()
+
+	def _baseline(self, order):
+		order.reload()
+		return (order.last_synced_hash, order.last_synced_snapshot)
+
+	def _assert_update_executed_and_idempotent(self, order, qty, amount):
+		result = sync_sales_order(order.name)
+		order.reload()
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["reconciliation"]["outcome"], "UPDATE_SUBMITTED_ORDER")
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertFalse(order.last_sync_error)
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		self.assertEqual(sales_order.docstatus, 1)
+		self.assertEqual(sales_order.items[0].qty, qty)
+		self.assertEqual(sales_order.items[0].amount, amount)
+		baseline_line = frappe.parse_json(order.last_synced_snapshot)["items"][0]
+		self.assertEqual(baseline_line["qty"], qty)
+		self.assertEqual(baseline_line["sales_order_item"], sales_order.items[0].name)
+		self.assertEqual(order.last_synced_hash, snapshot_hash(build_sales_order_snapshot(order)))
+		log = frappe.get_all(
+			"Marketplace Sync Log",
+			filters={"marketplace_order": order.name, "status": "Success"},
+			fields=["request_data"],
+			order_by="creation desc",
+			limit=1,
+		)[0]
+		self.assertEqual(frappe.parse_json(log.request_data)["action"], "UPDATE_SUBMITTED_ORDER")
+		with patch("erpnext.controllers.accounts_controller.update_child_qty_rate") as update:
+			replay = sync_sales_order(order.name)
+		update.assert_not_called()
+		self.assertEqual(replay["reconciliation"]["outcome"], "NO_ACTION")
+		return sales_order
+
+	def test_quantity_increase_before_delivery_updates_the_sales_order(self):
+		order = self._synced_talabat_order()
+		self._change_talabat_line(order, 3, 1500)
+		self._assert_update_executed_and_idempotent(order, 3, 1500)
+
+	def test_quantity_decrease_before_delivery_updates_the_sales_order(self):
+		order = self._synced_talabat_order()
+		self._change_talabat_line(order, 1, 500)
+		self._assert_update_executed_and_idempotent(order, 1, 500)
+
+	def test_rate_only_correction_updates_the_sales_order(self):
+		order = self._synced_talabat_order()
+		self._change_talabat_line(order, 2, 1000)
+		sales_order = self._assert_update_executed_and_idempotent(order, 2, 1000)
+		self.assertEqual(sales_order.items[0].rate, 500)
+
+	def test_line_refunded_to_zero_is_deleted_and_kept_in_the_baseline_without_a_row(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, transaction_amount=36, current_quantity=2)
+		order.append(
+			"items",
+			{
+				"external_item_id": f"gid://shopify/LineItem/second-{self.suffix}",
+				"external_variant_id": order.items[0].external_variant_id,
+				"current_quantity": 1,
+				"unfulfilled_quantity": 1,
+				"non_fulfillable_quantity": 0,
+				"fulfillment_quantities_known": 1,
+				"transaction_amount": 10,
+			},
+		)
+		order.save()
+		self.assertTrue(sync_sales_order(order.name)["ok"])
+		order.reload()
+		self.assertEqual(len(frappe.get_doc("Sales Order", order.erpnext_sales_order).items), 2)
+		first_row = frappe.parse_json(order.last_synced_snapshot)["items"][0]["sales_order_item"]
+		order.items[1].current_quantity = 0
+		order.items[1].unfulfilled_quantity = 0
+		order.items[1].transaction_amount = 0
+		order.save()
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["reconciliation"]["outcome"], "UPDATE_SUBMITTED_ORDER")
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		self.assertEqual([row.name for row in sales_order.items], [first_row])
+		self.assertEqual(sales_order.items[0].amount, 36)
+		lines = frappe.parse_json(order.last_synced_snapshot)["items"]
+		self.assertEqual(lines[0]["sales_order_item"], first_row)
+		self.assertEqual(lines[1]["qty"], 0)
+		self.assertIsNone(lines[1]["sales_order_item"])
+		with patch("erpnext.controllers.accounts_controller.update_child_qty_rate") as update:
+			replay = sync_sales_order(order.name)
+		update.assert_not_called()
+		self.assertEqual(replay["reconciliation"]["outcome"], "NO_ACTION")
+
+	def test_change_after_delivery_or_billing_needs_attention_without_calling_erpnext(self):
+		for field, value in (("delivered_qty", 1), ("billed_amt", 100)):
+			with self.subTest(field=field):
+				order = self._synced_talabat_order()
+				self._set_first_item_fields(order, **{field: value})
+				self._change_talabat_line(order, 3, 1500)
+				baseline = self._baseline(order)
+
+				with patch("erpnext.controllers.accounts_controller.update_child_qty_rate") as update:
+					result = sync_sales_order(order.name)
+
+				update.assert_not_called()
+				self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+				self.assertEqual(self._baseline(order), baseline)
+				self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+
+	def test_reduction_below_delivered_quantity_needs_attention_without_calling_erpnext(self):
+		order = self._synced_talabat_order()
+		self._set_first_item_fields(order, delivered_qty=2)
+		self._change_talabat_line(order, 1, 500)
+
+		with patch("erpnext.controllers.accounts_controller.update_child_qty_rate") as update:
+			result = sync_sales_order(order.name)
+
+		update.assert_not_called()
+		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+		self.assertIn("delivered", result["error"])
+
+	def test_erpnext_rejection_of_the_update_is_a_sync_error_and_rolls_back(self):
+		order = self._synced_talabat_order()
+		self._change_talabat_line(order, 3, 1500)
+		baseline = self._baseline(order)
+
+		def reject(*args, **kwargs):
+			frappe.db.set_value("Sales Order Item", {"parent": order.erpnext_sales_order}, "qty", 9)
+			frappe.throw("Cannot set quantity less than delivered quantity", frappe.ValidationError)
+
+		with patch("erpnext.controllers.accounts_controller.update_child_qty_rate", side_effect=reject):
+			result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertIn("less than delivered", order.last_sync_error)
+		self.assertEqual(self._baseline(order), baseline)
+		self.assertEqual(
+			frappe.db.get_value("Sales Order Item", {"parent": order.erpnext_sales_order}, "qty"), 2
+		)
+		self.assertTrue(
+			frappe.db.exists("Marketplace Sync Log", {"marketplace_order": order.name, "status": "Invalid"})
+		)
+
+	def test_amount_drift_after_the_update_rolls_back_and_needs_attention(self):
+		from erpnext.controllers.accounts_controller import update_child_qty_rate as real_update
+
+		order = self._synced_talabat_order()
+		self._change_talabat_line(order, 3, 1500)
+		baseline = self._baseline(order)
+
+		def drifting_update(*args, **kwargs):
+			real_update(*args, **kwargs)
+			frappe.db.set_value("Sales Order Item", {"parent": order.erpnext_sales_order}, "amount", 1499.99)
+
+		with patch(
+			"erpnext.controllers.accounts_controller.update_child_qty_rate", side_effect=drifting_update
+		):
+			result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+		self.assertIn("cannot reproduce the marketplace amounts", result["error"])
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(self._baseline(order), baseline)
+		row = frappe.db.get_value(
+			"Sales Order Item", {"parent": order.erpnext_sales_order}, ["qty", "amount"], as_dict=True
+		)
+		self.assertEqual((row.qty, row.amount), (2, 999))
+
+	def test_shopify_refund_reflected_by_the_update_stops_counting_as_evidence(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, transaction_amount=36, current_quantity=2)
+		self.assertTrue(sync_sales_order(order.name)["ok"])
+		order.reload()
+		order.items[0].current_quantity = 1
+		order.items[0].unfulfilled_quantity = 1
+		order.items[0].transaction_amount = 18
+		order.refunds = frappe.as_json([{"id": f"refund-{self.suffix}"}])
+		order.save()
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["reconciliation"]["outcome"], "UPDATE_SUBMITTED_ORDER")
+		self.assertEqual(
+			frappe.db.get_value("Sales Order Item", {"parent": order.erpnext_sales_order}, "qty"), 1
+		)
+		self.assertIn(f"refund-{self.suffix}", frappe.parse_json(order.last_synced_snapshot)["refund_ids"])
+		# The refund is now reflected: delivering the remaining unit is not compensating.
+		self._set_first_item_fields(order, delivered_qty=1)
+		self.assertEqual(sync_sales_order(order.name)["reconciliation"]["outcome"], "NO_ACTION")
+
+	def test_noon_quantity_change_updates_the_sales_order(self):
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(account)
+		self.assertTrue(sync_sales_order(order.name)["ok"])
+		order.reload()
+		order.items[0].current_quantity = 3
+		order.items[0].transaction_amount = 300
+		order.latest_payload = frappe.as_json(
+			{
+				"items": [
+					self._noon_payload_unit(
+						str(number), "MP_ITEM_STATUS_CONFIRMED", "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED"
+					)
+					for number in (1, 2, 3)
+				]
+			}
+		)
+		order.save()
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["reconciliation"]["outcome"], "UPDATE_SUBMITTED_ORDER")
+		row = frappe.db.get_value(
+			"Sales Order Item", {"parent": order.erpnext_sales_order}, ["qty", "amount"], as_dict=True
+		)
+		self.assertEqual((row.qty, row.amount), (3, 300))
+		self.assertEqual(sync_sales_order(order.name)["reconciliation"]["outcome"], "NO_ACTION")
+
+	def test_status_checks_never_execute_an_update(self):
+		order = self._synced_talabat_order()
+		with patch("erpnext.controllers.accounts_controller.update_child_qty_rate") as update:
+			self._change_talabat_line(order, 3, 1500)
+			order.save()
+			get_current_sync_status(order.name)
+		update.assert_not_called()
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(
+			frappe.db.get_value("Sales Order Item", {"parent": order.erpnext_sales_order}, "qty"), 2
+		)
+
+	def test_form_load_and_save_status_checks_never_execute(self):
+		order, sales_order = self._cancelled_talabat_order()
+
+		with patch("marketplace_integrations.services.sales_order_sync.execute") as execute:
+			get_current_sync_status(order.name)
+			order.reload()
+			order.customer_phone_number = "another save"
+			order.save()
+
+		execute.assert_not_called()
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order.name, "docstatus"), 1)
+
+	def test_current_snapshot_sync_status_stays_plan_only_for_close_remainder(self):
+		order, sales_order = self._cancelled_talabat_order(delivered_qty=1)
+
+		self.assertEqual(get_current_sync_status(order.name), "Modified After Sync")
+		self.assertEqual(
+			frappe.db.get_value("Sales Order", sales_order.name, "status"), "To Deliver and Bill"
+		)
+
 	def test_current_status_refreshes_reason_when_submitted_erp_drift_changes(self):
 		order = self._make_order()
 		first = sync_sales_order(order.name)
@@ -962,34 +1359,26 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertNotEqual(order.last_sync_error, rate_drift_reason)
 		self.assertIn("no longer an active submitted document", order.last_sync_error)
 
-	def test_submitted_shopify_cancellation_is_planned_without_mutating_the_sales_order(self):
+	def test_submitted_shopify_cancellation_cancels_the_sales_order(self):
 		account = self._make_shopify_account()
 		order, _mapping = self._make_shopify_order(account)
 		first = sync_sales_order(order.name)
 		order.reload()
 		sales_order = frappe.get_doc("Sales Order", first["sales_order"])
-		original = (
-			sales_order.docstatus,
-			sales_order.status,
-			sales_order.items[0].qty,
-			sales_order.items[0].rate,
-		)
 		order.cancelled_at = nowdate()
 		order.save()
 
 		result = sync_sales_order(order.name)
 		order.reload()
 		sales_order.reload()
-		log = frappe.get_doc("Marketplace Sync Log", {"marketplace_order": order.name, "status": "Invalid"})
+		log = frappe.get_doc("Marketplace Sync Log", {"marketplace_order": order.name, "status": "Success"})
 		request_data = frappe.parse_json(log.request_data)
 
-		self.assertFalse(result["ok"])
+		self.assertTrue(result["ok"], result.get("error"))
 		self.assertEqual(result["reconciliation"]["outcome"], "CANCEL_ORDER")
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
-		self.assertEqual(
-			(sales_order.docstatus, sales_order.status, sales_order.items[0].qty, sales_order.items[0].rate),
-			original,
-		)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(sales_order.docstatus, 2)
+		self.assertEqual(request_data["action"], "CANCEL_ORDER")
 		self.assertEqual(request_data["reconciliation"]["action"], "CANCEL_ORDER")
 		self.assertIn("erp_state", request_data["reconciliation"])
 
@@ -1021,6 +1410,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		result = sync_sales_order(order.name)
 
 		self.assertEqual(result["reconciliation"]["outcome"], "CANCEL_ORDER")
+		self.assertEqual(frappe.db.get_value("Sales Order", order.erpnext_sales_order, "docstatus"), 2)
 
 	def test_submitted_shopify_refund_that_zeroes_a_line_is_judged_not_blocked(self):
 		account = self._make_shopify_account()
@@ -1038,7 +1428,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(result["reconciliation"]["outcome"], "UNSUPPORTED_COMPENSATING_TRANSACTION")
 		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
 
-	def test_submitted_shopify_refund_that_zeroes_an_undelivered_line_is_an_update(self):
+	def test_submitted_shopify_refund_that_zeroes_every_undelivered_line_cancels_the_order(self):
 		account = self._make_shopify_account()
 		order, _mapping = self._make_shopify_order(account)
 		sync_sales_order(order.name)
@@ -1049,7 +1439,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 		result = sync_sales_order(order.name)
 
-		self.assertEqual(result["reconciliation"]["outcome"], "UPDATE_SUBMITTED_ORDER")
+		self.assertEqual(result["reconciliation"]["outcome"], "CANCEL_ORDER")
+		self.assertEqual(frappe.db.get_value("Sales Order", order.erpnext_sales_order, "docstatus"), 2)
 
 	def test_linked_submitted_order_with_refunded_status_flows_to_the_refund_planner(self):
 		account = self._make_shopify_account()
@@ -1711,18 +2102,16 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(frappe.db.get_value("Sales Order Item", {"parent": so_name}, "rate"), 18)
 		self.assertFalse(third["updated"])
 
-		# #131: the Sales Order was auto-submitted by the very first sync
-		# above, so a later Shopify-side transaction_amount change can no
-		# longer be applied in-place - it now hits `_submitted_reconciliation_advisory()`
-		# and the original rate survives untouched.
+		# #179: a later Shopify-side transaction_amount change is applied to the
+		# submitted Sales Order through ERPNext's native update.
 		order.reload()
 		order.items[0].transaction_amount = 40
 		order.save()
 		fourth = sync_sales_order(order.name)
-		self.assertFalse(fourth["ok"])
+		self.assertTrue(fourth["ok"], fourth.get("error"))
 		order.reload()
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
-		self.assertEqual(frappe.db.get_value("Sales Order Item", {"parent": so_name}, "rate"), 18)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(frappe.db.get_value("Sales Order Item", {"parent": so_name}, "rate"), 20)
 
 	def test_shopify_sync_sets_custom_marketplace_order_and_platform_fields(self):
 		"""#135: platform-agnostic wiring in `_apply_snapshot()` - the same
@@ -1974,7 +2363,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		"""#131: the first sync auto-submits the Sales Order, so a later
 		address/phone change on the Marketplace Order can no longer flow
 		through to the SALES ORDER - the resync attempt hits
-		`_submitted_reconciliation_advisory()` and the submitted Sales Order keeps
+		`_reconcile_submitted_order()` and the submitted Sales Order keeps
 		pointing at the same Address it always did. The buyer's dedicated
 		Address record itself is still resolved/updated in-place as part of
 		building the snapshot (unchanged pre-#131 behavior, upstream of the
@@ -2223,7 +2612,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			"Invalid",
 		)
 
-	def test_already_submitted_resync_creates_marketplace_sync_log_invalid_row(self):
+	def test_submitted_order_update_creates_marketplace_sync_log_success_row(self):
 		order = self._make_order()
 		sync_sales_order(order.name)
 		order.reload()
@@ -2233,16 +2622,17 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 		result = sync_sales_order(order.name)
 
-		self.assertFalse(result["ok"])
+		self.assertTrue(result["ok"], result.get("error"))
 		logs = frappe.get_all(
 			"Marketplace Sync Log",
 			filters={"marketplace_order": order.name},
-			fields=["status"],
+			fields=["status", "request_data"],
 			order_by="creation asc",
 		)
 		self.assertEqual(len(logs), 2)
 		self.assertEqual(logs[0].status, "Success")
-		self.assertEqual(logs[1].status, "Invalid")
+		self.assertEqual(logs[1].status, "Success")
+		self.assertEqual(frappe.parse_json(logs[1].request_data)["action"], "UPDATE_SUBMITTED_ORDER")
 
 	def test_unexpected_exception_creates_marketplace_sync_log_error_row_with_traceback(self):
 		order = self._make_order()
@@ -2492,7 +2882,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			"integration_status": integration_status,
 		}
 
-	def test_noon_linked_order_with_every_unit_cancelled_plans_cancel_order_without_raising(self):
+	def test_noon_linked_order_with_every_unit_cancelled_cancels_the_sales_order(self):
 		account = self._make_noon_account()
 		order, _mapping = self._make_noon_order(account)
 		first = sync_sales_order(order.name)
@@ -2516,9 +2906,9 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 		result = sync_sales_order(order.name)
 
-		self.assertFalse(result["ok"])
+		self.assertTrue(result["ok"], result.get("error"))
 		self.assertEqual(result["reconciliation"]["outcome"], "CANCEL_ORDER")
-		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "docstatus"), 1)
+		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "docstatus"), 2)
 
 	def test_noon_never_synced_order_with_no_eligible_lines_still_blocks(self):
 		account = self._make_noon_account()
