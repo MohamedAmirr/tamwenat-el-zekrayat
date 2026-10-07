@@ -17,7 +17,7 @@ class UnitTestBackfillLastSyncedSnapshot(UnitTestCase):
 			erpnext_sales_order="SAL-ORD-TEST",
 			last_synced_hash="matching-hash",
 		)
-		self.snapshot = {"items": [{"external_item_id": "line-1", "item_code": "ITEM-1"}]}
+		self.snapshot = {"items": [{"external_item_id": "line-1", "item_code": "ITEM-1", "qty": 1}]}
 
 	def test_matching_hash_persists_a_line_identified_baseline(self):
 		cases = (
@@ -109,7 +109,11 @@ class UnitTestBackfillLastSyncedSnapshot(UnitTestCase):
 				self.mark.assert_not_called()
 
 	def test_diverged_hash_relabels_only_submitted_non_error_orders(self):
-		for docstatus, status, relabelled in ((1, "Synced", True), (0, "Synced", False), (1, "Sync Error", False)):
+		for docstatus, status, relabelled in (
+			(1, "Synced", True),
+			(0, "Synced", False),
+			(1, "Sync Error", False),
+		):
 			with self.subTest(docstatus=docstatus, status=status):
 				self._execute_with(False, docstatus=docstatus, status=status)
 				self.assertEqual(self.mark.called, relabelled)

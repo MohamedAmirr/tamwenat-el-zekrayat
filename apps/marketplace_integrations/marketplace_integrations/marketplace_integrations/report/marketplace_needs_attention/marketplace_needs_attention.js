@@ -110,7 +110,10 @@ function retry_order_sync(marketplace_order, report) {
 					message: frappe.utils.escape_html(result.error || ""),
 				});
 			} else {
-				frappe.show_alert({ message: __("ERPNext sync succeeded."), indicator: "green" });
+				frappe.show_alert({
+					message: frappe.utils.escape_html(result.executed_message || __("ERPNext sync succeeded.")),
+					indicator: "green",
+				});
 			}
 			report.refresh();
 		});

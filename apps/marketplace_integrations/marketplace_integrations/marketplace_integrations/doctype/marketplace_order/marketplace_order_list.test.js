@@ -141,6 +141,20 @@ test("retry summary escapes failure text and reflects the outcome in the indicat
 	assert.equal(format_retry_summary({ succeeded: ["a"], failed: [] }).indicator, "green");
 });
 
+test("retry summary reports executed actions and escapes their text", () => {
+	const summary = summarize_retry_results(
+		["MKTORD-1", "MKTORD-2"],
+		[
+			{ status: "fulfilled", value: { message: { ok: true, executed_action: "CANCEL_ORDER", executed_message: "SO-1 was <b>cancelled</b>" } } },
+			{ status: "fulfilled", value: { message: { ok: true } } },
+		]
+	);
+	assert.deepEqual(summary.executed, ["SO-1 was <b>cancelled</b>"]);
+	const html = format_retry_summary(summary);
+	assert.doesNotMatch(html.message, /<b>/);
+	assert.match(html.message, /SO-1 was/);
+});
+
 test("Noon retrieval result distinguishes queued from already queued", () => {
 	assert.equal(format_noon_import_result({ queued: true }).indicator, "green");
 	assert.equal(format_noon_import_result({ queued: false }).indicator, "orange");

@@ -152,9 +152,15 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 		result = plan(self.previous, self._current(), {"cancellation": "full"}, self.erp_state)
 		self.assertEqual(result["outcome"], NO_ACTION)
 
-	def test_closed_erp_order_with_outstanding_remainder_needs_attention(self):
+	def test_closed_erp_order_with_delivery_converges_on_replay(self):
 		self.erp_state.update({"status": "Closed"})
 		self.erp_state["lines"][0]["delivered_qty"] = 1
+		# #179: a Closed order with delivery is what CLOSE_REMAINDER leaves, so it converges.
+		result = plan(self.previous, self._current(), {"cancellation": "full"}, self.erp_state)
+		self.assertEqual(result["outcome"], NO_ACTION)
+
+	def test_closed_erp_order_without_delivery_needs_attention(self):
+		self.erp_state.update({"status": "Closed"})
 		result = plan(self.previous, self._current(), {"cancellation": "full"}, self.erp_state)
 		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
 
@@ -300,8 +306,9 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 		):
 			with self.subTest(evidence=evidence):
 				result = plan(self.previous, current, evidence, self.erp_state)
-				self.assertEqual(result["outcome"], UPDATE_SUBMITTED_ORDER)
-				self.assertEqual(result["changes"][0]["field"], "warehouse")
+				# The lifecycle is not blamed; the mapping gate (D4) reports it instead.
+				self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+				self.assertIn("cannot be applied automatically", result["message"])
 
 	def test_marketplace_sourced_change_alongside_a_mapping_change_is_still_gated(self):
 		current = self._quantity_change()
@@ -377,12 +384,12 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 		result = plan(self.previous, self._current(), evidence, self.erp_state)
 		self.assertEqual(result["outcome"], NO_ACTION)
 
-	def test_post_pickup_cancellation_with_closed_remainder_does_not_converge(self):
+	def test_post_pickup_cancellation_with_closed_remainder_converges(self):
 		self.erp_state.update({"status": "Closed"})
 		self.erp_state["lines"][0]["delivered_qty"] = 1
 		evidence = {"cancellation": "full", "cancelled_after_fulfillment": True}
 		result = plan(self.previous, self._current(), evidence, self.erp_state)
-		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertEqual(result["outcome"], NO_ACTION)
 
 	def test_cancellation_after_fulfillment_with_billing_but_no_delivery_needs_attention(self):
 		self.erp_state["lines"][0]["billed_amt"] = 50
@@ -393,6 +400,85 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 	def test_plain_cancellation_is_unchanged_by_the_new_keys(self):
 		result = plan(self.previous, self._current(), {"cancellation": "full"}, self.erp_state)
 		self.assertEqual(result["outcome"], CANCEL_ORDER)
+
+	def test_advance_payment_blocks_cancellation(self):
+		self.erp_state["advance_paid"] = 50
+		result = plan(self.previous, self._current(), {"cancellation": "full"}, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertIn("advance payment", result["message"])
+
+	def test_all_lines_zero_cancels_when_nothing_is_delivered(self):
+		current = self._current()
+		current["items"][0]["qty"] = 0
+		result = plan(self.previous, current, {}, self.erp_state)
+		self.assertEqual(result["outcome"], CANCEL_ORDER)
+
+	def test_all_lines_zero_closes_remainder_after_delivery(self):
+		current = self._current()
+		current["items"][0]["qty"] = 0
+		self.erp_state["lines"][0]["delivered_qty"] = 1
+		result = plan(self.previous, current, {"cancellation": "full"}, self.erp_state)
+		self.assertEqual(result["outcome"], CLOSE_REMAINDER)
+
+	def test_all_lines_zero_after_delivery_without_cancellation_needs_attention(self):
+		current = self._current()
+		current["items"][0]["qty"] = 0
+		self.erp_state["lines"][0]["delivered_qty"] = 1
+		result = plan(self.previous, current, {}, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertIn("explicit cancellation is required", result["message"])
+
+	def _assert_mapping_change_needs_attention(self, field, value):
+		current = self._current()
+		current["items"][0][field] = value
+		result = plan(self.previous, current, {}, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertIn("cannot be applied automatically", result["message"])
+
+	def test_item_code_change_needs_attention(self):
+		self._assert_mapping_change_needs_attention("item_code", "OTHER-ITEM")
+
+	def test_uom_change_needs_attention(self):
+		self._assert_mapping_change_needs_attention("uom", "Box")
+
+	def test_warehouse_change_needs_attention(self):
+		self._assert_mapping_change_needs_attention("warehouse", "Other WH - X")
+
+	def test_all_lines_zero_with_billing_and_remainder_needs_attention(self):
+		current = self._current()
+		current["items"][0]["qty"] = 0
+		self.erp_state["lines"][0]["delivered_qty"] = 1
+		self.erp_state["lines"][0]["billed_amt"] = 50
+		result = plan(self.previous, current, {"cancellation": "full"}, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+
+	def test_zero_quantity_line_is_expected_absent_from_erp(self):
+		self.previous["items"].append(
+			{"external_item_id": "line-2", "qty": 0, "item_code": "ITEM-2", "sales_order_item": None}
+		)
+		result = plan(self.previous, self._current(), {}, self.erp_state)
+		self.assertEqual(result["outcome"], NO_ACTION)
+
+	def test_line_returning_from_zero_to_positive_needs_attention(self):
+		self.previous["items"][0]["qty"] = 0
+		current = self._current()
+		current["items"][0]["qty"] = 2
+		result = plan(self.previous, current, {}, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+
+	def test_quantity_reduction_after_partial_delivery_needs_attention(self):
+		current = self._current()
+		current["items"][0]["qty"] = 1
+		current["items"][0]["fulfilled_total_price"] = 50
+		self.erp_state["lines"][0]["delivered_qty"] = 2
+		result = plan(self.previous, current, {}, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+
+	def test_execute_rejects_a_non_executable_outcome(self):
+		from marketplace_integrations.services.sales_order_reconciliation import execute
+
+		with self.assertRaises(ValueError):
+			execute({"outcome": NO_ACTION}, "SO-1")
 
 	def test_this_module_is_platform_neutral(self):
 		import inspect
