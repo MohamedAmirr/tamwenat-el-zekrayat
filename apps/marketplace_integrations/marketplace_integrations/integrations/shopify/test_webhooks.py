@@ -952,6 +952,9 @@ class IntegrationTestShopifyWebhookDebouncedSyncTriggerSourceEndToEnd(Integratio
 		for order in frappe.get_all(
 			"Marketplace Order", {"marketplace_account": self.account.name}, pluck="name"
 		):
+			# sales_order_sync._create_sync_log never sets marketplace_account, so
+			# its logs are only reachable through the order link.
+			frappe.db.delete("Marketplace Sync Log", {"marketplace_order": order})
 			frappe.delete_doc("Marketplace Order", order, ignore_permissions=True, force=True)
 		frappe.db.delete("Marketplace Sync Log", {"marketplace_account": self.account.name})
 		frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": self.account.name})
