@@ -43,15 +43,18 @@ removed by this receiver.
 
 Setup, per Noon Connection:
 
-1. Set a `Webhook Secret` on the `Noon Connection` document (Password
-   field). This is a value you choose, not something Noon issues — pick any
-   sufficiently random string.
-2. In Noon's Integrator Configuration modal (Noon Partner Center), register
-   a destination pointing at this site's receiver URL:
-   `https://<your-site-domain>/api/method/marketplace_integrations.api.noon_webhooks.event_notification`
-3. In that same modal, add a custom header named `X-Noon-Webhook-Secret`
-   whose value is exactly the `Webhook Secret` you set on the `Noon
-   Connection` in step 1.
+1. Save the `Noon Connection`: `Webhook Secret` is generated automatically
+   when empty (an existing value is kept) and the read-only `Webhook URL` is
+   filled. Use the form's "Copy Webhook URL" / "Copy Webhook Key" buttons. If the
+   site URL changes, use "Refresh Webhook URL" (save any unsaved changes first) to re-derive and save it, then
+   update the destination in Noon.
+2. In Noon's Partner Center, Integrator Configuration, Webhook tab, register
+   a destination pointing at the connection's `Webhook URL`
+   (`https://<your-site-domain>/api/method/marketplace_integrations.api.noon_webhooks.event_notification`).
+3. In that same Webhook tab, set the header `X-Api-Key` to
+   exactly the connection's `Webhook Secret`. Existing connections must
+   change their Webhook tab header from `X-Noon-Webhook-Secret` to `X-Api-Key`
+   manually.
 4. Subscribe that destination to the `FBPI::ORDER_SYNC` event type. Any
    other event type delivered to this receiver is acknowledged (200) and
    ignored — it does not need to be excluded from the subscription, but
@@ -181,7 +184,9 @@ on in production:
 
 1. **Initial `integration_status`/`mp_status` of new orders.** #146 assumes
    newly confirmed orders surface as `INTEGRATION_ITEM_STATUS_ACKNOWLEDGED`
-   (the only status this release treats as shippable). If Noon's real
+   (the only status this release treats as shippable). Seen as
+   `MP_ITEM_STATUS_CONFIRMED` + `INTEGRATION_ITEM_STATUS_ACKNOWLEDGED` on
+   sandbox orders only; still unverified for real orders. If Noon's real
    default/initial value is `UNSPECIFIED` instead, nothing will ever become
    shippable until this is checked against real order data.
 2. **Whether CreateShipment moves units to `SHIPPED`.** Not documented

@@ -11,6 +11,7 @@
   "key_id",
   "private_key",
   "environment",
+  "webhook_url",
   "webhook_secret",
   "enabled"
  ],
@@ -55,7 +56,14 @@
    "reqd": 1
   },
   {
-   "description": "Shared secret this connection's FBPI event-notification webhook receiver requires on every inbound request's X-Noon-Webhook-Secret header. Paste the same value into Noon's Integrator Configuration modal.",
+   "fieldname": "webhook_url",
+   "fieldtype": "Data",
+   "label": "Webhook URL",
+   "length": 255,
+   "read_only": 1
+  },
+  {
+   "description": "Generated automatically when empty. The receiver requires this value on every inbound request's X-Api-Key header. Paste the same value into Noon's Partner Center webhook destination (header X-Api-Key).",
    "fieldname": "webhook_secret",
    "fieldtype": "Password",
    "ignore_xss_filter": 1,

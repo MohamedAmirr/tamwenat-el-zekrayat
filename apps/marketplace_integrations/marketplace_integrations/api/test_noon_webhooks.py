@@ -102,9 +102,17 @@ class IntegrationTestNoonWebhookReceiver(IntegrationTestCase):
 	def _call_webhook(self, envelope, header_value):
 		request = MagicMock()
 		request.get_json.return_value = envelope
+
+		def mock_get_request_header(header_name, default=""):
+			# Only X-Api-Key is recognized; any other header name (case-insensitive)
+			# returns the default, simulating Frappe's get_request_header behavior
+			if header_name.lower() == "x-api-key":
+				return header_value
+			return default
+
 		with (
 			patch.object(noon_webhooks.frappe, "request", request),
-			patch.object(noon_webhooks.frappe, "get_request_header", return_value=header_value),
+			patch.object(noon_webhooks.frappe, "get_request_header", side_effect=mock_get_request_header),
 		):
 			return noon_webhooks.event_notification()
 
@@ -231,7 +239,9 @@ class IntegrationTestNoonWebhookReceiver(IntegrationTestCase):
 
 		self._call_webhook(envelope, "test-webhook-secret")
 		self._call_webhook(envelope, "test-webhook-secret")
-		self._call_webhook(_envelope(self.connection, message_id="a-different-message"), "test-webhook-secret")
+		self._call_webhook(
+			_envelope(self.connection, message_id="a-different-message"), "test-webhook-secret"
+		)
 
 		self.assertEqual(enqueue.call_count, 3)
 		job_ids = {call.kwargs["job_id"] for call in enqueue.call_args_list}
@@ -320,3 +330,91 @@ class IntegrationTestNoonWebhookReceiver(IntegrationTestCase):
 			),
 			0,
 		)
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_bare_order_body_with_valid_key_returns_accepted_without_enqueuing(self, enqueue):
+		"""Bare order body ({"order_nr": ...} only) is authenticated but never
+		enqueues: there's no project_code to resolve a connection/account, so the
+		response is always {"accepted": True} after validating the key."""
+		bare_body = {"order_nr": "order-12345"}
+		result = self._call_webhook(bare_body, "test-webhook-secret")
+
+		self.assertEqual(result, {"accepted": True})
+		enqueue.assert_not_called()
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_bare_order_body_with_second_enabled_connection_key_returns_accepted(self, enqueue):
+		"""Bare order body whose X-Api-Key matches the SECOND of two enabled
+		Noon Connections (with different secrets) returns {"accepted": True} and
+		never enqueues, regardless of which connection the key belongs to."""
+		# Create a second connection with a different secret
+		suffix = frappe.generate_hash(length=8)
+		second_connection = _make_connection(f"Second Webhook Connection {suffix}", webhook_secret="second-webhook-secret")
+		self._other_connection = second_connection.name
+		# Create a second account for this second connection
+		second_account = _make_account(f"Second Webhook Account {suffix}", second_connection)
+		self._second_account = second_account.name
+
+		# Call with the second connection's secret
+		bare_body = {"order_nr": "order-12345"}
+		result = self._call_webhook(bare_body, "second-webhook-secret")
+
+		self.assertEqual(result, {"accepted": True})
+		enqueue.assert_not_called()
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_bare_order_body_missing_key_header_is_rejected_before_responding(self, enqueue):
+		"""Bare order body requires X-Api-Key header authentication."""
+		bare_body = {"order_nr": "order-12345"}
+
+		with self.assertRaises(frappe.PermissionError):
+			self._call_webhook(bare_body, "")
+		enqueue.assert_not_called()
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_bare_order_body_wrong_key_header_is_rejected_before_responding(self, enqueue):
+		"""Bare order body with a non-matching X-Api-Key is rejected."""
+		bare_body = {"order_nr": "order-12345"}
+
+		with self.assertRaises(frappe.PermissionError):
+			self._call_webhook(bare_body, "wrong-key")
+		enqueue.assert_not_called()
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_bare_order_body_with_disabled_connection_key_is_rejected(self, enqueue):
+		"""Bare order body authentication scans only enabled connections, so a
+		disabled connection's key is treated as invalid."""
+		self.connection.enabled = 0
+		self.connection.save()
+		bare_body = {"order_nr": "order-12345"}
+
+		with self.assertRaises(frappe.PermissionError):
+			self._call_webhook(bare_body, "test-webhook-secret")
+		enqueue.assert_not_called()
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_old_webhook_secret_header_does_not_authenticate(self, enqueue):
+		"""The X-Noon-Webhook-Secret header (from previous webhook receiver
+		implementations) is not recognized; only X-Api-Key works. Even if
+		X-Noon-Webhook-Secret has the valid secret, the receiver rejects it
+		because only X-Api-Key is checked."""
+		envelope = _envelope(self.connection)
+		request = MagicMock()
+		request.get_json.return_value = envelope
+
+		def mock_get_request_header(header_name, default=""):
+			# X-Noon-Webhook-Secret has the valid secret, but it's ignored;
+			# only X-Api-Key is recognized, and it's missing here.
+			if header_name.lower() == "x-noon-webhook-secret":
+				return "test-webhook-secret"  # Valid secret, but wrong header
+			if header_name.lower() == "x-api-key":
+				return ""  # No X-Api-Key header present in this request
+			return default
+
+		with (
+			patch.object(noon_webhooks.frappe, "request", request),
+			patch.object(noon_webhooks.frappe, "get_request_header", side_effect=mock_get_request_header),
+		):
+			with self.assertRaises(frappe.PermissionError):
+				noon_webhooks.event_notification()
+		enqueue.assert_not_called()

@@ -22,6 +22,7 @@ import hmac
 import frappe
 from frappe import _
 from frappe.utils import cstr
+from frappe.utils.password import get_decrypted_password
 
 from marketplace_integrations.integrations.noon.constants import (
 	NOON_FBPI_ORDER_SYNC_EVENT_TYPE,
@@ -40,6 +41,14 @@ def event_notification():
 	body = frappe.request.get_json(silent=True)
 	if not isinstance(body, dict):
 		_invalid_webhook()
+
+	if _is_bare_order_body(body):
+		# Noon sent a bare {"order_nr": ...} body (observed once, cause
+		# unconfirmed). There is no project_code to resolve a connection, so
+		# authenticate the key against every enabled connection, then ack.
+		if not _header_matches_any_enabled_connection():
+			_invalid_webhook()
+		return {"accepted": True}
 
 	event_type = body.get("event_type")
 	metadata = body.get("metadata")
@@ -73,6 +82,24 @@ def event_notification():
 	_log_accepted_event(account, message_id, event_type, import_queued)
 
 	return {"accepted": True}
+
+
+def _is_bare_order_body(body):
+	return "order_nr" in body and not any(key in body for key in ("event_type", "metadata", "payload"))
+
+
+def _header_matches_any_enabled_connection():
+	"""Constant-time compare of the X-Api-Key header against every enabled
+	Noon Connection's secret. Key uniqueness across connections is not enforced."""
+	header_value = cstr(frappe.get_request_header(NOON_WEBHOOK_SECRET_HEADER, "")).encode()
+	if not header_value:
+		return False
+	matched = False
+	for name in frappe.get_all("Noon Connection", filters={"enabled": 1}, pluck="name"):
+		secret = get_decrypted_password("Noon Connection", name, "webhook_secret", raise_exception=False)
+		if secret and hmac.compare_digest(header_value, cstr(secret).encode()):
+			matched = True
+	return matched
 
 
 def _resolve_account_and_connection(project_code):
