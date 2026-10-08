@@ -419,6 +419,8 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 		checked_hours_ago=None,
 		per_delivered=0,
 		per_billed=0,
+		so_cancelled=False,
+		outbound_cancelled=False,
 	):
 		order = self._make_order()
 		fixture = LinkedSalesOrderFixture()
@@ -427,6 +429,8 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 		values = {"erpnext_sync_status": status}
 		if platform:
 			values["platform"] = platform
+		if outbound_cancelled:
+			values["outbound_cancelled_on"] = now_datetime()
 		if checked_hours_ago is not None:
 			values["last_reconciliation_check_on"] = add_to_date(now_datetime(), hours=-checked_hours_ago)
 		frappe.db.set_value("Marketplace Order", order.name, values, update_modified=False)
@@ -442,6 +446,11 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 				},
 			)
 			# LIFO: runs before fixture.cleanup, which cannot delete a submitted Sales Order.
+			self.addCleanup(
+				frappe.db.set_value, "Sales Order", fixture.name, {"docstatus": 0, "status": "Draft"}
+			)
+		if so_cancelled:
+			frappe.db.set_value("Sales Order", fixture.name, {"docstatus": 2, "status": "Cancelled"})
 			self.addCleanup(
 				frappe.db.set_value, "Sales Order", fixture.name, {"docstatus": 0, "status": "Draft"}
 			)
@@ -466,14 +475,51 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 		self.assertNotIn(ignored.name, names)
 		self.assertNotIn(unlinked.name, names)
 
-	def test_closed_orders_with_delivery_or_billing_are_not_candidates(self):
+	def test_cancelled_and_closed_with_delivery_orders_are_candidates(self):
+		"""#181: the platform order may still be active behind an ERPNext cancel/close."""
+		cancelled = self._stuck_order(so_cancelled=True)
 		delivered = self._stuck_order(so_closed=True, per_delivered=50)
 		billed = self._stuck_order(so_closed=True, per_billed=100)
-		undelivered = self._stuck_order(so_closed=True)
 		names = self._candidates()
+		for order in (cancelled, delivered, billed):
+			self.assertIn(order.name, names)
+
+	def test_cancelled_and_closed_with_delivery_orders_back_off_for_24h(self):
+		status = "Modified After Sync"
+		recent_cancelled = self._stuck_order(status=status, so_cancelled=True, checked_hours_ago=20)
+		old_cancelled = self._stuck_order(status=status, so_cancelled=True, checked_hours_ago=25)
+		recent_delivered = self._stuck_order(
+			status=status, so_closed=True, per_delivered=50, checked_hours_ago=20
+		)
+		old_delivered = self._stuck_order(status=status, so_closed=True, per_delivered=50, checked_hours_ago=25)
+		names = self._candidates()
+		self.assertNotIn(recent_cancelled.name, names)
+		self.assertNotIn(recent_delivered.name, names)
+		self.assertIn(old_cancelled.name, names)
+		self.assertIn(old_delivered.name, names)
+
+	def test_converged_cancelled_and_closed_with_delivery_orders_are_skipped(self):
+		"""Synced and already checked: nothing left to report, so no daily re-check."""
+		cancelled = self._stuck_order(so_cancelled=True, checked_hours_ago=48)
+		delivered = self._stuck_order(so_closed=True, per_delivered=50, checked_hours_ago=48)
+		names = self._candidates()
+		self.assertNotIn(cancelled.name, names)
 		self.assertNotIn(delivered.name, names)
-		self.assertNotIn(billed.name, names)
-		self.assertIn(undelivered.name, names)
+
+	def test_never_checked_cancelled_order_is_a_candidate(self):
+		order = self._stuck_order(so_cancelled=True, checked_hours_ago=None)
+		self.assertIn(order.name, self._candidates())
+
+	def test_orders_with_an_outbound_cancel_marker_are_never_candidates(self):
+		for kwargs in (
+			{"so_closed": True},
+			{"so_cancelled": True},
+			{"so_closed": True, "per_delivered": 50},
+			{"status": "Modified After Sync"},
+		):
+			with self.subTest(**kwargs):
+				order = self._stuck_order(outbound_cancelled=True, **kwargs)
+				self.assertNotIn(order.name, self._candidates())
 
 	def test_sweep_does_not_overwrite_a_webhook_bump_made_after_the_candidate_query(self):
 		order = self._stuck_order(status="Sync Error")

@@ -164,6 +164,61 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 		self.assertEqual(result["outcome"], CANCEL_ORDER)
 		self.assertTrue(result["reopen"])
 
+	def test_echo_of_an_outbound_cancel_on_a_closed_order_is_no_action_and_not_reopened(self):
+		self.erp_state.update({"status": "Closed"})
+		evidence = {"cancellation": "full", "outbound_cancel_requested": True}
+		result = plan(self.previous, self._current(), evidence, self.erp_state)
+		self.assertEqual(result["outcome"], NO_ACTION)
+		self.assertFalse(result.get("reopen"))
+
+	def test_echo_also_holds_for_the_stored_snapshot_and_a_zero_quantity_current_snapshot(self):
+		self.erp_state.update({"status": "Closed"})
+		evidence = {"cancellation": "full", "outbound_cancel_requested": True}
+		for current in ({}, self._current()):
+			with self.subTest(current=current):
+				self.assertEqual(plan(self.previous, current, evidence, self.erp_state)["outcome"], NO_ACTION)
+
+	def test_outbound_marker_without_platform_cancellation_is_not_an_echo(self):
+		self.erp_state.update({"status": "Closed"})
+		result = plan(self.previous, self._current(), {"outbound_cancel_requested": True}, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+
+	def test_platform_cancellation_without_the_marker_still_reopens_and_cancels(self):
+		self.erp_state.update({"status": "Closed"})
+		result = plan(self.previous, self._current(), {"cancellation": "full"}, self.erp_state)
+		self.assertEqual(result["outcome"], CANCEL_ORDER)
+		self.assertTrue(result["reopen"])
+
+	def test_echo_rule_needs_a_closed_order_with_no_delivery_or_billing(self):
+		# With delivery the order already converges; the marker adds nothing and nothing is reopened.
+		evidence = {"cancellation": "full", "outbound_cancel_requested": True}
+		delivered = deepcopy(self.erp_state)
+		delivered.update({"status": "Closed"})
+		delivered["lines"][0]["delivered_qty"] = 1
+		self.assertEqual(plan(self.previous, self._current(), evidence, delivered)["outcome"], NO_ACTION)
+		# An open order is not an echo case: the normal cancel applies.
+		self.assertEqual(
+			plan(self.previous, self._current(), evidence, self.erp_state)["outcome"], CANCEL_ORDER
+		)
+		# A billed (undelivered) Closed order is not reopenable: attention, not NO_ACTION.
+		billed = deepcopy(self.erp_state)
+		billed.update({"status": "Closed"})
+		billed["lines"][0]["billed_amt"] = 10
+		self.assertEqual(plan(self.previous, self._current(), evidence, billed)["outcome"], NEEDS_ATTENTION)
+
+	def test_inactive_order_advisory_appends_the_platform_instruction_when_given(self):
+		erp_state = deepcopy(self.erp_state)
+		erp_state.update({"docstatus": 2, "status": "Cancelled"})
+		plain = plan(self.previous, self._current(), {}, erp_state)["message"]
+		hinted = plan(
+			self.previous,
+			self._current(),
+			{"inactive_order_instruction": "Cancel it on the platform."},
+			erp_state,
+		)
+		self.assertEqual(hinted["outcome"], NEEDS_ATTENTION)
+		self.assertEqual(hinted["message"], f"{plain} Cancel it on the platform.")
+
 	def test_closed_erp_order_with_advance_payment_is_not_reopened_for_cancellation(self):
 		self.erp_state.update({"status": "Closed", "advance_paid": 10})
 		result = plan(self.previous, self._current(), {"cancellation": "full"}, self.erp_state)

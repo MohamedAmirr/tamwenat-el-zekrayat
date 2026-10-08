@@ -128,6 +128,16 @@ class IntegrationTestRefreshOrder(IntegrationTestCase):
 			update_order(self.order.name, "CANCELLED")
 		mock_update.assert_not_called()
 
+	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.update_order")
+	def test_update_order_rejects_cancelled_for_an_order_with_a_sales_order(self, mock_update):
+		# set_value skips link validation; the guard only reads the field.
+		frappe.db.set_value("Marketplace Order", self.order.name, "erpnext_sales_order", "SO-NOT-REAL-0001")
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			update_order(self.order.name, "CANCELLED", "CLOSED")
+		self.assertIn("Cancel Order button", str(ctx.exception))
+		self.assertIn("request_platform_cancel", str(ctx.exception))
+		mock_update.assert_not_called()
+
 	@patch("marketplace_integrations.api.talabat_orders.upsert_marketplace_order")
 	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.update_order")
 	def test_update_order_reconciles_successful_remote_response(self, mock_update, mock_upsert):

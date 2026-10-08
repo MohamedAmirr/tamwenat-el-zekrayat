@@ -20,18 +20,24 @@ global.frappe = {
 	// this file's tests actually assert.
 	call: (opts) => ({
 		then: (resolve) => {
-			if (opts && String(opts.method || "").includes("get_erpnext_sync_status") && typeof resolve === "function") {
-				resolve({message: {status: "Not Synced"}});
+			if (
+				opts &&
+				String(opts.method || "").includes("get_erpnext_sync_status") &&
+				typeof resolve === "function"
+			) {
+				resolve({ message: { status: "Not Synced" } });
 			}
-			return {then: () => {}};
+			return { then: () => {} };
 		},
 	}),
-	ui: {form: {on: () => {}}},
-	utils: {escape_html: (v) => v},
+	ui: { form: { on: () => {} } },
+	utils: { escape_html: (v) => v },
 };
 
 const {
+	add_order_actions,
 	build_cart_update_items,
+	cancel_order,
 	get_status_indicator,
 	TALABAT_STATUS_COLORS,
 	ERPNEXT_SYNC_STATUS_COLORS,
@@ -56,10 +62,10 @@ function make_frm(doc) {
 			frm_calls.custom_buttons.push(label);
 		},
 		dashboard: {
-			add_indicator: (label, color) => frm_calls.indicators.push({label, color}),
+			add_indicator: (label, color) => frm_calls.indicators.push({ label, color }),
 		},
 		set_df_property: () => {},
-		get_field: () => ({$wrapper: {empty: () => {}, append: () => {}}}),
+		get_field: () => ({ $wrapper: { empty: () => {}, append: () => {} } }),
 		refresh_field: () => {},
 		refresh_fields: () => {},
 		is_dirty: () => false,
@@ -95,14 +101,14 @@ test("cart update preserves existing replacement and addition items on repeat", 
 			_id: "replacement-item",
 			sku: "replacement-sku",
 			status: "IN_CART",
-			pricing: {pricing_type: "UNIT", quantity: 1},
+			pricing: { pricing_type: "UNIT", quantity: 1 },
 			replaced_id: "original-item",
 		},
 		{
 			_id: "addition-item",
 			sku: "addition-sku",
 			status: "ADDITION",
-			pricing: {pricing_type: "UNIT", quantity: 2},
+			pricing: { pricing_type: "UNIT", quantity: 2 },
 		},
 	];
 
@@ -111,17 +117,41 @@ test("cart update preserves existing replacement and addition items on repeat", 
 });
 
 test("Talabat and ERPNext status indicators use the agreed standard colors", () => {
-	assert.deepEqual(get_status_indicator("RECEIVED", TALABAT_STATUS_COLORS), {label: "RECEIVED", color: "green"});
-	assert.deepEqual(get_status_indicator("PREPARING", TALABAT_STATUS_COLORS), {label: "PREPARING", color: "orange"});
-	assert.deepEqual(get_status_indicator("CANCELLED", TALABAT_STATUS_COLORS), {label: "CANCELLED", color: "red"});
-	assert.deepEqual(get_status_indicator("UNAVAILABLE", TALABAT_STATUS_COLORS), {label: "UNAVAILABLE", color: "gray"});
-	assert.deepEqual(get_status_indicator("Synced", ERPNEXT_SYNC_STATUS_COLORS), {label: "Synced", color: "green"});
-	assert.deepEqual(get_status_indicator("Modified After Sync", ERPNEXT_SYNC_STATUS_COLORS), {label: "Modified After Sync", color: "orange"});
-	assert.deepEqual(get_status_indicator("Sync Error", ERPNEXT_SYNC_STATUS_COLORS), {label: "Sync Error", color: "red"});
+	assert.deepEqual(get_status_indicator("RECEIVED", TALABAT_STATUS_COLORS), {
+		label: "RECEIVED",
+		color: "green",
+	});
+	assert.deepEqual(get_status_indicator("PREPARING", TALABAT_STATUS_COLORS), {
+		label: "PREPARING",
+		color: "orange",
+	});
+	assert.deepEqual(get_status_indicator("CANCELLED", TALABAT_STATUS_COLORS), {
+		label: "CANCELLED",
+		color: "red",
+	});
+	assert.deepEqual(get_status_indicator("UNAVAILABLE", TALABAT_STATUS_COLORS), {
+		label: "UNAVAILABLE",
+		color: "gray",
+	});
+	assert.deepEqual(get_status_indicator("Synced", ERPNEXT_SYNC_STATUS_COLORS), {
+		label: "Synced",
+		color: "green",
+	});
+	assert.deepEqual(get_status_indicator("Modified After Sync", ERPNEXT_SYNC_STATUS_COLORS), {
+		label: "Modified After Sync",
+		color: "orange",
+	});
+	assert.deepEqual(get_status_indicator("Sync Error", ERPNEXT_SYNC_STATUS_COLORS), {
+		label: "Sync Error",
+		color: "red",
+	});
 });
 
 test("promotion_status AVAILABLE and every other value get distinct, non-inventive notes", () => {
-	assert.equal(promotion_status_note("AVAILABLE"), "Talabat promotion detail is available and shown per item below.");
+	assert.equal(
+		promotion_status_note("AVAILABLE"),
+		"Talabat promotion detail is available and shown per item below."
+	);
 
 	const unavailable_note = promotion_status_note("UNAVAILABLE");
 	assert.match(unavailable_note, /unavailable/i);
@@ -140,7 +170,10 @@ test("promotion_status AVAILABLE and every other value get distinct, non-inventi
 });
 
 test("promotion_status UNAVAILABLE never hides totals and never invents sponsor/funding", () => {
-	const lines = promotion_lines([{name: "Malicious", sponsorships: [{sponsor: "VENDOR", amount: 5}]}], "UNAVAILABLE");
+	const lines = promotion_lines(
+		[{ name: "Malicious", sponsorships: [{ sponsor: "VENDOR", amount: 5 }] }],
+		"UNAVAILABLE"
+	);
 	assert.deepEqual(lines, ["Promotion detail unavailable"]);
 });
 
@@ -156,8 +189,8 @@ test("promotion sponsorship renders as safe plain-text lines and labels only doc
 			type: "PERCENTAGE",
 			discount_amount: 10,
 			sponsorships: [
-				{sponsor: "VENDOR", amount: 7},
-				{sponsor: "SOME_OTHER_SPONSOR", amount: 3},
+				{ sponsor: "VENDOR", amount: 7 },
+				{ sponsor: "SOME_OTHER_SPONSOR", amount: 3 },
 			],
 		},
 	];
@@ -177,17 +210,20 @@ test("promotion sponsorship renders as safe plain-text lines and labels only doc
 });
 
 test("parse_promotions tolerates a raw JSON string, an already-parsed array, and invalid/blank input", () => {
-	assert.deepEqual(parse_promotions('[{"name": "Promo"}]'), [{name: "Promo"}]);
-	assert.deepEqual(parse_promotions([{name: "Promo"}]), [{name: "Promo"}]);
+	assert.deepEqual(parse_promotions('[{"name": "Promo"}]'), [{ name: "Promo" }]);
+	assert.deepEqual(parse_promotions([{ name: "Promo" }]), [{ name: "Promo" }]);
 	assert.deepEqual(parse_promotions(null), []);
 	assert.deepEqual(parse_promotions(""), []);
 	assert.deepEqual(parse_promotions("not json"), []);
 });
 
 test("catalog price cell shows the resolved value or an unavailable reason, never a fallback", () => {
-	assert.equal(catalog_price_cell_text({current_catalog_price: 12.5}), "12.50");
+	assert.equal(catalog_price_cell_text({ current_catalog_price: 12.5 }), "12.50");
 	assert.equal(
-		catalog_price_cell_text({current_catalog_price: null, catalog_price_unavailable_reason: "No current Item Price."}),
+		catalog_price_cell_text({
+			current_catalog_price: null,
+			catalog_price_unavailable_reason: "No current Item Price.",
+		}),
 		"Catalog Price Unavailable: No current Item Price."
 	);
 	assert.equal(catalog_price_cell_text({}), "Catalog Price Unavailable: —");
@@ -197,7 +233,7 @@ test("catalog price cell formats a UOM-conversion float to 2 decimals like the d
 	// A UOM conversion (e.g. stock price * a non-integer conversion factor)
 	// can produce a long floating-point tail - this must render the same way
 	// as the diff columns (.toFixed(2)), never the raw unformatted float.
-	assert.equal(catalog_price_cell_text({current_catalog_price: 30.299999999999997}), "30.30");
+	assert.equal(catalog_price_cell_text({ current_catalog_price: 30.299999999999997 }), "30.30");
 });
 
 test("promotion_lines skips a non-object promotion element instead of throwing", () => {
@@ -212,7 +248,14 @@ test("promotion_lines skips a non-object promotion element instead of throwing",
 });
 
 test("promotion_lines guards a non-array sponsorships value instead of throwing", () => {
-	const promotions = [{name: "Promo", type: "FIXED", discount_amount: 5, sponsorships: {sponsor: "VENDOR", amount: 5}}];
+	const promotions = [
+		{
+			name: "Promo",
+			type: "FIXED",
+			discount_amount: 5,
+			sponsorships: { sponsor: "VENDOR", amount: 5 },
+		},
+	];
 
 	assert.doesNotThrow(() => promotion_lines(promotions, "AVAILABLE"));
 	assert.deepEqual(promotion_lines(promotions, "AVAILABLE"), ["Promo (FIXED): 5"]);
@@ -278,8 +321,8 @@ test("render_json_evidence_fields_as_escaped_text sets an escaping formatter on 
 test("add_generic_status_indicator shows the Financial/Fulfillment indicator pair sourced from the two new status fields", () => {
 	const indicators = [];
 	const frm = {
-		doc: {external_financial_status: "PAID", external_fulfillment_status: "FULFILLED"},
-		dashboard: {add_indicator: (label, color) => indicators.push({label, color})},
+		doc: { external_financial_status: "PAID", external_fulfillment_status: "FULFILLED" },
+		dashboard: { add_indicator: (label, color) => indicators.push({ label, color }) },
 	};
 
 	add_generic_status_indicator(frm);
@@ -292,8 +335,8 @@ test("add_generic_status_indicator shows the Financial/Fulfillment indicator pai
 test("add_generic_status_indicator handles blank financial/fulfillment status without inventing a value", () => {
 	const indicators = [];
 	const frm = {
-		doc: {external_financial_status: "", external_fulfillment_status: ""},
-		dashboard: {add_indicator: (label, color) => indicators.push({label, color})},
+		doc: { external_financial_status: "", external_fulfillment_status: "" },
+		dashboard: { add_indicator: (label, color) => indicators.push({ label, color }) },
 	};
 
 	add_generic_status_indicator(frm);
@@ -308,8 +351,11 @@ test("add_status_indicators escapes an untrusted external_status value before it
 	// at save time - it must still be safely escaped on display.
 	const indicators = [];
 	const frm = {
-		doc: {external_status: "<img src=x onerror=alert(1)>", erpnext_sync_status: "Not Synced"},
-		dashboard: {add_indicator: (label, color) => indicators.push({label, color})},
+		doc: {
+			external_status: "<img src=x onerror=alert(1)>",
+			erpnext_sync_status: "Not Synced",
+		},
+		dashboard: { add_indicator: (label, color) => indicators.push({ label, color }) },
 	};
 	const previous_escape_html = global.frappe.utils.escape_html;
 	global.frappe.utils.escape_html = fake_escape_html;
@@ -325,8 +371,11 @@ test("add_status_indicators escapes an untrusted external_status value before it
 test("add_generic_status_indicator escapes an untrusted status value before it reaches the indicator label", () => {
 	const indicators = [];
 	const frm = {
-		doc: {external_financial_status: "<img src=x onerror=alert(1)>", external_fulfillment_status: "FULFILLED"},
-		dashboard: {add_indicator: (label, color) => indicators.push({label, color})},
+		doc: {
+			external_financial_status: "<img src=x onerror=alert(1)>",
+			external_fulfillment_status: "FULFILLED",
+		},
+		dashboard: { add_indicator: (label, color) => indicators.push({ label, color }) },
 	};
 	const previous_escape_html = global.frappe.utils.escape_html;
 	global.frappe.utils.escape_html = fake_escape_html;
@@ -341,7 +390,7 @@ test("add_generic_status_indicator escapes an untrusted status value before it r
 
 // #108 decision 9: platform gating on the Marketplace Order form itself.
 test("apply_platform_gating shows the full Talabat action set for a Talabat order", () => {
-	frm_calls = {custom_buttons: [], indicators: []};
+	frm_calls = { custom_buttons: [], indicators: [] };
 	const frm = make_frm({
 		platform: "Talabat",
 		external_status: "RECEIVED",
@@ -376,11 +425,13 @@ test("apply_platform_gating shows the full Talabat action set for a Talabat orde
 	// Never the Financial/Fulfillment indicator pair shown to non-Talabat
 	// platforms.
 	assert.ok(!frm_calls.indicators.some((indicator) => indicator.label.startsWith("Financial:")));
-	assert.ok(!frm_calls.indicators.some((indicator) => indicator.label.startsWith("Fulfillment:")));
+	assert.ok(
+		!frm_calls.indicators.some((indicator) => indicator.label.startsWith("Fulfillment:"))
+	);
 });
 
 test("apply_platform_gating shows only Refresh from Shopify and the indicator pair for an already-synced Shopify order", () => {
-	frm_calls = {custom_buttons: [], indicators: []};
+	frm_calls = { custom_buttons: [], indicators: [] };
 	const frm = make_frm({
 		platform: "Shopify",
 		external_financial_status: "PAID",
@@ -392,10 +443,14 @@ test("apply_platform_gating shows only Refresh from Shopify and the indicator pa
 	const original_call = global.frappe.call;
 	global.frappe.call = (opts) => ({
 		then: (resolve) => {
-			if (opts && String(opts.method || "").includes("get_erpnext_sync_status") && typeof resolve === "function") {
-				resolve({message: {status: "Synced"}});
+			if (
+				opts &&
+				String(opts.method || "").includes("get_erpnext_sync_status") &&
+				typeof resolve === "function"
+			) {
+				resolve({ message: { status: "Synced" } });
 			}
-			return {then: () => {}};
+			return { then: () => {} };
 		},
 	});
 
@@ -407,13 +462,13 @@ test("apply_platform_gating shows only Refresh from Shopify and the indicator pa
 
 	assert.deepEqual(frm_calls.custom_buttons, ["Refresh from Shopify"]);
 	assert.deepEqual(frm_calls.indicators, [
-		{label: "Financial: PAID", color: "gray"},
-		{label: "Fulfillment: FULFILLED", color: "gray"},
+		{ label: "Financial: PAID", color: "gray" },
+		{ label: "Fulfillment: FULFILLED", color: "gray" },
 	]);
 });
 
 test("apply_platform_gating shows Send to ERPNext for an unsynced Shopify order", () => {
-	frm_calls = {custom_buttons: [], indicators: []};
+	frm_calls = { custom_buttons: [], indicators: [] };
 	const frm = make_frm({
 		platform: "Shopify",
 		external_financial_status: "PAID",
@@ -426,8 +481,8 @@ test("apply_platform_gating shows Send to ERPNext for an unsynced Shopify order"
 	assert.ok(frm_calls.custom_buttons.includes("Refresh from Shopify"));
 });
 
-function run_status_load({saved, dirty}) {
-	frm_calls = {custom_buttons: [], indicators: []};
+function run_status_load({ saved, dirty }) {
+	frm_calls = { custom_buttons: [], indicators: [] };
 	const frm = make_frm({
 		platform: "Shopify",
 		name: "MO-1",
@@ -443,8 +498,10 @@ function run_status_load({saved, dirty}) {
 	const original_call = global.frappe.call;
 	global.frappe.call = () => ({
 		then: (resolve) => {
-			resolve({message: {status: "Modified After Sync", last_sync_error: "changed", saved}});
-			return {then: () => {}};
+			resolve({
+				message: { status: "Modified After Sync", last_sync_error: "changed", saved },
+			});
+			return { then: () => {} };
 		},
 	});
 	try {
@@ -456,14 +513,14 @@ function run_status_load({saved, dirty}) {
 }
 
 test("load_erpnext_sync_status reloads the form when the server saved and the form is clean", () => {
-	const frm = run_status_load({saved: true, dirty: false});
+	const frm = run_status_load({ saved: true, dirty: false });
 	assert.equal(frm.reload_calls, 1);
 	assert.equal(frm.doc.modified, "2026-01-01 00:00:00");
 	assert.equal(frm.doc.erpnext_sync_status, "Synced");
 });
 
 test("load_erpnext_sync_status applies status without reload or modified change when the server saved a dirty form", () => {
-	const frm = run_status_load({saved: true, dirty: true});
+	const frm = run_status_load({ saved: true, dirty: true });
 	assert.equal(frm.reload_calls, 0);
 	assert.equal(frm.doc.modified, "2026-01-01 00:00:00");
 	assert.equal(frm.doc.erpnext_sync_status, "Modified After Sync");
@@ -471,7 +528,7 @@ test("load_erpnext_sync_status applies status without reload or modified change 
 
 test("load_erpnext_sync_status applies status without reload when the server did not save", () => {
 	for (const dirty of [false, true]) {
-		const frm = run_status_load({saved: false, dirty});
+		const frm = run_status_load({ saved: false, dirty });
 		assert.equal(frm.reload_calls, 0);
 		assert.equal(frm.doc.modified, "2026-01-01 00:00:00");
 		assert.equal(frm.doc.erpnext_sync_status, "Modified After Sync");
@@ -480,18 +537,120 @@ test("load_erpnext_sync_status applies status without reload when the server did
 });
 
 test("apply_platform_gating shows nothing at all for a blank/unrecognized platform (fails closed)", () => {
-	frm_calls = {custom_buttons: [], indicators: []};
-	const frm = make_frm({platform: "", external_status: "RECEIVED"});
+	frm_calls = { custom_buttons: [], indicators: [] };
+	const frm = make_frm({ platform: "", external_status: "RECEIVED" });
 
 	apply_platform_gating(frm);
 
 	assert.deepEqual(frm_calls.custom_buttons, []);
 	assert.deepEqual(frm_calls.indicators, []);
 
-	frm_calls = {custom_buttons: [], indicators: []};
-	const unknown_platform_frm = make_frm({platform: "SomeFuturePlatform"});
+	frm_calls = { custom_buttons: [], indicators: [] };
+	const unknown_platform_frm = make_frm({ platform: "SomeFuturePlatform" });
 	apply_platform_gating(unknown_platform_frm);
 
 	assert.deepEqual(frm_calls.custom_buttons, []);
 	assert.deepEqual(frm_calls.indicators, []);
+});
+
+// #181: the Cancel Order button must set the echo-guard marker when a Sales Order is linked.
+function run_cancel_order(doc, response) {
+	const calls = [];
+	const alerts = [];
+	const frm = make_frm(doc);
+	frm.reload_calls = 0;
+	frm.reload_doc = () => {
+		frm.reload_calls += 1;
+	};
+	const original_call = global.frappe.call;
+	const original_show_alert = global.frappe.show_alert;
+	global.frappe.call = (opts) => {
+		calls.push(opts);
+		return {
+			then: (resolve) => {
+				resolve({ message: response });
+				return { then: () => {} };
+			},
+		};
+	};
+	global.frappe.show_alert = (opts) => alerts.push(opts);
+	try {
+		cancel_order(frm, "TOO_BUSY");
+	} finally {
+		global.frappe.call = original_call;
+		global.frappe.show_alert = original_show_alert;
+	}
+	return { calls, alerts, frm };
+}
+
+test("cancel_order routes a linked order through request_platform_cancel with the Sales Order and reason", () => {
+	const { calls, alerts, frm } = run_cancel_order(
+		{ name: "MO-1", erpnext_sales_order: "SAL-ORD-1" },
+		{ ok: true, already_requested: false, refreshed: true }
+	);
+
+	assert.equal(calls.length, 1);
+	assert.equal(
+		calls[0].method,
+		"marketplace_integrations.api.marketplace_outbound.request_platform_cancel"
+	);
+	assert.deepEqual(calls[0].args, { sales_order: "SAL-ORD-1", cancellation_reason: "TOO_BUSY" });
+	assert.deepEqual(alerts, []);
+	assert.equal(frm.reload_calls, 1);
+});
+
+test("cancel_order tells the user when the cancellation was already requested or the refresh failed", () => {
+	const already = run_cancel_order(
+		{ name: "MO-1", erpnext_sales_order: "SAL-ORD-1" },
+		{ ok: true, already_requested: true }
+	);
+	assert.equal(already.alerts.length, 1);
+	assert.match(already.alerts[0].message, /already requested/);
+	assert.equal(already.frm.reload_calls, 1);
+
+	const not_refreshed = run_cancel_order(
+		{ name: "MO-1", erpnext_sales_order: "SAL-ORD-1" },
+		{ ok: true, already_requested: false, refreshed: false }
+	);
+	assert.equal(not_refreshed.alerts.length, 1);
+	assert.match(not_refreshed.alerts[0].message, /could not be refreshed/);
+	assert.equal(not_refreshed.frm.reload_calls, 1);
+});
+
+test("cancel_order keeps the direct Talabat update when no Sales Order is linked", () => {
+	const { calls, alerts, frm } = run_cancel_order(
+		{ name: "MO-1", erpnext_sales_order: "" },
+		{ name: "MO-1" }
+	);
+
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].method, "marketplace_integrations.api.talabat_orders.update_order");
+	assert.deepEqual(calls[0].args, {
+		marketplace_order: "MO-1",
+		status: "CANCELLED",
+		cancellation_reason: "TOO_BUSY",
+	});
+	assert.deepEqual(alerts, []);
+	assert.equal(frm.reload_calls, 1);
+});
+
+test("add_order_actions shows Cancel Order only for RECEIVED and UPDATE_CART orders", () => {
+	for (const status of ["RECEIVED", "UPDATE_CART"]) {
+		frm_calls = { custom_buttons: [], indicators: [] };
+		add_order_actions(make_frm({ external_status: status }));
+		assert.ok(frm_calls.custom_buttons.includes("Cancel Order"), status);
+	}
+	for (const status of [
+		"CANCELLED",
+		"DISPATCHED",
+		"READY_FOR_PICKUP",
+		"DELIVERED",
+		"SOMETHING_NEW",
+		"",
+		undefined,
+	]) {
+		frm_calls = { custom_buttons: [], indicators: [] };
+		add_order_actions(make_frm({ external_status: status }));
+		assert.ok(!frm_calls.custom_buttons.includes("Cancel Order"), String(status));
+	}
 });

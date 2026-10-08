@@ -144,11 +144,13 @@ is not supported by this release.
 ## Known risk: divergence after submission (decision 8)
 
 Per #131, a Marketplace Order's linked Sales Order is submitted immediately
-on sync — this app never amends or cancels a submitted Sales Order. If a
-unit later goes `OUT_OF_STOCK` or `CANCELLED` (via Noon's own action, our own
-`Mark Out of Stock`, or our own `Cancel Shipment`), **the already-submitted
-Sales Order keeps overstating the order, and nothing in #146 corrects it
-automatically.**
+on sync. Since #179/#180 the reconciliation planner can cancel, close the
+remainder of, or update the quantities of a submitted Sales Order (and reopen a
+Closed one first) when a unit later goes `OUT_OF_STOCK` or `CANCELLED` (via
+Noon's own action, our own `Mark Out of Stock`, or our own `Cancel Shipment`),
+but only while nothing was delivered or billed and no affected line has started
+fulfillment; every other case is left as a `Modified After Sync` advisory for a
+person (delivered or billed orders need a return or credit note).
 
 What surfaces this:
 - #178 part 3: the poll now also bumps the Sales Order sync debounce when a
@@ -158,7 +160,7 @@ What surfaces this:
   per-line fulfillment started, unknown stage for `UNSPECIFIED`). A `Noon Return`
   linked to the order is `return` evidence (#164); an own `Mark Out of Stock` is not
   distinguishable from a customer cancel. The ERP side is still corrected
-  manually.
+  manually only when the planner cannot act (see above).
 - Immediately (a linked, submitted order with no eligible unit left yields an empty snapshot for the reconciliation planner instead of raising `SyncBlocker`; a never-synced order still raises): the next poll's save runs `before_save` →
   `set_sync_status_from_current_snapshot()`, which detects the eligible-line
   hash changed and
@@ -181,9 +183,12 @@ What surfaces this:
   `Cancel Shipment` when a submitted Sales Order (`erpnext_sales_order`) is
   already linked, but this is advisory only — it does not block the action.
 
-Correcting the ERPNext side (amending the Sales Order, cancelling it, or
-issuing a Credit Note) is a **manual accounting action** that this release
-does not automate.
+Correcting the ERPNext side is automatic only where the planner may act (#179:
+cancel, close the remainder, update quantities/rates; #180: reopen a Closed
+order first). Amending after delivery, issuing a Credit Note or a return, and
+anything else the planner reports as `Modified After Sync` is a **manual
+accounting action**. Cancelling a Noon order from ERPNext is not supported
+(#181 reports Noon as blocked: no order-level cancel).
 
 ## Real-world verification checklist
 
@@ -235,7 +240,8 @@ have been checked against a real Noon account.
 
 - Order-level `UploadFbpiOrderInvoice` (shipment-level was chosen instead),
   bulk AWB pre-generation, `CreateSandboxOrder` tooling.
-- Automatic Sales Order amendment or cancellation, Delivery Note, Sales
+- Automatic Sales Order amendment after delivery (cancellation of an
+  undelivered, unbilled order is done by the reconciliation planner, #179), Delivery Note, Sales
   Invoice, Payment Entry, Credit Note, or stock ledger entries.
 - A Noon webhook/event-notification receiver was #145's own deferral at the
   time this release shipped; it has since been built under #163 — see

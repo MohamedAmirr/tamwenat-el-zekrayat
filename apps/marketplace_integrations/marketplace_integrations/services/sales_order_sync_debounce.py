@@ -283,7 +283,7 @@ def _run_debounced_sync(marketplace_order, expected_debounce_until):
 RECONCILIATION_SWEEP_BATCH = 200
 # A persistent Attention status (Modified After Sync / Sync Error) is re-evaluated at most daily.
 ATTENTION_RECHECK_HOURS = 24
-# A Closed linked Sales Order whose order is otherwise Synced is re-checked at most every 24 hours (a converged Closed order would otherwise be re-bumped forever).
+# A Closed or Cancelled linked Sales Order whose order is otherwise Synced is re-checked at most every 24 hours (a converged one would otherwise be re-bumped forever).
 CLOSED_RECHECK_HOURS = 24
 _ATTENTION_STATUSES = ("Modified After Sync", "Sync Error")
 
@@ -291,7 +291,8 @@ _ATTENTION_STATUSES = ("Modified After Sync", "Sync Error")
 def _stuck_reconciliation_candidates(limit):
 	"""Cheap SQL pre-filter only (no planning, no snapshot rebuild): linked Marketplace
 	Orders with no pending debounce that are either in an Attention status or whose
-	submitted Sales Order is Closed, and whose back-off window has elapsed.  Oldest
+	submitted Sales Order is Closed or Cancelled (#181), and whose back-off window has elapsed;
+	orders with an outbound cancel marker are skipped.  Oldest
 	check first (never-checked orders first)."""
 	order = frappe.qb.DocType(ORDER_DOCTYPE)
 	so = frappe.qb.DocType("Sales Order")
@@ -300,15 +301,28 @@ def _stuck_reconciliation_candidates(limit):
 	attention_due = order.erpnext_sync_status.isin(_ATTENTION_STATUSES) & (
 		checked.isnull() | (checked <= add_to_date(now, hours=-ATTENTION_RECHECK_HOURS))
 	)
+	not_attention = order.erpnext_sync_status.notin(_ATTENTION_STATUSES)
+	backed_off = checked.isnull() | (checked <= add_to_date(now, hours=-CLOSED_RECHECK_HOURS))
+	# Closed with no delivery/billing: #180 reopens or cancels it.
 	closed_due = (
 		(so.docstatus == 1)
 		& (so.status == "Closed")
-		# Closed with delivery/billing never reopens and already converges (#179): not re-checked.
 		& (so.per_delivered == 0)
 		& (so.per_billed == 0)
-		& order.erpnext_sync_status.notin(_ATTENTION_STATUSES)
-		& (checked.isnull() | (checked <= add_to_date(now, hours=-CLOSED_RECHECK_HOURS)))
+		& not_attention
+		& backed_off
 	)
+	# ERPNext-Cancelled, or Closed after delivery/billing (#181): nothing for ERPNext to do, but
+	# the platform order may still be active, which the planner surfaces as Modified After Sync
+	# with the platform instruction (no Sales Order hook announces the cancel/close).
+	# An order already converged (Synced and checked at least once) is skipped: re-planning it
+	# daily would only append a no-change log row.  Modified After Sync / Sync Error / never
+	# checked still qualify.
+	converged = (order.erpnext_sync_status == "Synced") & checked.isnotnull()
+	inactive_due = (
+		(so.docstatus == 2)
+		| ((so.docstatus == 1) & (so.status == "Closed") & ((so.per_delivered > 0) | (so.per_billed > 0)))
+	) & (not_attention & backed_off & ~converged)
 	rows = (
 		frappe.qb.from_(order)
 		.left_join(so)
@@ -316,7 +330,9 @@ def _stuck_reconciliation_candidates(limit):
 		.select(order.name)
 		.where(order.erpnext_sales_order.isnotnull() & (order.erpnext_sales_order != ""))
 		.where(order.sync_debounce_until.isnull())
-		.where(attention_due | closed_due)
+		# An order whose platform cancel ERPNext requested (#181) is the echo; never re-bumped.
+		.where(order.outbound_cancelled_on.isnull())
+		.where(attention_due | closed_due | inactive_due)
 		.orderby(order.last_reconciliation_check_on)
 		.orderby(order.name)
 		.limit(limit)
@@ -326,7 +342,7 @@ def _stuck_reconciliation_candidates(limit):
 
 def sweep_stuck_sales_order_reconciliations():
 	"""Hourly (``hooks.py`` ``scheduler_events["hourly"]``): find linked Marketplace Orders
-	stuck in Modified After Sync / Sync Error or whose Sales Order was Closed, and bump
+	stuck in Modified After Sync / Sync Error or whose Sales Order was Closed or Cancelled, and bump
 	their debounce with ``Scheduled Sweep``.  The minute job ``sweep_due_sales_order_syncs``
 	then runs the single sync path; this function never syncs or plans itself.  Idempotent:
 	a bumped order has a pending debounce (skipped) and a fresh check time (backed off)."""

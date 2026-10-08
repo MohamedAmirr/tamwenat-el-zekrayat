@@ -53,6 +53,7 @@ from marketplace_integrations.marketplace_integrations.doctype.marketplace_produ
 )
 from marketplace_integrations.services.account_warehouse import validate_account_warehouse
 from marketplace_integrations.services.mappings import resolve_mapping_and_item
+from marketplace_integrations.services.marketplace_outbound import platform_instruction
 from marketplace_integrations.services.sales_order_reconciliation import (
 	CANCEL_ORDER,
 	CLOSE_REMAINDER,
@@ -1247,9 +1248,16 @@ def _reconciliation_evidence(order):
 	display status is interpreted here.  A blank platform is Talabat.
 	"""
 	builder_path = _RECONCILIATION_EVIDENCE_BUILDERS.get(order.platform or "Talabat")
-	if not builder_path:
-		return {}
-	return frappe.get_attr(builder_path)(order)
+	evidence = frappe.get_attr(builder_path)(order) if builder_path else {}
+	# Platform-neutral keys merged for every platform (#181), so both the sync path and
+	# the status path (form load / save) see them.  The marker survives sync-log cleanup.
+	if getattr(order, "outbound_cancelled_on", None):
+		evidence = {**evidence, "outbound_cancel_requested": True}
+	if getattr(order, "erpnext_sales_order", None):
+		instruction = platform_instruction(order)
+		if instruction:
+			evidence = {**evidence, "inactive_order_instruction": instruction}
+	return evidence
 
 
 def _advance_baseline(order, previous, current_snapshot):
