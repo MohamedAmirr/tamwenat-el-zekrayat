@@ -15,6 +15,7 @@ from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api.noon_orders import import_orders, refresh_order
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
+from marketplace_integrations.tests.utils import make_role_user
 
 
 def _make_noon_connection(connection_name, project_code=None):
@@ -122,98 +123,48 @@ class IntegrationTestImportOrdersEndpoint(IntegrationTestCase):
 	def test_import_orders_requires_marketplace_account_write(self):
 		"""import_orders() requires write permission on the Marketplace Account
 		being acted on."""
-		role_name = f"Import No Write {frappe.generate_hash(length=8)}"
-		frappe.get_doc({"doctype": "Role", "role_name": role_name}).insert()
-		user = frappe.get_doc(
-			{
-				"doctype": "User",
-				"email": f"import-no-write-{frappe.generate_hash(length=10)}@example.com",
-				"first_name": "Import No Write Test User",
-				"send_welcome_email": 0,
-				"roles": [{"role": role_name}],
-			}
-		).insert()
-		account_perm_name = frappe.permissions.add_permission(
-			"Marketplace Account", role_name, ptype="read"
+		email, _role = make_role_user(
+			self,
+			"Import No Write",
+			{"Marketplace Account": ["read"], "Marketplace Order": ["create", "write"]},
 		)
-		frappe.permissions.add_permission("Marketplace Order", role_name, ptype="create")
-		frappe.permissions.add_permission("Marketplace Order", role_name, ptype="write")
-		frappe.clear_cache(user=user.name, doctype="Marketplace Account")
-		frappe.clear_cache(user=user.name, doctype="Marketplace Order")
-		try:
-			with self.set_user(user.name):
-				self.assertTrue(frappe.has_permission("Marketplace Account", "read"))
-				self.assertFalse(frappe.has_permission("Marketplace Account", "write"))
-				with self.assertRaises(frappe.PermissionError):
-					import_orders(self.account.name)
-		finally:
-			frappe.delete_doc("Custom DocPerm", account_perm_name, force=True)
-			frappe.delete_doc("User", user.name, force=True)
-			frappe.delete_doc("Role", role_name, force=True)
-			frappe.clear_cache(user=user.name, doctype="Marketplace Account")
-			frappe.clear_cache(user=user.name, doctype="Marketplace Order")
+		with self.set_user(email):
+			self.assertTrue(frappe.has_permission("Marketplace Account", "read"))
+			self.assertFalse(frappe.has_permission("Marketplace Account", "write"))
+			with self.assertRaises(frappe.PermissionError):
+				import_orders(self.account.name)
 
 	def test_import_orders_requires_marketplace_order_create(self):
 		"""import_orders() requires create permission on Marketplace Order
 		doctype (the enqueued worker will write new orders)."""
-		role_name = f"Import No Create {frappe.generate_hash(length=8)}"
-		frappe.get_doc({"doctype": "Role", "role_name": role_name}).insert()
-		user = frappe.get_doc(
-			{
-				"doctype": "User",
-				"email": f"import-no-create-{frappe.generate_hash(length=10)}@example.com",
-				"first_name": "Import No Create Test User",
-				"send_welcome_email": 0,
-				"roles": [{"role": role_name}],
-			}
-		).insert()
-		frappe.permissions.add_permission("Marketplace Account", role_name, ptype="write")
-		frappe.permissions.add_permission("Marketplace Order", role_name, ptype="write")
 		# Notably NOT adding create permission
-		frappe.clear_cache(user=user.name, doctype="Marketplace Account")
-		frappe.clear_cache(user=user.name, doctype="Marketplace Order")
-		try:
-			with self.set_user(user.name):
-				self.assertTrue(frappe.has_permission("Marketplace Account", "write"))
-				self.assertTrue(frappe.has_permission("Marketplace Order", "write"))
-				self.assertFalse(frappe.has_permission("Marketplace Order", "create"))
-				with self.assertRaises(frappe.PermissionError):
-					import_orders(self.account.name)
-		finally:
-			frappe.delete_doc("User", user.name, force=True)
-			frappe.delete_doc("Role", role_name, force=True)
-			frappe.clear_cache(user=user.name, doctype="Marketplace Order")
+		email, _role = make_role_user(
+			self,
+			"Import No Create",
+			{"Marketplace Account": ["write"], "Marketplace Order": ["write"]},
+		)
+		with self.set_user(email):
+			self.assertTrue(frappe.has_permission("Marketplace Account", "write"))
+			self.assertTrue(frappe.has_permission("Marketplace Order", "write"))
+			self.assertFalse(frappe.has_permission("Marketplace Order", "create"))
+			with self.assertRaises(frappe.PermissionError):
+				import_orders(self.account.name)
 
 	def test_import_orders_requires_marketplace_order_write(self):
 		"""import_orders() requires write permission on Marketplace Order
 		doctype (the enqueued worker will update existing orders too)."""
-		role_name = f"Import No Write Order {frappe.generate_hash(length=8)}"
-		frappe.get_doc({"doctype": "Role", "role_name": role_name}).insert()
-		user = frappe.get_doc(
-			{
-				"doctype": "User",
-				"email": f"import-no-write-order-{frappe.generate_hash(length=10)}@example.com",
-				"first_name": "Import No Write Order Test User",
-				"send_welcome_email": 0,
-				"roles": [{"role": role_name}],
-			}
-		).insert()
-		frappe.permissions.add_permission("Marketplace Account", role_name, ptype="write")
-		frappe.permissions.add_permission("Marketplace Order", role_name, ptype="create")
 		# Notably NOT adding write permission
-		frappe.clear_cache(user=user.name, doctype="Marketplace Account")
-		frappe.clear_cache(user=user.name, doctype="Marketplace Order")
-		try:
-			with self.set_user(user.name):
-				self.assertTrue(frappe.has_permission("Marketplace Account", "write"))
-				self.assertTrue(frappe.has_permission("Marketplace Order", "create"))
-				self.assertFalse(frappe.has_permission("Marketplace Order", "write"))
-				with self.assertRaises(frappe.PermissionError):
-					import_orders(self.account.name)
-		finally:
-			frappe.delete_doc("User", user.name, force=True)
-			frappe.delete_doc("Role", role_name, force=True)
-			frappe.clear_cache(user=user.name, doctype="Marketplace Order")
+		email, _role = make_role_user(
+			self,
+			"Import No Write Order",
+			{"Marketplace Account": ["write"], "Marketplace Order": ["create"]},
+		)
+		with self.set_user(email):
+			self.assertTrue(frappe.has_permission("Marketplace Account", "write"))
+			self.assertTrue(frappe.has_permission("Marketplace Order", "create"))
+			self.assertFalse(frappe.has_permission("Marketplace Order", "write"))
+			with self.assertRaises(frappe.PermissionError):
+				import_orders(self.account.name)
 
 	@patch("marketplace_integrations.api.noon_orders.queue_order_import")
 	def test_import_orders_queues_on_long_queue(self, mock_queue):
@@ -258,29 +209,12 @@ class IntegrationTestRefreshOrderEndpoint(IntegrationTestCase):
 	def test_refresh_order_requires_marketplace_order_write(self):
 		"""refresh_order() requires write permission on the specific
 		Marketplace Order being refreshed."""
-		role_name = f"Refresh No Write {frappe.generate_hash(length=8)}"
-		frappe.get_doc({"doctype": "Role", "role_name": role_name}).insert()
-		user = frappe.get_doc(
-			{
-				"doctype": "User",
-				"email": f"refresh-no-write-{frappe.generate_hash(length=10)}@example.com",
-				"first_name": "Refresh No Write Test User",
-				"send_welcome_email": 0,
-				"roles": [{"role": role_name}],
-			}
-		).insert()
-		frappe.permissions.add_permission("Marketplace Order", role_name, ptype="read")
-		frappe.clear_cache(user=user.name, doctype="Marketplace Order")
-		try:
-			with self.set_user(user.name):
-				self.assertTrue(frappe.has_permission("Marketplace Order", "read"))
-				self.assertFalse(frappe.has_permission("Marketplace Order", "write"))
-				with self.assertRaises(frappe.PermissionError):
-					refresh_order(self.order.name)
-		finally:
-			frappe.delete_doc("User", user.name, force=True)
-			frappe.delete_doc("Role", role_name, force=True)
-			frappe.clear_cache(user=user.name, doctype="Marketplace Order")
+		email, _role = make_role_user(self, "Refresh No Write", {"Marketplace Order": ["read"]})
+		with self.set_user(email):
+			self.assertTrue(frappe.has_permission("Marketplace Order", "read"))
+			self.assertFalse(frappe.has_permission("Marketplace Order", "write"))
+			with self.assertRaises(frappe.PermissionError):
+				refresh_order(self.order.name)
 
 	@patch("marketplace_integrations.api.noon_orders.queue_order_refresh")
 	def test_refresh_order_queues_on_long_queue(self, mock_queue):

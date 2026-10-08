@@ -27,6 +27,7 @@ from marketplace_integrations.api.noon_fulfillment import (
 	upload_invoice,
 )
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
+from marketplace_integrations.tests.utils import make_role_user
 
 
 def _make_noon_connection(connection_name, project_code):
@@ -82,28 +83,9 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 		frappe.delete_doc("Noon Connection", self.account.connection, ignore_permissions=True, force=True)
 		frappe.db.commit()
 
-	def _make_no_write_user(self, label):
-		role_name = f"{label} {frappe.generate_hash(length=8)}"
-		frappe.get_doc({"doctype": "Role", "role_name": role_name}).insert()
-		user = frappe.get_doc(
-			{
-				"doctype": "User",
-				"email": f"{label.lower().replace(' ', '-')}-{frappe.generate_hash(length=10)}@example.com",
-				"first_name": label,
-				"send_welcome_email": 0,
-				"roles": [{"role": role_name}],
-			}
-		).insert()
-		frappe.permissions.add_permission("Marketplace Order", role_name, ptype="read")
-		frappe.clear_cache(user=user.name, doctype="Marketplace Order")
-		self.addCleanup(frappe.delete_doc, "User", user.name, force=True)
-		self.addCleanup(frappe.delete_doc, "Role", role_name, force=True)
-		self.addCleanup(frappe.clear_cache, user=user.name, doctype="Marketplace Order")
-		return user
-
 	def test_requires_marketplace_order_write_permission(self):
-		user = self._make_no_write_user("Noon Fulfillment No Write")
-		with self.set_user(user.name):
+		email, _role = make_role_user(self, "Noon Fulfillment No Write", {"Marketplace Order": ["read"]})
+		with self.set_user(email):
 			self.assertTrue(frappe.has_permission("Marketplace Order", "read"))
 			self.assertFalse(frappe.has_permission("Marketplace Order", "write"))
 			with self.assertRaises(frappe.PermissionError):

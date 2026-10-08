@@ -12,6 +12,7 @@ from marketplace_integrations.api.talabat_orders import (
 	update_order,
 )
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
+from marketplace_integrations.tests.utils import make_role_user
 
 
 def _response(body, status_code=200):
@@ -97,6 +98,18 @@ def _sample_normalized_order(order_id="order-001", **overrides):
 	return order
 
 
+def _delete_account_fixtures(account):
+	"""Delete everything a test class created for ``account``, in dependency order, and commit
+	(make_role_user's cleanup commits, so fixtures must not be left to class-level rollback)."""
+	connection = account.connection
+	for doctype in ("Marketplace Order", "Marketplace Sync Log"):
+		for name in frappe.get_all(doctype, filters={"marketplace_account": account.name}, pluck="name"):
+			frappe.delete_doc(doctype, name, ignore_permissions=True, force=True)
+	frappe.delete_doc("Marketplace Account", account.name, ignore_permissions=True, force=True)
+	frappe.delete_doc("Talabat Connection", connection, ignore_permissions=True, force=True)
+	frappe.db.commit()
+
+
 class IntegrationTestRefreshOrder(IntegrationTestCase):
 	"""Tests for refresh_order API."""
 
@@ -105,6 +118,9 @@ class IntegrationTestRefreshOrder(IntegrationTestCase):
 		self.connection = _make_connection(f"Test Refresh Connection {suffix}")
 		self.account = _make_account(f"Test Refresh Account {suffix}", self.connection)
 		self.order = upsert_marketplace_order(self.account.name, _sample_normalized_order())
+
+	def tearDown(self):
+		_delete_account_fixtures(self.account)
 
 	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.update_order")
 	def test_update_order_sends_selected_cancellation_reason(self, mock_update):
@@ -284,17 +300,13 @@ class IntegrationTestRefreshOrder(IntegrationTestCase):
 			"cancellation": {},
 			"items": [],
 		}
-		user = frappe.get_doc(
-			{
-				"doctype": "User",
-				"email": f"refresh-test-{frappe.generate_hash(length=10)}@example.com",
-				"first_name": "Refresh Test User",
-				"send_welcome_email": 0,
-				"roles": [{"role": "All"}],
-			}
-		).insert()
+		email, _role = make_role_user(
+			self,
+			"Refresh No Write",
+			{"Marketplace Order": ["read"]},
+		)
 
-		with self.set_user(user.name):
+		with self.set_user(email):
 			with self.assertRaises(frappe.PermissionError):
 				refresh_order(self.order.name)
 
@@ -328,6 +340,9 @@ class IntegrationTestImportVendorOrders(IntegrationTestCase):
 		self.connection = _make_connection(f"Test Import Connection {suffix}")
 		self.account = _make_account(f"Test Import Account {suffix}", self.connection)
 
+	def tearDown(self):
+		_delete_account_fixtures(self.account)
+
 	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.get_vendor_orders")
 	def test_import_vendor_orders_requires_account_read_permission(self, mock_get_vendor_orders):
 		"""import_vendor_orders checks read permission on the account."""
@@ -337,17 +352,13 @@ class IntegrationTestImportVendorOrders(IntegrationTestCase):
 			"page_size": 20,
 			"total_pages": 1,
 		}
-		user = frappe.get_doc(
-			{
-				"doctype": "User",
-				"email": f"import-test-{frappe.generate_hash(length=10)}@example.com",
-				"first_name": "Import Test User",
-				"send_welcome_email": 0,
-				"roles": [{"role": "All"}],
-			}
-		).insert()
+		email, _role = make_role_user(
+			self,
+			"Import No Read",
+			{},
+		)
 
-		with self.set_user(user.name):
+		with self.set_user(email):
 			with self.assertRaises(frappe.PermissionError):
 				import_vendor_orders(self.account.name, "2026-08-01", "2026-08-31")
 
@@ -371,40 +382,16 @@ class IntegrationTestImportVendorOrders(IntegrationTestCase):
 			"page_size": 20,
 			"total_pages": 1,
 		}
-		role_name = f"Import No Create {frappe.generate_hash(length=8)}"
-		frappe.get_doc({"doctype": "Role", "role_name": role_name}).insert()
-		user = frappe.get_doc(
-			{
-				"doctype": "User",
-				"email": f"import-no-create-{frappe.generate_hash(length=10)}@example.com",
-				"first_name": "Import No Create Test User",
-				"send_welcome_email": 0,
-				"roles": [{"role": role_name}],
-			}
-		).insert()
-		had_account_custom_perms = frappe.db.exists("Custom DocPerm", {"parent": "Marketplace Account"})
-		had_order_custom_perms = frappe.db.exists("Custom DocPerm", {"parent": "Marketplace Order"})
-		account_perm_name = frappe.permissions.add_permission("Marketplace Account", role_name, ptype="read")
-		order_perm_name = frappe.permissions.add_permission("Marketplace Order", role_name, ptype="read")
-		frappe.clear_cache(user=user.name, doctype="Marketplace Account")
-		frappe.clear_cache(user=user.name, doctype="Marketplace Order")
-		try:
-			with self.set_user(user.name):
-				self.assertTrue(frappe.has_permission("Marketplace Account", "read"))
-				self.assertFalse(frappe.has_permission("Marketplace Order", "create"))
-				with self.assertRaises(frappe.PermissionError):
-					import_vendor_orders(self.account.name, "2026-08-01", "2026-08-31")
-		finally:
-			frappe.delete_doc("Custom DocPerm", account_perm_name, force=True)
-			frappe.delete_doc("Custom DocPerm", order_perm_name, force=True)
-			if not had_account_custom_perms:
-				frappe.db.delete("Custom DocPerm", {"parent": "Marketplace Account"})
-			if not had_order_custom_perms:
-				frappe.db.delete("Custom DocPerm", {"parent": "Marketplace Order"})
-			frappe.delete_doc("User", user.name, force=True)
-			frappe.delete_doc("Role", role_name, force=True)
-			frappe.clear_cache(user=user.name, doctype="Marketplace Account")
-			frappe.clear_cache(user=user.name, doctype="Marketplace Order")
+		email, _role = make_role_user(
+			self,
+			"Import No Create",
+			{"Marketplace Account": ["read"], "Marketplace Order": ["read"]},
+		)
+		with self.set_user(email):
+			self.assertTrue(frappe.has_permission("Marketplace Account", "read"))
+			self.assertFalse(frappe.has_permission("Marketplace Order", "create"))
+			with self.assertRaises(frappe.PermissionError):
+				import_vendor_orders(self.account.name, "2026-08-01", "2026-08-31")
 
 	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.get_vendor_orders")
 	def test_import_vendor_orders_requires_date_range(self, mock_get_vendor_orders):

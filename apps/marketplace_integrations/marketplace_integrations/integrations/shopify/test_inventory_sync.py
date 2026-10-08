@@ -22,6 +22,7 @@ from marketplace_integrations.integrations.shopify.constants import (
 	SHOPIFY_WEBHOOK_TOPICS,
 )
 from marketplace_integrations.integrations.shopify.test_products import make_shopify_account
+from marketplace_integrations.tests.utils import make_role_user
 
 EXECUTE_TARGET = "marketplace_integrations.integrations.shopify.client.ShopifyClient.execute"
 FETCH_LOCATIONS_TARGET = (
@@ -1246,38 +1247,20 @@ class IntegrationTestQueueInventorySync(InventoryFixtureMixin, IntegrationTestCa
 		self.assertIn("not a Shopify account", result["skipped_accounts"][0]["reason"])
 
 	def test_requires_write_permission_on_the_mapping(self):
-		# A real user with READ but no WRITE on the account and mapping.
+		# A real user with WRITE on the account (so the account-level checks pass)
+		# but only READ on the mapping: only the mapping check can fail.
 		mapping = self._one(5)
-		email = f"inv-reader-{self.suffix}@example.com"
-		role = f"Inv Reader {self.suffix}"
-		frappe.get_doc({"doctype": "Role", "role_name": role}).insert()
-		for doctype in ("Marketplace Account", "Marketplace Product Mapping"):
-			frappe.get_doc(
-				{
-					"doctype": "Custom DocPerm",
-					"parent": doctype,
-					"parenttype": "DocType",
-					"parentfield": "permissions",
-					"role": role,
-					"permlevel": 0,
-					"read": 1,
-				}
-			).insert()
-		frappe.clear_cache(doctype="Marketplace Account")
-		frappe.clear_cache(doctype="Marketplace Product Mapping")
-		user = frappe.get_doc(
-			{
-				"doctype": "User",
-				"email": email,
-				"first_name": "Reader",
-				"send_welcome_email": 0,
-				"roles": [{"role": role}],
-			}
-		).insert()
-		frappe.set_user(user.name)
+		email, _role = make_role_user(
+			self,
+			"Inv Reader",
+			{"Marketplace Account": ["write"], "Marketplace Product Mapping": ["read"]},
+		)
+		frappe.set_user(email)
 		try:
 			self.assertTrue(frappe.has_permission("Marketplace Account", "read", self.account.name))
-			self.assertFalse(frappe.has_permission("Marketplace Account", "write", self.account.name))
+			self.assertTrue(frappe.has_permission("Marketplace Account", "write", self.account.name))
+			self.assertTrue(frappe.has_permission("Marketplace Product Mapping", "read"))
+			self.assertFalse(frappe.has_permission("Marketplace Product Mapping", "write"))
 			with self.assertRaises(frappe.PermissionError):
 				inventory_sync.queue_inventory_sync([mapping.name])
 			with self.assertRaises(frappe.PermissionError):
