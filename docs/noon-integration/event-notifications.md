@@ -81,6 +81,25 @@ Observed during a sandbox test, not from Noon's docs:
 - Source IPs varied (34.76.219.109, 35.233.95.217, 104.155.39.2), so do not
   allowlist by IP.
 
+### Other sandbox observations (observed in a sandbox test on 2026-10-07)
+
+Observed in a sandbox test on 2026-10-07, not Noon contract:
+
+- `CreateSandboxOrder`: an `idempotency_key` longer than 10 characters is
+  rejected (a 36-character UUID returned 400 `INVALID_ARGUMENT`). `items`
+  has one entry per unit.
+- Sandbox orders use `mp_code` `test_integration_mp` and order numbers of the
+  form `TEST-<merchant>-<10 hex>`. This app skips any order whose `mp_code`
+  is not `"noon"`, so sandbox orders are not imported. Sandbox support is
+  deliberately out of scope.
+- Destination credential values are always redacted on read.
+- `order_created_at` has no timezone suffix; it matched UTC.
+- `delivered_invoice_price` on sandbox orders is a dummy value.
+
+Destination registration and `UpdateDestination` are not supported by this
+app (out of scope, not mandatory); destinations are set up by hand in the
+Partner Center.
+
 ## Delivery semantics
 
 Noon uses **at-least-once delivery**, with **up to 50 retries using

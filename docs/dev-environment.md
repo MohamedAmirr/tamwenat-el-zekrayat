@@ -107,6 +107,16 @@ docker exec -it -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekraya
 
 `bench start` serves on `127.0.0.1:8000` (published by the compose file). Add `dev.localhost` to `/etc/hosts` pointing at `127.0.0.1` before browsing to `http://dev.localhost:8000`. Login `Administrator` / `admin`.
 
+### Restarting `bench start`
+
+The worker and scheduler processes started by `bench start` do not reload Python on their own. If Python changes don't seem to take effect (web or worker), restart `bench start`. After pulling or editing worker-side code (background jobs, scheduler events, anything enqueued), restart `bench start`. After JS changes, hard-refresh the browser. To restart, kill the running honcho/`bench start` process in the container, then relaunch it detached:
+
+```bash
+docker exec -d -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekrayat-dev-frappe-1 bash -lc "nohup bench start > logs/bench-start.out 2>&1 &"
+```
+
+Always pass `-p tamwenat-el-zekrayat-dev` when using `docker compose` for this stack.
+
 ## Running tests: use `test.localhost`, never `dev.localhost`
 
 Tests must run on the dedicated `test.localhost` site. Code under test calls `frappe.db.commit()` (per-chunk and per-group commits, `db_set(..., commit=True)`), which defeats `IntegrationTestCase`'s class-level rollback, so **a test run permanently writes to whichever site it runs on**. Running them on `dev.localhost` polluted it with hundreds of leaked rows (by 2026-09-24: 227 test Shopify Connections, 122 accounts, 1359 mappings, 123 Items, 132 Price Lists). An attempt to auto-clean them after each test (a `CleanupTestCase` that deleted "whatever is new", PR #120, closed) made things worse on a live site: its unconditional commit made rows in doctypes outside its list permanent (a leaked test tax template even became the site's default), and deleting "whatever is new" could remove a real row created by another process mid-test. Tests therefore run on a separate site, and `dev.localhost` has `allow_tests` set to `false`, so `run-tests` is refused there ("Testing is disabled for the site!").
