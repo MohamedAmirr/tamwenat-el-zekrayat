@@ -38,9 +38,11 @@ SHIPMENT_INVOICE_MAX_BYTES = 5 * 1024 * 1024
 # Envelope/auth facts sourced from Noon's public Event Notifications page
 # (internet-sourced, not a checked-in API spec file - see
 # docs/noon-integration/event-notifications.md for the user-approved
-# source note) - there is no HMAC/signature scheme, only a static
-# credential header this receiver defines and checks itself.
-NOON_WEBHOOK_SECRET_HEADER = "X-Noon-Webhook-Secret"
+# source note) - there is no HMAC/signature scheme, only a static key.
+# X-Api-Key is the header Noon's dashboard sends; the key value is generated
+# by ERPNext (Noon Connection.webhook_secret) and pasted into Noon.
+NOON_WEBHOOK_SECRET_HEADER = "X-Api-Key"
+NOON_EVENT_WEBHOOK_PATH = "/api/method/marketplace_integrations.api.noon_webhooks.event_notification"
 
 # The only event_type this receiver currently acts on - any other
 # event_type is acknowledged (200) without enqueuing anything, so Noon

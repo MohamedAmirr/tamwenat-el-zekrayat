@@ -56,12 +56,30 @@ JSON envelope:
 ## Authentication
 
 Noon's Event Notifications have **no HMAC/signature scheme** — only static
-header credentials configured per destination in Noon's Integrator
-Configuration UI. This is why `api/noon_webhooks.py` implements its own
+header credentials configured per destination in Noon's Partner Center,
+Integrator Configuration, Webhook tab. This is why `api/noon_webhooks.py` implements its own
 secret-header check instead of verifying a signature: each `Noon Connection`
-has its own `webhook_secret` (Password field), and every inbound request
-must carry a matching `X-Noon-Webhook-Secret` header, compared with
-`hmac.compare_digest`.
+has its own `webhook_secret` (Password field, auto-generated when empty), and
+every inbound request must carry a matching `X-Api-Key` header (the header
+Noon's Partner Center, Integrator Configuration, Webhook tab sends), compared with `hmac.compare_digest`.
+The old `X-Noon-Webhook-Secret` header is no longer accepted.
+
+## Observed on the live sandbox test
+
+Observed during a sandbox test, not from Noon's docs:
+
+- The Webhook tab sends the key in the `X-Api-Key` header.
+- The delivered payload only contains `order_nr`
+  (`{"order_nr": "<fbpi_order_nr>"}` inside the envelope's `payload`).
+- A bare `{"order_nr": "..."}` body (no `event_type`/`metadata`/`payload`)
+  arrived once, right after saving the destination config; the cause is
+  unconfirmed. The receiver authenticates it by matching `X-Api-Key` against
+  every enabled Noon Connection's secret, returns 200 and enqueues nothing.
+  A missing or wrong key is rejected.
+- The first delivery attempt arrived about 27 seconds after the event.
+- An old event was redelivered about 7 minutes later.
+- Source IPs varied (34.76.219.109, 35.233.95.217, 104.155.39.2), so do not
+  allowlist by IP.
 
 ## Delivery semantics
 

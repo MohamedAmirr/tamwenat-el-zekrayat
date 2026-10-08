@@ -156,3 +156,164 @@ class IntegrationTestNoonConnection(IntegrationTestCase):
 			for ptype in ("read", "write", "create", "delete"):
 				with self.subTest(ptype=ptype):
 					self.assertFalse(frappe.has_permission("Noon Connection", ptype, doc=connection))
+
+	def test_new_connection_generates_webhook_url_when_empty(self):
+		"""A new connection with no webhook_url is automatically filled with the
+		webhook receiver URL when saved."""
+		connection = make_connection("Webhook URL Auto Generation")
+		connection.webhook_url = ""
+		connection.validate()
+
+		self.assertTrue(connection.webhook_url)
+		self.assertIn(
+			"api/method/marketplace_integrations.api.noon_webhooks.event_notification",
+			connection.webhook_url,
+		)
+		self.assertTrue(connection.webhook_url.startswith("http"))
+
+	def test_new_connection_generates_webhook_secret_when_empty(self):
+		"""A new connection with no webhook_secret is automatically filled with a
+		random secret when saved."""
+		connection = make_connection("Webhook Secret Auto Generation", webhook_secret="")
+		connection.reload()
+
+		secret = connection.get_password("webhook_secret")
+		self.assertTrue(secret)
+		self.assertGreater(len(secret), 20)
+
+	def test_new_connection_webhook_url_and_secret_both_generated(self):
+		"""Both webhook_url and webhook_secret are generated for a new connection."""
+		connection = frappe.new_doc("Noon Connection")
+		connection.connection_name = "Both Webhook Fields Auto Generation"
+		connection.project_code = f"test-project-{frappe.generate_hash(length=8)}"
+		connection.key_id = "test-key-id"
+		connection.private_key = "-----BEGIN PRIVATE KEY-----\nexample\n-----END PRIVATE KEY-----\n"
+		connection.environment = "Static Sandbox"
+		connection.insert()
+
+		self.assertTrue(connection.webhook_url)
+		self.assertTrue(connection.get_password("webhook_secret"))
+		self.assertIn(
+			"api/method/marketplace_integrations.api.noon_webhooks.event_notification",
+			connection.webhook_url,
+		)
+
+	def test_existing_connection_keeps_webhook_secret_on_update(self):
+		"""An existing connection with a webhook_secret does not regenerate it
+		when saved again - the secret persists across updates."""
+		connection = make_connection("Keep Secret On Update")
+		connection.reload()
+		original_secret = connection.get_password("webhook_secret")
+
+		connection.connection_name = "Keep Secret On Update - Updated"
+		connection.save()
+		connection.reload()
+		updated_secret = connection.get_password("webhook_secret")
+
+		self.assertEqual(original_secret, updated_secret)
+
+	def test_get_webhook_secret_for_copy_returns_secret(self):
+		"""get_webhook_secret_for_copy() returns the webhook_secret to a caller
+		with write permission."""
+		connection = make_connection("Secret Copy")
+		result = connection.get_webhook_secret_for_copy()
+
+		self.assertIn("webhook_secret", result)
+		self.assertEqual(result["webhook_secret"], connection.get_password("webhook_secret"))
+
+	def test_get_webhook_secret_for_copy_requires_write_permission(self):
+		"""get_webhook_secret_for_copy() checks write permission and raises
+		PermissionError for a non-editor."""
+		connection = make_connection("Secret Copy Restricted")
+		user = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": f"noon-secret-copy-{frappe.generate_hash(length=8)}@example.com",
+				"first_name": "Noon Secret Copy Test User",
+				"send_welcome_email": 0,
+				"roles": [{"role": "All"}],
+			}
+		).insert()
+
+		with self.set_user(user.name), self.assertRaises(frappe.PermissionError):
+			connection.get_webhook_secret_for_copy()
+
+	def test_explicit_webhook_secret_is_kept_on_save(self):
+		"""When a connection is created with an explicit webhook_secret, that
+		secret is preserved and not regenerated."""
+		manual_secret = "manual-secret-value"
+		connection = make_connection("Explicit Secret", webhook_secret=manual_secret)
+		connection.reload()
+
+		secret = connection.get_password("webhook_secret")
+		self.assertEqual(secret, manual_secret)
+
+	def test_refresh_webhook_url_rewrites_blank_url(self):
+		"""refresh_webhook_url() rewrites a blank/stale webhook_url with the
+		current site-derived URL and returns the new URL."""
+		connection = make_connection("Webhook URL Refresh")
+		connection.reload()
+
+		# Blank the URL and call refresh
+		frappe.db.set_value("Noon Connection", connection.name, "webhook_url", "")
+		connection.reload()
+		self.assertEqual(connection.webhook_url, "")
+
+		result = connection.refresh_webhook_url()
+
+		self.assertIn("webhook_url", result)
+		self.assertTrue(result["webhook_url"])
+		self.assertIn(
+			"api/method/marketplace_integrations.api.noon_webhooks.event_notification",
+			result["webhook_url"],
+		)
+
+	def test_refresh_webhook_url_requires_write_permission(self):
+		"""refresh_webhook_url() checks write permission and raises
+		PermissionError for a non-editor."""
+		connection = make_connection("Webhook URL Refresh Restricted")
+		user = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": f"noon-url-refresh-{frappe.generate_hash(length=8)}@example.com",
+				"first_name": "Noon URL Refresh Test User",
+				"send_welcome_email": 0,
+				"roles": [{"role": "All"}],
+			}
+		).insert()
+
+		with self.set_user(user.name), self.assertRaises(frappe.PermissionError):
+			connection.refresh_webhook_url()
+
+	def test_refresh_webhook_url_ignores_request_host_header(self):
+		"""refresh_webhook_url() builds the URL with allow_header_override=False,
+		so a request Host header never affects the persisted URL."""
+		from werkzeug.wrappers import Request
+
+		connection = make_connection("Webhook URL Host Header Check")
+		connection.reload()
+
+		# Create a fake request with a spoofed Host header. If get_url() respects
+		# allow_header_override=True, this header would change the URL result.
+		# Since refresh_webhook_url() passes allow_header_override=False, this
+		# spoofed host must be ignored.
+		spoofed_host = "fake-attacker-host.evil.com"
+		web_request = Request.from_values(
+			path="/api/method/test",
+			headers={"Host": spoofed_host},
+		)
+
+		# Bind the fake request and patch frappe.request to use it
+		frappe.local.request = web_request
+		try:
+			with patch.object(frappe, "request", web_request):
+				result = connection.refresh_webhook_url()
+		finally:
+			del frappe.local.request
+
+		# The URL should NOT contain the spoofed host, proving allow_header_override=False works
+		self.assertNotIn(spoofed_host, result["webhook_url"])
+		self.assertIn(
+			"api/method/marketplace_integrations.api.noon_webhooks.event_notification",
+			result["webhook_url"],
+		)
