@@ -46,8 +46,9 @@ Setup, per Noon Connection:
 1. Save the `Noon Connection`: `Webhook Secret` is generated automatically
    when empty (an existing value is kept) and the read-only `Webhook URL` is
    filled. Use the form's "Copy Webhook URL" / "Copy Webhook Key" buttons. If the
-   site URL changes, use "Refresh Webhook URL" (save any unsaved changes first) to re-derive and save it, then
-   update the destination in Noon.
+   site URL changes, use "Refresh Webhook URL" to re-derive and save it (it
+   refuses on an unsaved form, so save first), then update the destination in
+   Noon by hand.
 2. In Noon's Partner Center, Integrator Configuration, Webhook tab, register
    a destination pointing at the connection's `Webhook URL`
    (`https://<your-site-domain>/api/method/marketplace_integrations.api.noon_webhooks.event_notification`).
@@ -177,10 +178,16 @@ does not automate.
 
 ## Real-world verification checklist
 
-There is no sandbox access for this issue — every behavior below is built
-against the checked-in `docs/noon-integration/noon_api_full.md` contract
-only and must be confirmed against a real Noon account before being relied
-on in production:
+Sandbox test (user-reported, 2026-10-07): a sandbox order was created and
+item 1 (initial status CONFIRMED + ACKNOWLEDGED) was observed on it. Items
+2-9 (GetNoonLogisticsAWBs, CreateShipment, AddShipmentCourierAwbs,
+CancelShipment, UploadShipmentInvoice, UpdateOrder out-of-stock) were NOT
+tested. Sandbox orders carry mp_code `test_integration_mp`, which this app
+skips, so they are never imported (sandbox support is out of scope).
+Real-order verification is still required for every item. Every behavior
+below is built against the checked-in `docs/noon-integration/noon_api_full.md`
+contract and must be confirmed against a real Noon account before being
+relied on in production:
 
 1. **Initial `integration_status`/`mp_status` of new orders.** #146 assumes
    newly confirmed orders surface as `INTEGRATION_ITEM_STATUS_ACKNOWLEDGED`
