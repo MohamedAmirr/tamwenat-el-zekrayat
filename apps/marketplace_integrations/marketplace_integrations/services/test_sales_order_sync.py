@@ -7,7 +7,7 @@ from unittest.mock import patch
 import frappe
 from erpnext.selling.doctype.sales_order.sales_order import SalesOrder
 from frappe.tests import IntegrationTestCase
-from frappe.utils import add_days, cstr, getdate, nowdate
+from frappe.utils import add_days, cstr, getdate, now_datetime, nowdate
 
 from marketplace_integrations.patches.v0_0 import backfill_last_synced_snapshot as backfill
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
@@ -867,6 +867,111 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertIn("reopened", order.last_sync_error)
 		self.assertNotIn("not yet enabled", order.last_sync_error)
 		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "status"), "Closed")
+
+	# --- #181: echo of an outbound platform cancel ------------------------------
+
+	def _closed_order_with_outbound_cancel(self):
+		"""A Closed, undelivered Sales Order whose Talabat order ERPNext cancelled (marker set)
+		and that Talabat now reports CANCELLED - the echo."""
+		order = self._make_order()
+		first = sync_sales_order(order.name)
+		frappe.db.set_value("Sales Order", first["sales_order"], "status", "Closed", update_modified=False)
+		frappe.db.set_value(
+			"Marketplace Order", order.name, "outbound_cancelled_on", now_datetime(), update_modified=False
+		)
+		order.reload()
+		order.external_status = "CANCELLED"
+		order.save()
+		order.reload()
+		return order, first["sales_order"]
+
+	def test_outbound_cancel_echo_keeps_the_closed_order_closed_in_the_status_path(self):
+		order, sales_order = self._closed_order_with_outbound_cancel()
+
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertFalse(order.last_sync_error)
+		self.assertEqual(get_current_sync_status(order.name), "Synced")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "status"), "Closed")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 1)
+
+	def test_outbound_cancel_echo_is_no_action_in_the_sync_path_and_nothing_is_reopened(self):
+		order, sales_order = self._closed_order_with_outbound_cancel()
+
+		with patch.object(SalesOrder, "update_status") as update_status:
+			result = sync_sales_order(order.name)
+
+		update_status.assert_not_called()
+		self.assertEqual(result["reconciliation"]["outcome"], "NO_ACTION")
+		self.assertNotIn("executed_action", result)
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "status"), "Closed")
+		self.assertEqual(self._reopen_comments(sales_order), [])
+
+	def test_outbound_cancel_echo_is_still_no_action_after_the_sync_log_rows_are_deleted(self):
+		order, sales_order = self._closed_order_with_outbound_cancel()
+		frappe.db.delete("Marketplace Sync Log", {"marketplace_order": order.name})
+
+		with patch.object(SalesOrder, "update_status") as update_status:
+			result = sync_sales_order(order.name)
+		order.reload()
+		order.customer_phone_number = "another save"
+		order.save()
+
+		update_status.assert_not_called()
+		self.assertEqual(result["reconciliation"]["outcome"], "NO_ACTION")
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "status"), "Closed")
+
+	def test_marker_set_before_the_returned_order_is_saved_prevents_the_reopen(self):
+		"""The order of operations #181 relies on: marker first, then the platform's CANCELLED
+		order is saved (the save re-plans it)."""
+		order = self._make_order()
+		first = sync_sales_order(order.name)
+		frappe.db.set_value("Sales Order", first["sales_order"], "status", "Closed", update_modified=False)
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		frappe.db.set_value(
+			"Marketplace Order", order.name, "outbound_cancelled_on", now_datetime(), update_modified=False
+		)
+		cancelled = frappe._dict(
+			external_order_id=order.external_order_id,
+			latest_payload={"order_id": "external-order"},
+			external_status="CANCELLED",
+			items=[],
+		)
+
+		upsert_marketplace_order(self.account.name, cancelled)
+		order.reload()
+
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "status"), "Closed")
+
+	def test_cancelled_sales_order_with_an_active_talabat_order_gets_the_platform_instruction(self):
+		order = self._make_order()  # external_status RECEIVED
+		first = sync_sales_order(order.name)
+		frappe.db.set_value("Sales Order", first["sales_order"], "status", "Cancelled")
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertIn("no longer an active submitted document", order.last_sync_error)
+		self.assertIn("Cancel the order on Talabat", order.last_sync_error)
+
+	def test_closed_delivered_sales_order_with_a_delivered_talabat_order_says_it_cannot_be_cancelled(self):
+		order = self._make_order()
+		sales_order = self._sync_and_set_item_fields(order, delivered_qty=1)
+		frappe.db.set_value("Sales Order", sales_order.name, "status", "Closed", update_modified=False)
+		order.external_status = "DELIVERED"
+		order.save()
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertIn("no longer an active submitted document", order.last_sync_error)
+		self.assertIn("can no longer be cancelled from ERPNext", order.last_sync_error)
+		self.assertNotIn("executed_action", result)
 
 	def test_shopify_closed_order_is_reopened_and_cancelled(self):
 		account = self._make_shopify_account()

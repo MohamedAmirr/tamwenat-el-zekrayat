@@ -209,3 +209,18 @@ def _as_json(value):
 	if value is None or isinstance(value, str):
 		return value
 	return frappe.as_json(value)
+
+
+def rollback_to_savepoint(savepoint, log_title):
+	"""Roll back to ``savepoint``; if that itself fails (a deadlock or lock
+	wait timeout already rolled the whole transaction back, so the savepoint
+	no longer exists) fall back to a full rollback. Never raises, so it can't
+	mask the exception being handled. ``log_title`` titles the Error Log entry
+	written if even the full rollback fails."""
+	try:
+		frappe.db.rollback(save_point=savepoint)
+	except Exception:
+		try:
+			frappe.db.rollback()
+		except Exception:
+			frappe.log_error(title=log_title, message=frappe.get_traceback())

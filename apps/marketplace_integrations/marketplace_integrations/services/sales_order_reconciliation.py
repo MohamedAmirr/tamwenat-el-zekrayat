@@ -152,6 +152,11 @@ def plan(previous, current, evidence, erp_state):
 	  stage is unknown.  ``lifecycle_reason`` is the merchant-readable explanation.
 	- ``fulfillment_started``: ``{external_item_id: bool}`` per line, or one bool for
 	  the whole order.
+	- ``outbound_cancel_requested``: ERPNext already asked the marketplace to cancel the
+	  order (#181); with ``cancellation == "full"`` on a Closed order with no delivery or
+	  billing this is the echo of that request (``NO_ACTION``, no reopen).
+	- ``inactive_order_instruction``: merchant-readable text appended to the "no longer an
+	  active submitted document" advisory (what to do on the marketplace).
 	- ``source``: where the evidence comes from (e.g. ``"marketplace"``); informational.
 
 	A Closed order with no delivery or billing is judged as if it were open; a resulting
@@ -186,6 +191,18 @@ def plan(previous, current, evidence, erp_state):
 			"A marketplace line returned to a positive quantity; this needs a structural change."
 		)
 	if erp_state.get("docstatus") != 1 or erp_state.get("status") in INACTIVE_ERP_ORDER_STATUSES:
+		if (
+			evidence.get("outbound_cancel_requested")
+			and evidence.get("cancellation") == "full"
+			and _is_reopenable_closed_order(erp_state)
+		):
+			# Echo of our own outbound cancel (#181): ERPNext closed the order, asked the
+			# marketplace to cancel it, and the marketplace now says cancelled.  Both sides
+			# agree; the order stays Closed (it must not be reopened just to be cancelled).
+			return _result(
+				NO_ACTION,
+				"The marketplace order was cancelled at ERPNext's request; the Sales Order stays Closed.",
+			)
 		if _is_reopenable_closed_order(erp_state):
 			# Closed with no delivery or billing: judge it as the open order it would be after
 			# a reopen; only a cancel/update result carries the reopen flag (#180).
@@ -209,7 +226,10 @@ def plan(previous, current, evidence, erp_state):
 			return _result(
 				NO_ACTION, "The cancelled marketplace order is already cancelled or closed in ERPNext."
 			)
-		return _attention("The linked ERPNext Sales Order is no longer an active submitted document.")
+		message = "The linked ERPNext Sales Order is no longer an active submitted document."
+		# Platform-specific wording is built by the integration side (#181), never here.
+		instruction = cstr(evidence.get("inactive_order_instruction")).strip()
+		return _attention(f"{message} {instruction}" if instruction else message)
 
 	if evidence.get("cancellation") == "full" and evidence.get("cancelled_after_fulfillment"):
 		# Reached only while the ERP order is still active (an already cancelled or

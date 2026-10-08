@@ -41,6 +41,7 @@ from marketplace_integrations.services.marketplace_attention import (
 	get_attention_counts,
 	get_attention_items,
 )
+from marketplace_integrations.services.marketplace_outbound import platform_instruction
 
 NOON_PEM = "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
 
@@ -204,6 +205,25 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 			"Requested quantity is below the quantity already delivered in ERPNext.",
 		)
 		self.assertTrue(rows[modified.name]["detected_at"])
+
+	def test_cancelled_sales_order_with_an_active_platform_order_shows_the_platform_instruction(self):
+		"""#181: no new problem type; the planner message (with the platform instruction) is the
+		explanation of a Modified After Sync row, in full and not truncated."""
+		account = self.make_talabat_account()
+		base = "The linked ERPNext Sales Order is no longer an active submitted document."
+		instruction = platform_instruction(
+			frappe._dict(platform="Talabat", external_status="RECEIVED", outbound_cancelled_on=None)
+		)
+		order = self.make_order(
+			account, erpnext_sync_status="Modified After Sync", last_sync_error=f"{base} {instruction}"
+		)
+
+		rows = {row["reference_name"]: row for row in self.items_for(account)}
+
+		self.assertEqual(rows[order.name]["problem_type"], MODIFIED_AFTER_SYNC)
+		self.assertEqual(rows[order.name]["next_action"], "Open Order")
+		self.assertEqual(rows[order.name]["explanation"], f"{base} {instruction}")
+		self.assertIn("Cancel the order on Talabat", rows[order.name]["explanation"])
 
 	# -- unmapped items ---------------------------------------------------
 

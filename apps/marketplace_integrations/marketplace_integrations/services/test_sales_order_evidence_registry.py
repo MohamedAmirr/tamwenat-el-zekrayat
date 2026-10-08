@@ -23,6 +23,9 @@ class UnitTestSalesOrderEvidenceRegistry(UnitTestCase):
 			"refunds": None,
 			"last_synced_snapshot": None,
 			"items": [],
+			"latest_payload": None,
+			"noon_shipments": [],
+			"noon_shipment_units": [],
 		}
 		values.update(fields)
 		return SimpleNamespace(**values)
@@ -74,3 +77,21 @@ class UnitTestSalesOrderEvidenceRegistry(UnitTestCase):
 			with self.subTest(evidence=evidence):
 				self.assertFalse(_uses_stored_snapshot(1, evidence))
 		self.assertFalse(_uses_stored_snapshot(0, {"cancellation": "full"}))
+
+	def test_outbound_marker_is_merged_as_a_platform_neutral_key_for_every_platform(self):
+		for platform in ("Talabat", "Shopify", "Noon", "", None):
+			with self.subTest(platform=platform):
+				marked = _reconciliation_evidence(self._order(platform, outbound_cancelled_on="2026-10-08"))
+				unmarked = _reconciliation_evidence(self._order(platform))
+
+				self.assertTrue(marked["outbound_cancel_requested"])
+				self.assertNotIn("outbound_cancel_requested", unmarked)
+
+	def test_inactive_order_instruction_is_only_added_for_a_linked_order(self):
+		linked = _reconciliation_evidence(
+			self._order("Talabat", external_status="RECEIVED", erpnext_sales_order="SO-1")
+		)
+		unlinked = _reconciliation_evidence(self._order("Talabat", external_status="RECEIVED"))
+
+		self.assertIn("Talabat", linked["inactive_order_instruction"])
+		self.assertNotIn("inactive_order_instruction", unlinked)

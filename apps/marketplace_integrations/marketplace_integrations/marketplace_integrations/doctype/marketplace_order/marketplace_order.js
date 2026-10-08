@@ -9,7 +9,12 @@
 // per-order action (GetFbpiOrder) - it deliberately does not add Noon
 // equivalents of Talabat's/Shopify's status indicators or item presentation
 // tables, which remain out of #145's scope.
-const JSON_EVIDENCE_FIELDS = ["billing_address", "shipping_address", "payment_transactions", "refunds"];
+const JSON_EVIDENCE_FIELDS = [
+	"billing_address",
+	"shipping_address",
+	"payment_transactions",
+	"refunds",
+];
 
 if (typeof frappe !== "undefined") {
 	// Registered once, at doctype-client-script load time - i.e. before the
@@ -69,12 +74,14 @@ function apply_platform_gating(frm) {
 		load_erpnext_sync_status(frm);
 
 		frm.add_custom_button(__("Refresh from Talabat"), () => {
-			frappe.call({
-				method: "marketplace_integrations.api.talabat_orders.refresh_order",
-				args: { marketplace_order: frm.doc.name },
-				freeze: true,
-				freeze_message: __("Refreshing from Talabat..."),
-			}).then(() => frm.reload_doc());
+			frappe
+				.call({
+					method: "marketplace_integrations.api.talabat_orders.refresh_order",
+					args: { marketplace_order: frm.doc.name },
+					freeze: true,
+					freeze_message: __("Refreshing from Talabat..."),
+				})
+				.then(() => frm.reload_doc());
 		});
 		add_order_actions(frm);
 
@@ -83,12 +90,14 @@ function apply_platform_gating(frm) {
 		add_generic_status_indicator(frm);
 		load_erpnext_sync_status(frm);
 		frm.add_custom_button(__("Refresh from Shopify"), () => {
-			frappe.call({
-				method: "marketplace_integrations.api.shopify_orders.refresh_order",
-				args: { marketplace_order: frm.doc.name },
-				freeze: true,
-				freeze_message: __("Refreshing from Shopify..."),
-			}).then(() => frm.reload_doc());
+			frappe
+				.call({
+					method: "marketplace_integrations.api.shopify_orders.refresh_order",
+					args: { marketplace_order: frm.doc.name },
+					freeze: true,
+					freeze_message: __("Refreshing from Shopify..."),
+				})
+				.then(() => frm.reload_doc());
 		});
 		load_shopify_item_presentation(frm);
 	} else if (platform === "Noon") {
@@ -100,27 +109,31 @@ function apply_platform_gating(frm) {
 		// synchronously and reload the form immediately.
 		load_erpnext_sync_status(frm); // #146 decision 7
 		frm.add_custom_button(__("Refresh from Noon"), () => {
-			frappe.call({
-				method: "marketplace_integrations.api.noon_orders.refresh_order",
-				args: { marketplace_order: frm.doc.name },
-				freeze: true,
-				freeze_message: __("Queuing Noon refresh..."),
-			}).then((r) => {
-				// Review finding E: queue_order_refresh() dedups per order
-				// (job_id keyed on the order name) - `queued` is false when a
-				// refresh for this order is already queued/running, matching
-				// marketplace_account.js's own Noon button handling of the same
-				// {queued: bool} shape. Showing the "queued" toast unconditionally
-				// used to mislead the user into thinking a fresh refresh had just
-				// been kicked off even when it had actually been deduplicated.
-				const queued = (r.message || {}).queued;
-				frappe.show_alert({
-					message: queued
-						? __("Noon order refresh queued. Refresh this document to see the results.")
-						: __("A Noon refresh for this order is already queued or running."),
-					indicator: "blue",
+			frappe
+				.call({
+					method: "marketplace_integrations.api.noon_orders.refresh_order",
+					args: { marketplace_order: frm.doc.name },
+					freeze: true,
+					freeze_message: __("Queuing Noon refresh..."),
+				})
+				.then((r) => {
+					// Review finding E: queue_order_refresh() dedups per order
+					// (job_id keyed on the order name) - `queued` is false when a
+					// refresh for this order is already queued/running, matching
+					// marketplace_account.js's own Noon button handling of the same
+					// {queued: bool} shape. Showing the "queued" toast unconditionally
+					// used to mislead the user into thinking a fresh refresh had just
+					// been kicked off even when it had actually been deduplicated.
+					const queued = (r.message || {}).queued;
+					frappe.show_alert({
+						message: queued
+							? __(
+									"Noon order refresh queued. Refresh this document to see the results."
+							  )
+							: __("A Noon refresh for this order is already queued or running."),
+						indicator: "blue",
+					});
 				});
-			});
 		});
 		add_noon_fulfillment_actions(frm); // #146 decision 22
 	}
@@ -138,16 +151,32 @@ function apply_platform_gating(frm) {
 // above already follow.
 function add_noon_fulfillment_actions(frm) {
 	const group = __("Noon Fulfillment");
-	frm.add_custom_button(__("Create Shipment"), () => show_noon_create_shipment_dialog(frm), group);
-	frm.add_custom_button(__("Mark Out of Stock"), () => show_noon_mark_out_of_stock_dialog(frm), group);
-	frm.add_custom_button(__("Cancel Shipment"), () => show_noon_cancel_shipment_dialog(frm), group);
+	frm.add_custom_button(
+		__("Create Shipment"),
+		() => show_noon_create_shipment_dialog(frm),
+		group
+	);
+	frm.add_custom_button(
+		__("Mark Out of Stock"),
+		() => show_noon_mark_out_of_stock_dialog(frm),
+		group
+	);
+	frm.add_custom_button(
+		__("Cancel Shipment"),
+		() => show_noon_cancel_shipment_dialog(frm),
+		group
+	);
 	frm.add_custom_button(__("Add AWB"), () => show_noon_add_awb_dialog(frm), group);
 	frm.add_custom_button(__("Upload Invoice"), () => show_noon_upload_invoice_dialog(frm), group);
 	frm.add_custom_button(__("Retry"), () => show_noon_retry_dialog(frm), group);
 	// #146 review finding #2: recovery actions for a shipment stuck in Error
 	// or Cancel Pending with no other way out, and for an order-level Out of
 	// Stock reservation orphaned by a hard-killed worker.
-	frm.add_custom_button(__("Discard Shipment"), () => show_noon_discard_shipment_dialog(frm), group);
+	frm.add_custom_button(
+		__("Discard Shipment"),
+		() => show_noon_discard_shipment_dialog(frm),
+		group
+	);
 	frm.add_custom_button(
 		__("Release Stuck Out of Stock Reservation"),
 		() => run_noon_release_stuck_oos_reservation(frm),
@@ -173,10 +202,12 @@ function show_noon_queue_toast(r, frm) {
 }
 
 function fetch_noon_shippable_units(frm) {
-	return frappe.call({
-		method: "marketplace_integrations.api.noon_fulfillment.get_shippable_units",
-		args: {marketplace_order: frm.doc.name},
-	}).then((r) => r.message || []);
+	return frappe
+		.call({
+			method: "marketplace_integrations.api.noon_fulfillment.get_shippable_units",
+			args: { marketplace_order: frm.doc.name },
+		})
+		.then((r) => r.message || []);
 }
 
 // mp_item_nr/partner_sku are untrusted Noon-sourced text (#146 decision 9's
@@ -198,7 +229,9 @@ function fetch_noon_shippable_units(frm) {
 // to the real `mp_item_nr`s the caller actually needs to send to the API.
 function noon_unit_checklist_options(units) {
 	return units.map((unit, index) => ({
-		label: `${frappe.utils.escape_html(unit.mp_item_nr)} (${frappe.utils.escape_html(unit.partner_sku || "")})`,
+		label: `${frappe.utils.escape_html(unit.mp_item_nr)} (${frappe.utils.escape_html(
+			unit.partner_sku || ""
+		)})`,
 		value: String(index),
 	}));
 }
@@ -244,7 +277,10 @@ function noon_confirm_if_submitted_sales_order(frm, proceed) {
 function show_noon_create_shipment_dialog(frm) {
 	fetch_noon_shippable_units(frm).then((units) => {
 		if (!units.length) {
-			frappe.msgprint({message: __("No units are currently shippable for this order."), indicator: "orange"});
+			frappe.msgprint({
+				message: __("No units are currently shippable for this order."),
+				indicator: "orange",
+			});
 			return;
 		}
 		const dialog = new frappe.ui.Dialog({
@@ -282,7 +318,10 @@ function show_noon_create_shipment_dialog(frm) {
 			primary_action_label: __("Create"),
 			primary_action(values) {
 				if (!values.units || !values.units.length) {
-					frappe.msgprint({message: __("At least one unit must be selected."), indicator: "red"});
+					frappe.msgprint({
+						message: __("At least one unit must be selected."),
+						indicator: "red",
+					});
 					return;
 				}
 				if (values.awb_source === "Own Courier" && (!values.courier || !values.awb_nr)) {
@@ -293,18 +332,20 @@ function show_noon_create_shipment_dialog(frm) {
 					return;
 				}
 				dialog.hide();
-				frappe.call({
-					method: "marketplace_integrations.api.noon_fulfillment.create_shipment",
-					args: {
-						marketplace_order: frm.doc.name,
-						mp_item_nrs: mp_item_nrs_from_unit_indices(units, values.units),
-						awb_source: values.awb_source,
-						courier: values.courier,
-						awb_nr: values.awb_nr,
-					},
-					freeze: true,
-					freeze_message: __("Queuing shipment creation..."),
-				}).then((r) => show_noon_queue_toast(r, frm));
+				frappe
+					.call({
+						method: "marketplace_integrations.api.noon_fulfillment.create_shipment",
+						args: {
+							marketplace_order: frm.doc.name,
+							mp_item_nrs: mp_item_nrs_from_unit_indices(units, values.units),
+							awb_source: values.awb_source,
+							courier: values.courier,
+							awb_nr: values.awb_nr,
+						},
+						freeze: true,
+						freeze_message: __("Queuing shipment creation..."),
+					})
+					.then((r) => show_noon_queue_toast(r, frm));
 			},
 		});
 		dialog.show();
@@ -314,7 +355,10 @@ function show_noon_create_shipment_dialog(frm) {
 function show_noon_mark_out_of_stock_dialog(frm) {
 	fetch_noon_shippable_units(frm).then((units) => {
 		if (!units.length) {
-			frappe.msgprint({message: __("No units are currently eligible to mark Out of Stock."), indicator: "orange"});
+			frappe.msgprint({
+				message: __("No units are currently eligible to mark Out of Stock."),
+				indicator: "orange",
+			});
 			return;
 		}
 		const dialog = new frappe.ui.Dialog({
@@ -332,20 +376,25 @@ function show_noon_mark_out_of_stock_dialog(frm) {
 			primary_action_label: __("Mark Out of Stock"),
 			primary_action(values) {
 				if (!values.units || !values.units.length) {
-					frappe.msgprint({message: __("At least one unit must be selected."), indicator: "red"});
+					frappe.msgprint({
+						message: __("At least one unit must be selected."),
+						indicator: "red",
+					});
 					return;
 				}
 				dialog.hide();
 				noon_confirm_if_submitted_sales_order(frm, () => {
-					frappe.call({
-						method: "marketplace_integrations.api.noon_fulfillment.mark_out_of_stock",
-						args: {
-							marketplace_order: frm.doc.name,
-							mp_item_nrs: mp_item_nrs_from_unit_indices(units, values.units),
-						},
-						freeze: true,
-						freeze_message: __("Queuing Out of Stock update..."),
-					}).then((r) => show_noon_queue_toast(r, frm));
+					frappe
+						.call({
+							method: "marketplace_integrations.api.noon_fulfillment.mark_out_of_stock",
+							args: {
+								marketplace_order: frm.doc.name,
+								mp_item_nrs: mp_item_nrs_from_unit_indices(units, values.units),
+							},
+							freeze: true,
+							freeze_message: __("Queuing Out of Stock update..."),
+						})
+						.then((r) => show_noon_queue_toast(r, frm));
 				});
 			},
 		});
@@ -356,24 +405,38 @@ function show_noon_mark_out_of_stock_dialog(frm) {
 function show_noon_cancel_shipment_dialog(frm) {
 	const options = noon_created_shipment_options(frm);
 	if (!options.length) {
-		frappe.msgprint({message: __("No cancellable (Created) shipments on this order."), indicator: "orange"});
+		frappe.msgprint({
+			message: __("No cancellable (Created) shipments on this order."),
+			indicator: "orange",
+		});
 		return;
 	}
 	const dialog = new frappe.ui.Dialog({
 		title: __("Cancel Noon Shipment"),
 		fields: [
-			{fieldname: "integration_shipment_nr", fieldtype: "Select", label: __("Shipment"), options, reqd: 1},
+			{
+				fieldname: "integration_shipment_nr",
+				fieldtype: "Select",
+				label: __("Shipment"),
+				options,
+				reqd: 1,
+			},
 		],
 		primary_action_label: __("Cancel Shipment"),
 		primary_action(values) {
 			dialog.hide();
 			noon_confirm_if_submitted_sales_order(frm, () => {
-				frappe.call({
-					method: "marketplace_integrations.api.noon_fulfillment.cancel_shipment",
-					args: {marketplace_order: frm.doc.name, integration_shipment_nr: values.integration_shipment_nr},
-					freeze: true,
-					freeze_message: __("Queuing shipment cancellation..."),
-				}).then((r) => show_noon_queue_toast(r, frm));
+				frappe
+					.call({
+						method: "marketplace_integrations.api.noon_fulfillment.cancel_shipment",
+						args: {
+							marketplace_order: frm.doc.name,
+							integration_shipment_nr: values.integration_shipment_nr,
+						},
+						freeze: true,
+						freeze_message: __("Queuing shipment cancellation..."),
+					})
+					.then((r) => show_noon_queue_toast(r, frm));
 			});
 		},
 	});
@@ -383,30 +446,41 @@ function show_noon_cancel_shipment_dialog(frm) {
 function show_noon_add_awb_dialog(frm) {
 	const options = noon_created_shipment_options(frm);
 	if (!options.length) {
-		frappe.msgprint({message: __("No Created shipments on this order to add an AWB to."), indicator: "orange"});
+		frappe.msgprint({
+			message: __("No Created shipments on this order to add an AWB to."),
+			indicator: "orange",
+		});
 		return;
 	}
 	const dialog = new frappe.ui.Dialog({
 		title: __("Add Noon Shipment AWB"),
 		fields: [
-			{fieldname: "integration_shipment_nr", fieldtype: "Select", label: __("Shipment"), options, reqd: 1},
-			{fieldname: "courier", fieldtype: "Data", label: __("Courier"), reqd: 1},
-			{fieldname: "awb_nr", fieldtype: "Data", label: __("AWB Nr"), reqd: 1},
+			{
+				fieldname: "integration_shipment_nr",
+				fieldtype: "Select",
+				label: __("Shipment"),
+				options,
+				reqd: 1,
+			},
+			{ fieldname: "courier", fieldtype: "Data", label: __("Courier"), reqd: 1 },
+			{ fieldname: "awb_nr", fieldtype: "Data", label: __("AWB Nr"), reqd: 1 },
 		],
 		primary_action_label: __("Add AWB"),
 		primary_action(values) {
 			dialog.hide();
-			frappe.call({
-				method: "marketplace_integrations.api.noon_fulfillment.add_awb",
-				args: {
-					marketplace_order: frm.doc.name,
-					integration_shipment_nr: values.integration_shipment_nr,
-					courier: values.courier,
-					awb_nr: values.awb_nr,
-				},
-				freeze: true,
-				freeze_message: __("Queuing AWB addition..."),
-			}).then((r) => show_noon_queue_toast(r, frm));
+			frappe
+				.call({
+					method: "marketplace_integrations.api.noon_fulfillment.add_awb",
+					args: {
+						marketplace_order: frm.doc.name,
+						integration_shipment_nr: values.integration_shipment_nr,
+						courier: values.courier,
+						awb_nr: values.awb_nr,
+					},
+					freeze: true,
+					freeze_message: __("Queuing AWB addition..."),
+				})
+				.then((r) => show_noon_queue_toast(r, frm));
 		},
 	});
 	dialog.show();
@@ -424,7 +498,13 @@ function show_noon_upload_invoice_dialog(frm) {
 	const dialog = new frappe.ui.Dialog({
 		title: __("Upload Noon Shipment Invoice"),
 		fields: [
-			{fieldname: "integration_shipment_nr", fieldtype: "Select", label: __("Shipment"), options, reqd: 1},
+			{
+				fieldname: "integration_shipment_nr",
+				fieldtype: "Select",
+				label: __("Shipment"),
+				options,
+				reqd: 1,
+			},
 			{
 				fieldname: "invoice_file",
 				fieldtype: "Attach",
@@ -438,24 +518,26 @@ function show_noon_upload_invoice_dialog(frm) {
 				// than a surprise rejection after the dialog closes.
 				description: __("Must be uploaded as Private - a public file is rejected."),
 			},
-			{fieldname: "invoice_nr", fieldtype: "Data", label: __("Invoice Nr"), reqd: 1},
-			{fieldname: "issued_at", fieldtype: "Date", label: __("Issued At"), reqd: 1},
+			{ fieldname: "invoice_nr", fieldtype: "Data", label: __("Invoice Nr"), reqd: 1 },
+			{ fieldname: "issued_at", fieldtype: "Date", label: __("Issued At"), reqd: 1 },
 		],
 		primary_action_label: __("Upload"),
 		primary_action(values) {
 			dialog.hide();
-			frappe.call({
-				method: "marketplace_integrations.api.noon_fulfillment.upload_invoice",
-				args: {
-					marketplace_order: frm.doc.name,
-					integration_shipment_nr: values.integration_shipment_nr,
-					file_url: values.invoice_file,
-					invoice_nr: values.invoice_nr,
-					issued_at: values.issued_at,
-				},
-				freeze: true,
-				freeze_message: __("Queuing invoice upload..."),
-			}).then((r) => show_noon_queue_toast(r, frm));
+			frappe
+				.call({
+					method: "marketplace_integrations.api.noon_fulfillment.upload_invoice",
+					args: {
+						marketplace_order: frm.doc.name,
+						integration_shipment_nr: values.integration_shipment_nr,
+						file_url: values.invoice_file,
+						invoice_nr: values.invoice_nr,
+						issued_at: values.issued_at,
+					},
+					freeze: true,
+					freeze_message: __("Queuing invoice upload..."),
+				})
+				.then((r) => show_noon_queue_toast(r, frm));
 		},
 	});
 	dialog.show();
@@ -467,23 +549,34 @@ function show_noon_retry_dialog(frm) {
 		value: shipment.integration_shipment_nr,
 	}));
 	if (!options.length) {
-		frappe.msgprint({message: __("No shipments on this order."), indicator: "orange"});
+		frappe.msgprint({ message: __("No shipments on this order."), indicator: "orange" });
 		return;
 	}
 	const dialog = new frappe.ui.Dialog({
 		title: __("Retry Noon Shipment Action"),
 		fields: [
-			{fieldname: "integration_shipment_nr", fieldtype: "Select", label: __("Shipment"), options, reqd: 1},
+			{
+				fieldname: "integration_shipment_nr",
+				fieldtype: "Select",
+				label: __("Shipment"),
+				options,
+				reqd: 1,
+			},
 		],
 		primary_action_label: __("Retry"),
 		primary_action(values) {
 			dialog.hide();
-			frappe.call({
-				method: "marketplace_integrations.api.noon_fulfillment.retry",
-				args: {marketplace_order: frm.doc.name, integration_shipment_nr: values.integration_shipment_nr},
-				freeze: true,
-				freeze_message: __("Queuing retry..."),
-			}).then((r) => show_noon_queue_toast(r, frm));
+			frappe
+				.call({
+					method: "marketplace_integrations.api.noon_fulfillment.retry",
+					args: {
+						marketplace_order: frm.doc.name,
+						integration_shipment_nr: values.integration_shipment_nr,
+					},
+					freeze: true,
+					freeze_message: __("Queuing retry..."),
+				})
+				.then((r) => show_noon_queue_toast(r, frm));
 		},
 	});
 	dialog.show();
@@ -514,7 +607,13 @@ function show_noon_discard_shipment_dialog(frm) {
 	const dialog = new frappe.ui.Dialog({
 		title: __("Discard Noon Shipment"),
 		fields: [
-			{fieldname: "integration_shipment_nr", fieldtype: "Select", label: __("Shipment"), options, reqd: 1},
+			{
+				fieldname: "integration_shipment_nr",
+				fieldtype: "Select",
+				label: __("Shipment"),
+				options,
+				reqd: 1,
+			},
 		],
 		primary_action_label: __("Discard"),
 		primary_action(values) {
@@ -525,18 +624,23 @@ function show_noon_discard_shipment_dialog(frm) {
 					[frappe.utils.escape_html(values.integration_shipment_nr)]
 				),
 				() => {
-					frappe.call({
-						method: "marketplace_integrations.api.noon_fulfillment.discard_shipment",
-						args: {
-							marketplace_order: frm.doc.name,
-							integration_shipment_nr: values.integration_shipment_nr,
-						},
-						freeze: true,
-						freeze_message: __("Discarding shipment..."),
-					}).then(() => {
-						frappe.show_alert({message: __("Shipment discarded."), indicator: "green"});
-						frm.reload_doc();
-					});
+					frappe
+						.call({
+							method: "marketplace_integrations.api.noon_fulfillment.discard_shipment",
+							args: {
+								marketplace_order: frm.doc.name,
+								integration_shipment_nr: values.integration_shipment_nr,
+							},
+							freeze: true,
+							freeze_message: __("Discarding shipment..."),
+						})
+						.then(() => {
+							frappe.show_alert({
+								message: __("Shipment discarded."),
+								indicator: "green",
+							});
+							frm.reload_doc();
+						});
 				}
 			);
 		},
@@ -550,39 +654,46 @@ function run_noon_release_stuck_oos_reservation(frm) {
 			"This clears any pending Noon Out of Stock reservation on this order, in case a worker died before releasing it. Continue?"
 		),
 		() => {
-			frappe.call({
-				method: "marketplace_integrations.api.noon_fulfillment.release_stuck_oos_reservation",
-				args: {marketplace_order: frm.doc.name},
-				freeze: true,
-				freeze_message: __("Releasing reservation..."),
-			}).then(() => {
-				frappe.show_alert({message: __("Reservation released."), indicator: "green"});
-				frm.reload_doc();
-			});
+			frappe
+				.call({
+					method: "marketplace_integrations.api.noon_fulfillment.release_stuck_oos_reservation",
+					args: { marketplace_order: frm.doc.name },
+					freeze: true,
+					freeze_message: __("Releasing reservation..."),
+				})
+				.then(() => {
+					frappe.show_alert({
+						message: __("Reservation released."),
+						indicator: "green",
+					});
+					frm.reload_doc();
+				});
 		}
 	);
 }
 
 function load_shopify_item_presentation(frm) {
-	frappe.call({
-		method: "marketplace_integrations.api.marketplace_order_presentation.get_item_presentation",
-		args: { marketplace_order: frm.doc.name },
-	}).then((response) => {
-		const wrapper = frm.get_field("talabat_order_presentation").$wrapper;
-		wrapper.empty();
-		for (const item of response.message.items || []) {
-			const line = document.createElement("p");
-			// A custom/no-variant line (variant: null on the Shopify side) has no
-			// mapping to report at all - showing it as its own clean label rather
-			// than concatenating with the "Unmapped"/mapped-item text below, which
-			// always read "No Shopify variant: Unmapped" for this case even though
-			// nothing was actually left unmapped.
-			line.textContent = item.external_variant_id
-				? `${item.external_variant_id}: ${item.mapped_item || __("Unmapped")}`
-				: __("No Shopify variant");
-			wrapper.append(line);
-		}
-	});
+	frappe
+		.call({
+			method: "marketplace_integrations.api.marketplace_order_presentation.get_item_presentation",
+			args: { marketplace_order: frm.doc.name },
+		})
+		.then((response) => {
+			const wrapper = frm.get_field("talabat_order_presentation").$wrapper;
+			wrapper.empty();
+			for (const item of response.message.items || []) {
+				const line = document.createElement("p");
+				// A custom/no-variant line (variant: null on the Shopify side) has no
+				// mapping to report at all - showing it as its own clean label rather
+				// than concatenating with the "Unmapped"/mapped-item text below, which
+				// always read "No Shopify variant: Unmapped" for this case even though
+				// nothing was actually left unmapped.
+				line.textContent = item.external_variant_id
+					? `${item.external_variant_id}: ${item.mapped_item || __("Unmapped")}`
+					: __("No Shopify variant");
+				wrapper.append(line);
+			}
+		});
 }
 
 // Read-only JSON-fieldtype fields are not HTML-escaped by Frappe's default
@@ -619,7 +730,8 @@ function load_shopify_item_presentation(frm) {
 // a frappe.meta.sync() reload of this doctype's cached field objects can't
 // silently drop it either.
 function render_json_evidence_fields_as_escaped_text() {
-	const docfield_map = frappe.meta && frappe.meta.docfield_map && frappe.meta.docfield_map["Marketplace Order"];
+	const docfield_map =
+		frappe.meta && frappe.meta.docfield_map && frappe.meta.docfield_map["Marketplace Order"];
 	if (!docfield_map) return;
 	for (const fieldname of JSON_EVIDENCE_FIELDS) {
 		const df = docfield_map[fieldname];
@@ -629,56 +741,60 @@ function render_json_evidence_fields_as_escaped_text() {
 }
 
 function load_erpnext_sync_status(frm) {
-	frappe.call({
-		method: "marketplace_integrations.api.marketplace_orders.get_erpnext_sync_status",
-		args: {marketplace_order: frm.doc.name},
-	}).then((response) => {
-		const message = response.message;
-		if (message.saved && !frm.is_dirty()) {
-			// The server saved the order (new `modified`): reload the whole doc rather than
-			// patching it; the reload's refresh re-runs this check (a no-op save this time).
-			frm.reload_doc();
-			return;
-		}
-		frm.doc.erpnext_sync_status = message.status;
-		frm.doc.last_sync_error = message.last_sync_error || null;
-		// `modified` is deliberately never patched here: on a dirty form that was also saved
-		// server-side, Frappe's own "modified since you opened it" check must still fire.
-		frm.refresh_fields(["erpnext_sync_status", "last_sync_error"]);
-		add_erpnext_sync_action(frm);
-	});
+	frappe
+		.call({
+			method: "marketplace_integrations.api.marketplace_orders.get_erpnext_sync_status",
+			args: { marketplace_order: frm.doc.name },
+		})
+		.then((response) => {
+			const message = response.message;
+			if (message.saved && !frm.is_dirty()) {
+				// The server saved the order (new `modified`): reload the whole doc rather than
+				// patching it; the reload's refresh re-runs this check (a no-op save this time).
+				frm.reload_doc();
+				return;
+			}
+			frm.doc.erpnext_sync_status = message.status;
+			frm.doc.last_sync_error = message.last_sync_error || null;
+			// `modified` is deliberately never patched here: on a dirty form that was also saved
+			// server-side, Frappe's own "modified since you opened it" check must still fire.
+			frm.refresh_fields(["erpnext_sync_status", "last_sync_error"]);
+			add_erpnext_sync_action(frm);
+		});
 }
 
 function add_erpnext_sync_action(frm) {
 	if (frm.doc.erpnext_sales_order && frm.doc.erpnext_sync_status === "Synced") return;
 	const label = frm.doc.erpnext_sales_order ? __("Update ERPNext Order") : __("Send to ERPNext");
 	frm.add_custom_button(label, () => {
-		frappe.call({
-			method: "marketplace_integrations.api.marketplace_orders.sync_to_erpnext",
-			args: {marketplace_order: frm.doc.name},
-			freeze: true,
-			freeze_message: __("Synchronizing with ERPNext..."),
-		}).then((response) => {
-			if (!response.message.ok) {
-				// response.message.error can interpolate Talabat-sourced values
-				// (external_item_id/external_sku, ignore_xss_filter fields never
-				// sanitized server-side) - frappe.msgprint's message renders as
-				// HTML, so escape at the interpolation point per the pattern
-				// already established elsewhere in this codebase (#84).
-				frappe.msgprint({
-					message: frappe.utils.escape_html(response.message.error),
-					indicator: "red",
-					title: __("ERPNext Sync Blocked"),
-				});
-			} else if (response.message.executed_action) {
-				// Server text embeds the Sales Order name; escape as above.
-				frappe.show_alert({
-					message: frappe.utils.escape_html(response.message.executed_message || ""),
-					indicator: "green",
-				});
-			}
-			frm.reload_doc();
-		});
+		frappe
+			.call({
+				method: "marketplace_integrations.api.marketplace_orders.sync_to_erpnext",
+				args: { marketplace_order: frm.doc.name },
+				freeze: true,
+				freeze_message: __("Synchronizing with ERPNext..."),
+			})
+			.then((response) => {
+				if (!response.message.ok) {
+					// response.message.error can interpolate Talabat-sourced values
+					// (external_item_id/external_sku, ignore_xss_filter fields never
+					// sanitized server-side) - frappe.msgprint's message renders as
+					// HTML, so escape at the interpolation point per the pattern
+					// already established elsewhere in this codebase (#84).
+					frappe.msgprint({
+						message: frappe.utils.escape_html(response.message.error),
+						indicator: "red",
+						title: __("ERPNext Sync Blocked"),
+					});
+				} else if (response.message.executed_action) {
+					// Server text embeds the Sales Order name; escape as above.
+					frappe.show_alert({
+						message: frappe.utils.escape_html(response.message.executed_message || ""),
+						indicator: "green",
+					});
+				}
+				frm.reload_doc();
+			});
 	});
 }
 
@@ -726,9 +842,18 @@ function get_status_indicator(status, color_by_status) {
 // markup.
 function add_status_indicators(frm) {
 	const talabat_status = get_status_indicator(frm.doc.external_status, TALABAT_STATUS_COLORS);
-	const erpnext_sync_status = get_status_indicator(frm.doc.erpnext_sync_status, ERPNEXT_SYNC_STATUS_COLORS);
-	frm.dashboard.add_indicator(__("Talabat: {0}", [frappe.utils.escape_html(talabat_status.label)]), talabat_status.color);
-	frm.dashboard.add_indicator(__("ERPNext: {0}", [frappe.utils.escape_html(erpnext_sync_status.label)]), erpnext_sync_status.color);
+	const erpnext_sync_status = get_status_indicator(
+		frm.doc.erpnext_sync_status,
+		ERPNEXT_SYNC_STATUS_COLORS
+	);
+	frm.dashboard.add_indicator(
+		__("Talabat: {0}", [frappe.utils.escape_html(talabat_status.label)]),
+		talabat_status.color
+	);
+	frm.dashboard.add_indicator(
+		__("ERPNext: {0}", [frappe.utils.escape_html(erpnext_sync_status.label)]),
+		erpnext_sync_status.color
+	);
 }
 
 // Non-Talabat platforms (Shopify, for now) get the Financial/Fulfillment
@@ -752,10 +877,12 @@ function add_generic_status_indicator(frm) {
 }
 
 function load_item_presentation(frm) {
-	frappe.call({
-		method: "marketplace_integrations.api.marketplace_order_presentation.get_item_presentation",
-		args: { marketplace_order: frm.doc.name },
-	}).then((response) => render_item_presentation(frm, response.message));
+	frappe
+		.call({
+			method: "marketplace_integrations.api.marketplace_order_presentation.get_item_presentation",
+			args: { marketplace_order: frm.doc.name },
+		})
+		.then((response) => render_item_presentation(frm, response.message));
 }
 
 function add_order_actions(frm) {
@@ -763,17 +890,31 @@ function add_order_actions(frm) {
 	if (["RECEIVED", "UPDATE_CART"].includes(status)) {
 		frm.add_custom_button(__("Update Cart"), () => update_order(frm, "UPDATE_CART"));
 	}
-	if (!["CANCELLED", "DELIVERED", "DISPATCHED", "READY_FOR_PICKUP"].includes(status) && frm.doc.transport_type === "VENDOR_DELIVERY") {
+	if (
+		!["CANCELLED", "DELIVERED", "DISPATCHED", "READY_FOR_PICKUP"].includes(status) &&
+		frm.doc.transport_type === "VENDOR_DELIVERY"
+	) {
 		frm.add_custom_button(__("Dispatch"), () => update_order(frm, "DISPATCHED"));
 	}
-	if (!["CANCELLED", "DELIVERED", "DISPATCHED", "READY_FOR_PICKUP"].includes(status) && frm.doc.transport_type === "LOGISTICS_DELIVERY") {
+	if (
+		!["CANCELLED", "DELIVERED", "DISPATCHED", "READY_FOR_PICKUP"].includes(status) &&
+		frm.doc.transport_type === "LOGISTICS_DELIVERY"
+	) {
 		frm.add_custom_button(__("Ready for Pickup"), () => update_order(frm, "READY_FOR_PICKUP"));
 	}
-	if (!["CANCELLED", "DISPATCHED", "READY_FOR_PICKUP", "DELIVERED"].includes(status)) {
+	if (["RECEIVED", "UPDATE_CART"].includes(status)) {
 		frm.add_custom_button(__("Cancel Order"), () => {
 			frappe.prompt(
-				[{fieldname: "reason", fieldtype: "Select", label: __("Reason"), options: "CLOSED\nITEM_UNAVAILABLE\nTOO_BUSY", reqd: 1}],
-				(values) => update_order(frm, "CANCELLED", values.reason),
+				[
+					{
+						fieldname: "reason",
+						fieldtype: "Select",
+						label: __("Reason"),
+						options: "CLOSED\nITEM_UNAVAILABLE\nTOO_BUSY",
+						reqd: 1,
+					},
+				],
+				(values) => cancel_order(frm, values.reason),
 				__("Cancel Talabat Order"),
 				__("Submit")
 			);
@@ -781,42 +922,125 @@ function add_order_actions(frm) {
 	}
 }
 
+// A linked Sales Order must go through the #181 outbound service: it sets the echo-guard
+// marker that stops the platform's CANCELLED echo from reopening and cancelling a Closed
+// Sales Order.  Without a Sales Order there is nothing to guard, so the direct call stays.
+function cancel_order(frm, reason) {
+	if (!frm.doc.erpnext_sales_order) {
+		return update_order(frm, "CANCELLED", reason);
+	}
+	return frappe
+		.call({
+			method: "marketplace_integrations.api.marketplace_outbound.request_platform_cancel",
+			args: { sales_order: frm.doc.erpnext_sales_order, cancellation_reason: reason },
+			freeze: true,
+			freeze_message: __("Updating order on Talabat..."),
+		})
+		.then((response) => {
+			const result = (response && response.message) || {};
+			if (result.already_requested) {
+				frappe.show_alert({
+					message: __("Cancellation was already requested on Talabat."),
+					indicator: "orange",
+				});
+			} else if (result.refreshed === false) {
+				frappe.show_alert({
+					message: __(
+						"Talabat cancelled the order, but the order could not be refreshed. Use Refresh from Talabat."
+					),
+					indicator: "orange",
+				});
+			}
+			frm.reload_doc();
+		});
+}
+
 function update_order(frm, status, cancellation_reason) {
 	if (status === "UPDATE_CART") {
 		return show_cart_dialog(frm);
 	}
-	frappe.call({
-		method: "marketplace_integrations.api.talabat_orders.update_order",
-		args: {marketplace_order: frm.doc.name, status, cancellation_reason},
-		freeze: true,
-		freeze_message: __("Updating order on Talabat...")
-	}).then(() => frm.reload_doc());
+	frappe
+		.call({
+			method: "marketplace_integrations.api.talabat_orders.update_order",
+			args: { marketplace_order: frm.doc.name, status, cancellation_reason },
+			freeze: true,
+			freeze_message: __("Updating order on Talabat..."),
+		})
+		.then(() => frm.reload_doc());
 }
 
 function show_cart_dialog(frm) {
 	const fields = [];
 	for (const [index, row] of (frm.doc.items || []).entries()) {
-		fields.push({fieldtype: "Section Break", label: row.product_name || row.external_sku || row.external_item_id});
-		const status_options = row.external_status === "ADDITION" ? "IN_CART\nNOT_FOUND\nREPLACED\nADDITION" : "IN_CART\nNOT_FOUND\nREPLACED";
-		fields.push({fieldname: `item_${index}_status`, fieldtype: "Select", label: __("Status"), options: status_options, default: ["IN_CART", "NOT_FOUND", "REPLACED", "ADDITION"].includes(row.external_status) ? row.external_status : "IN_CART", reqd: 1});
-		fields.push({fieldname: `item_${index}_quantity`, fieldtype: "Float", label: row.pricing_type === "KG" ? __("Weight") : __("Quantity"), default: row.pricing_type === "KG" ? row.fulfilled_weight : row.fulfilled_quantity, reqd: 1});
+		fields.push({
+			fieldtype: "Section Break",
+			label: row.product_name || row.external_sku || row.external_item_id,
+		});
+		const status_options =
+			row.external_status === "ADDITION"
+				? "IN_CART\nNOT_FOUND\nREPLACED\nADDITION"
+				: "IN_CART\nNOT_FOUND\nREPLACED";
+		fields.push({
+			fieldname: `item_${index}_status`,
+			fieldtype: "Select",
+			label: __("Status"),
+			options: status_options,
+			default: ["IN_CART", "NOT_FOUND", "REPLACED", "ADDITION"].includes(row.external_status)
+				? row.external_status
+				: "IN_CART",
+			reqd: 1,
+		});
+		fields.push({
+			fieldname: `item_${index}_quantity`,
+			fieldtype: "Float",
+			label: row.pricing_type === "KG" ? __("Weight") : __("Quantity"),
+			default: row.pricing_type === "KG" ? row.fulfilled_weight : row.fulfilled_quantity,
+			reqd: 1,
+		});
 	}
-	fields.push({fieldtype: "Section Break", label: __("Add Replacement or Item")});
-	fields.push({fieldname: "new_sku", fieldtype: "Data", label: __("New Item SKU")});
-	fields.push({fieldname: "new_status", fieldtype: "Select", label: __("New Item Status"), options: "ADDITION\nIN_CART", default: "ADDITION"});
-	fields.push({fieldname: "new_replaced_id", fieldtype: "Data", label: __("Replace Item ID"), depends_on: "eval:doc.new_status == 'IN_CART'"});
-	fields.push({fieldname: "new_quantity", fieldtype: "Float", label: __("New Quantity")});
-	const dialog = new frappe.ui.Dialog({title: __("Update Talabat Cart"), fields, primary_action_label: __("Send to Talabat"), primary_action(values) {
-		const items = build_cart_update_items(frm.doc.items || [], values);
-		dialog.hide();
-		frappe.call({method: "marketplace_integrations.api.talabat_orders.update_order", args: {marketplace_order: frm.doc.name, status: "UPDATE_CART", items: JSON.stringify(items)}, freeze: true, freeze_message: __("Updating cart on Talabat...")}).then(() => frm.reload_doc());
-	}});
+	fields.push({ fieldtype: "Section Break", label: __("Add Replacement or Item") });
+	fields.push({ fieldname: "new_sku", fieldtype: "Data", label: __("New Item SKU") });
+	fields.push({
+		fieldname: "new_status",
+		fieldtype: "Select",
+		label: __("New Item Status"),
+		options: "ADDITION\nIN_CART",
+		default: "ADDITION",
+	});
+	fields.push({
+		fieldname: "new_replaced_id",
+		fieldtype: "Data",
+		label: __("Replace Item ID"),
+		depends_on: "eval:doc.new_status == 'IN_CART'",
+	});
+	fields.push({ fieldname: "new_quantity", fieldtype: "Float", label: __("New Quantity") });
+	const dialog = new frappe.ui.Dialog({
+		title: __("Update Talabat Cart"),
+		fields,
+		primary_action_label: __("Send to Talabat"),
+		primary_action(values) {
+			const items = build_cart_update_items(frm.doc.items || [], values);
+			dialog.hide();
+			frappe
+				.call({
+					method: "marketplace_integrations.api.talabat_orders.update_order",
+					args: {
+						marketplace_order: frm.doc.name,
+						status: "UPDATE_CART",
+						items: JSON.stringify(items),
+					},
+					freeze: true,
+					freeze_message: __("Updating cart on Talabat..."),
+				})
+				.then(() => frm.reload_doc());
+		},
+	});
 	dialog.show();
 }
 
 function build_cart_update_items(rows, values) {
 	const items = rows.map((row, index) => {
-		const pricing = {pricing_type: row.pricing_type};
+		const pricing = { pricing_type: row.pricing_type };
 		const item_status = values[`item_${index}_status`];
 		if (!["NOT_FOUND", "REPLACED"].includes(item_status)) {
 			if (row.pricing_type === "KG") pricing.weight = values[`item_${index}_quantity`];
@@ -828,7 +1052,7 @@ function build_cart_update_items(rows, values) {
 			status: item_status,
 			pricing,
 			...(item_status === "IN_CART" && row.replaced_external_item_id
-				? {replaced_id: row.replaced_external_item_id}
+				? { replaced_id: row.replaced_external_item_id }
 				: {}),
 		};
 	});
@@ -836,9 +1060,9 @@ function build_cart_update_items(rows, values) {
 		items.push({
 			sku: values.new_sku,
 			status: values.new_status || "ADDITION",
-			pricing: {pricing_type: "UNIT", quantity: values.new_quantity || 0},
+			pricing: { pricing_type: "UNIT", quantity: values.new_quantity || 0 },
 			...(values.new_status === "IN_CART" && values.new_replaced_id
-				? {replaced_id: values.new_replaced_id}
+				? { replaced_id: values.new_replaced_id }
 				: {}),
 		});
 	}
@@ -847,7 +1071,9 @@ function build_cart_update_items(rows, values) {
 
 if (typeof module !== "undefined") {
 	module.exports = {
+		add_order_actions,
 		build_cart_update_items,
+		cancel_order,
 		get_status_indicator,
 		TALABAT_STATUS_COLORS,
 		ERPNEXT_SYNC_STATUS_COLORS,
@@ -883,7 +1109,9 @@ function render_item_presentation(frm, presentation) {
 	promotion_note.textContent = promotion_status_note(frm.doc.promotion_status);
 	wrapper.append(promotion_note);
 
-	const by_item_id = new Map((presentation.items || []).map((item) => [item.external_item_id, item]));
+	const by_item_id = new Map(
+		(presentation.items || []).map((item) => [item.external_item_id, item])
+	);
 	const table_wrapper = document.createElement("div");
 	table_wrapper.className = "table-responsive";
 	const table = document.createElement("table");
@@ -891,7 +1119,9 @@ function render_item_presentation(frm, presentation) {
 	table.setAttribute("aria-label", __("Talabat order items"));
 	const caption = document.createElement("caption");
 	caption.className = "sr-only";
-	caption.textContent = __("Talabat order items with fulfillment, live mapping, and price comparison");
+	caption.textContent = __(
+		"Talabat order items with fulfillment, live mapping, and price comparison"
+	);
 	table.append(caption);
 
 	const headers = [
@@ -923,14 +1153,23 @@ function render_item_presentation(frm, presentation) {
 		const item_row = document.createElement("tr");
 		append_table_cell(item_row, row.product_name || __("Unnamed item"));
 		append_table_cell(item_row, display_value(row.external_sku));
-		append_status_cell(item_row, get_status_indicator(row.external_status, TALABAT_STATUS_COLORS));
+		append_status_cell(
+			item_row,
+			get_status_indicator(row.external_status, TALABAT_STATUS_COLORS)
+		);
 		append_mapping_cell(item_row, mapping.mapped_item);
 		append_table_cell(item_row, display_value(row.replaced_external_item_id));
 		append_table_cell(item_row, display_value(row.pricing_type));
 		append_table_cell(item_row, fulfillment_value(row, "original"));
 		append_table_cell(item_row, fulfillment_value(row, "fulfilled"));
-		append_table_cell(item_row, price_value(row.original_unit_price, row.original_total_price));
-		append_table_cell(item_row, price_value(row.fulfilled_unit_price, row.fulfilled_total_price));
+		append_table_cell(
+			item_row,
+			price_value(row.original_unit_price, row.original_total_price)
+		);
+		append_table_cell(
+			item_row,
+			price_value(row.fulfilled_unit_price, row.fulfilled_total_price)
+		);
 		append_table_cell(
 			item_row,
 			price_value(
@@ -944,7 +1183,11 @@ function render_item_presentation(frm, presentation) {
 			item_row,
 			price_difference_text(mapping.current_catalog_price, row.original_list_price)
 		);
-		append_promotion_cell(item_row, parse_promotions(row.promotions), frm.doc.promotion_status);
+		append_promotion_cell(
+			item_row,
+			parse_promotions(row.promotions),
+			frm.doc.promotion_status
+		);
 		tbody.append(item_row);
 	}
 	table.append(tbody);
@@ -995,9 +1238,10 @@ function fulfillment_value(row, prefix) {
 	const value = row.pricing_type === "KG" ? row[`${prefix}_weight`] : row[`${prefix}_quantity`];
 	const unit = row.pricing_type === "KG" ? __("Weight") : __("Quantity");
 	const weighted_pieces = row[`${prefix}_weighted_pieces`];
-	const pieces = weighted_pieces === undefined || weighted_pieces === null || weighted_pieces === ""
-		? ""
-		: `; ${__("Weighted pieces")}: ${weighted_pieces}`;
+	const pieces =
+		weighted_pieces === undefined || weighted_pieces === null || weighted_pieces === ""
+			? ""
+			: `; ${__("Weighted pieces")}: ${weighted_pieces}`;
 	return `${unit}: ${display_value(value)}${pieces}`;
 }
 
@@ -1035,7 +1279,9 @@ function promotion_lines(promotions, promotion_status) {
 		// skipped rather than throwing and breaking the entire item table.
 		if (typeof promotion !== "object" || promotion === null) continue;
 		lines.push(
-			`${display_value(promotion.name)} (${display_value(promotion.type)}): ${display_value(promotion.discount_amount)}`
+			`${display_value(promotion.name)} (${display_value(promotion.type)}): ${display_value(
+				promotion.discount_amount
+			)}`
 		);
 		const sponsorships = Array.isArray(promotion.sponsorships) ? promotion.sponsorships : [];
 		for (const sponsorship of sponsorships) {
@@ -1045,7 +1291,11 @@ function promotion_lines(promotions, promotion_status) {
 			// Only Talabat's own documented VENDOR sponsorship value gets the
 			// explicit "VENDOR-sponsored" label; any other sponsor value is
 			// shown as-is rather than guessing it means PLATFORM/other funding.
-			lines.push(sponsor === "VENDOR" ? __("VENDOR-sponsored amount: {0}", [amount]) : `${sponsor}: ${amount}`);
+			lines.push(
+				sponsor === "VENDOR"
+					? __("VENDOR-sponsored amount: {0}", [amount])
+					: `${sponsor}: ${amount}`
+			);
 		}
 	}
 	return lines;
@@ -1069,7 +1319,9 @@ function catalog_price_cell_text(mapping) {
 	if (typeof mapping.current_catalog_price === "number") {
 		return mapping.current_catalog_price.toFixed(2);
 	}
-	return `${__("Catalog Price Unavailable")}: ${display_value(mapping.catalog_price_unavailable_reason)}`;
+	return `${__("Catalog Price Unavailable")}: ${display_value(
+		mapping.catalog_price_unavailable_reason
+	)}`;
 }
 
 // Never labeled "discount" - #84 requires this only when Talabat data

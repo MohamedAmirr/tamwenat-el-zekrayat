@@ -7,7 +7,10 @@ import frappe
 from frappe.utils import cstr
 
 from marketplace_integrations.integrations.talabat.order_mapper import normalize_order
-from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
+from marketplace_integrations.services.marketplace_orders import (
+	rollback_to_savepoint,
+	upsert_marketplace_order,
+)
 from marketplace_integrations.services.sales_order_sync_debounce import bump_sync_debounce
 
 
@@ -27,7 +30,7 @@ def process_order_event(marketplace_account, payload):
 		# rolls its transaction back on failure, hence the commit). The failed
 		# upsert is rolled back first so that commit cannot persist its
 		# partial writes.
-		_rollback_to_savepoint(savepoint)
+		rollback_to_savepoint(savepoint, "Talabat order import: rollback failed")
 		order_id = cstr((payload or {}).get("order_id") if isinstance(payload, dict) else "").strip()
 		log_order_import_failure(marketplace_account, order_id, str(exc), "Talabat Webhook", commit=True)
 		raise
@@ -73,21 +76,7 @@ def log_order_import_failure(marketplace_account, order_id, error, trigger_sourc
 		if commit:
 			frappe.db.commit()
 	except Exception:
-		_rollback_to_savepoint(savepoint)
+		rollback_to_savepoint(savepoint, "Talabat order import: rollback failed")
 		frappe.log_error(
 			title="Talabat order import: failed to write failure log", message=frappe.get_traceback()
 		)
-
-
-def _rollback_to_savepoint(savepoint):
-	"""Roll back to ``savepoint``; if that itself fails (a deadlock or lock
-	wait timeout already rolled the whole transaction back, so the savepoint
-	no longer exists) fall back to a full rollback. Never raises, so it can't
-	mask the exception being handled."""
-	try:
-		frappe.db.rollback(save_point=savepoint)
-	except Exception:
-		try:
-			frappe.db.rollback()
-		except Exception:
-			frappe.log_error(title="Talabat order import: rollback failed", message=frappe.get_traceback())

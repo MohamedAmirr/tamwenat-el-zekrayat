@@ -524,3 +524,39 @@ class IntegrationTestMarketplaceOrder(IntegrationTestCase):
 
         unit_line = next(row for row in order.items if row.external_item_id == "line-unit-001")
         self.assertEqual(frappe.parse_json(unit_line.promotions)[0]["name"], "Buy 2 <get 1 free>")
+
+    def test_a_stale_copy_saved_after_the_marker_was_set_keeps_the_marker(self):
+        account = self.make_account()
+        order = upsert_marketplace_order(account.name, self.sample_order())
+        stale = frappe.get_doc("Marketplace Order", order.name)
+        marker = "2026-09-01 10:00:00"
+        frappe.db.set_value("Marketplace Order", order.name, "outbound_cancelled_on", marker, update_modified=False)
+
+        stale.save()
+
+        self.assertEqual(
+            frappe.utils.get_datetime(frappe.db.get_value("Marketplace Order", order.name, "outbound_cancelled_on")),
+            frappe.utils.get_datetime(marker),
+        )
+
+    def test_an_order_that_never_had_the_marker_is_unaffected(self):
+        account = self.make_account()
+        order = upsert_marketplace_order(account.name, self.sample_order())
+        self.assertIsNone(order.outbound_cancelled_on)
+
+        order.save()
+
+        self.assertIsNone(frappe.db.get_value("Marketplace Order", order.name, "outbound_cancelled_on"))
+
+    def test_the_marker_can_still_be_set_by_a_save_and_the_helper_clears_it(self):
+        from marketplace_integrations.services.marketplace_outbound import clear_outbound_cancelled_marker
+
+        account = self.make_account()
+        order = upsert_marketplace_order(account.name, self.sample_order())
+        order.outbound_cancelled_on = "2026-09-01 10:00:00"
+        order.save()
+        self.assertIsNotNone(frappe.db.get_value("Marketplace Order", order.name, "outbound_cancelled_on"))
+
+        clear_outbound_cancelled_marker(order.name)
+
+        self.assertIsNone(frappe.db.get_value("Marketplace Order", order.name, "outbound_cancelled_on"))

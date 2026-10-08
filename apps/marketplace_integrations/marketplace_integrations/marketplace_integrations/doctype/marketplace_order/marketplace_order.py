@@ -39,6 +39,13 @@ class MarketplaceOrder(Document):
 	def before_save(self):
 		self.external_order_id = cstr(self.external_order_id).strip()
 		self.order_identity_key = compute_order_identity_key(self.marketplace_account, self.external_order_id)
+		# The echo-guard marker is one-way (#181): it is written with update_modified=False,
+		# so a copy loaded before it was set can still be saved and would write NULL back,
+		# making the planner reopen and cancel the Closed Sales Order.  Clearing it goes
+		# through services.marketplace_outbound.clear_outbound_cancelled_marker().
+		before = self.get_doc_before_save()
+		if before and before.get("outbound_cancelled_on") and not self.outbound_cancelled_on:
+			self.outbound_cancelled_on = before.outbound_cancelled_on
 		if not self.flags.skip_sync_status_update:
 			from marketplace_integrations.services.sales_order_sync import (
 				set_sync_status_from_current_snapshot,
