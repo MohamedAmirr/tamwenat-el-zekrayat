@@ -4,7 +4,7 @@ Covers the Noon Sales Order eligibility/sync policy and FBPI shipment
 fulfillment (create/cancel/add-AWB/mark-out-of-stock/shipment invoice) built
 in #146, plus the FBPI return reference lookup/evidence capture built in
 #153 (see "Returns: FBPI return reference lookup and evidence (#153)"
-below). The reconciliation Script Report remains out of scope — see
+below). The reconciliation Script Report is not built (findings are Needs Attention rows, #164) — see
 "Out of scope" at the end of each section for what is and isn't covered.
 
 ## What this ships
@@ -155,8 +155,8 @@ What surfaces this:
   LINKED order's evidence fingerprint changed (units cancelled/out of stock/
   shipped, shipment membership), and `integrations/noon/order_reconciliation.py`
   turns the per-unit states into reconciliation evidence (full cancellation,
-  per-line fulfillment started, unknown stage for `UNSPECIFIED`). `Noon Return`
-  rows are not consumed yet (deferred); an own `Mark Out of Stock` is not
+  per-line fulfillment started, unknown stage for `UNSPECIFIED`). A `Noon Return`
+  linked to the order is `return` evidence (#164); an own `Mark Out of Stock` is not
   distinguishable from a customer cancel. The ERP side is still corrected
   manually.
 - Immediately (a linked, submitted order with no eligible unit left yields an empty snapshot for the reconciliation planner instead of raising `SyncBlocker`; a never-synced order still raises): the next poll's save runs `before_save` →
@@ -166,8 +166,17 @@ What surfaces this:
 - The hourly Noon order import bumps a changed linked order, and the
   platform-neutral hourly `sweep_stuck_sales_order_reconciliations` (#180)
   re-checks stuck (Modified After Sync / Sync Error) or Closed linked orders
-  with trigger source `Scheduled Sweep`. The reconciliation Script Report
-  stays deferred to the follow-up issue.
+  with trigger source `Scheduled Sweep`. Needs Attention (#164) lists
+  shipments stuck in Pending longer than `NOON_PENDING_SHIPMENT_STUCK_HOURS`
+  (1 hour, a placeholder with no documented basis; measured from the shipment
+  row's creation, in the existing per-order Noon Fulfillment row; Cancelled and
+  Discarded are excluded) and Noon Returns with no Marketplace Order
+  (`Noon Return Unlinked`). A Noon Return linked to an order with a Sales Order
+  re-queues its sync (debounce) and ends Modified After Sync with the
+  compensating-transaction message; no Sales Order is changed. A return linked
+  before the Sales Order exists (e.g. during Sync Error) is caught when that
+  Sales Order is first created: the order ends Modified After Sync with the same
+  message instead of Synced.
 - The Desk UI shows a confirmation warning before `Mark Out of Stock` and
   `Cancel Shipment` when a submitted Sales Order (`erpnext_sales_order`) is
   already linked, but this is advisory only — it does not block the action.
@@ -324,7 +333,7 @@ items have been checked against a real Noon account.
 - Any ERPNext-side correction from a return (Credit Note, Sales Invoice
   adjustment, Payment Entry, stock ledger entry, or Sales Order change) —
   this issue is pure evidence capture only.
-- The reconciliation Script Report that would surface this evidence for
-  manual action (deferred to a follow-up issue).
+- A separate reconciliation report: the evidence surfaces through Needs
+  Attention and the planner instead (#164).
 - Any write-path Noon call (e.g. acknowledging or resolving a return) —
   `ListReturnReferences` is the only endpoint this issue calls.

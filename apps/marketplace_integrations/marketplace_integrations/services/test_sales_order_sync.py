@@ -3318,6 +3318,63 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(frappe.db.get_value("Sales Order", so_name, "docstatus"), 1)
 		self.assertEqual(frappe.db.get_value("Sales Order Item", {"parent": so_name}, "qty"), 2)
 
+	COMPENSATING_MESSAGE = "Marketplace return or refund evidence needs a compensating ERP transaction."
+
+	def _link_noon_return(self, account, order):
+		noon_return = frappe.get_doc(
+			{
+				"doctype": "Noon Return",
+				"marketplace_account": account.name,
+				"purchase_item_nr": f"PI-SO-SYNC-{self.suffix}",
+				"order_nr": "ORD-NOON",
+				"found_via": "Manual Lookup",
+				"first_seen_on": frappe.utils.now_datetime(),
+				"last_seen_on": frappe.utils.now_datetime(),
+				"marketplace_order": order.name,
+			}
+		).insert()
+		self.addCleanup(
+			frappe.delete_doc, "Noon Return", noon_return.name, force=True, ignore_permissions=True
+		)
+		return noon_return
+
+	def test_noon_return_on_a_synced_order_sets_modified_after_sync_without_changing_the_sales_order(self):
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(account)
+		first = sync_sales_order(order.name)
+		self.assertTrue(first["ok"], first.get("error"))
+		so_before = frappe.db.get_value(
+			"Sales Order", first["sales_order"], ["docstatus", "modified"], as_dict=True
+		)
+
+		self._link_noon_return(account, order)
+		sync_sales_order(order.name)
+
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.last_sync_error, self.COMPENSATING_MESSAGE)
+		self.assertEqual(
+			frappe.db.get_value("Sales Order", first["sales_order"], ["docstatus", "modified"], as_dict=True),
+			so_before,
+		)
+		self.assertEqual(frappe.db.get_value("Sales Order Item", {"parent": first["sales_order"]}, "qty"), 2)
+
+	def test_noon_return_linked_before_the_sales_order_exists_is_not_reported_synced(self):
+		"""#164: a return linked while the order has no Sales Order bumps no
+		re-plan, so the first (fresh-insert) sync must itself flag it."""
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(account)
+		self._link_noon_return(account, order)
+
+		result = sync_sales_order(order.name)
+
+		order.reload()
+		self.assertTrue(order.erpnext_sales_order)
+		self.assertEqual(result["sales_order"], order.erpnext_sales_order)
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.last_sync_error, self.COMPENSATING_MESSAGE)
+		self.assertEqual(frappe.db.get_value("Sales Order", order.erpnext_sales_order, "docstatus"), 1)
+
 	# -------------------------------------------------------------------
 	# #178 part 3: Noon evidence + snapshot builder for a linked order.
 	# -------------------------------------------------------------------

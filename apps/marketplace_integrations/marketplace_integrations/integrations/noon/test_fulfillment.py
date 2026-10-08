@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
-from frappe.utils import nowdate
+from frappe.utils import add_to_date, nowdate
 
 from marketplace_integrations.integrations.noon import fulfillment
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
@@ -214,6 +214,20 @@ class IntegrationTestNoonCreateShipmentRequestPath(IntegrationTestNoonFulfillmen
 		self.assertEqual(self.order.noon_shipments[0].status, "Pending")
 		self.assertEqual(self.order.noon_shipments[0].awb_source, "Noon")
 		self.assertEqual([row.mp_item_nr for row in self.order.noon_shipment_units], ["1"])
+
+	def test_new_shipment_row_creation_is_its_own_not_the_orders_import_time(self):
+		frappe.db.set_value("Marketplace Order", self.order.name, "creation", add_to_date(None, hours=-5))
+		self.addCleanup(
+			frappe.delete_doc, "Marketplace Order", self.order.name, force=True, ignore_permissions=True
+		)
+		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
+			enqueue.return_value = MagicMock()
+			fulfillment.create_shipment(self.order.name, ["1"], "Noon")
+
+		shipment_creation = frappe.db.get_value(
+			"Marketplace Order Shipment", {"parent": self.order.name}, "creation"
+		)
+		self.assertGreater(shipment_creation, add_to_date(None, hours=-1))
 
 	def test_own_courier_writes_a_pending_awb_row(self):
 		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:

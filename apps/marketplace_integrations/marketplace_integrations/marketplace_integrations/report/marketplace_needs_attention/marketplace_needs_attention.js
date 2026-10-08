@@ -15,6 +15,7 @@ const MARKETPLACE_ATTENTION_PROBLEM_TYPES = [
 	"Fulfillment Error",
 	"Webhook Retries Exhausted",
 	"Noon Fulfillment",
+	"Noon Return Unlinked",
 ];
 
 if (typeof frappe !== "undefined") {

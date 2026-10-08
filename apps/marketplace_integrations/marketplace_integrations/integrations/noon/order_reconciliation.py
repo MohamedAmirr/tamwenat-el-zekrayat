@@ -3,10 +3,11 @@
 
 """Noon reconciliation evidence for a Marketplace Order (#178 part 3).
 
-``build_evidence()`` is pure: it reads only the Marketplace Order document, its
-``noon_shipments``/``noon_shipment_units`` child tables and the per-unit
-``latest_payload.items[]`` (the only place Noon's per-physical-unit ``mp_status``
-/ ``integration_status`` / ``mp_item_nr`` live, #145).  No Noon call, no write.
+``build_evidence()`` reads the Marketplace Order document (plus one Noon Return
+existence check), its ``noon_shipments``/``noon_shipment_units`` child tables and
+the per-unit ``latest_payload.items[]`` (the only place Noon's per-physical-unit
+``mp_status`` / ``integration_status`` / ``mp_item_nr`` live, #145).  No Noon
+call, no write.
 
 Units are judged one by one and aggregated per Sales Order line key
 ``sku:<partner_sku>`` (the planner snapshot's ``external_item_id`` - not the
@@ -26,11 +27,14 @@ status-grouped Marketplace Order Item id):
 - an unrecognized status (``UNSPECIFIED`` or a future value; Noon documents no
   meaning for it) makes the stage unknown instead of being guessed.
 
-``Noon Return`` rows are deliberately not consumed yet: ``return`` evidence is
-never produced here (deferred).  Own ``UpdateOrder`` out-of-stock marks cannot be
-told apart from a customer cancellation with the data stored today.
+A ``Noon Return`` linked to the order (``marketplace_order``, #153/#164) makes
+``return`` evidence, which the planner turns into the compensating-transaction
+outcome.  This is the one DB read here (a single ``exists``).  Own
+``UpdateOrder`` out-of-stock marks cannot be told apart from a customer
+cancellation with the data stored today.
 """
 
+import frappe
 from frappe import _
 from frappe.utils import cstr
 
@@ -62,16 +66,25 @@ def _started_shipment_mp_item_nrs(order):
 	}
 
 
+def _has_noon_return(order):
+	order_name = getattr(order, "name", None)
+	return bool(order_name and frappe.db.exists("Noon Return", {"marketplace_order": order_name}))
+
+
 def build_evidence(order):
 	units = [unit for unit in _latest_payload_items(order) if isinstance(unit, dict)]
+	has_return = _has_noon_return(order)
 	if not units:
-		return {
+		evidence = {
 			"source": "marketplace",
 			"lifecycle_permits_change": None,
 			"lifecycle_reason": _(
 				"The Noon order has no per-unit item data, so it is unknown whether the order can still change."
 			),
 		}
+		if has_return:
+			evidence["return"] = True
+		return evidence
 
 	in_started_shipment = _started_shipment_mp_item_nrs(order)
 	started = {}
@@ -98,6 +111,8 @@ def build_evidence(order):
 		started[line_key] = started.get(line_key, False) or unit_started
 
 	evidence = {"source": "marketplace", "fulfillment_started": started}
+	if has_return:
+		evidence["return"] = True
 	if has_unknown:
 		evidence["lifecycle_permits_change"] = None
 		evidence["lifecycle_reason"] = _(

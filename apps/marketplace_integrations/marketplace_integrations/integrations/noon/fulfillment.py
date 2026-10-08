@@ -284,6 +284,10 @@ def create_shipment(marketplace_order_name, mp_item_nrs, awb_source, courier=Non
 			"integration_shipment_nr": integration_shipment_nr,
 			"status": "Pending",
 			"awb_source": awb_source,
+			# Explicit: an appended child row without `creation` inherits the
+			# PARENT's creation on save, which would make the #164 stuck-Pending
+			# age count from the order's import time instead of this shipment's.
+			"creation": now_datetime(),
 		},
 	)
 	for mp_item_nr in mp_item_nrs:
