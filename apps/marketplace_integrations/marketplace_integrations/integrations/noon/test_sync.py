@@ -9,6 +9,7 @@ from marketplace_integrations.integrations.noon.sync import persist_outcomes, se
 
 class IntegrationTestNoonSyncState(IntegrationTestCase):
 	def setUp(self):
+		self._accounts = []
 		self.account = self.make_account()
 		item_code = f"TEST-NOON-{frappe.generate_hash(length=8)}"
 		self.item = frappe.get_doc(
@@ -29,6 +30,16 @@ class IntegrationTestNoonSyncState(IntegrationTestCase):
 			}
 		).insert()
 
+	def tearDown(self):
+		# persist_outcomes() commits, so the class-level rollback no longer
+		# covers these rows. Deleting an account does not delete its connection.
+		frappe.db.delete("Marketplace Product Mapping", {"name": self.mapping.name})
+		frappe.delete_doc("Item", self.item.name, ignore_permissions=True, force=True)
+		for account in self._accounts:
+			frappe.delete_doc("Marketplace Account", account.name, ignore_permissions=True, force=True)
+			frappe.delete_doc("Noon Connection", account.connection, ignore_permissions=True, force=True)
+		frappe.db.commit()
+
 	def make_account(self):
 		project = f"test-noon-{frappe.generate_hash(length=10)}"
 		connection = frappe.get_doc(
@@ -41,7 +52,7 @@ class IntegrationTestNoonSyncState(IntegrationTestCase):
 				"environment": "Static Sandbox",
 			}
 		).insert()
-		return frappe.get_doc(
+		account = frappe.get_doc(
 			{
 				"doctype": "Marketplace Account",
 				"account_name": project,
@@ -51,6 +62,8 @@ class IntegrationTestNoonSyncState(IntegrationTestCase):
 				"noon_country_code": "ae",
 			}
 		).insert()
+		self._accounts.append(account)
+		return account
 
 	def test_only_exact_enabled_mapping_and_account_resolve(self):
 		self.assertEqual(
