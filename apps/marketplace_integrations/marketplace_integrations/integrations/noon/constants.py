@@ -67,3 +67,8 @@ AWB_SCAN_LOOKBACK_DAYS = 30
 # #153 review finding #4: Noon's ListReturnReferences contract caps
 # merchant_codes at 200 items.
 MERCHANT_CODES_MAX = 200
+
+# #164: Needs Attention flags a shipment row still in Pending (CreateShipment
+# not yet sent or not yet confirmed) longer than this, measured from the
+# shipment row's creation. 1 hour is a placeholder with no documented basis.
+NOON_PENDING_SHIPMENT_STUCK_HOURS = 1

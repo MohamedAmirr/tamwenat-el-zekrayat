@@ -3,11 +3,13 @@
 
 """Noon FBPI return reference lookup and evidence (#153).
 
-Pure evidence capture: this module never creates a Credit Note, Sales
+Evidence capture only: this module never creates a Credit Note, Sales
 Invoice, Payment Entry, GL entry, stock ledger entry, or touches a Sales
 Order. It only calls Noon's ``ListReturnReferences`` and records what Noon
 returns, linking it to an existing ``Marketplace Order`` only on an exact
-``order_nr`` match.
+``order_nr`` match. (#164) A newly linked return on an order that already
+has a Sales Order also re-queues that order's sync via the debounce, so the
+planner sees the return evidence.
 
 **Documented provisional assumptions, not confirmed against a real Noon
 account (carry into the release-doc verification checklist, not blocking
@@ -49,6 +51,7 @@ from marketplace_integrations.integrations.noon.constants import (
 from marketplace_integrations.marketplace_integrations.doctype.noon_return.noon_return import (
 	compute_return_identity_key,
 )
+from marketplace_integrations.services.sales_order_sync_debounce import bump_sync_debounce
 
 RQ_JOB_PREFIX = "marketplace-noon-return"
 
@@ -343,9 +346,21 @@ def upsert_return_item(account, item, found_via):
 		doc.merchant_code = merchant_code
 		doc.references = references
 		doc.found_via = found_via
+		previous_order = doc.marketplace_order
 		doc.marketplace_order = marketplace_order
 		doc.last_seen_on = now
 		doc.save(ignore_permissions=True)
+		# #164: a return newly linked to an order that already has a Sales Order is
+		# planner evidence, so re-plan that order. A repeat sighting of an unchanged
+		# link (the daily AWB scan) does not re-bump. Same transaction as the save.
+		if (
+			marketplace_order
+			and marketplace_order != previous_order
+			and frappe.db.get_value("Marketplace Order", marketplace_order, "erpnext_sales_order")
+		):
+			bump_sync_debounce(
+				marketplace_order, "Manual" if found_via == "Manual Lookup" else "Scheduled Reconciliation"
+			)
 		frappe.db.commit()
 		return doc
 

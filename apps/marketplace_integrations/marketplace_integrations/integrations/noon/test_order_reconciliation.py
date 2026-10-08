@@ -9,10 +9,17 @@ they appear in ``latest_payload.items[]``.
 """
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from frappe.tests import UnitTestCase
+import frappe
+from frappe.tests import IntegrationTestCase, UnitTestCase
 
-from marketplace_integrations.integrations.noon.order_reconciliation import build_evidence
+from marketplace_integrations.integrations.noon.order_reconciliation import (
+	_has_noon_return,
+)
+from marketplace_integrations.integrations.noon.order_reconciliation import (
+	build_evidence as _build_evidence,
+)
 from marketplace_integrations.services.sales_order_reconciliation import (
 	CANCEL_ORDER,
 	NEEDS_ATTENTION,
@@ -27,6 +34,13 @@ ACKNOWLEDGED = "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED"
 OUT_OF_STOCK = "INTEGRATION_ITEM_STATUS_OUT_OF_STOCK"
 SHIPPED = "INTEGRATION_ITEM_STATUS_SHIPPED"
 UNSPECIFIED = "INTEGRATION_ITEM_STATUS_UNSPECIFIED"
+HAS_RETURN = "marketplace_integrations.integrations.noon.order_reconciliation._has_noon_return"
+
+
+def build_evidence(order, has_return=False):
+	"""Pure-logic tests never touch the DB: the one Noon Return lookup is stubbed."""
+	with patch(HAS_RETURN, return_value=has_return):
+		return _build_evidence(order)
 
 
 def _unit(mp_item_nr, sku="SKU-A", mp_status=CONFIRMED, integration_status=ACKNOWLEDGED):
@@ -41,6 +55,7 @@ def _unit(mp_item_nr, sku="SKU-A", mp_status=CONFIRMED, integration_status=ACKNO
 def _order(units, shipments=(), shipment_units=()):
 	"""``shipments``: ``[(integration_shipment_nr, status)]``; ``shipment_units``: ``[(shipment_nr, mp_item_nr)]``."""
 	return SimpleNamespace(
+		name="MO-164",
 		platform="Noon",
 		latest_payload={"items": units},
 		noon_shipments=[
@@ -172,12 +187,26 @@ class UnitTestNoonOrderReconciliation(UnitTestCase):
 				self.assertIsNone(evidence["lifecycle_permits_change"])
 				self.assertNotIn("fulfillment_started", evidence)
 
-	def test_noon_never_produces_return_or_refund_evidence_yet(self):
+	def test_noon_never_produces_refund_evidence(self):
 		for units in ([_unit("1")], [_unit("1", mp_status=CANCELLED, integration_status=SHIPPED)]):
 			evidence = build_evidence(_order(units))
 
-			self.assertNotIn("return", evidence)
 			self.assertNotIn("refund", evidence)
+
+	def test_order_without_a_noon_return_has_no_return_evidence(self):
+		for units in ([_unit("1")], [_unit("1", mp_status=CANCELLED)], []):
+			with self.subTest(units=len(units)):
+				self.assertNotIn("return", build_evidence(_order(units)))
+
+	def test_a_linked_noon_return_is_return_evidence_whatever_the_unit_state(self):
+		for units in (
+			[_unit("1")],
+			[_unit("1", mp_status=CANCELLED)],
+			[_unit("1", integration_status=UNSPECIFIED)],
+			[],
+		):
+			with self.subTest(units=len(units)):
+				self.assertIs(build_evidence(_order(units), has_return=True)["return"], True)
 
 	def test_adapter_does_not_mutate_the_order(self):
 		order = _order([_unit("1")], [("S-1", "Created")], [("S-1", "1")])
@@ -261,7 +290,28 @@ class UnitTestNoonEvidenceThroughThePlanner(UnitTestCase):
 
 		self.assertEqual(result["outcome"], UNSUPPORTED_COMPENSATING_TRANSACTION)
 
-	def test_no_return_evidence_comes_from_noon_yet(self):
-		evidence = build_evidence(_order([_unit("1", mp_status=CANCELLED, integration_status=SHIPPED)]))
+	def test_a_noon_return_on_a_synced_order_is_a_compensating_transaction(self):
+		evidence = build_evidence(_order([_unit("1")]), has_return=True)
 
-		self.assertNotIn("return", evidence)
+		# Nothing delivered or billed: return evidence still always needs a compensating
+		# transaction, and the plan never edits the Sales Order.
+		result = plan(self._snapshot(2), self._snapshot(2), evidence, self._erp_state())
+
+		self.assertEqual(result["outcome"], UNSUPPORTED_COMPENSATING_TRANSACTION)
+
+	def test_without_a_noon_return_the_same_order_is_no_action(self):
+		result = plan(
+			self._snapshot(2), self._snapshot(2), build_evidence(_order([_unit("1")])), self._erp_state()
+		)
+
+		self.assertEqual(result["outcome"], NO_ACTION)
+
+
+class IntegrationTestNoonReturnLookup(IntegrationTestCase):
+	def test_return_evidence_is_looked_up_by_the_marketplace_order_link(self):
+		for found in ("NOONRET-00001", None):
+			with self.subTest(found=found):
+				with patch("frappe.db.exists", return_value=found) as exists:
+					self.assertIs(_has_noon_return(SimpleNamespace(name="MO-164")), bool(found))
+
+				exists.assert_called_once_with("Noon Return", {"marketplace_order": "MO-164"})

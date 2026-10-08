@@ -42,8 +42,12 @@ Problem sources (``problem_type``):
   blocks any further attempt), so it is NOT counted by get_attention_counts()
   and never drives the account level.
 - Noon Fulfillment: ONE rollup row per Noon order (shipment Error / Cancel
-  Pending / invoice upload Error, or units pending Out of Stock). No age
-  threshold is applied.
+  Pending / invoice upload Error, or units pending Out of Stock), plus (#164)
+  shipments stuck in Pending longer than NOON_PENDING_SHIPMENT_STUCK_HOURS,
+  measured from the shipment row's creation. The Error / Cancel Pending /
+  invoice error / Out of Stock parts have no age threshold.
+- Noon Return Unlinked (#164): one row per Noon Return with no Marketplace
+  Order (no exact order_nr match, see integrations/noon/returns.py).
 """
 
 import json
@@ -51,8 +55,9 @@ from datetime import datetime
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, flt, get_datetime
+from frappe.utils import add_to_date, cstr, flt, get_datetime, now_datetime
 
+from marketplace_integrations.integrations.noon.constants import NOON_PENDING_SHIPMENT_STUCK_HOURS
 from marketplace_integrations.integrations.shopify.webhooks import MAX_WEBHOOK_DELIVERY_ATTEMPTS
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_product_mapping.marketplace_product_mapping import (
 	compute_mapping_identity_key,
@@ -71,6 +76,7 @@ ORDER_IMPORT_ERROR = "Order Import Error"
 FULFILLMENT_ERROR = "Fulfillment Error"
 WEBHOOK_RETRIES_EXHAUSTED = "Webhook Retries Exhausted"
 NOON_FULFILLMENT = "Noon Fulfillment"
+NOON_RETURN_UNLINKED = "Noon Return Unlinked"
 
 PROBLEM_TYPES = [
 	SYNC_ERROR,
@@ -80,11 +86,13 @@ PROBLEM_TYPES = [
 	FULFILLMENT_ERROR,
 	WEBHOOK_RETRIES_EXHAUSTED,
 	NOON_FULFILLMENT,
+	NOON_RETURN_UNLINKED,
 ]
 
 NEXT_MAP_ITEM = "Map Item"
 NEXT_RETRY = "Retry"
 NEXT_OPEN_ORDER = "Open Order"
+NEXT_OPEN_RETURN = "Open Return"
 NEXT_VIEW_ERROR = "View Error"
 
 # Keys inside Marketplace Sync Log.request_data that carry the platform's
@@ -119,6 +127,7 @@ def get_attention_items(filters=None):
 		({FULFILLMENT_ERROR}, _collect_fulfillment_errors),
 		({WEBHOOK_RETRIES_EXHAUSTED}, _collect_exhausted_webhooks),
 		({NOON_FULFILLMENT}, _collect_noon_rollups),
+		({NOON_RETURN_UNLINKED}, _collect_unlinked_noon_returns),
 	]
 	items = []
 	for types, collector in collectors:
@@ -633,7 +642,7 @@ def _collect_noon_rollups(accounts):
 
 	def rollup(order):
 		return rollups.setdefault(
-			order, {"shipments": 0, "worst": None, "invoice_errors": 0, "pending_oos": 0}
+			order, {"shipments": 0, "worst": None, "invoice_errors": 0, "pending_oos": 0, "stuck_pending": 0}
 		)
 
 	pending = _get_orders(
@@ -651,6 +660,9 @@ def _collect_noon_rollups(accounts):
 	shipments = frappe.get_list(
 		"Marketplace Order Shipment",
 		parent_doctype="Marketplace Order",
+		# Cancelled / Discarded shipments are closed: an old invoice error on one
+		# must not keep the order flagged.
+		filters={"status": ["not in", ["Cancelled", "Discarded"]]},
 		or_filters={"status": ["in", NOON_SHIPMENT_ATTENTION_STATUSES], "invoice_status": "Error"},
 		fields=["parent", "status", "invoice_status"],
 		limit_page_length=0,
@@ -663,6 +675,21 @@ def _collect_noon_rollups(accounts):
 				entry["worst"] = shipment.status
 		if shipment.invoice_status == "Error":
 			entry["invoice_errors"] += 1
+
+	# #164: Pending shipments older than the threshold (Created / Cancelled /
+	# Discarded / Error / Cancel Pending are not Pending, so they never match).
+	stuck = frappe.get_list(
+		"Marketplace Order Shipment",
+		parent_doctype="Marketplace Order",
+		filters={
+			"status": "Pending",
+			"creation": ["<=", add_to_date(now_datetime(), hours=-NOON_PENDING_SHIPMENT_STUCK_HOURS)],
+		},
+		fields=["parent"],
+		limit_page_length=0,
+	)
+	for shipment in stuck:
+		rollup(shipment.parent)["stuck_pending"] += 1
 
 	if not rollups:
 		return []
@@ -680,6 +707,12 @@ def _collect_noon_rollups(accounts):
 			parts.append(text)
 		if entry["invoice_errors"]:
 			parts.append(_("{0} invoice upload(s) failed").format(entry["invoice_errors"]))
+		if entry["stuck_pending"]:
+			parts.append(
+				_("{0} shipment(s) stuck in Pending for over {1} hour(s)").format(
+					entry["stuck_pending"], NOON_PENDING_SHIPMENT_STUCK_HOURS
+				)
+			)
 		if entry["pending_oos"]:
 			parts.append(_("{0} unit(s) pending Out of Stock").format(entry["pending_oos"]))
 		items.append(
@@ -694,3 +727,29 @@ def _collect_noon_rollups(accounts):
 			)
 		)
 	return items
+
+
+def _collect_unlinked_noon_returns(accounts):
+	noon_accounts = {name: account for name, account in accounts.items() if account.platform == "Noon"}
+	if not noon_accounts:
+		return []
+	returns = frappe.get_list(
+		"Noon Return",
+		filters={"marketplace_account": ["in", list(noon_accounts)], "marketplace_order": ["is", "not set"]},
+		fields=["name", "marketplace_account", "purchase_item_nr", "order_nr", "first_seen_on", "creation"],
+		limit_page_length=0,
+	)
+	return [
+		_item(
+			NOON_RETURN_UNLINKED,
+			noon_accounts[row.marketplace_account],
+			"Noon Return",
+			row.name,
+			_("Noon return {0} (order {1}) matches no Marketplace Order.").format(
+				row.purchase_item_nr, row.order_nr or _("unknown")
+			),
+			row.first_seen_on or row.creation,
+			NEXT_OPEN_RETURN,
+		)
+		for row in returns
+	]

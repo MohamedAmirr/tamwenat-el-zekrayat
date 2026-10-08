@@ -17,6 +17,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import now_datetime
 
+from marketplace_integrations.integrations.noon.constants import NOON_PENDING_SHIPMENT_STUCK_HOURS
 from marketplace_integrations.integrations.shopify.test_products import (
 	make_shopify_account,
 )
@@ -32,6 +33,7 @@ from marketplace_integrations.services.marketplace_attention import (
 	FULFILLMENT_ERROR,
 	MODIFIED_AFTER_SYNC,
 	NOON_FULFILLMENT,
+	NOON_RETURN_UNLINKED,
 	ORDER_IMPORT_ERROR,
 	SYNC_ERROR,
 	UNMAPPED_ITEMS,
@@ -600,6 +602,191 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		rows = self.items_for(account, NOON_FULFILLMENT)
 
 		self.assertEqual([row["reference_name"] for row in rows], [order.name])
+
+	# -- Noon stuck Pending shipments and unlinked returns (#164) --------------
+
+	def age_shipments(self, order, hours):
+		"""Back-date every shipment row's ``creation`` (the stuck-Pending clock)."""
+		created = now_datetime() - timedelta(hours=hours)
+		for row in order.noon_shipments:
+			frappe.db.set_value(row.doctype, row.name, "creation", created, update_modified=False)
+
+	def make_pending_order(self, account, status="Pending", hours=None):
+		order = self.make_order(
+			account,
+			shipments=[{"integration_shipment_nr": "S-P", "status": status, "awb_source": "Noon"}],
+		)
+		self.age_shipments(order, NOON_PENDING_SHIPMENT_STUCK_HOURS + 1 if hours is None else hours)
+		return order
+
+	def test_pending_shipment_older_than_the_threshold_is_one_finding(self):
+		account = self.make_noon_account()
+		order = self.make_pending_order(account)
+
+		rows = self.items_for(account, NOON_FULFILLMENT)
+
+		self.assertEqual([row["reference_name"] for row in rows], [order.name])
+		self.assertIn("1 shipment(s) stuck in Pending", rows[0]["explanation"])
+
+	def test_two_stuck_pending_shipments_on_one_order_are_still_one_finding(self):
+		account = self.make_noon_account()
+		order = self.make_order(
+			account,
+			shipments=[
+				{"integration_shipment_nr": "S-1", "status": "Pending", "awb_source": "Noon"},
+				{"integration_shipment_nr": "S-2", "status": "Pending", "awb_source": "Noon"},
+			],
+		)
+		self.age_shipments(order, NOON_PENDING_SHIPMENT_STUCK_HOURS + 1)
+
+		rows = self.items_for(account, NOON_FULFILLMENT)
+
+		self.assertEqual(len(rows), 1)
+		self.assertIn("2 shipment(s) stuck in Pending", rows[0]["explanation"])
+
+	def test_pending_shipment_younger_than_the_threshold_is_not_a_finding(self):
+		account = self.make_noon_account()
+		self.make_pending_order(account, hours=0)
+
+		self.assertEqual(self.items_for(account, NOON_FULFILLMENT), [])
+
+	def test_old_cancelled_discarded_and_created_shipments_are_not_stuck_pending(self):
+		account = self.make_noon_account()
+		for status in ("Cancelled", "Discarded", "Created"):
+			self.make_pending_order(account, status=status)
+
+		self.assertEqual(self.items_for(account, NOON_FULFILLMENT), [])
+
+	def test_error_shipment_is_not_repeated_as_stuck_pending(self):
+		account = self.make_noon_account()
+		self.make_pending_order(account, status="Error")
+
+		rows = self.items_for(account, NOON_FULFILLMENT)
+
+		self.assertEqual(len(rows), 1)
+		self.assertNotIn("stuck in Pending", rows[0]["explanation"])
+
+	def test_fresh_pending_shipment_on_an_old_order_is_not_a_finding(self):
+		account = self.make_noon_account()
+		order = self.make_order(account)
+		old = now_datetime() - timedelta(hours=NOON_PENDING_SHIPMENT_STUCK_HOURS + 5)
+		frappe.db.set_value("Marketplace Order", order.name, "creation", old, update_modified=False)
+		order.reload()
+		# Same shape as fulfillment.create_shipment: explicit creation on the child row.
+		order.append(
+			"noon_shipments",
+			{
+				"integration_shipment_nr": "S-NEW",
+				"status": "Pending",
+				"awb_source": "Noon",
+				"creation": now_datetime(),
+			},
+		)
+		order.save()
+
+		self.assertEqual(self.items_for(account, NOON_FULFILLMENT), [])
+
+	def test_invoice_error_on_cancelled_or_discarded_shipment_is_not_a_finding(self):
+		account = self.make_noon_account()
+		for status in ("Cancelled", "Discarded"):
+			self.make_order(
+				account,
+				shipments=[
+					{
+						"integration_shipment_nr": "S-X",
+						"status": status,
+						"awb_source": "Noon",
+						"invoice_status": "Error",
+					}
+				],
+			)
+
+		self.assertEqual(self.items_for(account, NOON_FULFILLMENT), [])
+
+	def test_invoice_error_on_a_created_shipment_is_still_a_finding(self):
+		account = self.make_noon_account()
+		order = self.make_order(
+			account,
+			shipments=[
+				{
+					"integration_shipment_nr": "S-I",
+					"status": "Created",
+					"awb_source": "Noon",
+					"invoice_status": "Error",
+				}
+			],
+		)
+
+		rows = self.items_for(account, NOON_FULFILLMENT)
+
+		self.assertEqual([row["reference_name"] for row in rows], [order.name])
+		self.assertIn("invoice upload(s) failed", rows[0]["explanation"])
+
+	def test_a_clean_noon_order_produces_no_finding(self):
+		account = self.make_noon_account()
+		self.make_order(
+			account,
+			shipments=[{"integration_shipment_nr": "S-OK", "status": "Created", "awb_source": "Noon"}],
+		)
+
+		self.assertEqual(get_attention_items({"account": account.name}), [])
+
+	def make_noon_return(self, account, purchase_item_nr, **overrides):
+		values = {
+			"doctype": "Noon Return",
+			"marketplace_account": account.name,
+			"purchase_item_nr": purchase_item_nr,
+			"order_nr": "ORD-NONE",
+			"found_via": "Manual Lookup",
+			"first_seen_on": now_datetime(),
+			"last_seen_on": now_datetime(),
+			**overrides,
+		}
+		return self._track(frappe.get_doc(values).insert())
+
+	def test_an_unlinked_noon_return_is_one_finding(self):
+		account = self.make_noon_account()
+		order = self.make_order(account)
+		unlinked = self.make_noon_return(account, f"PI-U-{self.suffix}")
+		self.make_noon_return(account, f"PI-L-{self.suffix}", marketplace_order=order.name)
+
+		rows = self.items_for(account, NOON_RETURN_UNLINKED)
+
+		self.assertEqual([row["reference_name"] for row in rows], [unlinked.name])
+		self.assertEqual(rows[0]["reference_doctype"], "Noon Return")
+		self.assertEqual(rows[0]["next_action"], "Open Return")
+		# Counted once, and not as an order, import error or fulfillment error.
+		self.assertEqual(len(get_attention_items({"account": account.name})), 1)
+		self.assertEqual(
+			get_attention_counts([account.name])[account.name],
+			{"orders_needing_attention": 0, "import_errors": 0, "fulfillment_errors": 0},
+		)
+
+	def test_unlinked_returns_are_scoped_to_the_account(self):
+		account = self.make_noon_account()
+		other = self.make_noon_account()
+		self.make_noon_return(other, f"PI-O-{self.suffix}")
+
+		self.assertEqual(self.items_for(account, NOON_RETURN_UNLINKED), [])
+
+	def test_new_findings_are_permission_scoped_through_get_list(self):
+		account = self.make_noon_account()
+		self.make_pending_order(account)
+		self.make_noon_return(account, f"PI-P-{self.suffix}")
+		real_get_list = frappe.get_list
+		doctypes = []
+
+		def spy(doctype, *args, **kwargs):
+			doctypes.append(doctype)
+			return real_get_list(doctype, *args, **kwargs)
+
+		with patch(
+			"marketplace_integrations.services.marketplace_attention.frappe.get_list", side_effect=spy
+		):
+			get_attention_items({"account": account.name})
+
+		self.assertIn("Noon Return", doctypes)
+		self.assertIn("Marketplace Order Shipment", doctypes)
 
 	# -- filters, counts, permissions ---------------------------------------
 

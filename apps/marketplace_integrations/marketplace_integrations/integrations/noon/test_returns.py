@@ -146,6 +146,78 @@ class IntegrationTestUpsertReturnItem(IntegrationTestNoonReturnsBase):
 		self.assertIsNone(doc)
 
 
+class IntegrationTestUpsertReturnItemBumpsSync(IntegrationTestNoonReturnsBase):
+	"""#164: a return newly linked to an order that has a Sales Order re-queues its sync."""
+
+	def _debounce(self, order):
+		return frappe.db.get_value(
+			"Marketplace Order",
+			order.name,
+			["sync_debounce_until", "pending_sync_trigger_source"],
+			as_dict=True,
+		)
+
+	def _link_sales_order(self, order):
+		# Plain DB write: the planner is never run here, only the debounce is observed.
+		frappe.db.set_value("Marketplace Order", order.name, "erpnext_sales_order", "SO-FAKE-164")
+
+	def test_new_return_on_a_linked_order_bumps_the_debounce(self):
+		order = _make_order(self.account, "FBPI-BUMP")
+		self._link_sales_order(order)
+
+		returns.upsert_return_item(
+			self.account, _return_item("PI-BUMP", order_nr="FBPI-BUMP"), "Manual Lookup"
+		)
+
+		debounce = self._debounce(order)
+		self.assertIsNotNone(debounce.sync_debounce_until)
+		self.assertEqual(debounce.pending_sync_trigger_source, "Manual")
+
+	def test_awb_scan_return_uses_the_scheduled_trigger_source(self):
+		order = _make_order(self.account, "FBPI-BUMP-AWB")
+		self._link_sales_order(order)
+
+		returns.upsert_return_item(
+			self.account, _return_item("PI-BUMP-AWB", order_nr="FBPI-BUMP-AWB"), "AWB Scan"
+		)
+
+		self.assertEqual(self._debounce(order).pending_sync_trigger_source, "Scheduled Reconciliation")
+
+	def test_order_without_a_sales_order_is_not_bumped(self):
+		order = _make_order(self.account, "FBPI-NO-SO")
+
+		returns.upsert_return_item(
+			self.account, _return_item("PI-NO-SO", order_nr="FBPI-NO-SO"), "Manual Lookup"
+		)
+
+		self.assertIsNone(self._debounce(order).sync_debounce_until)
+
+	def test_unlinked_return_bumps_nothing(self):
+		order = _make_order(self.account, "FBPI-OTHER")
+		self._link_sales_order(order)
+
+		returns.upsert_return_item(
+			self.account, _return_item("PI-NOMATCH", order_nr="NO-SUCH"), "Manual Lookup"
+		)
+
+		self.assertIsNone(self._debounce(order).sync_debounce_until)
+
+	def test_repeat_sighting_of_an_unchanged_link_does_not_bump_again(self):
+		order = _make_order(self.account, "FBPI-REPEAT")
+		self._link_sales_order(order)
+		item = _return_item("PI-REPEAT", order_nr="FBPI-REPEAT")
+		returns.upsert_return_item(self.account, item, "Manual Lookup")
+		frappe.db.set_value(
+			"Marketplace Order",
+			order.name,
+			{"sync_debounce_until": None, "pending_sync_trigger_source": None},
+		)
+
+		returns.upsert_return_item(self.account, item, "AWB Scan")
+
+		self.assertIsNone(self._debounce(order).sync_debounce_until)
+
+
 class IntegrationTestAwbReferenceMatching(IntegrationTestNoonReturnsBase):
 	def test_item_without_matching_awb_reference_is_ignored(self):
 		item = _return_item(

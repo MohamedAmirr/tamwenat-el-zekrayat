@@ -72,7 +72,7 @@ from marketplace_integrations.services.sales_order_reconciliation import (
 
 FINAL_ITEM_STATUSES = {"IN_CART", "ADDITION"}
 
-# Platform -> dotted path of its pure ``build_evidence(order)`` (#178).  Resolved
+# Platform -> dotted path of its ``build_evidence(order)`` (#178; reads only persisted data).  Resolved
 # lazily (``frappe.get_attr``) so this module never imports an integration at
 # import time.  A blank platform is Talabat, like ``_validate_platform_supported``.
 _RECONCILIATION_EVIDENCE_BUILDERS = {
@@ -238,6 +238,7 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 			raise SyncBlocker(str(exc)) from exc
 		sales_order.submit()
 		result = _save_success(order, current_hash, sales_order, updated=False, snapshot=snapshot)
+		result = _flag_compensating_evidence_on_new_order(order, sales_order, snapshot) or result
 		_create_sync_log(order, trigger_source, "Success", snapshot, result)
 		return result
 	except (SyncBlocker, SalesOrderLinesMismatch) as exc:
@@ -721,6 +722,25 @@ def _compensating_plan_outranks_blocker(order, sales_order, evidence):
 		return False
 	reconciliation_plan = plan(_parse_last_synced_snapshot(order), {}, evidence, read_erp_state(sales_order))
 	return reconciliation_plan["outcome"] == UNSUPPORTED_COMPENSATING_TRANSACTION
+
+
+def _flag_compensating_evidence_on_new_order(order, sales_order, snapshot):
+	"""Mark a just-created Sales Order Modified After Sync when return/refund evidence already exists.
+
+	Evidence recorded while the order had no Sales Order (e.g. a return linked during
+	Sync Error) bumped no re-plan, so the first sync must not report it Synced.  Only
+	the unsupported compensating outcome is handled here; any other outcome keeps the
+	plain success.  Returns the advisory result, or None.
+	"""
+	evidence = _reconciliation_evidence(order)
+	if not (evidence.get("return") or evidence.get("refund")):
+		return None
+	reconciliation_plan = plan(
+		_parse_last_synced_snapshot(order), snapshot, evidence, read_erp_state(sales_order)
+	)
+	if reconciliation_plan["outcome"] != UNSUPPORTED_COMPENSATING_TRANSACTION:
+		return None
+	return _save_reconciliation_advisory(order, reconciliation_plan)
 
 
 def _modified_after_sync_message():
