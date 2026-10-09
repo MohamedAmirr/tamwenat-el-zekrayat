@@ -466,7 +466,8 @@ def _build_noon_sales_order_lines(order, account, tolerate_zero_quantity=False):
 	reconciliation planner sees the removal; a never-synced order still raises.
 	"""
 	currency = _resolved_currency(account)
-	if order.presentment_currency and order.presentment_currency != currency:
+	# Noon sends lowercase ISO codes ("egp"); ERPNext currencies are uppercase.
+	if order.presentment_currency and order.presentment_currency.upper() != currency.upper():
 		raise SyncBlocker(
 			_(
 				"Noon order {0}'s presentment currency ({1}) does not match the resolved ERPNext currency "
