@@ -47,6 +47,8 @@ The PR body lists the source commits since the last published source sha and add
 - Feature branches are cut from an up-to-date `dev` (`git fetch`, fast-forward `dev`), never from `prod`.
 - Every normal PR must be created with `gh pr create --base dev`; the default base is `prod`.
 - `prod` PRs come only from `scripts/publish-prod.sh --pr`.
+- Never open a PR from `dev`, or from any feature branch, into `prod`, and ignore GitHub's compare banner: `dev` and `prod` have no common history (GitHub reports "No common ancestor between prod and dev") so such a PR is impossible or, if forced, would put the monorepo layout into `prod` and break Frappe Cloud. The only PR into `prod` is the one `scripts/publish-prod.sh --pr` builds from a `publish/<sha>` branch.
+- Release order: apply on `dev` first (PR, tests, migrate on the dev/test sites, manual checks), then publish `dev` to `prod` with `scripts/publish-prod.sh --pr`, merge that PR, then Update in the Frappe Cloud Bench Group. Never the reverse; `prod` gets no work of its own.
 - `Closes #N` in a PR into `dev` does not auto-close the issue (see below).
 
 ## Closing issues
