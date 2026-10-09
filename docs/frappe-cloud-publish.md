@@ -60,7 +60,11 @@ The PR body lists the source commits since the last published source sha and add
 1. Add the app from GitHub: repo `MohamedAmirr/tamwenat-el-zekrayat`, branch `prod`. Give the Frappe Cloud GitHub app access to the (private) repo first.
 2. After each publish PR is merged, use "Update Available" in the Bench Group, then update the site(s).
 
+Frappe Cloud answered "Could not find a compatible Frappe version in pyproject.toml ... ensure `[tool.bench.frappe-dependencies]` is defined" the first time it read `prod`, so `apps/marketplace_integrations/pyproject.toml` declares `[tool.bench.frappe-dependencies]` with `frappe = ">=16.21.0,<17.0.0"`. The format and the floor are copied from ERPNext's own `pyproject.toml` (the app requires ERPNext through `required_apps` in `hooks.py`, so any bench that has the app already has Frappe 16.21 or newer). The app is tested only on Frappe 16.32 / ERPNext 16.33.
+
 ## Unverified prerequisites
+
+- Whether Frappe Cloud requires the app name to match the GitHub repository name (`tamwenat-el-zekrayat`, the repo) or accepts the name in `pyproject.toml` / `hooks.py` (`marketplace_integrations`). Not checked; if it insists on a match, the app needs its own repo named `marketplace_integrations`.
 
 - The app declares `requires-python >=3.14` and targets Frappe/ERPNext v16. The Bench Group must run a compatible Python and Frappe/ERPNext v16. Not checked.
 - The app's other dependencies (see `pyproject.toml`) must install on Frappe Cloud. Not checked.
