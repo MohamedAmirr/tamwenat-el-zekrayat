@@ -136,10 +136,11 @@ is not supported by this release.
   the persisted unit reservation rejects an overlapping second request; each
   accepted request gets a distinct job ID so a recent completed job cannot
   suppress a new attempt after an error.
-- GetShipment HTTP 404 is provisionally treated as "not found" for Create
-  Shipment and Add AWB retries. Any other HTTP error, or a malformed 200 AWB
-  list, blocks the subsequent mutating call. Noon's actual "not found"
-  response remains to be verified against a real account (item #4 below).
+- GetShipment "not found" for Create Shipment and Add AWB retries is HTTP 404
+  or, as seen on production Noon (verification item #4), HTTP 400
+  `INVALID_ARGUMENT` whose message contains "No shipment found". Any other
+  HTTP error, or a malformed 200 AWB list, blocks the subsequent mutating
+  call.
 
 ## Known risk: divergence after submission (decision 8)
 
@@ -214,9 +215,10 @@ relied on in production:
    either way in the checked-in contract.
 3. **Duplicate `integration_shipment_nr` is actually rejected** by
    CreateShipment — decision 15's retry-by-resend behavior relies on this.
-4. **GetShipment on an unknown `integration_shipment_nr`** — confirm it
-   returns HTTP 404 (not a 200 with an empty/misleading body), since 404 is
-   provisionally treated as absence and 200 as "the shipment already exists."
+4. **GetShipment on an unknown `integration_shipment_nr`** - verified on
+   production: Noon returns HTTP 400 `INVALID_ARGUMENT` "No shipment found
+   with integration_shipment_nr ...", not 404. Both are treated as absence
+   (`_is_shipment_not_found()`); 200 means the shipment already exists.
 5. **Duplicate AddShipmentCourierAwbs** (adding the same `awb_nr` twice) —
    confirm it is safe to resend, since the Add AWB retry path checks
    `GetShipment.awbs` first but falls back to resending if not found there.

@@ -506,7 +506,7 @@ def run_create_shipment(marketplace_order_name, integration_shipment_nr):
 			{"integration_shipment_nr": integration_shipment_nr, "note": "found via GetShipment retry"},
 		)
 		return
-	if get_response.status_code != 404:
+	if not _is_shipment_not_found(get_response):
 		message = client.error_message(get_response)
 		_fail_shipment(order, shipment, message)
 		_log_fulfillment(
@@ -761,6 +761,25 @@ def _reload_shipment(marketplace_order_name, integration_shipment_nr):
 	order = _lock_and_load_order(marketplace_order_name)
 	shipment = _find_shipment_row(order, integration_shipment_nr)
 	return order, shipment
+
+
+def _is_shipment_not_found(response):
+	"""True when GetShipment says the shipment does not exist on Noon.
+
+	Production Noon answers HTTP 400 INVALID_ARGUMENT "No shipment found with
+	integration_shipment_nr ..." (not the 404 first assumed, #146 verification
+	item 4). Any other 400, and every other error, is NOT treated as absence.
+	"""
+	if response.status_code == 404:
+		return True
+	if response.status_code != 400:
+		return False
+	try:
+		error = (response.json() or {}).get("error")
+	except (ValueError, AttributeError):
+		return False
+	message = error.get("message") if isinstance(error, dict) else None
+	return isinstance(message, str) and "No shipment found" in message
 
 
 def _shipment_status_changed_message(expected_status, actual_status):
@@ -1071,7 +1090,7 @@ def run_add_awb(marketplace_order_name, integration_shipment_nr, awb_nr):
 		)
 		return
 
-	if get_response.status_code not in (200, 404):
+	if get_response.status_code != 200 and not _is_shipment_not_found(get_response):
 		frappe.db.commit()
 		_log_fulfillment(
 			order,
