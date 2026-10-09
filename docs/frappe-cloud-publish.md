@@ -28,7 +28,7 @@ scripts/publish-prod.sh --pr --no-pr-create   # push the branch, skip gh (e.g. t
 scripts/publish-prod.sh --init           # one-time bootstrap, see below
 ```
 
-Options: `--source <branch>` (default `dev`; use `main` until the rename), `--remote <name>` (default `origin`), `--dry-run` (with `--init`/`--pr`: plan only). With no mode flag it dry-runs `--init` if `origin/prod` does not exist, else `--pr`.
+Options: `--source <branch>` (default `dev`), `--remote <name>` (default `origin`), `--dry-run` (with `--init`/`--pr`: plan only). With no mode flag it dry-runs `--init` if `origin/prod` does not exist, else `--pr`.
 
 Then merge the publish PR into `prod` in GitHub. It refuses (exit 1) if: not at the repo root, tree dirty, not on the source branch, source differs from `<remote>/<source>`, `--init` while `prod` exists, `--pr` while `prod` does not exist, `publish/<shortsha>` already exists on the remote (never forced), the new tree lacks `pyproject.toml`/`README.md`/`marketplace_integrations/{__init__,hooks}.py`, contains `node_modules/`, `__pycache__/`, `.env` or `*.pyc`, or `pyproject.toml` `name` is not `marketplace_integrations` (parsed with `tomllib`, so a Python >= 3.11 must be on PATH). If `prod` already has the same tree it prints `already published` and exits 0.
 
@@ -39,7 +39,15 @@ The PR body lists the source commits since the last published source sha and add
 1. Bootstrap BEFORE enabling branch rules: `scripts/publish-prod.sh --init` creates the root commit and pushes it straight to `prod`. This only works while `prod` is unprotected; the script prints a warning.
 2. Set the repo default branch to `prod`.
 3. Enable the rulesets (PR required, no bypass) on `dev` and `prod`.
-4. The integration branch is called `dev` (the rename from `main` is a separate step; until then pass `--source main`).
+4. The integration branch is called `dev` (renamed from `main`).
+
+## Branches and PRs (rules for everyone, agents included)
+
+- Nobody pushes directly to `dev` or `prod`; both require a PR with no bypass. The user merges PRs.
+- Feature branches are cut from an up-to-date `dev` (`git fetch`, fast-forward `dev`), never from `prod`.
+- Every normal PR must be created with `gh pr create --base dev`; the default base is `prod`.
+- `prod` PRs come only from `scripts/publish-prod.sh --pr`.
+- `Closes #N` in a PR into `dev` does not auto-close the issue (see below).
 
 ## Closing issues
 

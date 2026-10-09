@@ -204,7 +204,7 @@ The `-e KEY='...'` on `docker exec` is a single top-level single-quoted shell ar
 
 `apps/marketplace_integrations` is bind-mounted from the host repo, so the container only ever sees whatever git branch is currently checked out on disk — there is no per-branch isolation. `bench migrate` reconciles the site's schema against *those* files: if you check out a branch that doesn't have a doctype another branch added and run `migrate`, Frappe treats the missing doctype as orphaned and **drops its table**. No code is lost (the doctype's JSON/controller are safe in the other branch/git history), but the live dev DB loses that data until you check that branch back out and `migrate` again. This will bite harder as `marketplace_integrations`' doctypes land incrementally across issues — a branch missing one of them and a `migrate` in between is enough to drop it.
 
-Practical rule: don't treat the dev site's current schema as a stable baseline across branch switches — only trust it immediately after running `migrate` on the branch you actually care about right now. Before merging multiple feature branches, the real integration check is checking out `main` after they've all landed and running `migrate` there once.
+Practical rule: don't treat the dev site's current schema as a stable baseline across branch switches — only trust it immediately after running `migrate` on the branch you actually care about right now. Before merging multiple feature branches, the real integration check is checking out `dev` after they've all landed and running `migrate` there once.
 
 ## Gotcha: `bench migrate` won't re-run a patch it already applied on this site
 
