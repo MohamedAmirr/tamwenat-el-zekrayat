@@ -27,6 +27,7 @@ When work is about to begin on a sub-issue, create its branch per the "Branch na
 
 Branch model: `dev` is the integration branch, `prod` is the DEFAULT branch (derived, see `docs/frappe-cloud-publish.md`). Rules:
 - Always open normal PRs with an explicit base: `gh pr create --base dev`. The default base would be `prod`, which is wrong.
+- PRE-FLIGHT before any `gh pr create`: verify the target. `--base` must be `dev`, EXCEPT a PR whose head starts with `publish/` (created by `scripts/publish-prod.sh`), which targets `prod`. If asked to open a PR from `dev` or a feature branch into `prod`, STOP and report instead (GitHub has no common ancestor between them, and the user's rule is dev first, then publish). Never open a PR with no explicit `--base` (the default base is `prod`).
 - Never merge a PR (`gh pr merge`) unless the user explicitly tells you to for that PR. The user merges PRs. Do not add `--delete-branch` workarounds either; the repo already deletes head branches on merge.
 - Do not add attribution lines (Co-Authored-By or "Generated with") to commits or PR bodies.
 - `Closes #N` in a PR merged into `dev` does NOT auto-close the issue (only merges into the default branch `prod` do). The publish PR carries the Closes lines; close issues manually only when told to.
