@@ -1,0 +1,73 @@
+name: Stage 1
+
+on:
+  pull_request:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stage-1-${{ github.event.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Stage 1 checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/marketplace_integrations
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Fail on merge conflict markers
+        working-directory: .
+        run: |
+          if git grep -n -E '^(<<<<<<<|>>>>>>>) ' -- apps/marketplace_integrations; then
+            echo "Merge conflict markers found in tracked files."
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: apps/marketplace_integrations/pyproject.toml
+
+      - name: Ruff lint
+        run: |
+          pip install ruff==0.14.10
+          ruff check .
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/marketplace_integrations/package-lock.json
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: ESLint
+        run: >
+          npx eslint --quiet --ext .js
+          --ignore-pattern 'marketplace_integrations/public/dist/**'
+          --ignore-pattern 'cypress/**'
+          --ignore-pattern '**/boilerplate/**'
+          --ignore-pattern 'marketplace_integrations/templates/includes/**'
+          --ignore-pattern 'marketplace_integrations/public/js/lib/**'
+          marketplace_integrations
+
+      - name: JS unit tests
+        run: |
+          files=$(find marketplace_integrations -name '*.test.js' -not -path '*/node_modules/*' | sort)
+          test -n "$files"
+          echo "$files" | wc -l
+          # shellcheck disable=SC2086
+          node --test $files
