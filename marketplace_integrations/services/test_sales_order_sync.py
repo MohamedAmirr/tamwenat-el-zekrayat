@@ -3362,6 +3362,16 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertIn("presentment currency", result["error"])
 		self.assertFalse(order.erpnext_sales_order)
 
+	def test_noon_currency_match_ignores_case(self):
+		"""Noon sends lowercase ISO codes (e.g. "egp"); that must match ERPNext's "EGP"."""
+		account = self._make_noon_account()
+		currency = frappe.get_cached_value("Company", self.company, "default_currency")
+		order, _mapping = self._make_noon_order(account, presentment_currency=currency.lower())
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+
 	def test_noon_dates_use_received_on_for_both_transaction_and_delivery(self):
 		"""Decision 5: Noon documents no promised/delivery date - both
 		Sales Order dates are set to received_on, never left to default to
