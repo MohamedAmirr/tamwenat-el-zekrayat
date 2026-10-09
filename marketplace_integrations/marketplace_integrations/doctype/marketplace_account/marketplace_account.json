@@ -1,0 +1,233 @@
+{
+ "actions": [],
+ "autoname": "MKTACC-.#####",
+ "creation": "2026-08-30 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "account_name",
+  "platform",
+  "external_account_id",
+  "account_identity_key",
+  "connection_doctype",
+  "connection",
+  "warehouse",
+  "noon_warehouse_section",
+  "noon_warehouse_code",
+  "noon_country_code",
+  "shopify_location_section",
+  "shopify_location_gid",
+  "shopify_location_name",
+  "shopify_orders_reconciled_through",
+  "outlet_status_section",
+  "external_status",
+  "external_status_reason",
+  "external_status_until",
+  "external_status_checked_on",
+  "external_status_error",
+  "external_status_payload",
+  "erpnext_sync_section",
+  "erpnext_company",
+  "erpnext_selling_price_list",
+  "erpnext_customer",
+  "enabled"
+ ],
+ "fields": [
+  {
+   "fieldname": "account_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Account Name",
+   "reqd": 1
+  },
+  {
+   "fieldname": "platform",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Platform",
+   "options": "Talabat\nShopify\nNoon",
+   "reqd": 1
+  },
+  {
+   "fieldname": "external_account_id",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "in_list_view": 1,
+   "label": "External Account ID",
+   "mandatory_depends_on": "eval:doc.platform != \"Shopify\""
+  },
+  {
+   "fieldname": "account_identity_key",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Account Identity Key",
+   "length": 64,
+   "read_only": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "connection_doctype",
+   "fieldtype": "Link",
+   "hidden": 1,
+   "label": "Connection DocType",
+   "options": "DocType",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "connection",
+   "fieldtype": "Dynamic Link",
+   "in_list_view": 1,
+   "label": "Connection",
+   "options": "connection_doctype",
+   "reqd": 1
+  },
+  {
+   "fieldname": "warehouse",
+   "fieldtype": "Link",
+   "label": "Warehouse",
+   "options": "Warehouse"
+  },
+  {
+   "fieldname": "noon_warehouse_section",
+   "fieldtype": "Section Break",
+   "label": "Noon Storefront and Warehouse"
+  },
+  {
+   "fieldname": "noon_warehouse_code",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Noon Warehouse Code"
+  },
+  {
+   "fieldname": "noon_country_code",
+   "fieldtype": "Select",
+   "label": "Noon Country Code",
+   "options": "\nae\nsa\neg"
+  },
+  {
+   "fieldname": "shopify_location_section",
+   "fieldtype": "Section Break",
+   "label": "Shopify Inventory Location"
+  },
+  {
+   "fieldname": "shopify_location_gid",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Shopify Location GID"
+  },
+  {
+   "fieldname": "shopify_location_name",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Shopify Location Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "shopify_orders_reconciled_through",
+   "fieldtype": "Datetime",
+   "label": "Shopify Orders Reconciled Through",
+   "read_only": 1
+  },
+  {
+   "fieldname": "outlet_status_section",
+   "fieldtype": "Section Break",
+   "label": "Marketplace Availability"
+  },
+  {
+   "fieldname": "external_status",
+   "fieldtype": "Data",
+   "label": "Last Confirmed External Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "external_status_reason",
+   "fieldtype": "Data",
+   "label": "Last Confirmed External Status Reason",
+   "read_only": 1
+  },
+  {
+   "fieldname": "external_status_until",
+   "fieldtype": "Datetime",
+   "label": "Last Confirmed External Status Until",
+   "read_only": 1
+  },
+  {
+   "fieldname": "external_status_checked_on",
+   "fieldtype": "Datetime",
+   "label": "External Status Last Checked On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "external_status_error",
+   "fieldtype": "Small Text",
+   "label": "External Status Error",
+   "read_only": 1
+  },
+  {
+   "fieldname": "external_status_payload",
+   "fieldtype": "JSON",
+   "hidden": 1,
+   "ignore_xss_filter": 1,
+   "label": "External Status Payload",
+   "read_only": 1
+  },
+  {
+   "fieldname": "erpnext_sync_section",
+   "fieldtype": "Section Break",
+   "label": "ERPNext Integration Settings"
+  },
+  {
+   "fieldname": "erpnext_company",
+   "fieldtype": "Link",
+   "label": "ERPNext Company",
+   "options": "Company"
+  },
+  {
+   "fieldname": "erpnext_selling_price_list",
+   "fieldtype": "Link",
+   "label": "ERPNext Selling Price List",
+   "options": "Price List"
+  },
+  {
+   "fieldname": "erpnext_customer",
+   "fieldtype": "Link",
+   "label": "ERPNext Customer",
+   "options": "Customer",
+   "read_only": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-08-30 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Marketplace Integrations",
+ "name": "Marketplace Account",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "account_name",
+ "track_changes": 1
+}

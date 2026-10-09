@@ -1,0 +1,58 @@
+{
+ "app": "marketplace_integrations",
+ "charts": [],
+ "content": "[{\"id\":\"src1header\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Shopify Reconciliation</b></span>\",\"col\":12}},{\"id\":\"src1shortcut0\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Reconciliation Summary\",\"col\":4}},{\"id\":\"src1spacer\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"src1shortcuts\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Detail</b></span>\",\"col\":12}},{\"id\":\"src1shortcut1\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Order Import Failures\",\"col\":4}},{\"id\":\"src1shortcut4\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Marketplace Shopify Catalog Mapping\",\"col\":4}}]",
+ "creation": "2026-09-29 00:00:00.000000",
+ "custom_blocks": [],
+ "docstatus": 0,
+ "doctype": "Workspace",
+ "for_user": "",
+ "hide_custom": 0,
+ "icon": "refresh",
+ "idx": 0,
+ "is_hidden": 0,
+ "label": "Shopify Reconciliation",
+ "links": [],
+ "modified": "2026-10-04 02:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Marketplace Integrations",
+ "name": "Shopify Reconciliation",
+ "number_cards": [],
+ "owner": "Administrator",
+ "parent_page": "Tamwenat Marketplaces",
+ "public": 1,
+ "quick_lists": [],
+ "restrict_to_domain": "",
+ "roles": [
+  {
+   "doctype": "Has Role",
+   "role": "System Manager"
+  }
+ ],
+ "sequence_id": 1.0,
+ "shortcuts": [
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Shopify Reconciliation Summary",
+   "link_to": "Shopify Reconciliation Summary",
+   "type": "Report"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Shopify Order Import Failures",
+   "link_to": "Shopify Order Import Failures",
+   "type": "Report"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Marketplace Shopify Catalog Mapping",
+   "link_to": "marketplace-shopify-catalog-mapping",
+   "type": "Page"
+  }
+ ],
+ "title": "Shopify Reconciliation",
+ "type": "Workspace"
+}

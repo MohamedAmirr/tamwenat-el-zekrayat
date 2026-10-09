@@ -1,0 +1,105 @@
+{
+ "actions": [],
+ "autoname": "NOONCONN-.#####",
+ "creation": "2026-09-29 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "connection_name",
+  "project_code",
+  "key_id",
+  "private_key",
+  "environment",
+  "webhook_url",
+  "webhook_secret",
+  "enabled"
+ ],
+ "fields": [
+  {
+   "fieldname": "connection_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Connection Name",
+   "reqd": 1
+  },
+  {
+   "fieldname": "project_code",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "in_list_view": 1,
+   "label": "Project Code",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "key_id",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Key ID",
+   "reqd": 1
+  },
+  {
+   "description": "Paste the complete PEM private key, including BEGIN/END lines. Use literal \\n between lines when copying from a credentials JSON file; line breaks are restored only when signing.",
+   "fieldname": "private_key",
+   "fieldtype": "Password",
+   "ignore_xss_filter": 1,
+   "label": "Private Key",
+   "reqd": 1
+  },
+  {
+   "fieldname": "environment",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Environment",
+   "options": "\nProduction\nStatic Sandbox",
+   "reqd": 1
+  },
+  {
+   "fieldname": "webhook_url",
+   "fieldtype": "Data",
+   "label": "Webhook URL",
+   "length": 255,
+   "read_only": 1
+  },
+  {
+   "description": "Generated automatically when empty. The receiver requires this value on every inbound request's X-Api-Key header. Paste the same value into Noon's Partner Center webhook destination (header X-Api-Key).",
+   "fieldname": "webhook_secret",
+   "fieldtype": "Password",
+   "ignore_xss_filter": 1,
+   "label": "Webhook Secret"
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-03 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Marketplace Integrations",
+ "name": "Noon Connection",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "connection_name",
+ "track_changes": 1
+}

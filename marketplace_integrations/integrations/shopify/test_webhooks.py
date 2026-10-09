@@ -1,0 +1,1030 @@
+# Copyright (c) 2026, Tamwenat El Zekrayat and contributors
+# For license information, please see license.txt
+
+from unittest.mock import patch
+
+import frappe
+from frappe.tests import IntegrationTestCase, UnitTestCase
+from frappe.utils import add_to_date, now_datetime
+
+from marketplace_integrations.integrations.shopify.constants import SHOPIFY_ORDER_WEBHOOK_TOPICS
+from marketplace_integrations.integrations.shopify.test_orders import make_order_payload
+from marketplace_integrations.integrations.shopify.test_products import make_shopify_account
+from marketplace_integrations.integrations.shopify.webhooks import (
+	MAX_WEBHOOK_DELIVERY_ATTEMPTS,
+	STUCK_RECEIVED_THRESHOLD_MINUTES,
+	process_shopify_webhook,
+	retry_errored_webhook_deliveries,
+	sync_webhook_subscriptions,
+	verify_shopify_hmac,
+)
+from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
+from marketplace_integrations.services.sales_order_sync_debounce import _run_debounced_sync
+
+EXECUTE_TARGET = "marketplace_integrations.integrations.shopify.client.ShopifyClient.execute"
+
+
+def make_connection(connection_name, **kwargs):
+	# shop_domain defaults to a call-unique value - it carries a DB-level
+	# unique: 1 constraint, and IntegrationTestCase only rolls back once at
+	# class teardown (see docs/frappe-conventions.md's Tests section), so a
+	# fixed literal default would collide across this class's test methods.
+	doc = {
+		"doctype": "Shopify Connection",
+		"connection_name": connection_name,
+		"shop_domain": f"test-shop-{frappe.generate_hash(length=8)}.myshopify.com",
+		"client_id": "test-client-id",
+		"client_secret": "test-client-secret",
+	}
+	doc.update(kwargs)
+	return frappe.get_doc(doc).insert()
+
+
+class UnitTestVerifyShopifyHmac(UnitTestCase):
+	def test_correct_hmac_matches(self):
+		import base64
+		import hashlib
+		import hmac
+
+		body = b'{"id":1}'
+		secret = "shhh"
+		digest = base64.b64encode(hmac.new(secret.encode(), body, hashlib.sha256).digest()).decode()
+		self.assertTrue(verify_shopify_hmac(body, secret, digest))
+
+	def test_wrong_hmac_is_rejected(self):
+		self.assertFalse(verify_shopify_hmac(b'{"id":1}', "shhh", "not-a-real-digest"))
+
+	def test_missing_secret_or_header_is_rejected(self):
+		self.assertFalse(verify_shopify_hmac(b'{"id":1}', "", "some-digest"))
+		self.assertFalse(verify_shopify_hmac(b'{"id":1}', "shhh", ""))
+		self.assertFalse(verify_shopify_hmac(b"", "shhh", "some-digest"))
+
+	def test_current_secret_matches_without_previous_secret(self):
+		import base64
+		import hashlib
+		import hmac
+
+		body = b'{"id":1}'
+		digest = base64.b64encode(hmac.new(b"current", body, hashlib.sha256).digest()).decode()
+		self.assertTrue(verify_shopify_hmac(body, "current", digest))
+		self.assertTrue(verify_shopify_hmac(body, "current", digest, previous_secret=None))
+
+	def test_previous_secret_matches_when_current_fails(self):
+		import base64
+		import hashlib
+		import hmac
+
+		body = b'{"id":1}'
+		digest = base64.b64encode(hmac.new(b"old-secret", body, hashlib.sha256).digest()).decode()
+		self.assertTrue(verify_shopify_hmac(body, "new-secret", digest, previous_secret="old-secret"))
+
+	def test_wrong_hmac_rejected_against_both_secrets(self):
+		self.assertFalse(
+			verify_shopify_hmac(b'{"id":1}', "current", "not-a-real-digest", previous_secret="old")
+		)
+
+	def test_non_ascii_provided_hmac_does_not_raise(self):
+		# hmac.compare_digest() raises TypeError on non-ASCII str input;
+		# provided_hmac_b64 is attacker-controlled (werkzeug decodes headers
+		# as latin-1, so non-ASCII is reachable) - this must return False,
+		# never raise, per verify_shopify_hmac()'s own docstring promise.
+		self.assertFalse(verify_shopify_hmac(b'{"id":1}', "shhh", "nöt-ascii-é"))
+		self.assertFalse(verify_shopify_hmac(b'{"id":1}', "current", "nöt-ascii", previous_secret="old"))
+
+
+class IntegrationTestSyncWebhookSubscriptions(IntegrationTestCase):
+	def setUp(self):
+		self.connection = make_connection(f"Sync Webhooks {frappe.generate_hash(length=8)}")
+
+	def tearDown(self):
+		frappe.delete_doc("Shopify Connection", self.connection.name, ignore_permissions=True, force=True)
+		frappe.db.commit()
+
+	def test_creates_only_missing_topics(self):
+		callback_url = (
+			"https://example.com/api/method/marketplace_integrations.api.shopify_webhooks.webhook_event"
+		)
+		existing_response = {
+			"webhookSubscriptions": {
+				"edges": [
+					{
+						"node": {
+							"id": "gid://shopify/WebhookSubscription/1",
+							"topic": "ORDERS_CREATE",
+							"uri": callback_url,
+						}
+					}
+				]
+			}
+		}
+		create_response = {
+			"webhookSubscriptionCreate": {"webhookSubscription": {"id": "x"}, "userErrors": []}
+		}
+
+		with (
+			patch(
+				"marketplace_integrations.integrations.shopify.webhooks.get_webhook_callback_url",
+				return_value=callback_url,
+			),
+			patch(EXECUTE_TARGET, side_effect=[existing_response] + [create_response] * 6) as execute,
+		):
+			result = sync_webhook_subscriptions(self.connection)
+
+		# 1 query + 6 creates (7 topics minus the 1 already registered)
+		self.assertEqual(execute.call_count, 7)
+		self.assertEqual(result["status"], "Complete")
+		self.assertEqual(result["missing_topics"], [])
+		self.connection.reload()
+		self.assertEqual(self.connection.webhook_registration_status, "Complete")
+		self.assertEqual(self.connection.webhook_missing_topics, "")
+
+	def test_running_twice_creates_nothing_the_second_time(self):
+		callback_url = (
+			"https://example.com/api/method/marketplace_integrations.api.shopify_webhooks.webhook_event"
+		)
+		all_registered_response = {
+			"webhookSubscriptions": {
+				"edges": [
+					{
+						"node": {
+							"id": f"gid://shopify/WebhookSubscription/{i}",
+							"topic": t,
+							"uri": callback_url,
+						}
+					}
+					for i, t in enumerate(
+						[
+							"ORDERS_CREATE",
+							"ORDERS_UPDATED",
+							"ORDERS_CANCELLED",
+							"ORDERS_PAID",
+							"REFUNDS_CREATE",
+							"APP_UNINSTALLED",
+							"APP_SCOPES_UPDATE",
+						]
+					)
+				]
+			}
+		}
+		with (
+			patch(
+				"marketplace_integrations.integrations.shopify.webhooks.get_webhook_callback_url",
+				return_value=callback_url,
+			),
+			patch(EXECUTE_TARGET, return_value=all_registered_response) as execute,
+		):
+			result = sync_webhook_subscriptions(self.connection)
+
+		# Only the inspection query ran - nothing was missing, so no
+		# webhookSubscriptionCreate mutation should fire.
+		self.assertEqual(execute.call_count, 1)
+		self.assertEqual(result["status"], "Complete")
+
+	def test_user_errors_mark_status_error_and_still_report_progress(self):
+		callback_url = "https://example.com/webhook"
+		empty_response = {"webhookSubscriptions": {"edges": []}}
+		failing_create = {
+			"webhookSubscriptionCreate": {
+				"webhookSubscription": None,
+				"userErrors": [{"field": ["topic"], "message": "already exists"}],
+			}
+		}
+		with (
+			patch(
+				"marketplace_integrations.integrations.shopify.webhooks.get_webhook_callback_url",
+				return_value=callback_url,
+			),
+			patch(EXECUTE_TARGET, side_effect=[empty_response] + [failing_create] * 7),
+		):
+			result = sync_webhook_subscriptions(self.connection)
+
+		self.assertEqual(result["status"], "Error")
+		self.assertEqual(len(result["missing_topics"]), 7)
+		self.connection.reload()
+		self.assertEqual(self.connection.webhook_registration_status, "Error")
+
+	def test_exception_during_sync_still_persists_error_status(self):
+		# db_set() defaults to commit=False, and Frappe's request handler
+		# rolls back the whole transaction on any exception escaping the
+		# request (the frappe.throw() at the end of the except block) -
+		# without commit=True on these specific db_set() calls, none of
+		# them would survive and the form would show stale status after a
+		# real failure.
+		with (
+			patch(
+				"marketplace_integrations.integrations.shopify.webhooks.get_webhook_callback_url",
+				return_value="https://example.com/webhook",
+			),
+			patch(EXECUTE_TARGET, side_effect=RuntimeError("boom: shopify unreachable")),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				sync_webhook_subscriptions(self.connection)
+
+		self.connection.reload()
+		self.assertEqual(self.connection.webhook_registration_status, "Error")
+		self.assertIn("boom", self.connection.last_webhook_error)
+
+	def test_stale_uri_subscription_is_deleted_and_recreated_at_new_url(self):
+		old_url = "https://old-tunnel.example.com/webhook"
+		new_url = "https://new-tunnel.example.com/webhook"
+		existing_response = {
+			"webhookSubscriptions": {
+				"edges": [
+					{
+						"node": {
+							"id": "gid://shopify/WebhookSubscription/stale-1",
+							"topic": "ORDERS_CREATE",
+							"uri": old_url,
+						}
+					}
+				]
+			}
+		}
+		delete_response = {
+			"webhookSubscriptionDelete": {
+				"deletedWebhookSubscriptionId": "gid://shopify/WebhookSubscription/stale-1",
+				"userErrors": [],
+			}
+		}
+		create_response = {
+			"webhookSubscriptionCreate": {"webhookSubscription": {"id": "x"}, "userErrors": []}
+		}
+
+		with (
+			patch(
+				"marketplace_integrations.integrations.shopify.webhooks.get_webhook_callback_url",
+				return_value=new_url,
+			),
+			patch(
+				EXECUTE_TARGET,
+				side_effect=[existing_response, delete_response] + [create_response] * 7,
+			) as execute,
+		):
+			result = sync_webhook_subscriptions(self.connection)
+
+		# 1 inspection query + 1 delete (the stale ORDERS_CREATE sub at
+		# old_url) + 7 creates (all topics are "missing" at new_url, since
+		# the only prior ORDERS_CREATE registration was stale and just
+		# deleted).
+		self.assertEqual(execute.call_count, 9)
+		self.assertEqual(result["status"], "Complete")
+		self.assertEqual(result["missing_topics"], [])
+
+	def test_failed_delete_marks_status_error_even_when_nothing_is_missing(self):
+		# Second review pass finding #1: a failed webhookSubscriptionDelete
+		# (stale-subscription cleanup) must mark status "Error" even when
+		# every topic's create-pass still succeeds and nothing ends up
+		# "missing" - otherwise a dead stale subscription stays live and
+		# double-delivering behind a green "Complete" status.
+		old_url = "https://old-tunnel.example.com/webhook"
+		new_url = "https://new-tunnel.example.com/webhook"
+		existing_response = {
+			"webhookSubscriptions": {
+				"edges": [
+					{
+						"node": {
+							"id": "gid://shopify/WebhookSubscription/stale-1",
+							"topic": "ORDERS_CREATE",
+							"uri": old_url,
+						}
+					}
+				]
+			}
+		}
+		failing_delete_response = {
+			"webhookSubscriptionDelete": {
+				"deletedWebhookSubscriptionId": None,
+				"userErrors": [{"field": ["id"], "message": "could not delete"}],
+			}
+		}
+		create_response = {
+			"webhookSubscriptionCreate": {"webhookSubscription": {"id": "x"}, "userErrors": []}
+		}
+
+		with (
+			patch(
+				"marketplace_integrations.integrations.shopify.webhooks.get_webhook_callback_url",
+				return_value=new_url,
+			),
+			patch(
+				EXECUTE_TARGET,
+				side_effect=[existing_response, failing_delete_response] + [create_response] * 7,
+			),
+		):
+			result = sync_webhook_subscriptions(self.connection)
+
+		self.assertEqual(result["status"], "Error")
+		self.assertEqual(result["missing_topics"], [])
+		self.assertTrue(result["errors"])
+		self.connection.reload()
+		self.assertEqual(self.connection.webhook_registration_status, "Error")
+
+
+class IntegrationTestProcessShopifyWebhook(IntegrationTestCase):
+	def setUp(self):
+		self.connection = make_connection(f"Process Webhook {frappe.generate_hash(length=8)}")
+
+	def tearDown(self):
+		frappe.db.delete("Shopify Webhook Delivery", {"connection": self.connection.name})
+		frappe.delete_doc("Shopify Connection", self.connection.name, ignore_permissions=True, force=True)
+
+	def test_duplicate_webhook_id_is_harmless(self):
+		process_shopify_webhook(
+			self.connection.name, "ORDERS_CREATE", "webhook-dup-1", "test-shop.myshopify.com"
+		)
+		# A second delivery of the same webhook_id must not raise and must not
+		# create a second Shopify Webhook Delivery record.
+		process_shopify_webhook(
+			self.connection.name, "ORDERS_CREATE", "webhook-dup-1", "test-shop.myshopify.com"
+		)
+
+		count = frappe.db.count("Shopify Webhook Delivery", {"webhook_id": "webhook-dup-1"})
+		self.assertEqual(count, 1)
+
+	def test_non_uninstall_topic_is_recorded_processed(self):
+		# ORDERS_CREATE is an order topic (#109 decision 4) - it requires an
+		# order_gid; account_for_connection() resolves to None here (no
+		# Marketplace Account exists for this connection), so this is still a
+		# silent Processed no-op end-to-end, same as before #109's order
+		# handling existed.
+		process_shopify_webhook(
+			self.connection.name,
+			"ORDERS_CREATE",
+			"webhook-order-1",
+			"test-shop.myshopify.com",
+			order_gid="gid://shopify/Order/1",
+		)
+
+		delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": "webhook-order-1"})
+		self.assertEqual(delivery.status, "Processed")
+		self.assertEqual(delivery.topic, "ORDERS_CREATE")
+
+		self.connection.reload()
+		self.assertTrue(self.connection.enabled)
+		self.assertEqual(self.connection.last_webhook_delivery_topic, "ORDERS_CREATE")
+		self.assertTrue(self.connection.last_webhook_processed_at)
+
+	def test_app_uninstalled_disables_connection_idempotently(self):
+		process_shopify_webhook(
+			self.connection.name, "APP_UNINSTALLED", "webhook-uninstall-1", "test-shop.myshopify.com"
+		)
+
+		self.connection.reload()
+		self.assertFalse(self.connection.enabled)
+
+		# A second, distinct delivery (different webhook_id, same effective
+		# event) must be a safe no-op against an already-disabled connection.
+		process_shopify_webhook(
+			self.connection.name, "APP_UNINSTALLED", "webhook-uninstall-2", "test-shop.myshopify.com"
+		)
+		self.connection.reload()
+		self.assertFalse(self.connection.enabled)
+
+	def test_previously_errored_delivery_is_reprocessed_on_retry(self):
+		# Second review pass finding #2: a duplicate webhook_id must not be a
+		# permanent no-op when the existing row never reached "Processed" -
+		# otherwise a delivery that errored once could never be reprocessed
+		# by any of Shopify's own retries of that same event.
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		call_count = {"n": 0}
+
+		def flaky_handle_topic(connection, topic, order_gid=None):
+			call_count["n"] += 1
+			if call_count["n"] == 1:
+				raise RuntimeError("boom: simulated failure")
+
+		with patch.object(webhooks_module, "_handle_topic", side_effect=flaky_handle_topic):
+			process_shopify_webhook(
+				self.connection.name, "ORDERS_CREATE", "webhook-retry-1", "test-shop.myshopify.com"
+			)
+
+		delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": "webhook-retry-1"})
+		self.assertEqual(delivery.status, "Error")
+
+		with patch.object(webhooks_module, "_handle_topic", side_effect=flaky_handle_topic):
+			process_shopify_webhook(
+				self.connection.name, "ORDERS_CREATE", "webhook-retry-1", "test-shop.myshopify.com"
+			)
+
+		self.assertEqual(call_count["n"], 2)
+		# Still exactly one row - the unique index guarantees this - but its
+		# status has moved on to "Processed" via the retry, not a second row.
+		count = frappe.db.count("Shopify Webhook Delivery", {"webhook_id": "webhook-retry-1"})
+		self.assertEqual(count, 1)
+		delivery.reload()
+		self.assertEqual(delivery.status, "Processed")
+
+	def test_previously_processed_delivery_is_not_reprocessed_on_retry(self):
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with patch.object(webhooks_module, "_handle_topic", return_value=None) as mocked_handle_topic:
+			process_shopify_webhook(
+				self.connection.name, "ORDERS_CREATE", "webhook-processed-1", "test-shop.myshopify.com"
+			)
+			process_shopify_webhook(
+				self.connection.name, "ORDERS_CREATE", "webhook-processed-1", "test-shop.myshopify.com"
+			)
+
+		self.assertEqual(mocked_handle_topic.call_count, 1)
+
+	def test_reprocess_does_not_restamp_last_webhook_delivery_at(self):
+		# Per explicit product decision (review pass on PR #117):
+		# last_webhook_delivery_at/last_webhook_delivery_topic mean "has
+		# Shopify stopped delivering to us" - they must only ever be stamped
+		# from the delivery's own received_at/topic on the ORIGINAL
+		# processing attempt, never re-stamped with the current time on a
+		# reprocess/retry (that would make a stale delivery falsely look
+		# fresh). This reverses an earlier version of this test that
+		# asserted the opposite.
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		call_count = {"n": 0}
+
+		def flaky_handle_topic(connection, topic, order_gid=None):
+			call_count["n"] += 1
+			if call_count["n"] == 1:
+				raise RuntimeError("boom: simulated failure")
+
+		original_received_at = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-3)
+		with patch.object(webhooks_module, "now_datetime", return_value=original_received_at):
+			with patch.object(webhooks_module, "_handle_topic", side_effect=flaky_handle_topic):
+				process_shopify_webhook(
+					self.connection.name, "ORDERS_CREATE", "webhook-ts-1", "test-shop.myshopify.com"
+				)
+
+		delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": "webhook-ts-1"})
+		self.assertEqual(delivery.received_at, original_received_at)
+
+		self.connection.reload()
+		# Original attempt: last_webhook_delivery_at was stamped from the
+		# delivery's own received_at.
+		self.assertEqual(self.connection.last_webhook_delivery_at, original_received_at)
+
+		with patch.object(webhooks_module, "_handle_topic", side_effect=flaky_handle_topic):
+			process_shopify_webhook(
+				self.connection.name, "ORDERS_CREATE", "webhook-ts-1", "test-shop.myshopify.com"
+			)
+
+		delivery.reload()
+		self.connection.reload()
+		# received_at is untouched by the reprocess - still the original time.
+		self.assertEqual(delivery.received_at, original_received_at)
+		# last_webhook_delivery_at must NOT have moved - the reprocess is not
+		# an original delivery.
+		self.assertEqual(self.connection.last_webhook_delivery_at, original_received_at)
+		# The reprocess is still tracked via last_webhook_processed_at, which
+		# does update on every attempt.
+		self.assertTrue(self.connection.last_webhook_processed_at)
+
+
+def make_delivery(connection, webhook_id, **kwargs):
+	doc = {
+		"doctype": "Shopify Webhook Delivery",
+		"connection": connection.name,
+		"shop_domain": connection.shop_domain,
+		"topic": "ORDERS_CREATE",
+		"webhook_id": webhook_id,
+		"received_at": frappe.utils.now_datetime(),
+	}
+	doc.update(kwargs)
+	return frappe.get_doc(doc).insert()
+
+
+class IntegrationTestRetryErroredWebhookDeliveries(IntegrationTestCase):
+	def setUp(self):
+		self.connection = make_connection(f"Retry Sweep {frappe.generate_hash(length=8)}")
+
+	def tearDown(self):
+		frappe.db.delete("Shopify Webhook Delivery", {"connection": self.connection.name})
+		frappe.delete_doc("Shopify Connection", self.connection.name, ignore_permissions=True, force=True)
+		frappe.db.commit()
+
+	@staticmethod
+	def _calls_for(mocked_handle_topic, connection_name):
+		# The sweep runs against the whole site, so other status="Error" (or
+		# stuck "Received") rows left over from other tests/dev-DB state can
+		# legitimately also get processed in the same call - see
+		# docs/frappe-conventions.md's "IntegrationTestCase only rolls back
+		# once at class teardown" gotcha. Scope assertions to only the calls
+		# this test's own connection triggered, rather than a raw call count.
+		return [c for c in mocked_handle_topic.call_args_list if c.args[0].name == connection_name]
+
+	def test_sweep_reprocesses_an_errored_delivery(self):
+		delivery = make_delivery(
+			self.connection, f"webhook-sweep-error-{frappe.generate_hash(length=6)}", status="Error"
+		)
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with patch.object(webhooks_module, "_handle_topic", return_value=None) as mocked_handle_topic:
+			retry_errored_webhook_deliveries()
+
+		self.assertEqual(len(self._calls_for(mocked_handle_topic, self.connection.name)), 1)
+		delivery.reload()
+		self.assertEqual(delivery.status, "Processed")
+		self.assertEqual(delivery.attempt_count, 1)
+
+	def test_sweep_skips_a_processed_delivery(self):
+		delivery = make_delivery(
+			self.connection, f"webhook-sweep-processed-{frappe.generate_hash(length=6)}", status="Processed"
+		)
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with patch.object(webhooks_module, "_handle_topic", return_value=None) as mocked_handle_topic:
+			retry_errored_webhook_deliveries()
+
+		self.assertEqual(self._calls_for(mocked_handle_topic, self.connection.name), [])
+		delivery.reload()
+		self.assertEqual(delivery.status, "Processed")
+		self.assertEqual(delivery.attempt_count, 0)
+
+	def test_sweep_respects_the_max_attempt_bound(self):
+		delivery = make_delivery(
+			self.connection,
+			f"webhook-sweep-exhausted-{frappe.generate_hash(length=6)}",
+			status="Error",
+			attempt_count=MAX_WEBHOOK_DELIVERY_ATTEMPTS,
+		)
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with patch.object(webhooks_module, "_handle_topic", return_value=None) as mocked_handle_topic:
+			retry_errored_webhook_deliveries()
+
+		# The sweep's own query filter already excludes an exhausted row, and
+		# _process_delivery()'s own cap would no-op it even if that filter
+		# somehow didn't - neither path should ever call _handle_topic again.
+		self.assertEqual(self._calls_for(mocked_handle_topic, self.connection.name), [])
+		delivery.reload()
+		self.assertEqual(delivery.status, "Error")
+		self.assertEqual(delivery.attempt_count, MAX_WEBHOOK_DELIVERY_ATTEMPTS)
+
+	def test_sweep_recovers_a_stuck_received_row_past_the_threshold(self):
+		old_creation = frappe.utils.add_to_date(
+			frappe.utils.now_datetime(), minutes=-(STUCK_RECEIVED_THRESHOLD_MINUTES + 5)
+		)
+		stuck = make_delivery(
+			self.connection,
+			f"webhook-sweep-stuck-{frappe.generate_hash(length=6)}",
+			status="Received",
+		)
+		frappe.db.set_value(
+			"Shopify Webhook Delivery", stuck.name, "creation", old_creation, update_modified=False
+		)
+		frappe.clear_document_cache("Shopify Webhook Delivery", stuck.name)
+
+		fresh = make_delivery(
+			self.connection,
+			f"webhook-sweep-fresh-{frappe.generate_hash(length=6)}",
+			status="Received",
+		)
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with patch.object(webhooks_module, "_handle_topic", return_value=None) as mocked_handle_topic:
+			retry_errored_webhook_deliveries()
+
+		# Only the old stuck row was picked up - a fresh "Received" row could
+		# still be actively mid-processing by a worker right now and must not
+		# be raced.
+		self.assertEqual(len(self._calls_for(mocked_handle_topic, self.connection.name)), 1)
+		stuck.reload()
+		self.assertEqual(stuck.status, "Processed")
+		fresh.reload()
+		self.assertEqual(fresh.status, "Received")
+		self.assertEqual(fresh.attempt_count, 0)
+
+	def test_poison_row_does_not_block_other_rows_in_the_same_sweep(self):
+		# Savepoint isolation: one row whose processing raises must not roll
+		# back another row already successfully processed earlier in the
+		# same sweep run.
+		good = make_delivery(
+			self.connection, f"webhook-sweep-good-{frappe.generate_hash(length=6)}", status="Error"
+		)
+		poison = make_delivery(
+			self.connection, f"webhook-sweep-poison-{frappe.generate_hash(length=6)}", status="Error"
+		)
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		# Site-wide leftover rows from other tests/dev-DB state can also be
+		# picked up by the same sweep run (see _calls_for()'s docstring
+		# note) - scope the flaky behavior to only this test's own
+		# connection so ordering assumptions below stay deterministic
+		# regardless of what else the sweep happens to touch.
+		call_order = []
+
+		def flaky(connection, topic, order_gid=None):
+			if connection.name != self.connection.name:
+				return
+			call_order.append(connection.name)
+			if len(call_order) == 1:
+				return
+			raise RuntimeError("boom: poison row")
+
+		with patch.object(webhooks_module, "_handle_topic", side_effect=flaky):
+			retry_errored_webhook_deliveries()
+
+		good.reload()
+		poison.reload()
+		# Both rows were attempted (creation-ascending order), and whichever
+		# one failed did not roll back the other's already-committed success.
+		statuses = {good.name: good.status, poison.name: poison.status}
+		self.assertIn("Processed", statuses.values())
+		self.assertIn("Error", statuses.values())
+		self.assertEqual(good.attempt_count, 1)
+		self.assertEqual(poison.attempt_count, 1)
+
+
+class UnitTestProcessDeliveryAtomicIncrement(IntegrationTestCase):
+	def test_attempt_count_increment_is_atomic_under_a_simulated_race(self):
+		# Simulates two concurrent callers (e.g. the sweep and a simultaneous
+		# Shopify redelivery) both trying to process the same already-
+		# exhausted-minus-one delivery: only one of the two atomic UPDATEs
+		# should succeed in incrementing attempt_count, the other must bail
+		# out cleanly without double-counting or calling _handle_topic.
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		connection = make_connection(f"Atomic Increment {frappe.generate_hash(length=8)}")
+		delivery = make_delivery(
+			connection,
+			f"webhook-race-{frappe.generate_hash(length=6)}",
+			status="Error",
+			attempt_count=MAX_WEBHOOK_DELIVERY_ATTEMPTS - 1,
+		)
+
+		# Simulate the "loser" of the race by pre-incrementing attempt_count
+		# on the DB directly (as if a concurrent caller's atomic UPDATE won
+		# first), while this in-memory `delivery` object still holds the
+		# pre-race value.
+		frappe.db.set_value(
+			"Shopify Webhook Delivery",
+			delivery.name,
+			"attempt_count",
+			MAX_WEBHOOK_DELIVERY_ATTEMPTS,
+			update_modified=False,
+		)
+
+		with patch.object(webhooks_module, "_handle_topic", return_value=None) as mocked_handle_topic:
+			webhooks_module._process_delivery(delivery, connection)
+
+		mocked_handle_topic.assert_not_called()
+		delivery.reload()
+		# The loser's own atomic UPDATE found attempt_count already at the
+		# cap (WHERE attempt_count < %s matched 0 rows) and did not
+		# increment further - still exactly at the cap, not over it.
+		self.assertEqual(delivery.attempt_count, MAX_WEBHOOK_DELIVERY_ATTEMPTS)
+
+
+class IntegrationTestHandleTopicRealOrderRouting(IntegrationTestCase):
+	"""Review finding #4: _handle_topic()'s real order-topic routing logic
+	(#109 decision 4/5) was never exercised - every existing test above mocks
+	_handle_topic itself away. These go through process_shopify_webhook()
+	end-to-end so the REAL _handle_topic() runs; only import_order()/
+	ShopifyClient are mocked, never _handle_topic."""
+
+	def setUp(self):
+		self.connection = make_connection(f"Handle Topic Routing {frappe.generate_hash(length=8)}")
+
+	def tearDown(self):
+		for order in frappe.get_all(
+			"Marketplace Order",
+			{
+				"marketplace_account": [
+					"in",
+					frappe.get_all("Marketplace Account", {"connection": self.connection.name}, pluck="name"),
+				]
+			},
+			pluck="name",
+		):
+			frappe.delete_doc("Marketplace Order", order, ignore_permissions=True, force=True)
+		frappe.db.delete("Marketplace Account", {"connection": self.connection.name})
+		frappe.db.delete("Shopify Webhook Delivery", {"connection": self.connection.name})
+		frappe.delete_doc("Shopify Connection", self.connection.name, ignore_permissions=True, force=True)
+
+	def test_missing_order_gid_is_marked_error_for_every_order_topic(self):
+		for topic in SHOPIFY_ORDER_WEBHOOK_TOPICS:
+			with self.subTest(topic=topic):
+				webhook_id = f"webhook-missing-gid-{topic}-{frappe.generate_hash(length=6)}"
+				process_shopify_webhook(
+					self.connection.name, topic, webhook_id, self.connection.shop_domain, order_gid=None
+				)
+				delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": webhook_id})
+				self.assertEqual(delivery.status, "Error")
+				self.assertIn("order id", delivery.error.lower())
+
+	def test_malformed_blank_order_gid_is_also_marked_error(self):
+		# _handle_topic()'s own check is `if not order_gid`, so an empty
+		# string (a malformed/blank id, distinct from the None case above -
+		# e.g. api/shopify_webhooks.py's _extract_order_gid() found no usable
+		# admin_graphql_api_id/order_id) hits the exact same guard.
+		webhook_id = f"webhook-blank-gid-{frappe.generate_hash(length=6)}"
+		process_shopify_webhook(
+			self.connection.name, "ORDERS_CREATE", webhook_id, self.connection.shop_domain, order_gid=""
+		)
+		delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": webhook_id})
+		self.assertEqual(delivery.status, "Error")
+		self.assertIn("order id", delivery.error.lower())
+
+	def test_no_resolvable_marketplace_account_is_a_silent_processed_noop(self):
+		# No Marketplace Account exists for this connection at all -
+		# account_for_connection() naturally returns None. #109 decision 5,
+		# edge case 2: a silent Processed no-op, not an Error - an Error here
+		# would just burn through the 5-attempt retry budget for nothing
+		# actionable.
+		webhook_id = f"webhook-no-account-{frappe.generate_hash(length=6)}"
+		process_shopify_webhook(
+			self.connection.name,
+			"ORDERS_CREATE",
+			webhook_id,
+			self.connection.shop_domain,
+			order_gid="gid://shopify/Order/12345",
+		)
+		delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": webhook_id})
+		self.assertEqual(delivery.status, "Processed")
+		self.assertEqual(delivery.error, "")
+
+	def test_import_order_returning_none_is_processed_with_a_distinguishing_note(self):
+		# #109 decision 5, edge case 3: order(id:) returned null (older than
+		# the 60-day read_orders window, or genuinely deleted). Only
+		# import_order() itself is mocked - _handle_topic()'s own routing
+		# (resolving the account, calling import_order(), branching on its
+		# None result) runs for real.
+		make_shopify_account(
+			f"Handle Topic Routing Account {frappe.generate_hash(length=8)}",
+			connection=self.connection.name,
+		)
+		webhook_id = f"webhook-null-order-{frappe.generate_hash(length=6)}"
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with patch.object(webhooks_module, "import_order", return_value=None) as mocked_import_order:
+			process_shopify_webhook(
+				self.connection.name,
+				"ORDERS_CREATE",
+				webhook_id,
+				self.connection.shop_domain,
+				order_gid="gid://shopify/Order/12345",
+			)
+
+		mocked_import_order.assert_called_once()
+		delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": webhook_id})
+		self.assertEqual(delivery.status, "Processed")
+		# The distinguishing note - present here, unlike the silent no-op
+		# above, and unlike a genuine success (which also leaves error blank).
+		self.assertTrue(delivery.error)
+
+	def test_successful_import_bumps_the_sync_debounce_window(self):
+		# #133: a successful import_order() schedules the eventual Sales Order
+		# sync via bump_sync_debounce() (#132) rather than enqueueing directly.
+		# import_order() is mocked to return a real Marketplace Order (built
+		# the same way import_order() itself would upsert one) so
+		# bump_sync_debounce(order.name) has a real row to act on; only
+		# import_order() is mocked, _handle_topic()'s own routing runs for
+		# real.
+		account = make_shopify_account(
+			f"Handle Topic Routing Account {frappe.generate_hash(length=8)}",
+			connection=self.connection.name,
+		)
+		order = upsert_marketplace_order(
+			account.name,
+			{
+				"external_order_id": f"handle-topic-debounce-{frappe.generate_hash(length=6)}",
+				"latest_payload": {"order_id": "external-order"},
+				"items": [],
+			},
+		)
+		webhook_id = f"webhook-debounce-bump-{frappe.generate_hash(length=6)}"
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		before = frappe.utils.now_datetime()
+		with patch.object(webhooks_module, "import_order", return_value=order) as mocked_import_order:
+			process_shopify_webhook(
+				self.connection.name,
+				"ORDERS_CREATE",
+				webhook_id,
+				self.connection.shop_domain,
+				order_gid="gid://shopify/Order/12345",
+			)
+
+		mocked_import_order.assert_called_once()
+		delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": webhook_id})
+		self.assertEqual(delivery.status, "Processed")
+		self.assertEqual(delivery.error, "")
+		sync_debounce_until = frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until")
+		self.assertIsNotNone(sync_debounce_until)
+		self.assertGreater(sync_debounce_until, before)
+
+	def test_successful_import_calls_bump_sync_debounce_with_the_order_name(self):
+		# Direct call-site assertion, complementing the state-based assertion
+		# above - confirms _handle_topic() wires bump_sync_debounce() to the
+		# imported order's name specifically, not e.g. the raw order_gid.
+		account = make_shopify_account(
+			f"Handle Topic Routing Account {frappe.generate_hash(length=8)}",
+			connection=self.connection.name,
+		)
+		order = upsert_marketplace_order(
+			account.name,
+			{
+				"external_order_id": f"handle-topic-debounce-call-{frappe.generate_hash(length=6)}",
+				"latest_payload": {"order_id": "external-order"},
+				"items": [],
+			},
+		)
+		webhook_id = f"webhook-debounce-call-{frappe.generate_hash(length=6)}"
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with (
+			patch.object(webhooks_module, "import_order", return_value=order),
+			patch.object(webhooks_module, "bump_sync_debounce") as mocked_bump,
+		):
+			process_shopify_webhook(
+				self.connection.name,
+				"ORDERS_CREATE",
+				webhook_id,
+				self.connection.shop_domain,
+				order_gid="gid://shopify/Order/12345",
+			)
+
+		mocked_bump.assert_called_once_with(order.name, trigger_source="Shopify Webhook")
+
+	def test_no_resolvable_account_does_not_bump_sync_debounce(self):
+		# #109 decision 5 edge case 2 (no resolvable account) must remain a
+		# pure no-op - bump_sync_debounce() is only reachable past a
+		# successful import_order() call, which never happens on this path.
+		webhook_id = f"webhook-no-account-no-bump-{frappe.generate_hash(length=6)}"
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with patch.object(webhooks_module, "bump_sync_debounce") as mocked_bump:
+			process_shopify_webhook(
+				self.connection.name,
+				"ORDERS_CREATE",
+				webhook_id,
+				self.connection.shop_domain,
+				order_gid="gid://shopify/Order/12345",
+			)
+
+		mocked_bump.assert_not_called()
+
+	def test_null_order_does_not_bump_sync_debounce(self):
+		# #109 decision 5 edge case 3 (import_order() returns None) must also
+		# remain unaffected - bump_sync_debounce() is only called on the
+		# non-None branch.
+		make_shopify_account(
+			f"Handle Topic Routing Account {frappe.generate_hash(length=8)}",
+			connection=self.connection.name,
+		)
+		webhook_id = f"webhook-null-order-no-bump-{frappe.generate_hash(length=6)}"
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with (
+			patch.object(webhooks_module, "import_order", return_value=None),
+			patch.object(webhooks_module, "bump_sync_debounce") as mocked_bump,
+		):
+			process_shopify_webhook(
+				self.connection.name,
+				"ORDERS_CREATE",
+				webhook_id,
+				self.connection.shop_domain,
+				order_gid="gid://shopify/Order/12345",
+			)
+
+		mocked_bump.assert_not_called()
+
+
+class IntegrationTestShopifyWebhookDebouncedSyncTriggerSourceEndToEnd(IntegrationTestCase):
+	"""#135 end-to-end: a real Shopify webhook delivery, through the real
+	debounce window, must produce a Marketplace Sync Log row correctly
+	attributed to "Shopify Webhook" rather than silently defaulting to
+	"Manual". Only ShopifyClient.execute() is mocked - import_order(),
+	_handle_topic(), bump_sync_debounce() and _run_debounced_sync() all run
+	for real, exercising the exact regression this issue fixes."""
+
+	EXECUTE_TARGET = "marketplace_integrations.integrations.shopify.client.ShopifyClient.execute"
+
+	def setUp(self):
+		self.suffix = frappe.generate_hash(length=8)
+		self.company = frappe.defaults.get_global_default("company")
+		self.price_list = frappe.get_all(
+			"Price List", filters={"selling": 1, "enabled": 1}, pluck="name", limit=1
+		)[0]
+		self.warehouse = frappe.get_all(
+			"Warehouse",
+			filters={"disabled": 0, "is_group": 0, "company": self.company},
+			pluck="name",
+			limit=1,
+		)[0]
+		self.item = frappe.get_doc(
+			{
+				"doctype": "Item",
+				"item_code": f"TEST-WEBHOOK-E2E-{self.suffix}",
+				"item_group": "Products",
+				"stock_uom": "Nos",
+				"is_stock_item": 0,
+			}
+		).insert()
+		self.connection = make_connection(f"Webhook E2E {self.suffix}")
+		self.account = make_shopify_account(
+			f"Webhook E2E Account {self.suffix}", connection=self.connection.name
+		)
+		self.account.db_set("erpnext_company", self.company, update_modified=False)
+		self.account.db_set("erpnext_selling_price_list", self.price_list, update_modified=False)
+		self.account.db_set("warehouse", self.warehouse, update_modified=False)
+		self.variant_gid = f"gid://shopify/ProductVariant/{self.suffix}"
+		frappe.get_doc(
+			{
+				"doctype": "Marketplace Product Mapping",
+				"marketplace_account": self.account.name,
+				"item": self.item.name,
+				"external_reference": self.variant_gid,
+				"external_variant_id": self.variant_gid,
+				"sales_uom": "Nos",
+			}
+		).insert()
+
+	def tearDown(self):
+		for order in frappe.get_all(
+			"Marketplace Order", {"marketplace_account": self.account.name}, pluck="name"
+		):
+			# sales_order_sync._create_sync_log never sets marketplace_account, so
+			# its logs are only reachable through the order link.
+			frappe.db.delete("Marketplace Sync Log", {"marketplace_order": order})
+			frappe.delete_doc("Marketplace Order", order, ignore_permissions=True, force=True)
+		frappe.db.delete("Marketplace Sync Log", {"marketplace_account": self.account.name})
+		frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": self.account.name})
+		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
+		frappe.db.delete("Shopify Webhook Delivery", {"connection": self.connection.name})
+		frappe.delete_doc("Shopify Connection", self.connection.name, ignore_permissions=True, force=True)
+		frappe.db.commit()
+
+	def test_webhook_driven_debounced_sync_logs_shopify_webhook_trigger_source_and_submits(self):
+		order_gid = f"gid://shopify/Order/{self.suffix}"
+		# displayFinancialStatus="PAID" and refunds=[]: the fixture's default
+		# PARTIALLY_REFUNDED/refund-evidence shape is exactly what
+		# test_orders.py exercises elsewhere - this test only needs a plain,
+		# synchronizable order so sync_sales_order() doesn't hit an unrelated
+		# SyncBlocker. priceAfterAllDiscountsBeforeTaxesSet is added on the
+		# line item because _build_shopify_sales_order_lines() requires real
+		# transaction evidence (transaction_amount_missing=0), which the
+		# fixture's default line item doesn't include.
+		payload = make_order_payload(
+			order_gid,
+			displayFinancialStatus="PAID",
+			refunds=[],
+			processedAt="2026-09-27T10:00:05Z",
+		)
+		payload["lineItems"]["nodes"][0]["variant"]["id"] = self.variant_gid
+		payload["lineItems"]["nodes"][0]["priceAfterAllDiscountsBeforeTaxesSet"] = {
+			"shopMoney": {"amount": "40.00", "currencyCode": "EGP"}
+		}
+		webhook_id = f"webhook-e2e-{self.suffix}"
+
+		with patch(self.EXECUTE_TARGET, return_value={"order": payload}):
+			process_shopify_webhook(
+				self.connection.name,
+				"ORDERS_CREATE",
+				webhook_id,
+				self.connection.shop_domain,
+				order_gid=order_gid,
+			)
+
+		delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": webhook_id})
+		self.assertEqual(delivery.status, "Processed")
+		order = frappe.get_doc(
+			"Marketplace Order",
+			{"marketplace_account": self.account.name, "external_order_id": order_gid},
+		)
+		self.assertEqual(order.pending_sync_trigger_source, "Shopify Webhook")
+		self.assertIsNotNone(order.sync_debounce_until)
+
+		# Backdate the debounce window to simulate it already being due, then
+		# run the real (not mocked) debounced-sync job body.
+		frappe.db.set_value(
+			"Marketplace Order",
+			order.name,
+			"sync_debounce_until",
+			add_to_date(now_datetime(), seconds=-1),
+			update_modified=False,
+		)
+		expected_debounce_until = frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until")
+
+		_run_debounced_sync(order.name, expected_debounce_until)
+
+		order.reload()
+		self.assertIsNone(order.sync_debounce_until)
+		self.assertIsNone(order.pending_sync_trigger_source)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		self.assertEqual(sales_order.docstatus, 1)
+
+		log = frappe.get_doc(
+			"Marketplace Sync Log",
+			{"marketplace_order": order.name, "status": "Success"},
+		)
+		self.assertEqual(log.trigger_source, "Shopify Webhook")

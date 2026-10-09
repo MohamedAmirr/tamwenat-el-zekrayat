@@ -1,0 +1,50 @@
+[
+ {
+  "attach_files": "",
+  "attach_print": 0,
+  "channel": "System Notification",
+  "condition": "doc.refunds",
+  "condition_type": "Python",
+  "date_changed": null,
+  "datetime_changed": null,
+  "datetime_last_run": null,
+  "days_in_advance": 0,
+  "docstatus": 0,
+  "doctype": "Notification",
+  "document_type": "Marketplace Order",
+  "enabled": 1,
+  "event": "Value Change",
+  "filters": null,
+  "from_attach_field": null,
+  "is_standard": 0,
+  "message": "Add your message here",
+  "message_type": "Markdown",
+  "method": null,
+  "minutes_offset": 0,
+  "modified": "2026-09-28 15:31:43.698258",
+  "module": null,
+  "name": "Refund Detected on Marketplace Order",
+  "notification_message": "Refund evidence was recorded for order {{ doc.order_code or doc.external_order_id }}. <a href=\"/app/marketplace-order/{{ doc.name }}\">View Marketplace Order</a>",
+  "notification_title": "Refund detected on Marketplace Order {{ doc.order_code or doc.external_order_id }}",
+  "notification_type": "Alert",
+  "print_format": null,
+  "property_value": null,
+  "recipients": [
+   {
+    "bcc": null,
+    "cc": null,
+    "condition": null,
+    "receiver_by_document_field": null,
+    "receiver_by_role": "System Manager"
+   }
+  ],
+  "send_system_notification": 0,
+  "send_to_all_assignees": 0,
+  "sender": null,
+  "sender_email": null,
+  "set_property_after_alert": null,
+  "slack_webhook_url": null,
+  "subject": "Refund detected on Marketplace Order {{ doc.order_code or doc.external_order_id }}",
+  "value_changed": "refunds"
+ }
+]

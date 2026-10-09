@@ -1,0 +1,181 @@
+{
+ "app": "marketplace_integrations",
+ "charts": [],
+ "content": "[{\"id\":\"mktheader\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Tamwenat Marketplaces</b></span>\",\"col\":12}},{\"id\":\"mktoverviewheader\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h5\\\"><b>Overview</b></span>\",\"col\":12}},{\"id\":\"mktshortcutchannelstatus\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Marketplace Channel Status\",\"col\":4}},{\"id\":\"mktshortcutaccount\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Marketplace Account\",\"col\":4}},{\"id\":\"mktshortcutneedsattention\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Marketplace Needs Attention\",\"col\":4}},{\"id\":\"mktspacer1\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"mkttalabatheader\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h5\\\"><b>Talabat</b></span>\",\"col\":12}},{\"id\":\"mktshortcuttalabatconnection\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Talabat Connection\",\"col\":4}},{\"id\":\"mktshortcuttalabatcatalog\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Marketplace Talabat Catalog Mapping\",\"col\":4}},{\"id\":\"mktshortcuttalabatorders\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Talabat Orders\",\"col\":4}},{\"id\":\"mktspacer2\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"mktshopifyheader\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h5\\\"><b>Shopify</b></span>\",\"col\":12}},{\"id\":\"mktshortcutshopifyconnection\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Connection\",\"col\":4}},{\"id\":\"mktshortcutshopifycatalog\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Marketplace Shopify Catalog Mapping\",\"col\":4}},{\"id\":\"mktshortcutshopifyorders\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Orders\",\"col\":4}},{\"id\":\"mktspacer3\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"mktnoonheader\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h5\\\"><b>Noon</b></span>\",\"col\":12}},{\"id\":\"mktshortcutnoonconnection\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Noon Connection\",\"col\":4}},{\"id\":\"mktshortcutnoonorders\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Noon Orders\",\"col\":4}},{\"id\":\"mktspacer4\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"mktoperationsheader\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h5\\\"><b>Operations</b></span>\",\"col\":12}},{\"id\":\"mktshortcutorders\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"All Marketplace Orders\",\"col\":4}},{\"id\":\"mktshortcutmappings\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Marketplace Product Mapping\",\"col\":4}},{\"id\":\"mktshortcutmarketplaceproducts\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Marketplace Products\",\"col\":4}},{\"id\":\"mktshortcutproductmgmt\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Marketplace Product Management\",\"col\":4}},{\"id\":\"mktspacer5\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"mktadvancedheader\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h5\\\"><b>Advanced</b></span>\",\"col\":12}},{\"id\":\"mktshortcutsynclog\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Marketplace Sync Log\",\"col\":4}},{\"id\":\"mktshortcutwebhookdelivery\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Webhook Delivery\",\"col\":4}},{\"id\":\"mktshortcutnoonreturn\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Noon Return\",\"col\":4}},{\"id\":\"mktshortcutreconciliationsummary\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Reconciliation Summary\",\"col\":4}},{\"id\":\"mktshortcutimportfailures\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Shopify Order Import Failures\",\"col\":4}}]",
+ "creation": "2026-10-04 00:00:00.000000",
+ "custom_blocks": [],
+ "docstatus": 0,
+ "doctype": "Workspace",
+ "for_user": "",
+ "hide_custom": 0,
+ "icon": "store",
+ "idx": 0,
+ "is_hidden": 0,
+ "label": "Tamwenat Marketplaces",
+ "links": [],
+ "modified": "2026-10-05 16:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Marketplace Integrations",
+ "name": "Tamwenat Marketplaces",
+ "number_cards": [],
+ "owner": "Administrator",
+ "parent_page": "",
+ "public": 1,
+ "quick_lists": [],
+ "restrict_to_domain": "",
+ "roles": [
+  {
+   "doctype": "Has Role",
+   "role": "System Manager"
+  }
+ ],
+ "sequence_id": 1.0,
+ "shortcuts": [
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Marketplace Channel Status",
+   "link_to": "Marketplace Channel Status",
+   "type": "Report"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Marketplace Account",
+   "link_to": "Marketplace Account",
+   "type": "DocType"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Marketplace Needs Attention",
+   "link_to": "Marketplace Needs Attention",
+   "type": "Report"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Talabat Connection",
+   "link_to": "Talabat Connection",
+   "type": "DocType"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Marketplace Talabat Catalog Mapping",
+   "link_to": "marketplace-talabat-catalog-mapping",
+   "type": "Page"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Talabat Orders",
+   "link_to": "Marketplace Order",
+   "type": "DocType",
+   "stats_filter": "{\"platform\": \"Talabat\"}"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Shopify Connection",
+   "link_to": "Shopify Connection",
+   "type": "DocType"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Marketplace Shopify Catalog Mapping",
+   "link_to": "marketplace-shopify-catalog-mapping",
+   "type": "Page"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Shopify Orders",
+   "link_to": "Marketplace Order",
+   "type": "DocType",
+   "stats_filter": "{\"platform\": \"Shopify\"}"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Noon Connection",
+   "link_to": "Noon Connection",
+   "type": "DocType"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Noon Orders",
+   "link_to": "Marketplace Order",
+   "type": "DocType",
+   "stats_filter": "{\"platform\": \"Noon\"}"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "All Marketplace Orders",
+   "link_to": "Marketplace Order",
+   "type": "DocType",
+   "stats_filter": "{\"name\": [\"like\", \"%\"]}"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Marketplace Product Mapping",
+   "link_to": "Marketplace Product Mapping",
+   "type": "DocType"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Marketplace Products",
+   "link_to": "marketplace-products",
+   "type": "Page"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Marketplace Product Management",
+   "link_to": "marketplace-product-management",
+   "type": "Page"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Marketplace Sync Log",
+   "link_to": "Marketplace Sync Log",
+   "type": "DocType"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Shopify Webhook Delivery",
+   "link_to": "Shopify Webhook Delivery",
+   "type": "DocType"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Noon Return",
+   "link_to": "Noon Return",
+   "type": "DocType"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Shopify Reconciliation Summary",
+   "link_to": "Shopify Reconciliation Summary",
+   "type": "Report"
+  },
+  {
+   "doc_view": "",
+   "doctype": "Workspace Shortcut",
+   "label": "Shopify Order Import Failures",
+   "link_to": "Shopify Order Import Failures",
+   "type": "Report"
+  }
+ ],
+ "title": "Tamwenat Marketplaces",
+ "type": "Workspace"
+}

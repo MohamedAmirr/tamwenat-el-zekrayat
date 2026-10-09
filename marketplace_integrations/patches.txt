@@ -1,0 +1,14 @@
+[pre_model_sync]
+# Patches added in this section will be executed before doctypes are migrated
+# Read docs to understand patches: https://frappeframework.com/docs/v14/user/en/database-migrations
+
+[post_model_sync]
+# Patches added in this section will be executed after doctypes are migrated
+marketplace_integrations.patches.v0_0.backfill_talabat_order_webhook_urls
+marketplace_integrations.patches.v0_0.backfill_talabat_catalog_webhook_urls
+marketplace_integrations.patches.v0_0.backfill_marketplace_order_promotion_evidence
+marketplace_integrations.patches.v0_0.backfill_marketplace_order_fulfilled_total_price_missing
+marketplace_integrations.patches.v0_0.backfill_marketplace_order_platform
+marketplace_integrations.patches.v0_0.backfill_marketplace_sync_log_marketplace_account
+marketplace_integrations.patches.v0_0.backfill_marketplace_product_mapping_platform
+marketplace_integrations.patches.v0_0.backfill_last_synced_snapshot
