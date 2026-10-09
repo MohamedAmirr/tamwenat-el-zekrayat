@@ -2,7 +2,7 @@
 
 ## Stage 1 (built)
 
-Workflow: `.github/workflows/stage-1.yml` (workflow name `Stage 1`, one job id `checks`, job name `Stage 1 checks`). No bench, no database; about a minute.
+Workflow: `.github/workflows/stage-1.yml` (workflow name `Stage 1`, one job id `checks`, job name `Stage 1 checks`). No bench, no database; the first run on GitHub (PR #201) took about 19 seconds.
 
 Runs on pull requests into `dev` and on manual `workflow_dispatch`. It does not run on PRs into `prod` (those are publish PRs of work already checked on `dev`).
 
