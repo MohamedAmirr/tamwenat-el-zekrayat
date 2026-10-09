@@ -80,7 +80,7 @@ One branch per sub-issue, created when work actually starts on it (not when the 
 
 Example: issue #1 "Talabat Authentication: Talabat Settings doctype" → `feat/1-talabat-settings-doctype`.
 
-Create it with `gh issue develop <number> --name <branch> --checkout`, not a plain `git checkout -b` — this makes it a GitHub-linked branch that shows under the issue's "Development" section and lets a PR from it auto-close the issue on merge. Fall back to a plain branch only if `gh issue develop` isn't available.
+Create it with `gh issue develop <number> --name <branch> --checkout`, not a plain `git checkout -b` — this makes it a GitHub-linked branch that shows under the issue's "Development" section and links the PR to the issue. Fall back to a plain branch only if `gh issue develop` isn't available. Branch from an up-to-date `dev`, and open the PR with `--base dev` (default branch is `prod`). `Closes #N` in a PR merged into `dev` does not auto-close the issue; see `docs/frappe-cloud-publish.md`.
 
 ## Amending a sub-issue before it's merged
 
