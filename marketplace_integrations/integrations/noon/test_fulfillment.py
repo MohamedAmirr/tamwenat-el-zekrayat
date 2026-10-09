@@ -314,6 +314,51 @@ class IntegrationTestNoonCreateShipmentWorker(IntegrationTestNoonFulfillmentBase
 		)
 		self.assertEqual([log.status for log in logs], ["Success"])
 
+	def test_noon_400_no_shipment_found_is_treated_as_not_found(self):
+		"""Production Noon answers GetShipment for an unknown shipment with HTTP 400
+		INVALID_ARGUMENT "No shipment found ..." (not 404); creation must proceed."""
+		import_patch, get_patch = self._patch_refresh()
+		get_response = MagicMock(status_code=400)
+		get_response.json.return_value = {
+			"error": {
+				"code": "INVALID_ARGUMENT",
+				"message": "AssertionError(\"No shipment found with integration_shipment_nr 'X'.\")",
+			}
+		}
+		awb_response = MagicMock(status_code=200)
+		awb_response.json.return_value = {"awb_nrs": ["NOON-AWB-1"]}
+		create_response = MagicMock(status_code=200)
+		with (
+			import_patch,
+			get_patch,
+			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
+		):
+			client = client_class.return_value
+			client.request.side_effect = [get_response, awb_response, create_response]
+			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
+
+		self.assertEqual(client.request.call_args.args[1], fulfillment.SHIPMENT_CREATE_PATH)
+		self.order.reload()
+		self.assertEqual(self.order.noon_shipments[0].status, "Created")
+
+	def test_other_get_shipment_400_never_resends_create(self):
+		import_patch, get_patch = self._patch_refresh()
+		get_response = MagicMock(status_code=400)
+		get_response.json.return_value = {"error": {"code": "INVALID_ARGUMENT", "message": "bad warehouse"}}
+		with (
+			import_patch,
+			get_patch,
+			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
+		):
+			client = client_class.return_value
+			client.request.return_value = get_response
+			client.error_message.return_value = "bad warehouse"
+			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
+
+		self.assertEqual(client.request.call_count, 1)
+		self.order.reload()
+		self.assertEqual(self.order.noon_shipments[0].status, "Error")
+
 	def test_retry_finds_shipment_via_get_shipment_and_never_resends_create(self):
 		"""Decision 15: CreateShipment documents no idempotency key -
 		retrying a Pending/Error shipment calls GetShipment first, and a 200
