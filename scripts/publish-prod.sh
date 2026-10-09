@@ -112,19 +112,21 @@ if git ls-remote --exit-code --heads "$remote" "$pub_branch" >/dev/null 2>&1; th
   die "$remote/$pub_branch already exists; merge or delete it first (never forced)"
 fi
 
-# Source sha of the last publish is in the body of the prod tip commit.
-last=$(git log -1 --format=%b "$prod_tip" | sed -n 's/^Source: [^ ]* \([0-9a-f]\{40\}\)$/\1/p' | head -n 1)
+# Source sha of the last publish: the newest `Source:` line anywhere in prod's history (the tip may be a
+# GitHub merge commit without one). Publish commits form a parent chain, so --topo-order never lists an older one first (commit dates can tie).
+last=$(git log --topo-order -1 --grep='^Source: [^ ]* [0-9a-f]\{40\}$' --format=%b "$prod_tip" | sed -n 's/^Source: [^ ]* \([0-9a-f]\{40\}\)$/\1/p' | head -n 1)
 if [ -n "$last" ] && git cat-file -e "$last^{commit}" 2>/dev/null && git merge-base --is-ancestor "$last" "$src_sha"; then
-  subjects=$(git log --no-merges --format=%s "$last..$src_sha")
+  subjects=$(git log --no-merges --format=%s "$last..$src_sha" -- "$APP_DIR")
+  [ -n "$subjects" ] || subjects="(none)"
   range="since last published source ${last:0:7}"
 else
   subjects=""
-  range="last published source sha not found in $remote/prod tip commit (or not an ancestor of $source_branch); commit list unavailable"
+  range="last published source sha not found in the history of $remote/prod (or not an ancestor of $source_branch); commit list unavailable"
 fi
 issues=$(printf '%s\n' "$subjects" | grep -oE '\(#[0-9]+\)' | tr -d '(#)' | sort -un || true)
 body="Publishes \`$APP_DIR\` from \`$source_branch\` @ \`$src_sha\` to \`prod\`.
 
-Source commits $range:
+Source commits touching \`$APP_DIR\` $range:
 $(printf '%s\n' "$subjects" | sed '/^$/d; s/^/- /')
 
 Issues below were found as \`(#N)\` in those commit subjects (best-effort, check the list). \`prod\` is the default branch, so GitHub closes issues only when this PR is merged:

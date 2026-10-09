@@ -15,7 +15,7 @@ Rules:
 
 - Nobody pushes directly to `dev` or `prod` (branch rules require pull requests, no bypass). The user merges PRs.
 - PRs into `prod` come only from `scripts/publish-prod.sh`.
-- Each publish commit has the current `origin/prod` tip as parent (so the PR shares history), tree = `<source>:apps/marketplace_integrations`, message `Publish apps/marketplace_integrations from <source> <shortsha>`, and a body line `Source: <source> <full sha>`. The next publish reads that line to find the last published source sha.
+- Each publish commit has the current `origin/prod` tip as parent (so the PR shares history), tree = `<source>:apps/marketplace_integrations`, message `Publish apps/marketplace_integrations from <source> <shortsha>`, and a body line `Source: <source> <full sha>`. The next publish takes the newest `Source:` line anywhere in `origin/prod` history (`git log --topo-order`) as the last published source sha, so it still works after GitHub merges the publish PR with a merge commit (whose own message has no `Source:` line).
 
 ## Publish flow
 
@@ -32,7 +32,7 @@ Options: `--source <branch>` (default `dev`), `--remote <name>` (default `origin
 
 Then merge the publish PR into `prod` in GitHub. It refuses (exit 1) if: not at the repo root, tree dirty, not on the source branch, source differs from `<remote>/<source>`, `--init` while `prod` exists, `--pr` while `prod` does not exist, `publish/<shortsha>` already exists on the remote (never forced), the new tree lacks `pyproject.toml`/`README.md`/`marketplace_integrations/{__init__,hooks}.py`, contains `node_modules/`, `__pycache__/`, `.env` or `*.pyc`, or `pyproject.toml` `name` is not `marketplace_integrations` (parsed with `tomllib`, so a Python >= 3.11 must be on PATH). If `prod` already has the same tree it prints `already published` and exits 0.
 
-The PR body lists the source commits since the last published source sha and adds `Closes #N` for every `(#N)` found in those commit subjects (best-effort; check the list).
+The PR body lists the source commits since the last published source sha that touch `apps/marketplace_integrations` (commits elsewhere in the repo are omitted) and adds `Closes #N` for every `(#N)` found in those (app-touching) commit subjects (best-effort; check the list).
 
 ## One-time setup order
 
@@ -64,7 +64,7 @@ Frappe Cloud answered "Could not find a compatible Frappe version in pyproject.t
 
 ## Unverified prerequisites
 
-- Whether Frappe Cloud requires the app name to match the GitHub repository name (`tamwenat-el-zekrayat`, the repo) or accepts the name in `pyproject.toml` / `hooks.py` (`marketplace_integrations`). Not checked; if it insists on a match, the app needs its own repo named `marketplace_integrations`.
+- Resolved at the add-app step (reported by the user, 2026-10-09): Frappe Cloud's "Add app from GitHub" accepted the app from branch `prod` of the repo `tamwenat-el-zekrayat`, even though the repo name differs from the app name `marketplace_integrations`. Not verified beyond that step: building a Bench Group with the app and installing it on a site.
 
 - The app declares `requires-python >=3.14` and targets Frappe/ERPNext v16. The Bench Group must run a compatible Python and Frappe/ERPNext v16. Not checked.
 - The app's other dependencies (see `pyproject.toml`) must install on Frappe Cloud. Not checked.
