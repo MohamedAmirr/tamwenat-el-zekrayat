@@ -983,6 +983,14 @@ class IntegrationTestShopifyWebhookDebouncedSyncTriggerSourceEndToEnd(Integratio
 		payload["lineItems"]["nodes"][0]["priceAfterAllDiscountsBeforeTaxesSet"] = {
 			"shopMoney": {"amount": "40.00", "currencyCode": "EGP"}
 		}
+		# No taxes or shipping, so the order is syncable and its total equals the line (the
+		# fixture's default 8.00 tax is unsupported by the sync and its shipping needs an account).
+		for field, amount in (
+			("currentTotalTaxSet", "0.00"),
+			("currentShippingPriceSet", "0.00"),
+			("currentTotalPriceSet", "40.00"),
+		):
+			payload[field] = {"shopMoney": {"amount": amount, "currencyCode": "EGP"}}
 		webhook_id = f"webhook-e2e-{self.suffix}"
 
 		with patch(self.EXECUTE_TARGET, return_value={"order": payload}):
