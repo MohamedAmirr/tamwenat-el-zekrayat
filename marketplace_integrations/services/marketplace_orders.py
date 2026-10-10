@@ -10,7 +10,7 @@ product mapping or creates ERPNext commercial documents.
 
 import frappe
 from frappe import _
-from frappe.utils import cstr
+from frappe.utils import cint, cstr, flt
 
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_order.marketplace_order import (
 	compute_order_identity_key,
@@ -161,8 +161,12 @@ def upsert_marketplace_order(marketplace_account, normalized_order, is_stale=Non
 
 
 def _apply_order_fields(doc, normalized_order):
+	meta = frappe.get_meta("Marketplace Order")
 	for fieldname in ORDER_FIELDS:
-		doc.set(fieldname, normalized_order.get(fieldname))
+		value = normalized_order.get(fieldname)
+		if value is None:
+			value = _unset_value(meta.get_field(fieldname))
+		doc.set(fieldname, value)
 	for fieldname in JSON_ORDER_FIELDS:
 		doc.set(fieldname, _as_json(normalized_order.get(fieldname)))
 
@@ -192,17 +196,29 @@ def _upsert_order_items(doc, items):
 		for fieldname in ITEM_FIELDS:
 			value = values.get(fieldname)
 			if value is None:
-				# On insert Frappe fills an unset Select with its first option (e.g. a
-				# Shopify row's external_status "NOT_PROCESSED", pricing_type "UNIT"), but
-				# not on update, so a re-import would blank it and look like a change to
-				# the evidence fingerprint. Store the same value both times.
-				field = item_meta.get_field(fieldname)
-				value = field.default
-				if value is None and field.fieldtype == "Select" and field.options:
-					value = field.options.split("\n")[0]
+				value = _unset_value(item_meta.get_field(fieldname))
 			row.set(fieldname, value)
 		for fieldname in JSON_ITEM_FIELDS:
 			row.set(fieldname, _as_json(values.get(fieldname)))
+
+
+def _unset_value(field):
+	"""The value Frappe stores on insert for a field the payload leaves unset.
+
+	On insert Frappe fills an unset Select with its first option (e.g. a Shopify
+	row's external_status "NOT_PROCESSED", pricing_type "UNIT") and the NOT NULL
+	numeric/Check columns with 0, but not on update, so assigning ``None`` on a
+	re-import blanks the field. That looks like a change to the evidence
+	fingerprint and logs a "0 to null" entry in the Version timeline on every
+	refresh. Use the same value both times."""
+	if field.fieldtype in ("Float", "Currency", "Percent"):
+		return flt(field.default)
+	if field.fieldtype in ("Int", "Check"):
+		return cint(field.default)
+	value = field.default
+	if value is None and field.fieldtype == "Select" and field.options:
+		value = field.options.split("\n")[0]
+	return value
 
 
 def _as_json(value):
