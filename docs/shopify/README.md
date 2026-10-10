@@ -1,5 +1,7 @@
 # Shopify integration
 
+Manual test checklist for the finished integration (production, Desk UI, for the business owner): [test-checklist.md](test-checklist.md).
+
 No single official downloadable spec exists for Shopify (unlike Talabat's checked-in `openapi.json`) — Shopify does not publish one. This doc is a manually maintained reference, sourced from `shopify.dev`, scoped to what's needed for the current work: the `Shopify Connection` doctype and its auth layer (tracked by #101). Extend this doc (or add sibling files) when catalog/order sync work is actually scoped — don't infer those endpoints from here yet.
 
 This will back `Shopify Connection` in the `marketplace_integrations` app — see `docs/marketplace-integrations/architecture.md`'s "Connection design decision" for why Shopify gets its own typed doctype rather than a shared one.
