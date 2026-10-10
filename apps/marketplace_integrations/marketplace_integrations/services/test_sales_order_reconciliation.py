@@ -680,6 +680,30 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 		for platform in ("talabat", "shopify", "noon"):
 			self.assertNotIn(platform, source)
 
+	def test_shipping_charge_unchanged_needs_no_action(self):
+		self.previous["shipping"] = 419.22
+		current = self._current()
+		current["shipping"] = 419.22
+
+		self.assertEqual(plan(self.previous, current, {}, self.erp_state)["outcome"], NO_ACTION)
+
+	def test_changed_or_new_shipping_on_a_submitted_order_needs_attention_and_executes_nothing(self):
+		cases = {"refunded": (419.22, None), "changed": (419.22, 100.0), "never synced": (None, 419.22)}
+		for label, (previous_shipping, current_shipping) in cases.items():
+			with self.subTest(case=label):
+				previous = deepcopy(self.previous)
+				current = self._current()
+				if previous_shipping is not None:
+					previous["shipping"] = previous_shipping
+				if current_shipping is not None:
+					current["shipping"] = current_shipping
+
+				result = plan(previous, current, {}, self.erp_state)
+
+				self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+				self.assertIn("cancel and amend", result["message"])
+				self.assertEqual([change["field"] for change in result["changes"]], ["shipping"])
+
 	def _current(self):
 		current = deepcopy(self.previous)
 		current["items"][0].pop("sales_order_item")
