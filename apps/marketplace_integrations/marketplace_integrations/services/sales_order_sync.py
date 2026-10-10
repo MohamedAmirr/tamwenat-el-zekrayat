@@ -45,9 +45,12 @@ from copy import deepcopy
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, flt, getdate, now_datetime, strip_html
+from frappe.utils import cint, cstr, flt, getdate, now_datetime, strip_html
 
 from marketplace_integrations.integrations.shopify.order_reconciliation import refund_ids as _refund_ids
+from marketplace_integrations.marketplace_integrations.doctype.marketplace_account.marketplace_account import (
+	shipping_account_problem,
+)
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_product_mapping.marketplace_product_mapping import (
 	compute_mapping_identity_key,
 )
@@ -195,6 +198,7 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 			lines = _build_order_lines(
 				order, account, tolerate_zero_quantity=bool(sales_order and sales_order.docstatus != 0)
 			)
+			shipping = _shopify_shipping_amount(order, account)
 			if order.platform == "Shopify":
 				customer = _get_or_create_shopify_customer(order, account)
 				address = _resolve_shopify_address(order, customer) or {"name": None, "address_type": None}
@@ -209,7 +213,7 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 				return _reconcile_submitted_order(order, sales_order, None, evidence, trigger_source)
 			raise
 		snapshot = _make_snapshot(
-			account, customer, lines, _transaction_date(order), _delivery_date(order), address
+			account, customer, lines, _transaction_date(order), _delivery_date(order), address, shipping
 		)
 		current_hash = snapshot_hash(snapshot)
 
@@ -220,16 +224,18 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 				result = _save_success(order, current_hash, sales_order, updated=False, snapshot=snapshot)
 				_create_sync_log(order, trigger_source, "Success", snapshot, result)
 				return result
-			_apply_snapshot(sales_order, snapshot, order.name)
+			_apply_snapshot(sales_order, snapshot, order.name, account.erpnext_shipping_account)
 			_verify_line_amounts(sales_order, snapshot, account)
+			_verify_grand_total(sales_order, snapshot, order, account)
 			sales_order.save()
 			result = _save_success(order, current_hash, sales_order, updated=True, snapshot=snapshot)
 			_create_sync_log(order, trigger_source, "Success", snapshot, result)
 			return result
 
 		sales_order = frappe.new_doc("Sales Order")
-		_apply_snapshot(sales_order, snapshot, order.name)
+		_apply_snapshot(sales_order, snapshot, order.name, account.erpnext_shipping_account)
 		_verify_line_amounts(sales_order, snapshot, account)
+		_verify_grand_total(sales_order, snapshot, order, account)
 		# Verify the snapshot pairs with the inserted rows BEFORE submitting; on a
 		# mismatch roll the insert back so no orphan Sales Order is left unlinked
 		# (a retry would otherwise create a duplicate).
@@ -345,7 +351,15 @@ def build_sales_order_snapshot(order, account=None, customer=None, for_submitted
 			if order.platform == "Shopify"
 			else None
 		)
-	return _make_snapshot(account, customer, lines, _transaction_date(order), _delivery_date(order), address)
+	return _make_snapshot(
+		account,
+		customer,
+		lines,
+		_transaction_date(order),
+		_delivery_date(order),
+		address,
+		_shopify_shipping_amount(order, account),
+	)
 
 
 def _build_sales_order_lines(order, account):
@@ -722,7 +736,40 @@ def _amount_precision(account):
 	return frappe.get_precision("Sales Order Item", "amount", currency=_resolved_currency(account))
 
 
-def _make_snapshot(account, customer, lines, transaction_date, delivery_date, address=None):
+def _shopify_shipping_amount(order, account):
+	"""The Shopify shipping charge to carry on the Sales Order, or None when there is none.
+
+	Only Shopify orders carry one.  ``shipping_total`` is Shopify's ``currentShippingPriceSet``:
+	already net of shipping discounts and refunds, and before tax.  Taxes and duties are not
+	synced yet, so an order with either blocks instead of producing a wrong total.  The income
+	account is only required once there is a charge to post.
+	"""
+	if order.platform != "Shopify":
+		return None
+	if flt(order.total_taxes) or flt(order.duties_total):
+		raise SyncBlocker(
+			_(
+				"Shopify order {0} has taxes or duties (taxes {1}, duties {2}). Taxes and duties are not "
+				"synced to ERPNext yet; create or adjust this order's Sales Order in ERPNext manually."
+			).format(order.name, flt(order.total_taxes), flt(order.duties_total))
+		)
+	shipping = flt(order.shipping_total, _amount_precision(account))
+	if shipping <= 0:
+		return None
+	if not account.erpnext_shipping_account:
+		raise SyncBlocker(
+			_(
+				"Shopify order {0} has a shipping charge of {1}. Set the ERPNext Shipping Income Account on "
+				"Marketplace Account {2} before synchronizing it."
+			).format(order.name, shipping, account.name)
+		)
+	problem = shipping_account_problem(account.erpnext_shipping_account, account.erpnext_company)
+	if problem:
+		raise SyncBlocker(problem)
+	return shipping
+
+
+def _make_snapshot(account, customer, lines, transaction_date, delivery_date, address=None, shipping=None):
 	snapshot = {
 		"company": account.erpnext_company,
 		"customer": customer,
@@ -736,6 +783,11 @@ def _make_snapshot(account, customer, lines, transaction_date, delivery_date, ad
 		snapshot["customer_address"] = (
 			address["name"] if address["address_type"] == "Billing" and address["name"] else None
 		)
+	# Omitted unless there is a charge, so other platforms and free-shipping orders keep
+	# their existing snapshots and hashes.  The income account is deliberately not part of
+	# it: an account configuration change must not mark submitted orders as changed.
+	if shipping:
+		snapshot["shipping"] = shipping
 	return snapshot
 
 
@@ -1187,7 +1239,7 @@ def _get_enabled_mapping(marketplace_account, external_sku):
 	return frappe._dict(values) if values else None
 
 
-def _apply_snapshot(sales_order, snapshot, marketplace_order_name):
+def _apply_snapshot(sales_order, snapshot, marketplace_order_name, shipping_account=None):
 	"""Populate a Sales Order, then overwrite every line with the historical
 	Talabat transaction amount so it survives ERPNext's own recalculation.
 
@@ -1279,6 +1331,20 @@ def _apply_snapshot(sales_order, snapshot, marketplace_order_name):
 		so_item.discount_amount = 0
 		so_item.is_free_item = 1 if line["effective_rate"] == 0 else 0
 
+	# The one charge row, rebuilt from scratch on every call (no template or Shipping Rule is
+	# used).  Shopify's shipping is already net of shipping discounts and before tax.
+	if snapshot.get("shipping"):
+		sales_order.append(
+			"taxes",
+			{
+				"charge_type": "Actual",
+				"account_head": shipping_account,
+				"description": "Shipping",
+				"tax_amount": snapshot["shipping"],
+				"included_in_print_rate": 0,
+			},
+		)
+
 	# Recalculates net/grand totals from the rates just overridden above and
 	# the header fields just reset - no Sales Taxes and Charges Template,
 	# Shipping Rule, or additional discount survives from before this call.
@@ -1310,6 +1376,40 @@ def _verify_line_amounts(sales_order, snapshot, account):
 					"at ERPNext's currency precision. Please review before retrying."
 				).format(line["external_item_id"], so_item.item_code, actual, expected)
 			)
+
+
+def _verify_grand_total(sales_order, snapshot, order, account):
+	"""Block unless the Sales Order total reproduces Shopify's order total (Shopify only).
+
+	Compares ``grand_total`` (not ``rounded_total``) within one currency-precision unit.
+	Nothing is forced to match: a gap is reported, never papered over with an adjustment
+	line.  Skipped only when Shopify recorded no total and there is no shipping to check
+	(rows imported before totals were stored, or a free order).  An ERPNext Actual charge is
+	spread over the items by value, so it is lost when every item is free.
+	"""
+	if order.platform != "Shopify":
+		return
+	shipping = flt(snapshot.get("shipping"))
+	shopify_total = flt(order.order_total)
+	if not shopify_total and not shipping:
+		return
+	precision = _amount_precision(account)
+	items_total = flt(sum(flt(row.amount) for row in sales_order.items), precision)
+	if shipping and not items_total:
+		raise SyncBlocker(
+			_(
+				"Shopify order {0} has a shipping charge of {1} but all of its items are free; ERPNext cannot "
+				"post a shipping charge on a zero-value order. Handle this order in ERPNext manually."
+			).format(order.name, shipping)
+		)
+	sales_order_total = flt(sales_order.grand_total, precision)
+	if flt(abs(sales_order_total - shopify_total), precision) > 10 ** -cint(precision):
+		raise SyncBlocker(
+			_(
+				"Shopify total {0} does not match the Sales Order total {1} (items {2} + shipping {3}). "
+				"Review the Shopify order before retrying."
+			).format(shopify_total, sales_order_total, items_total, shipping)
+		)
 
 
 def snapshot_hash(snapshot):

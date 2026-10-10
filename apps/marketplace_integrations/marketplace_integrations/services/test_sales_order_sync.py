@@ -7,7 +7,7 @@ from unittest.mock import patch
 import frappe
 from erpnext.selling.doctype.sales_order.sales_order import SalesOrder
 from frappe.tests import IntegrationTestCase
-from frappe.utils import add_days, cstr, getdate, now_datetime, nowdate
+from frappe.utils import add_days, cstr, flt, getdate, now_datetime, nowdate
 
 from marketplace_integrations.patches.v0_0 import backfill_last_synced_snapshot as backfill
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
@@ -98,7 +98,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			}
 		).insert()
 
-	def _make_shopify_account(self):
+	def _make_shopify_account(self, shipping_account=None):
 		connection = frappe.get_doc(
 			{
 				"doctype": "Shopify Connection",
@@ -122,6 +122,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 					"erpnext_company": self.company,
 					"erpnext_selling_price_list": self.price_list,
 					"warehouse": self.warehouse,
+					"erpnext_shipping_account": shipping_account,
 				}
 			).insert()
 		return account
@@ -145,7 +146,13 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		shipping_address=None,
 		billing_address=None,
 		payment_transactions=None,
+		shipping_total=0,
+		order_total=None,
+		total_taxes=0,
+		duties_total=0,
 	):
+		if order_total is None:
+			order_total = flt(transaction_amount) + flt(shipping_total)
 		if variant_gid is _DEFAULT_VARIANT:
 			variant_gid = f"gid://shopify/ProductVariant/{frappe.generate_hash(length=12)}"
 		mapping = None
@@ -174,6 +181,10 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 				"shipping_address": shipping_address,
 				"billing_address": billing_address,
 				"payment_transactions": payment_transactions,
+				"shipping_total": shipping_total,
+				"order_total": order_total,
+				"total_taxes": total_taxes,
+				"duties_total": duties_total,
 				"latest_payload": {"updatedAt": "2026-09-28T10:00:00Z"},
 				"items": [
 					{
@@ -1529,6 +1540,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 				"transaction_amount": 10,
 			},
 		)
+		order.order_total = 46
 		order.save()
 		self.assertTrue(sync_sales_order(order.name)["ok"])
 		order.reload()
@@ -1835,6 +1847,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 				"transaction_amount": 10,
 			},
 		)
+		order.order_total = 20
 		order.save()
 		self.assertTrue(sync_sales_order(order.name)["ok"])
 		order.reload()
@@ -3747,4 +3760,313 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		result = sync_sales_order(order.name)
 		self.assertFalse(result["ok"])
 		self.assertIn("No eligible Noon order lines", result["error"])
+
+	# --- Shopify shipping charge -------------------------------------------------------
+
+	def _income_account(self):
+		return frappe.get_all(
+			"Account",
+			filters={"company": self.company, "is_group": 0, "disabled": 0, "root_type": "Income"},
+			pluck="name",
+			limit=1,
+		)[0]
+
+	def _sync_shopify(self, *, with_account=True, account=None, **order_kwargs):
+		"""Sync a one-line Shopify order (line total ``transaction_amount``, qty ``current_quantity``)."""
+		account = account or self._make_shopify_account(self._income_account() if with_account else None)
+		order, _mapping = self._make_shopify_order(account, **order_kwargs)
+		result = sync_sales_order(order.name)
+		order.reload()
+		return account, order, result
+
+	def _shipping_rows(self, sales_order_name):
+		return frappe.get_doc("Sales Order", sales_order_name).taxes
+
+	def test_shopify_free_shipping_order_has_no_charge_row_and_no_snapshot_key(self):
+		_account, order, result = self._sync_shopify(transaction_amount=74.99, current_quantity=1)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		self.assertEqual(len(sales_order.taxes), 0)
+		self.assertEqual(sales_order.grand_total, 74.99)
+		self.assertNotIn("shipping", frappe.parse_json(order.last_synced_snapshot))
+
+	def test_shopify_free_shipping_order_needs_no_shipping_account(self):
+		_account, order, result = self._sync_shopify(with_account=False)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(len(self._shipping_rows(order.erpnext_sales_order)), 0)
+
+	def test_shopify_paid_shipping_adds_one_actual_charge_row_to_the_total(self):
+		account, order, result = self._sync_shopify(
+			transaction_amount=74.99, current_quantity=1, shipping_total=419.22
+		)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		self.assertEqual(sales_order.docstatus, 1)
+		self.assertEqual(len(sales_order.taxes), 1)
+		row = sales_order.taxes[0]
+		self.assertEqual(row.charge_type, "Actual")
+		self.assertEqual(row.account_head, account.erpnext_shipping_account)
+		self.assertEqual(row.description, "Shipping")
+		self.assertEqual(row.tax_amount, 419.22)
+		self.assertEqual(sales_order.net_total, 74.99)
+		self.assertEqual(sales_order.grand_total, 494.21)
+		self.assertEqual(frappe.parse_json(order.last_synced_snapshot)["shipping"], 419.22)
+		self.assertNotIn("account", frappe.as_json(frappe.parse_json(order.last_synced_snapshot)["shipping"]))
+
+	def test_shopify_cod_order_with_shipping_matches_shopify_and_creates_no_payment_documents(self):
+		"""The #1033 shape: COD (PENDING + manual transaction), items 74.99 + shipping 419.22 = 494.21."""
+		doctypes = ("Payment Entry", "Sales Invoice")
+		before = {doctype: frappe.db.count(doctype) for doctype in doctypes}
+
+		_account, order, result = self._sync_shopify(
+			transaction_amount=74.99,
+			current_quantity=1,
+			shipping_total=419.22,
+			order_total=494.21,
+			financial_status="PENDING",
+			payment_transactions=[self._transaction(manual=True)],
+		)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(frappe.db.get_value("Sales Order", order.erpnext_sales_order, "grand_total"), 494.21)
+		self.assertEqual({doctype: frappe.db.count(doctype) for doctype in doctypes}, before)
+
+	def test_shopify_prepaid_order_with_shipping_matches_shopify(self):
+		_account, order, result = self._sync_shopify(
+			transaction_amount=36, financial_status="PAID", shipping_total=50, order_total=86
+		)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(frappe.db.get_value("Sales Order", order.erpnext_sales_order, "grand_total"), 86)
+
+	def test_shopify_shipping_discount_is_already_net_in_shipping_total(self):
+		"""currentShippingPriceSet is after shipping discounts: the row carries exactly that amount."""
+		_account, order, result = self._sync_shopify(transaction_amount=36, shipping_total=12.5, order_total=48.5)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		self.assertEqual(sales_order.taxes[0].tax_amount, 12.5)
+		self.assertEqual(sales_order.grand_total, 48.5)
+
+	def test_shopify_product_and_order_level_discounts_are_already_net_in_the_lines(self):
+		cases = {
+			"product discount": {"transaction_amount": 30, "original_unit_price": 25, "order_total": 30},
+			"order discount": {"transaction_amount": 27.5, "original_unit_price": 25, "order_total": 77.5},
+		}
+		account = self._make_shopify_account(self._income_account())
+		for label, kwargs in cases.items():
+			with self.subTest(case=label):
+				_account, order, result = self._sync_shopify(
+					account=account, shipping_total=50 if label == "order discount" else 0, **kwargs
+				)
+
+				self.assertTrue(result["ok"], result.get("error"))
+				self.assertEqual(
+					frappe.db.get_value("Sales Order", order.erpnext_sales_order, "grand_total"),
+					kwargs["order_total"],
+				)
+
+	def test_shopify_orders_with_taxes_or_duties_are_blocked_and_create_nothing(self):
+		cases = {
+			"tax exclusive": {"transaction_amount": 36, "total_taxes": 5.04, "order_total": 41.04},
+			"tax inclusive": {"transaction_amount": 36, "total_taxes": 4.4, "order_total": 36},
+			"shipping tax": {"transaction_amount": 36, "shipping_total": 10, "total_taxes": 2, "order_total": 48},
+			"duties": {"transaction_amount": 36, "duties_total": 3, "order_total": 39},
+		}
+		account = self._make_shopify_account(self._income_account())
+		for label, kwargs in cases.items():
+			with self.subTest(case=label):
+				before = frappe.db.count("Sales Order")
+
+				_account, order, result = self._sync_shopify(account=account, **kwargs)
+
+				self.assertFalse(result["ok"])
+				self.assertIn("Taxes and duties are not synced to ERPNext yet", result["error"])
+				self.assertFalse(order.erpnext_sales_order)
+				self.assertEqual(frappe.db.count("Sales Order"), before)
+
+	def test_shopify_shipping_sync_is_idempotent_for_submitted_and_draft_orders(self):
+		_account, order, first = self._sync_shopify(transaction_amount=36, shipping_total=50, order_total=86)
+		first_hash = order.last_synced_hash
+
+		second = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(second["ok"], second.get("error"))
+		self.assertEqual(order.last_synced_hash, first_hash)
+		self.assertEqual(len(self._shipping_rows(first["sales_order"])), 1)
+
+		# A legacy Draft is re-applied in place: the same input keeps one row, a changed charge replaces it.
+		frappe.db.set_value("Sales Order", first["sales_order"], "docstatus", 0, update_modified=False)
+		third = sync_sales_order(order.name)
+		order.reload()
+		self.assertTrue(third["ok"], third.get("error"))
+		self.assertEqual(order.last_synced_hash, first_hash)
+		self.assertEqual(len(self._shipping_rows(first["sales_order"])), 1)
+
+		order.shipping_total = 60
+		order.order_total = 96
+		order.save()
+		fourth = sync_sales_order(order.name)
+		order.reload()
+		self.assertTrue(fourth["ok"], fourth.get("error"))
+		self.assertNotEqual(order.last_synced_hash, first_hash)
+		rows = self._shipping_rows(first["sales_order"])
+		self.assertEqual([row.tax_amount for row in rows], [60])
+		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "grand_total"), 96)
+
+	def test_changed_shipping_on_a_submitted_order_needs_attention_and_changes_nothing(self):
+		_account, order, first = self._sync_shopify(
+			transaction_amount=74.99, current_quantity=1, shipping_total=419.22, order_total=494.21
+		)
+		baseline = (order.last_synced_hash, order.last_synced_snapshot)
+		before = frappe.get_doc("Sales Order", first["sales_order"]).as_dict()
+
+		# e.g. a shipping refund: Shopify's current* fields drop the charge
+		order.shipping_total = 0
+		order.order_total = 74.99
+		order.save()
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+		self.assertIn("shipping", result["error"])
+		self.assertIn("shipping", [change["field"] for change in result["reconciliation"]["changes"]])
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual((order.last_synced_hash, order.last_synced_snapshot), baseline)
+		after = frappe.get_doc("Sales Order", first["sales_order"])
+		self.assertEqual((after.grand_total, len(after.taxes), after.modified), (494.21, 1, before.modified))
+
+	def test_existing_submitted_order_synced_without_shipping_needs_attention_and_is_not_mutated(self):
+		"""An order synced before shipping was carried has a baseline without the key."""
+		account = self._make_shopify_account(self._income_account())
+		order, _mapping = self._make_shopify_order(account, transaction_amount=74.99, current_quantity=1)
+		first = sync_sales_order(order.name)
+		order.reload()
+		self.assertTrue(first["ok"], first.get("error"))
+		# Shopify's shipping was there all along; the Sales Order and its baseline never carried it.
+		order.shipping_total = 419.22
+		order.order_total = 494.21
+		order.save()
+		baseline = (order.last_synced_hash, order.last_synced_snapshot)
+		modified = frappe.db.get_value("Sales Order", first["sales_order"], "modified")
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+		self.assertIn("cancel and amend", result["error"])
+		self.assertEqual((order.last_synced_hash, order.last_synced_snapshot), baseline)
+		after = frappe.get_doc("Sales Order", first["sales_order"])
+		self.assertEqual((after.grand_total, len(after.taxes), after.modified), (74.99, 0, modified))
+		self.assertEqual(get_current_sync_status(order.name), "Modified After Sync")
+
+	def test_shopify_shipping_without_a_shipping_account_blocks_with_an_actionable_message(self):
+		before = frappe.db.count("Sales Order")
+
+		_account, order, result = self._sync_shopify(with_account=False, shipping_total=50, order_total=86)
+
+		self.assertFalse(result["ok"])
+		self.assertIn("Set the ERPNext Shipping Income Account", result["error"])
+		self.assertFalse(order.erpnext_sales_order)
+		self.assertEqual(frappe.db.count("Sales Order"), before)
+
+	def test_shopify_shipping_account_that_became_unusable_blocks_the_sync(self):
+		account = self._make_shopify_account(self._income_account())
+		order, _mapping = self._make_shopify_order(account, shipping_total=50)
+		frappe.db.set_value("Account", account.erpnext_shipping_account, "disabled", 1)
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		self.assertIn("is disabled", result["error"])
+
+	def test_snapshot_preview_with_shipping_but_no_account_raises_only_the_sync_blocker(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, shipping_total=50)
+
+		with self.assertRaisesRegex(SyncBlocker, "Shipping Income Account"):
+			build_sales_order_snapshot(order)
+
+	def test_linked_order_whose_shipping_account_was_removed_reads_as_modified_after_sync(self):
+		account, order, result = self._sync_shopify(shipping_total=50, order_total=86)
+		self.assertTrue(result["ok"], result.get("error"))
+		account.reload()
+		account.erpnext_shipping_account = None
+		account.save()
+
+		status = get_current_sync_status(order.name)
+		order.reload()
+
+		self.assertEqual(status, "Modified After Sync")
+		self.assertIn("Shipping Income Account", order.last_sync_error)
+
+	def test_shopify_total_that_disagrees_with_items_and_shipping_blocks_with_the_numbers(self):
+		before = frappe.db.count("Sales Order")
+
+		_account, order, result = self._sync_shopify(transaction_amount=36, shipping_total=50, order_total=90)
+
+		self.assertFalse(result["ok"])
+		self.assertIn("Shopify total 90.0 does not match the Sales Order total 86.0", result["error"])
+		self.assertIn("items 36.0 + shipping 50.0", result["error"])
+		self.assertFalse(order.erpnext_sales_order)
+		self.assertEqual(frappe.db.count("Sales Order"), before)
+
+	def test_shopify_total_within_one_currency_unit_passes(self):
+		account = self._make_shopify_account(self._income_account())
+		for order_total in (86.01, 85.99):
+			with self.subTest(order_total=order_total):
+				_account, _order, result = self._sync_shopify(
+					account=account, transaction_amount=36, shipping_total=50, order_total=order_total
+				)
+				self.assertTrue(result["ok"], result.get("error"))
+		_account, _order, result = self._sync_shopify(
+			account=account, transaction_amount=36, shipping_total=50, order_total=86.02
+		)
+		self.assertFalse(result["ok"])
+
+	def test_shopify_order_without_a_stored_total_and_without_shipping_skips_the_total_check(self):
+		account = self._make_shopify_account(self._income_account())
+		_account, _order, result = self._sync_shopify(account=account, transaction_amount=36, order_total=0)
+		self.assertTrue(result["ok"], result.get("error"))
+
+		# With shipping there is always something to compare against.
+		_account, _order, result = self._sync_shopify(
+			account=account, transaction_amount=36, shipping_total=50, order_total=0
+		)
+		self.assertFalse(result["ok"])
+		self.assertIn("Shopify total 0.0 does not match", result["error"])
+
+	def test_shopify_shipping_on_an_all_free_order_blocks_instead_of_losing_the_charge(self):
+		_account, order, result = self._sync_shopify(transaction_amount=0, shipping_total=50, order_total=50)
+
+		self.assertFalse(result["ok"])
+		self.assertIn("all of its items are free", result["error"])
+		self.assertFalse(order.erpnext_sales_order)
+
+	def test_talabat_and_noon_snapshots_and_hashes_ignore_shipping_fields(self):
+		talabat_order = self._make_order()
+		first = sync_sales_order(talabat_order.name)
+		talabat_order.reload()
+		self.assertTrue(first["ok"], first.get("error"))
+		talabat_order.db_set({"shipping_total": 50, "total_taxes": 5, "duties_total": 1})
+		snapshot = build_sales_order_snapshot(talabat_order)
+		self.assertNotIn("shipping", snapshot)
+		self.assertEqual(snapshot_hash(snapshot), talabat_order.last_synced_hash)
+		self.assertEqual(len(self._shipping_rows(first["sales_order"])), 0)
+
+		noon_account = self._make_noon_account()
+		noon_order, _mapping = self._make_noon_order(noon_account)
+		noon_result = sync_sales_order(noon_order.name)
+		noon_order.reload()
+		self.assertTrue(noon_result["ok"], noon_result.get("error"))
+		noon_order.db_set({"shipping_total": 50, "total_taxes": 5})
+		noon_snapshot = build_sales_order_snapshot(noon_order)
+		self.assertNotIn("shipping", noon_snapshot)
+		self.assertEqual(snapshot_hash(noon_snapshot), noon_order.last_synced_hash)
 

@@ -286,7 +286,9 @@ class IntegrationTestTalabatCatalogApi(IntegrationTestCase):
 		enqueue.assert_not_called()
 
 	def test_no_catalog_document_events_are_registered(self):
-		doc_events = frappe.get_hooks("doc_events")
+		# Only this app's hooks: other installed apps (ERPNext registers an Item doc event
+		# since 16.50) are not ours to forbid.
+		doc_events = frappe.get_hooks("doc_events", app_name="marketplace_integrations")
 		for doctype in (
 			"Stock Ledger Entry",
 			"Item Price",

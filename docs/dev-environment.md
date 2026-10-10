@@ -240,3 +240,15 @@ docker exec -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekrayat-de
 docker compose -p tamwenat-el-zekrayat-dev -f docker-compose.dev.yml down       # keep the bench/db volumes
 docker compose -p tamwenat-el-zekrayat-dev -f docker-compose.dev.yml down -v    # wipe them — confirm with the user first
 ```
+
+## Keeping the dev bench on production's Frappe/ERPNext version
+
+Frappe Cloud runs the latest `version-16` of Frappe and ERPNext; the dev bench does not update itself. Framework features (sidebar, apps screen, desk UI) can behave differently between versions: on 2026-10-10 prod ran Frappe 16.51.0 / ERPNext 16.50.0 while dev was on 16.32.0 / 16.33.0, and a sidebar file in the old `workspace_sidebar/` format passed every dev test but was ignored on prod. Check prod's versions (Frappe Cloud site, Apps tab) before framework-UI work, and move dev to the same commits when they differ.
+
+How the dev bench was moved (2026-10-10), from the host with `-p tamwenat-el-zekrayat-dev`:
+
+1. Back up every site: `bench --site <site> backup --with-files`, and `docker cp` the `sites/<site>/private/backups` folders out of the volume.
+2. Git inside the container fails over HTTP/2 against GitHub ("expected flush after ref listing"): run `git config --global http.version HTTP/1.1` once. The apps' remote is named `upstream`, not `origin`. Fast-forward each app to prod's commit: `git -C apps/frappe fetch upstream version-16 && git -C apps/frappe merge --ff-only <sha>`, same for `apps/erpnext` (revert a stray `banking/yarn.lock` edit first).
+3. `bench setup requirements` aborts at `marketplace_integrations` (a bind-mounted folder that is not its own git repo: `InvalidGitRepositoryError`). Install per app instead: `uv pip install -e apps/<app> --python env/bin/python` for frappe, erpnext and marketplace_integrations, and `yarn install --check-files` inside `apps/frappe` and `apps/erpnext`.
+4. `bench build --apps frappe,erpnext`, then `bench --site test.localhost migrate`, then the full suite on `test.localhost`, then migrate `dev.localhost`.
+5. The new Frappe ignores `<app>/workspace_sidebar/*.json`; sidebars ship as `<app>/<module>/sidebar/<name>/<name>.json` (Sidebar doctype).

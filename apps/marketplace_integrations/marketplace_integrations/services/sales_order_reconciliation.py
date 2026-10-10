@@ -253,6 +253,14 @@ def plan(previous, current, evidence, erp_state):
 	header_changes = _header_changes(previous, current)
 	changes = _line_changes(previous_items, current_items)
 	if header_changes:
+		shipping_change = next((change for change in header_changes if change["field"] == "shipping"), None)
+		if shipping_change:
+			return _attention(
+				"The shipping charge differs from the submitted Sales Order "
+				f"(Sales Order {shipping_change['previous'] or 0}, marketplace {shipping_change['current'] or 0}). "
+				"A submitted Sales Order's charges are not edited automatically; cancel and amend it.",
+				header_changes + changes,
+			)
 		return _attention(
 			"A submitted Sales Order has structural commercial changes.", header_changes + changes
 		)
