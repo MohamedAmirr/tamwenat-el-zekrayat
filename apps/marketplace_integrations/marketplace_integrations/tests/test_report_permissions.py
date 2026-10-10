@@ -3,7 +3,8 @@
 
 """Script Reports check ``frappe.has_permission(report.ref_doctype, "report")``
 (frappe/desk/query_report.py), so the doctypes our reports use as ref_doctype
-must grant the "report" ptype to System Manager, the reports' own role.
+must grant the "report" ptype to System Manager, the reports' own role. The other
+top-level doctypes grant it too so their list Report view works.
 Administrator bypasses the check, which is how a missing grant goes unnoticed.
 """
 
@@ -12,8 +13,19 @@ from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.tests.utils import make_role_user
 
-# ref_doctype of the app's Script Reports
-REPORT_REF_DOCTYPES = ("Marketplace Account", "Marketplace Order", "Marketplace Sync Log")
+# ref_doctype of the app's Script Reports, plus every other top-level doctype of the app: the
+# list view's Report view uses the same "report" ptype.
+REPORT_REF_DOCTYPES = (
+	"Marketplace Account",
+	"Marketplace Order",
+	"Marketplace Sync Log",
+	"Marketplace Product Mapping",
+	"Noon Connection",
+	"Noon Return",
+	"Shopify Connection",
+	"Shopify Webhook Delivery",
+	"Talabat Connection",
+)
 
 
 class IntegrationTestReportPermissions(IntegrationTestCase):
