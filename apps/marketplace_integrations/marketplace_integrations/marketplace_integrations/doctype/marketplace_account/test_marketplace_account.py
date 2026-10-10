@@ -8,6 +8,7 @@ from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_account.marketplace_account import (
     compute_account_identity_key,
+    shipping_account_problem,
 )
 
 # #103's Shopify shop-GID / Location cross-checks call
@@ -58,7 +59,7 @@ OTHER_DOCTYPE_RECORD = "Products"
 # dependency). These tests construct only their required Warehouse with the
 # site's real configured company, so skip generic generation for every
 # optional ERPNext Link target.
-IGNORE_TEST_RECORD_DEPENDENCIES = ["Warehouse", "Company", "Price List", "Customer"]
+IGNORE_TEST_RECORD_DEPENDENCIES = ["Warehouse", "Company", "Price List", "Customer", "Account"]
 
 
 class IntegrationTestMarketplaceAccount(IntegrationTestCase):
@@ -921,3 +922,65 @@ class IntegrationTestMarketplaceAccount(IntegrationTestCase):
         account.reload()
 
         self.assertEqual(account.external_account_id, tricky_value)
+
+    def _shipping_account_candidates(self):
+        company = frappe.defaults.get_global_default("company")
+        income = frappe.get_all(
+            "Account",
+            filters={"company": company, "is_group": 0, "disabled": 0, "root_type": "Income"},
+            pluck="name",
+            limit=1,
+        )[0]
+        group = frappe.get_all(
+            "Account", filters={"company": company, "is_group": 1, "root_type": "Income"}, pluck="name", limit=1
+        )[0]
+        wrong_type = frappe.get_all(
+            "Account",
+            filters={"company": company, "is_group": 0, "account_type": "Cost of Goods Sold"},
+            pluck="name",
+            limit=1,
+        )[0]
+        return company, income, group, wrong_type
+
+    def test_shopify_shipping_account_accepts_an_income_account(self):
+        company, income, _group, _wrong = self._shipping_account_candidates()
+        external_account_id = "gid://shopify/Shop/9000000101"
+        with mock_shopify_verification(shop_id=external_account_id):
+            account = self.make_shopify_account(
+                "Test Shopify Shipping Account",
+                external_account_id=external_account_id,
+                erpnext_company=company,
+                erpnext_shipping_account=income,
+            )
+        account.reload()
+        self.assertEqual(account.erpnext_shipping_account, income)
+
+    def test_shopify_shipping_account_rejects_group_disabled_and_wrong_type_accounts(self):
+        company, _income, group, wrong_type = self._shipping_account_candidates()
+        disabled = frappe.get_doc(
+            {
+                "doctype": "Account",
+                "account_name": "Test Disabled Shipping Income",
+                "parent_account": group,
+                "company": company,
+                "disabled": 1,
+            }
+        ).insert()
+        cases = {"is a group account": group, "is disabled": disabled.name, "must be an Income": wrong_type}
+        for index, (message, shipping_account) in enumerate(cases.items()):
+            external_account_id = f"gid://shopify/Shop/90000002{index:02d}"
+            with self.subTest(case=message), mock_shopify_verification(shop_id=external_account_id):
+                with self.assertRaisesRegex(frappe.ValidationError, message):
+                    self.make_shopify_account(
+                        f"Test Shopify Bad Shipping {index}",
+                        external_account_id=external_account_id,
+                        erpnext_company=company,
+                        erpnext_shipping_account=shipping_account,
+                    )
+
+    def test_shipping_account_of_another_company_or_missing_company_is_a_problem(self):
+        company, income, _group, _wrong = self._shipping_account_candidates()
+        self.assertIsNone(shipping_account_problem(income, company))
+        self.assertIn("does not belong to Company", shipping_account_problem(income, "Another Company"))
+        self.assertIn("Set the ERPNext Company", shipping_account_problem(income, None))
+        self.assertIn("does not exist", shipping_account_problem("No Such Account", company))

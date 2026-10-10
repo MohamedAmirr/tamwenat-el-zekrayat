@@ -65,6 +65,40 @@ def compute_account_identity_key(platform, external_account_id):
 	return hashlib.sha256(digest_input).hexdigest()
 
 
+def shipping_account_problem(account_name, company):
+	"""Why ``account_name`` cannot receive a Shopify shipping charge, or None when it can.
+
+	Shared by Marketplace Account validation and the Sales Order sync (the account
+	can be disabled or changed after the Marketplace Account was saved).  ERPNext
+	itself only checks that the account belongs to the document's company.
+	"""
+	values = frappe.db.get_value(
+		"Account",
+		account_name,
+		["company", "is_group", "disabled", "root_type", "account_type"],
+		as_dict=True,
+	)
+	if not values:
+		return _("ERPNext Shipping Income Account {0} does not exist.").format(account_name)
+	if not company:
+		return _("Set the ERPNext Company before choosing the ERPNext Shipping Income Account.")
+	if values.company != company:
+		return _("ERPNext Shipping Income Account {0} does not belong to Company {1}.").format(
+			account_name, company
+		)
+	if values.is_group:
+		return _("ERPNext Shipping Income Account {0} is a group account; choose a leaf account.").format(
+			account_name
+		)
+	if values.disabled:
+		return _("ERPNext Shipping Income Account {0} is disabled.").format(account_name)
+	if values.root_type != "Income" and values.account_type not in ("Tax", "Chargeable"):
+		return _(
+			"ERPNext Shipping Income Account {0} must be an Income account or have the Tax or Chargeable account type."
+		).format(account_name)
+	return None
+
+
 class MarketplaceAccount(Document):
 	def __init__(self, *args, **kwargs):
 		"""connection_doctype needs to be defaulted here, in __init__, not in
@@ -113,6 +147,7 @@ class MarketplaceAccount(Document):
 		self.update_connection_doctype_on_platform_change()
 		self.validate_connection()
 		self.validate_warehouse()
+		self.validate_shipping_account()
 		# validate_shopify_account() must run BEFORE validate_unique_account_identity():
 		# for a new Shopify account, external_account_id starts out blank and
 		# is only populated from the live-confirmed shop GID inside
@@ -192,6 +227,15 @@ class MarketplaceAccount(Document):
 		# fold the two together; they intentionally check different things.
 		if self.warehouse and frappe.db.get_value("Warehouse", self.warehouse, "is_group"):
 			frappe.throw(_("Marketplace Account Warehouse must be a leaf Warehouse, not a group Warehouse."))
+
+	def validate_shipping_account(self):
+		"""The Shopify shipping income account must be a usable account of this
+		account's Company (see ``shipping_account_problem()``)."""
+		if self.platform != "Shopify" or not self.erpnext_shipping_account:
+			return
+		problem = shipping_account_problem(self.erpnext_shipping_account, self.erpnext_company)
+		if problem:
+			frappe.throw(problem)
 
 	def validate_noon_account(self):
 		"""Bind a Noon account to the selected connection's project code locally."""

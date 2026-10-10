@@ -5,7 +5,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import now_datetime
 
-IGNORE_TEST_RECORD_DEPENDENCIES = ["Marketplace Order"]
+IGNORE_TEST_RECORD_DEPENDENCIES = ["Marketplace Order", "Account"]
 
 
 class TestNoonReturn(IntegrationTestCase):

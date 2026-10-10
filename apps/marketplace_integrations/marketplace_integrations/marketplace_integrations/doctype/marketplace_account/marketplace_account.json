@@ -31,6 +31,7 @@
   "erpnext_company",
   "erpnext_selling_price_list",
   "erpnext_customer",
+  "erpnext_shipping_account",
   "enabled"
  ],
  "fields": [
@@ -198,6 +199,14 @@
    "read_only": 1
   },
   {
+   "depends_on": "eval:doc.platform==\"Shopify\"",
+   "description": "Income account that receives the shipping charge of synced Shopify orders. Required once an order with a shipping charge is synced. Not used for merchandise.",
+   "fieldname": "erpnext_shipping_account",
+   "fieldtype": "Link",
+   "label": "ERPNext Shipping Income Account",
+   "options": "Account"
+  },
+  {
    "default": "1",
    "fieldname": "enabled",
    "fieldtype": "Check",
@@ -207,7 +216,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-08-30 00:00:00.000000",
+ "modified": "2026-10-10 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Marketplace Account",
