@@ -173,6 +173,9 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 		_create_sync_log(order, trigger_source, "Invalid", None, result)
 		return result
 
+	if order.platform == "Shopify" and order.cancelled_at and not order.erpnext_sales_order:
+		return _skip_cancelled_before_sync(order, trigger_source)
+
 	snapshot = None
 	try:
 		account = _get_account(order)
@@ -268,6 +271,32 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 		)
 		_create_sync_log(order, trigger_source, "Error", snapshot, result, traceback_text=traceback_text)
 		return result
+
+
+def _skip_cancelled_before_sync(order, trigger_source):
+	"""Terminal, successful skip for a Shopify order cancelled before any Sales Order existed.
+
+	No Sales Order is created just to cancel it, and the cancellation is not a sync error:
+	the order stays ``Not Synced`` with the error cleared (clearing an obsolete error from an
+	earlier attempt, e.g. a COD order first blocked as unpaid). The Marketplace Order and its
+	earlier Sync Log rows are untouched; this attempt adds one Success row. Nothing re-triggers
+	this on a schedule (the reconciliation sweeps only look at orders with a linked Sales Order).
+	"""
+	if order.erpnext_sync_status != "Not Synced" or order.last_sync_error:
+		order.erpnext_sync_status = "Not Synced"
+		order.last_sync_error = None
+		order.flags.skip_sync_status_update = True
+		order.save()
+	result = {
+		"ok": True,
+		"skipped": True,
+		"status": order.erpnext_sync_status,
+		"message": _(
+			"The Shopify order was cancelled before an ERPNext Sales Order was created; no Sales Order is needed."
+		),
+	}
+	_create_sync_log(order, trigger_source, "Success", None, result)
+	return result
 
 
 def build_sales_order_snapshot(order, account=None, customer=None, for_submitted_order=False):
@@ -560,7 +589,7 @@ def _describe_shopify_transactions(order):
 			cstr(row.get("kind")) or "?",
 			cstr(row.get("status")) or "?",
 			cstr(row.get("gateway")) or "?",
-			"yes" if row.get("manualPaymentGateway") is True else "no",
+			{True: "yes", False: "no"}.get(row.get("manualPaymentGateway"), "unknown"),
 		)
 		for row in rows
 	)
@@ -575,6 +604,13 @@ def _build_shopify_sales_order_lines(order, account, tolerate_zero_quantity=Fals
 	lets a REFUNDED/PARTIALLY_REFUNDED order through to the refund planner (#178).
 	"""
 	if order.cancelled_at:
+		if order.erpnext_sales_order:
+			raise SyncBlocker(
+				_(
+					"The Shopify order was cancelled but its linked Sales Order {0} is still a Draft; "
+					"delete or cancel it in ERPNext."
+				).format(order.erpnext_sales_order)
+			)
 		raise SyncBlocker(_("Cancelled Shopify orders cannot be synchronized."))
 	eligible_statuses = {"PAID", "PARTIALLY_PAID"}
 	if tolerate_zero_quantity:

@@ -2153,7 +2153,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 				self.assertFalse(result["ok"])
 				self.assertIn("financially eligible", result["error"])
 
-	def test_cancelled_pending_manual_shopify_order_stays_blocked(self):
+	def test_cancelled_pending_manual_shopify_order_creates_no_sales_order(self):
 		account = self._make_shopify_account()
 		order, _mapping = self._make_shopify_order(
 			account,
@@ -2163,9 +2163,10 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		)
 
 		result = sync_sales_order(order.name)
+		order.reload()
 
-		self.assertFalse(result["ok"])
-		self.assertIn("Cancelled", result["error"])
+		self.assertTrue(result["skipped"])
+		self.assertFalse(order.erpnext_sales_order)
 
 	def test_cod_order_marked_paid_keeps_its_sales_order_synced(self):
 		account = self._make_shopify_account()
@@ -2189,6 +2190,92 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(second["sales_order"], first["sales_order"])
 		self.assertEqual(order.last_synced_hash, first_hash)
 		self.assertEqual(order.erpnext_sync_status, "Synced")
+
+	def test_shopify_order_cancelled_before_a_sales_order_is_a_terminal_skip(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, cancelled_at=now_datetime())
+
+		result = sync_sales_order(order.name)
+		order.reload()
+		logs = frappe.get_all(
+			"Marketplace Sync Log",
+			filters={"marketplace_order": order.name},
+			fields=["status", "sync_type"],
+		)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertTrue(result["skipped"])
+		self.assertFalse(order.erpnext_sales_order)
+		self.assertEqual(order.erpnext_sync_status, "Not Synced")
+		self.assertFalse(order.last_sync_error)
+		self.assertEqual([(row.sync_type, row.status) for row in logs], [("Sales Order Sync", "Success")])
+		self.assertFalse(frappe.db.exists("Sales Order", {"custom_marketplace_order": order.name}))
+
+	def test_cancelling_after_an_earlier_sync_error_clears_the_obsolete_error(self):
+		"""A COD order first blocked as unpaid, then cancelled, must not stay in Sync Error."""
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, financial_status="PENDING")
+		first = sync_sales_order(order.name)
+		order.reload()
+		self.assertFalse(first["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+
+		order.cancelled_at = now_datetime()
+		order.save()
+		second = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(second["ok"], second.get("error"))
+		self.assertEqual(order.erpnext_sync_status, "Not Synced")
+		self.assertFalse(order.last_sync_error)
+		statuses = [
+			row.status
+			for row in frappe.get_all(
+				"Marketplace Sync Log",
+				filters={"marketplace_order": order.name},
+				fields=["status"],
+				order_by="creation asc",
+			)
+		]
+		self.assertEqual(statuses, ["Invalid", "Success"])  # history preserved, nothing deleted
+
+	def test_repeated_syncs_of_a_cancelled_unsynced_order_never_create_a_sales_order(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, cancelled_at=now_datetime())
+
+		for _attempt in range(3):
+			result = sync_sales_order(order.name)
+			self.assertTrue(result["ok"])
+		order.reload()
+
+		self.assertFalse(order.erpnext_sales_order)
+		self.assertEqual(order.erpnext_sync_status, "Not Synced")
+
+	def test_cancelled_shopify_order_with_a_draft_sales_order_gets_an_actionable_message(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account)
+		first = sync_sales_order(order.name)
+		sales_order = frappe.get_doc("Sales Order", first["sales_order"])
+		frappe.db.set_value("Sales Order", sales_order.name, "docstatus", 0, update_modified=False)
+		order.reload()
+		order.cancelled_at = now_datetime()
+		order.save()
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		self.assertIn(sales_order.name, result["error"])
+		self.assertIn("Draft", result["error"])
+
+	def test_pending_order_message_shows_unknown_for_a_missing_manual_flag(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(
+			account, financial_status="PENDING", payment_transactions=[{"kind": "SALE", "status": "PENDING"}]
+		)
+
+		result = sync_sales_order(order.name)
+
+		self.assertIn("SALE/PENDING/?/manual=unknown", result["error"])
 
 	def test_never_synced_zero_quantity_shopify_line_still_blocks(self):
 		account = self._make_shopify_account()
@@ -2688,18 +2775,21 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.platform = "Shopify"
 		_validate_platform_supported(order)
 
-	def test_shopify_cancelled_or_unpaid_orders_are_blocked(self):
+	def test_shopify_unpaid_orders_are_blocked(self):
 		account = self._make_shopify_account()
-		for options in (
-			{"cancelled_at": nowdate()},
-			{"financial_status": "PENDING"},
-		):
-			with self.subTest(options=options):
-				order, _mapping = self._make_shopify_order(account, **options)
-				result = sync_sales_order(order.name)
-				self.assertFalse(result["ok"])
-				self.assertEqual(result["status"], "Sync Error")
-				self.assertFalse(order.erpnext_sales_order)
+		order, _mapping = self._make_shopify_order(account, financial_status="PENDING")
+		result = sync_sales_order(order.name)
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["status"], "Sync Error")
+		self.assertFalse(order.erpnext_sales_order)
+
+	def test_shopify_cancelled_unsynced_order_is_skipped_not_blocked(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, cancelled_at=nowdate())
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"])
+		self.assertEqual(result["status"], "Not Synced")
+		self.assertFalse(order.erpnext_sales_order)
 
 	def test_shopify_unmapped_null_variant_and_fully_refunded_lines_block(self):
 		account = self._make_shopify_account()
@@ -3657,3 +3747,4 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		result = sync_sales_order(order.name)
 		self.assertFalse(result["ok"])
 		self.assertIn("No eligible Noon order lines", result["error"])
+
