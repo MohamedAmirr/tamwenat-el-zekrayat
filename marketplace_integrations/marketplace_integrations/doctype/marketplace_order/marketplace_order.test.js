@@ -51,6 +51,7 @@ const {
 	add_status_indicators,
 	apply_platform_gating,
 	load_erpnext_sync_status,
+	select_noon_fulfillment_buttons,
 	JSON_EVIDENCE_FIELDS,
 } = require("./marketplace_order.js");
 
@@ -653,4 +654,15 @@ test("add_order_actions shows Cancel Order only for RECEIVED and UPDATE_CART ord
 		add_order_actions(make_frm({ external_status: status }));
 		assert.ok(!frm_calls.custom_buttons.includes("Cancel Order"), String(status));
 	}
+});
+
+test("select_noon_fulfillment_buttons keeps only available actions, or all when the call failed", () => {
+	const buttons = [{ action: "create_shipment" }, { action: "retry" }, { action: "add_awb" }];
+	assert.deepEqual(
+		select_noon_fulfillment_buttons(buttons, ["retry", "unknown_action"]).map((b) => b.action),
+		["retry"]
+	);
+	assert.deepEqual(select_noon_fulfillment_buttons(buttons, []), []);
+	assert.equal(select_noon_fulfillment_buttons(buttons, null), buttons);
+	assert.equal(select_noon_fulfillment_buttons(buttons, undefined), buttons);
 });

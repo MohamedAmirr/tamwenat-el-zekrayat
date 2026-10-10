@@ -44,6 +44,18 @@ def get_shippable_units(marketplace_order: str):
 
 
 @frappe.whitelist(methods=["POST"])
+def get_available_actions(marketplace_order: str):
+	"""Read-only convenience for the form: which Noon Fulfillment buttons to
+	show. No lock needed (nothing is written), so this loads directly and
+	only needs read permission; every action still validates server side."""
+	doc = frappe.get_doc("Marketplace Order", marketplace_order)
+	doc.check_permission("read")
+	if doc.platform != "Noon":
+		frappe.throw(frappe._("Marketplace Order {0} is not a Noon order.").format(doc.name))
+	return fulfillment.get_available_actions(doc)
+
+
+@frappe.whitelist(methods=["POST"])
 def create_shipment(
 	marketplace_order: str, mp_item_nrs, awb_source: str, courier: str | None = None, awb_nr: str | None = None
 ):

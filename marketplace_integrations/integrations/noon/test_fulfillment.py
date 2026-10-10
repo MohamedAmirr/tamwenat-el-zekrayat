@@ -179,6 +179,79 @@ class IntegrationTestNoonShippableUnits(IntegrationTestNoonFulfillmentBase):
 		self.assertEqual([row["mp_item_nr"] for row in shippable], ["1"])
 
 
+class IntegrationTestNoonAvailableActions(IntegrationTestNoonFulfillmentBase):
+	def _add_shipment(self, order, status, **extra):
+		order.append(
+			"noon_shipments",
+			{"integration_shipment_nr": f"{self.fbpi_order_nr}-1", "status": status, "awb_source": "Noon", **extra},
+		)
+		order.save()
+
+	def test_acknowledged_order_offers_only_unit_actions(self):
+		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
+		self.assertEqual(
+			fulfillment.get_available_actions(order),
+			{"actions": ["create_shipment", "mark_out_of_stock"], "cancelled_on_noon": False},
+		)
+
+	def test_cancelled_units_offer_nothing_and_flag_cancelled_on_noon(self):
+		order = _make_fulfillment_order(
+			self.account,
+			self.fbpi_order_nr,
+			[{**_confirmed_acknowledged(1), "mp_status": "MP_ITEM_STATUS_CANCELLED"}],
+		)
+		self.assertEqual(
+			fulfillment.get_available_actions(order), {"actions": [], "cancelled_on_noon": True}
+		)
+
+	def test_created_shipment_offers_shipment_actions_and_no_unit_actions(self):
+		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
+		self._add_shipment(order, "Created")
+		order.append(
+			"noon_shipment_units",
+			{"integration_shipment_nr": f"{self.fbpi_order_nr}-1", "mp_item_nr": "1", "partner_sku": "SKU-001"},
+		)
+		order.save()
+		result = fulfillment.get_available_actions(order)
+		self.assertEqual(result["actions"], ["cancel_shipment", "add_awb", "upload_invoice"])
+		self.assertFalse(result["cancelled_on_noon"])
+
+		# Retry appears once the Created shipment has a Pending invoice upload,
+		# and upload_invoice() itself refuses while one is already pending.
+		order.noon_shipments[0].invoice_status = "Pending"
+		order.save()
+		self.assertEqual(
+			fulfillment.get_available_actions(order)["actions"], ["cancel_shipment", "add_awb", "retry"]
+		)
+
+	def test_error_shipment_offers_retry_and_discard(self):
+		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
+		self._add_shipment(order, "Error", last_error="boom")
+		order.append(
+			"noon_shipment_units",
+			{"integration_shipment_nr": f"{self.fbpi_order_nr}-1", "mp_item_nr": "1", "partner_sku": "SKU-001"},
+		)
+		order.save()
+		self.assertEqual(fulfillment.get_available_actions(order)["actions"], ["retry", "discard_shipment"])
+
+	def test_pending_oos_reservation_offers_release(self):
+		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
+		order.noon_pending_oos_units = frappe.as_json(["1"])
+		order.save()
+		self.assertEqual(
+			fulfillment.get_available_actions(order)["actions"], ["release_stuck_oos_reservation"]
+		)
+
+	def test_endpoint_returns_actions_for_a_noon_order(self):
+		from marketplace_integrations.api import noon_fulfillment
+
+		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
+		self.assertEqual(
+			noon_fulfillment.get_available_actions(order.name)["actions"],
+			["create_shipment", "mark_out_of_stock"],
+		)
+
+
 class IntegrationTestNoonCreateShipmentRequestPath(IntegrationTestNoonFulfillmentBase):
 	def setUp(self):
 		super().setUp()

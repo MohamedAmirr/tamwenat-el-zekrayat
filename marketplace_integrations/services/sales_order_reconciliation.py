@@ -242,10 +242,13 @@ def plan(previous, current, evidence, erp_state):
 				"The marketplace order was cancelled after fulfillment and ERPNext already has delivery; "
 				"a return or other compensating transaction is needed.",
 			)
-		return _attention(
-			"The marketplace order was cancelled after fulfillment, but ERPNext has no recorded delivery; "
-			"review what happened to the goods."
-		)
+		if _has_execution(erp_state):
+			return _attention(
+				"The marketplace order was cancelled after fulfillment, but ERPNext has billing without "
+				"delivery; review what happened to the goods."
+			)
+		# No delivery and no billing: ERPNext never recorded the goods leaving, so the Sales Order
+		# is cancelled like any other cancellation (below); what happened to the parcel is physical.
 
 	header_changes = _header_changes(previous, current)
 	changes = _line_changes(previous_items, current_items)
@@ -324,9 +327,13 @@ def plan(previous, current, evidence, erp_state):
 					"before the order can be cancelled.",
 					changes,
 				)
-			return _result(
-				CANCEL_ORDER, "The marketplace order is fully cancelled before ERP execution.", changes
-			)
+			message = "The marketplace order is fully cancelled before ERP execution."
+			if evidence.get("cancelled_after_fulfillment"):
+				message = (
+					"The marketplace order was cancelled after fulfillment; ERPNext has no delivery or "
+					"billing, so the Sales Order is cancelled. Check what happened to the parcel."
+				)
+			return _result(CANCEL_ORDER, message, changes)
 		if _has_outstanding_remainder(erp_state):
 			return _result(
 				CLOSE_REMAINDER, "Only the outstanding Sales Order remainder can be closed.", changes
