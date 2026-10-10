@@ -526,6 +526,47 @@ def _build_noon_sales_order_lines(order, account, tolerate_zero_quantity=False):
 	return sorted(lines, key=lambda line: line["external_item_id"])
 
 
+def _shopify_transactions(order):
+	"""The order's stored Shopify transactions as a list of dicts ([] when absent or invalid)."""
+	raw = order.get("payment_transactions")
+	if isinstance(raw, str):
+		try:
+			raw = frappe.parse_json(raw)
+		except ValueError:
+			return []
+	return [row for row in raw if isinstance(row, dict)] if isinstance(raw, list) else []
+
+
+def _is_manual_payment_pending(order):
+	"""A PENDING Shopify order whose payment is a manual method (COD, bank deposit, custom).
+
+	Shopify marks the transaction of a manual payment method with ``manualPaymentGateway``
+	(Admin API 2025-01+); the gateway NAME is never used because merchants can rename it.
+	PENDING alone is not enough: Shopify also uses it for online payments still processing.
+	"""
+	return order.external_financial_status == "PENDING" and any(
+		row.get("manualPaymentGateway") is True and row.get("status") == "PENDING"
+		for row in _shopify_transactions(order)
+	)
+
+
+def _describe_shopify_transactions(order):
+	"""Blocker detail naming what Shopify sent, so an unexpected store setup can be diagnosed."""
+	rows = _shopify_transactions(order)
+	if not rows:
+		return " " + _("No payment transactions were received.")
+	described = "; ".join(
+		"{0}/{1}/{2}/manual={3}".format(
+			cstr(row.get("kind")) or "?",
+			cstr(row.get("status")) or "?",
+			cstr(row.get("gateway")) or "?",
+			"yes" if row.get("manualPaymentGateway") is True else "no",
+		)
+		for row in rows
+	)
+	return " " + _("Transactions (kind/status/gateway/manual): {0}.").format(described)
+
+
 def _build_shopify_sales_order_lines(order, account, tolerate_zero_quantity=False):
 	"""Build immutable Sales Order lines from Shopify transaction evidence.
 
@@ -538,10 +579,12 @@ def _build_shopify_sales_order_lines(order, account, tolerate_zero_quantity=Fals
 	eligible_statuses = {"PAID", "PARTIALLY_PAID"}
 	if tolerate_zero_quantity:
 		eligible_statuses |= {"REFUNDED", "PARTIALLY_REFUNDED"}
-	if order.external_financial_status not in eligible_statuses:
+	if order.external_financial_status not in eligible_statuses and not _is_manual_payment_pending(order):
 		raise SyncBlocker(
-			_("Shopify order {0} is not financially eligible for synchronization ({1}).").format(
-				order.name, order.external_financial_status or _("unknown status")
+			_("Shopify order {0} is not financially eligible for synchronization ({1}).{2}").format(
+				order.name,
+				order.external_financial_status or _("unknown status"),
+				_describe_shopify_transactions(order) if order.external_financial_status == "PENDING" else "",
 			)
 		)
 
