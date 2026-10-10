@@ -2137,8 +2137,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
 		self.assertIn("not recognized", result["error"])
 
-	def test_talabat_cancelled_after_pickup_is_compensating_only_with_erp_delivery(self):
-		for delivered_qty, expected in ((1, "UNSUPPORTED_COMPENSATING_TRANSACTION"), (0, "NEEDS_ATTENTION")):
+	def test_talabat_cancelled_after_pickup_needs_a_compensating_transaction_only_with_erp_delivery(self):
+		for delivered_qty, expected in ((1, "UNSUPPORTED_COMPENSATING_TRANSACTION"), (0, "CANCEL_ORDER")):
 			with self.subTest(delivered_qty=delivered_qty):
 				order = self._make_order()
 				self._sync_and_set_item_fields(order, delivered_qty=delivered_qty)

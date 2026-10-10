@@ -519,9 +519,9 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 
 	def test_cancellation_after_fulfillment_depends_on_erp_delivery(self):
 		evidence = {"cancellation": "full", "cancelled_after_fulfillment": True}
-		self.assertEqual(
-			plan(self.previous, self._current(), evidence, self.erp_state)["outcome"], NEEDS_ATTENTION
-		)
+		result = plan(self.previous, self._current(), evidence, self.erp_state)
+		self.assertEqual(result["outcome"], CANCEL_ORDER)
+		self.assertIn("Check what happened to the parcel", result["message"])
 		for delivered_qty in (1, 2):
 			with self.subTest(delivered_qty=delivered_qty):
 				erp_state = deepcopy(self.erp_state)
@@ -555,6 +555,12 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 
 	def test_cancellation_after_fulfillment_with_billing_but_no_delivery_needs_attention(self):
 		self.erp_state["lines"][0]["billed_amt"] = 50
+		evidence = {"cancellation": "full", "cancelled_after_fulfillment": True}
+		result = plan(self.previous, self._current(), evidence, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+
+	def test_cancellation_after_fulfillment_with_advance_payment_needs_attention(self):
+		self.erp_state["advance_paid"] = 100
 		evidence = {"cancellation": "full", "cancelled_after_fulfillment": True}
 		result = plan(self.previous, self._current(), evidence, self.erp_state)
 		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
