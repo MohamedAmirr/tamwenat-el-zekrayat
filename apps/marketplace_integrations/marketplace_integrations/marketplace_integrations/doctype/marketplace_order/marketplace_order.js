@@ -829,6 +829,11 @@ function add_erpnext_sync_action(frm) {
 						indicator: "red",
 						title: __("ERPNext Sync Blocked"),
 					});
+				} else if (response.message.skipped) {
+					frappe.show_alert({
+						message: frappe.utils.escape_html(response.message.message || ""),
+						indicator: "blue",
+					});
 				} else if (response.message.executed_action) {
 					// Server text embeds the Sales Order name; escape as above.
 					frappe.show_alert({
