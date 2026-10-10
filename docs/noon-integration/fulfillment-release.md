@@ -96,7 +96,7 @@ the full explanation - this is accepted behavior, not a bug.
 ## Permissions
 
 **System Manager only.** `Marketplace Order`'s only configured DocPerm role
-is System Manager (read/write/create/delete) — every fulfillment endpoint in
+is System Manager (read/write/create/delete/report) — every fulfillment endpoint in
 `api/noon_fulfillment.py` calls `doc.check_permission("write")` before doing
 anything, so this is enforced through the existing doctype permission model,
 not a separate check. There is no dedicated "Noon Fulfillment" role; granting

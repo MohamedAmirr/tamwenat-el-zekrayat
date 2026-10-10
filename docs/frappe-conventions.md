@@ -71,6 +71,7 @@ apps/<app_name>/
 
 ## Permissions
 
+- A Script Report needs the `report` permission type on its `ref_doctype` for every role that runs it (`frappe.has_permission(ref_doctype, "report")` in `desk/query_report.py`); the report's own `roles` list is not enough, and Administrator bypasses the check so the gap goes unnoticed. Add `"report": 1` to the doctype's permission row. Standard DocPerm rows re-sync from the JSON on `bench migrate`, but a doctype with Custom DocPerm rows (Role Permission Manager edits, or copies made by `add_permission`) uses only those and ignores the JSON.
 - Default to the Role Permission Manager (exported as a fixture), not hardcoded permission checks, unless the rule is dynamic (e.g. "only the owning branch can see this").
 - For dynamic rules, use a `permission_query_conditions` / `has_permission` hook in `hooks.py`, not ad-hoc checks scattered in controllers.
 
