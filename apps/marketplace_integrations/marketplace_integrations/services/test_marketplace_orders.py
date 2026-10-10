@@ -166,3 +166,37 @@ class IntegrationTestUpsertMarketplaceOrderConcurrentRace(IntegrationTestCase):
 		result.reload()
 		self.assertEqual(result.name, first.name)
 		self.assertEqual(result.external_financial_status, "PAID")
+
+
+class IntegrationTestUpsertMarketplaceOrderNoopResave(IntegrationTestCase):
+	def setUp(self):
+		self.account = make_shopify_account(f"Order Noop {frappe.generate_hash(length=8)}")
+		self.order_name = None
+
+	def tearDown(self):
+		if self.order_name:
+			frappe.db.delete("Version", {"ref_doctype": "Marketplace Order", "docname": self.order_name})
+			frappe.delete_doc("Marketplace Order", self.order_name, force=True)
+
+	def test_reimporting_identical_payload_leaves_no_version_entry(self):
+		# A platform that omits numeric/Check fields (e.g. Noon: weights,
+		# customer_latitude, is_preorder) must not flip the stored 0 to None
+		# on re-import: Version logs 0 -> None as a change on every refresh.
+		payload = {
+			"external_order_id": f"noop-order-{frappe.generate_hash(length=8)}",
+			"latest_payload": {"id": 1},
+			"items": [{"external_item_id": "sku:A:S:I", "product_name": "A", "current_quantity": 2}],
+		}
+		order = upsert_marketplace_order(self.account.name, payload)
+		self.order_name = order.name
+
+		# Document.save() skips Version tracking while frappe.in_test is set.
+		with patch.object(frappe, "in_test", False):
+			upsert_marketplace_order(self.account.name, payload)
+
+		versions = frappe.get_all(
+			"Version",
+			filters={"ref_doctype": "Marketplace Order", "docname": order.name},
+			fields=["data"],
+		)
+		self.assertEqual(versions, [], [v.data for v in versions])
