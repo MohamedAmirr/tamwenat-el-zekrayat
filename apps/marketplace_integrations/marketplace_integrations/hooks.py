@@ -13,15 +13,19 @@ app_license = "mit"
 required_apps = ["erpnext"]
 
 # Each item in the list will be shown as an app in the apps page
-# add_to_apps_screen = [
-# 	{
-# 		"name": "marketplace_integrations",
-# 		"logo": "/assets/marketplace_integrations/logo.png",
-# 		"title": "Marketplace Integrations",
-# 		"route": "/marketplace_integrations",
-# 		"has_permission": "marketplace_integrations.api.permission.has_app_permission"
-# 	}
-# ]
+# The logo is the existing solid desktop-icon tile (a standalone rounded SVG).
+# The route is /desk/<workspace name, lower-cased, spaces -> hyphens>.
+app_logo_url = "/assets/marketplace_integrations/icons/desktop_icons/solid/tamwenat_marketplaces.svg"
+
+add_to_apps_screen = [
+	{
+		"name": app_name,
+		"logo": app_logo_url,
+		"title": app_title,
+		"route": "/desk/tamwenat-marketplaces",
+		"has_permission": "marketplace_integrations.api.permission.has_app_permission",
+	}
+]
 
 # Includes in <head>
 # ------------------
