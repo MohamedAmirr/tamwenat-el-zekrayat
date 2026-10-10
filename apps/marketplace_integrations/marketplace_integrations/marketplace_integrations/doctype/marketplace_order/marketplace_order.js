@@ -150,37 +150,80 @@ function apply_platform_gating(frm) {
 // render_json_evidence_fields_as_escaped_text()/add_status_indicators()
 // above already follow.
 function add_noon_fulfillment_actions(frm) {
+	// Which actions are shown is decided server-side by
+	// api.noon_fulfillment.get_available_actions (the same eligibility rules
+	// the actions themselves enforce); the buttons are only a convenience, so
+	// if that call fails the full list is shown and each action's own server
+	// validation stays the source of truth.
+	frappe
+		.call({
+			method: "marketplace_integrations.api.noon_fulfillment.get_available_actions",
+			args: { marketplace_order: frm.doc.name },
+		})
+		.then(
+			(r) => {
+				const available = r.message || {};
+				render_noon_fulfillment_buttons(frm, available.actions);
+				if (available.cancelled_on_noon) {
+					frm.dashboard.set_headline(
+						__("Cancelled on Noon; no fulfillment actions available"),
+						"orange"
+					);
+				}
+			},
+			() => render_noon_fulfillment_buttons(frm, null)
+		);
+}
+
+// Pure selection step, kept separate for testing: `available_actions` is the
+// list of action keys from get_available_actions, or null/undefined to keep
+// every button (the fallback when that call is unavailable).
+function select_noon_fulfillment_buttons(buttons, available_actions) {
+	if (!Array.isArray(available_actions)) return buttons;
+	return buttons.filter((button) => available_actions.includes(button.action));
+}
+
+function render_noon_fulfillment_buttons(frm, available_actions) {
 	const group = __("Noon Fulfillment");
-	frm.add_custom_button(
-		__("Create Shipment"),
-		() => show_noon_create_shipment_dialog(frm),
-		group
-	);
-	frm.add_custom_button(
-		__("Mark Out of Stock"),
-		() => show_noon_mark_out_of_stock_dialog(frm),
-		group
-	);
-	frm.add_custom_button(
-		__("Cancel Shipment"),
-		() => show_noon_cancel_shipment_dialog(frm),
-		group
-	);
-	frm.add_custom_button(__("Add AWB"), () => show_noon_add_awb_dialog(frm), group);
-	frm.add_custom_button(__("Upload Invoice"), () => show_noon_upload_invoice_dialog(frm), group);
-	frm.add_custom_button(__("Retry"), () => show_noon_retry_dialog(frm), group);
-	// #146 review finding #2: recovery actions for a shipment stuck in Error
-	// or Cancel Pending with no other way out, and for an order-level Out of
-	// Stock reservation orphaned by a hard-killed worker.
-	frm.add_custom_button(
-		__("Discard Shipment"),
-		() => show_noon_discard_shipment_dialog(frm),
-		group
-	);
-	frm.add_custom_button(
-		__("Release Stuck Out of Stock Reservation"),
-		() => run_noon_release_stuck_oos_reservation(frm),
-		group
+	const buttons = [
+		{
+			action: "create_shipment",
+			label: __("Create Shipment"),
+			click: () => show_noon_create_shipment_dialog(frm),
+		},
+		{
+			action: "mark_out_of_stock",
+			label: __("Mark Out of Stock"),
+			click: () => show_noon_mark_out_of_stock_dialog(frm),
+		},
+		{
+			action: "cancel_shipment",
+			label: __("Cancel Shipment"),
+			click: () => show_noon_cancel_shipment_dialog(frm),
+		},
+		{ action: "add_awb", label: __("Add AWB"), click: () => show_noon_add_awb_dialog(frm) },
+		{
+			action: "upload_invoice",
+			label: __("Upload Invoice"),
+			click: () => show_noon_upload_invoice_dialog(frm),
+		},
+		{ action: "retry", label: __("Retry"), click: () => show_noon_retry_dialog(frm) },
+		// #146 review finding #2: recovery actions for a shipment stuck in Error
+		// or Cancel Pending with no other way out, and for an order-level Out of
+		// Stock reservation orphaned by a hard-killed worker.
+		{
+			action: "discard_shipment",
+			label: __("Discard Shipment"),
+			click: () => show_noon_discard_shipment_dialog(frm),
+		},
+		{
+			action: "release_stuck_oos_reservation",
+			label: __("Release Stuck Out of Stock Reservation"),
+			click: () => run_noon_release_stuck_oos_reservation(frm),
+		},
+	];
+	select_noon_fulfillment_buttons(buttons, available_actions).forEach((button) =>
+		frm.add_custom_button(button.label, button.click, group)
 	);
 }
 
@@ -1092,6 +1135,7 @@ if (typeof module !== "undefined") {
 		mp_item_nrs_from_unit_indices,
 		noon_created_shipment_options,
 		noon_discardable_shipment_options,
+		select_noon_fulfillment_buttons,
 	};
 }
 

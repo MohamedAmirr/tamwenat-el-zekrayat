@@ -213,6 +213,54 @@ def get_shippable_units(order, include_pending_oos=False):
 	return shippable
 
 
+def get_available_actions(order):
+	"""Which Noon Fulfillment Desk actions currently have something to act on,
+	using the same eligibility rules the request paths below enforce (the
+	server still re-validates every action; this only lets the form hide
+	buttons that would just fail). Returns ``{"actions": [...],
+	"cancelled_on_noon": bool}``; ``cancelled_on_noon`` is true only when no
+	action applies and the payload has no CONFIRMED unit left."""
+	shipments = order.noon_shipments or []
+	statuses = {row.status for row in shipments}
+	actions = []
+
+	if get_shippable_units(order):
+		actions += ["create_shipment", "mark_out_of_stock"]
+
+	created = [row for row in shipments if row.status == "Created"]
+	if created:
+		actions.append("cancel_shipment")
+		actions.append("add_awb")
+	# upload_invoice() also refuses while an upload is already Pending.
+	if any(row.invoice_status != "Pending" for row in created):
+		actions.append("upload_invoice")
+
+	# Mirrors retry(): Pending/Error re-run CreateShipment, Cancel Pending
+	# re-runs CancelShipment, and a Created shipment can retry a Pending
+	# Own Courier AWB or a Pending/Error invoice.
+	created_nrs = {row.integration_shipment_nr for row in created}
+	if (
+		statuses & {"Pending", "Error", "Cancel Pending"}
+		or any(
+			row.integration_shipment_nr in created_nrs and row.status == "Pending" and row.source == "Own Courier"
+			for row in order.noon_shipment_awbs or []
+		)
+		or any(row.invoice_status in ("Pending", "Error") for row in created)
+	):
+		actions.append("retry")
+
+	if statuses & set(_DISCARDABLE_SHIPMENT_STATUSES):
+		actions.append("discard_shipment")
+	if _pending_oos_units(order):
+		actions.append("release_stuck_oos_reservation")
+
+	items = [item for item in _latest_payload_items(order) if isinstance(item, dict)]
+	cancelled_on_noon = (
+		not actions and bool(items) and not any(item.get("mp_status") == MP_STATUS_CONFIRMED for item in items)
+	)
+	return {"actions": actions, "cancelled_on_noon": cancelled_on_noon}
+
+
 def _next_shipment_number(order):
 	"""``<fbpi_order_nr>-<n>``, n = 1 + every shipment ever created on this
 	order (including cancelled ones) - never reused (#146 decision 13)."""

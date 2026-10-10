@@ -29,6 +29,19 @@ below). The reconciliation Script Report is not built (findings are Needs Attent
    same Noon Connection used for order import/pricing/inventory is reused.
 3. The Noon Fulfillment tab and its action buttons only appear on a
    Marketplace Order whose `platform` is `Noon`.
+4. The "Noon Fulfillment" button group shows only the actions that currently
+   have something to act on, decided by one read-only call
+   (`api.noon_fulfillment.get_available_actions`, read permission) using the
+   same eligibility rules as the actions: Create Shipment and Mark Out of
+   Stock need a shippable unit; Cancel Shipment and Add AWB need a Created
+   shipment; Upload Invoice needs a Created shipment with no invoice upload
+   Pending; Retry needs a Pending, Error or Cancel Pending shipment, or a
+   Created one with a Pending Own Courier AWB or a Pending/Error invoice;
+   Discard Shipment needs an Error or Cancel Pending shipment; Release Stuck
+   Out of Stock Reservation needs a pending reservation. With no applicable
+   action the group is absent, and a fully cancelled order shows a "Cancelled
+   on Noon; no fulfillment actions available" headline. If the call fails the
+   full button list is shown (each action still validates server side).
 
 ## Noon event-notification webhook (#163)
 
