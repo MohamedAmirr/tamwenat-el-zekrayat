@@ -80,7 +80,7 @@ query ShopifyOrder($id: ID!, $lineItemsFirst: Int!, $transactionsFirst: Int!, $r
     currentTotalDutiesSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }
     currentTotalPriceSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }
     transactions(first: $transactionsFirst) {
-      id kind status amountSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } } createdAt processedAt
+      id kind status gateway manualPaymentGateway amountSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } } createdAt processedAt
     }
     refunds(first: $refundsFirst) {
       id createdAt note totalRefundedSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }
