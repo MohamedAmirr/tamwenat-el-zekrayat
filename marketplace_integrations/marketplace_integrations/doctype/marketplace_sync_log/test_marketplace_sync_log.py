@@ -14,7 +14,7 @@ from marketplace_integrations.marketplace_integrations.doctype.marketplace_sync_
 	clear_old_logs,
 )
 
-IGNORE_TEST_RECORD_DEPENDENCIES = ["Marketplace Order"]
+IGNORE_TEST_RECORD_DEPENDENCIES = ["Marketplace Order", "Account"]
 
 
 class TestMarketplaceSyncLog(IntegrationTestCase):
