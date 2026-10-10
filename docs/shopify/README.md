@@ -124,10 +124,10 @@ For a Shopify buyer with a nonblank email, Sales Order sync creates or updates o
 
 ## Controlled Sales Order handoff (#110)
 
-- Sales Order creation is explicit and manual. Only Shopify orders with no `cancelled_at` and financial status `PAID` or `PARTIALLY_PAID` are eligible.
+- Only Shopify orders with no `cancelled_at` and financial status `PAID` or `PARTIALLY_PAID` are eligible, plus (#216) a `PENDING` order paid by a manual method (COD, bank deposit, custom): at least one transaction with `status` `PENDING` and `manualPaymentGateway: true` (Admin API 2025-01+; the gateway name is never matched because merchants can rename it). Other `PENDING` orders (an online payment still processing) and `AUTHORIZED`, `VOIDED`, `EXPIRED` stay blocked, and the blocker message lists each transaction's `kind/status/gateway/manual`. When the merchant later marks a COD order paid, the Sales Order is unchanged (only line amounts are compared). **Unverified on this store:** whether its COD orders carry the flag; shopify.dev documents the field and a Shopify staff community answer says COD returns `true`, and a COD app with its own gateway may not set it. Sales Orders are created automatically from webhooks (#133) and manually from the form ("Send to ERPNext"); a fresh Sales Order is submitted immediately (#131), not left as a Draft.
 - Each line resolves only through the exact `(Marketplace Account, external_variant_id)` mapping. A missing mapping, null variant, missing transaction amount, or fully refunded line blocks the whole order; no partial Sales Order is created.
 - The line rate is `priceAfterAllDiscountsBeforeTaxesSet.shopMoney.amount / currentQuantity`, rounded to the existing six-decimal effective-rate precision. The stored `transaction_amount` is separate from #109's `net_amount`.
-- The existing snapshot/hash/idempotency flow is reused. Later Item Price changes do not change an already synchronized Shopify-derived rate; reprocessing updates the same Draft Sales Order rather than creating a duplicate.
+- The existing snapshot/hash/idempotency flow is reused. Later Item Price changes do not change an already synchronized Shopify-derived rate; reprocessing updates the same Sales Order rather than creating a duplicate.
 - The handoff creates or updates only a Draft Sales Order. Taxes, shipping, duties, refunds, payouts, invoices, payments, GL entries, Delivery Notes, and Stock Entries remain outside this issue.
 
 ## Open questions

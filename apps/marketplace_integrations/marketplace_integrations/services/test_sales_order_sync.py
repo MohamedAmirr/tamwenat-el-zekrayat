@@ -144,6 +144,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		customer_phone_number=None,
 		shipping_address=None,
 		billing_address=None,
+		payment_transactions=None,
 	):
 		if variant_gid is _DEFAULT_VARIANT:
 			variant_gid = f"gid://shopify/ProductVariant/{frappe.generate_hash(length=12)}"
@@ -172,6 +173,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 				"customer_phone_number": customer_phone_number,
 				"shipping_address": shipping_address,
 				"billing_address": billing_address,
+				"payment_transactions": payment_transactions,
 				"latest_payload": {"updatedAt": "2026-09-28T10:00:00Z"},
 				"items": [
 					{
@@ -2083,6 +2085,110 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 				self.assertFalse(result["ok"])
 				self.assertIn("financially eligible", result["error"])
 				self.assertFalse(order.erpnext_sales_order)
+
+	@staticmethod
+	def _transaction(*, manual, status="PENDING", gateway="Cash on Delivery (COD)", kind="SALE"):
+		return {"kind": kind, "status": status, "gateway": gateway, "manualPaymentGateway": manual}
+
+	def test_pending_shopify_order_with_a_manual_payment_syncs(self):
+		"""#216: COD and any other manual method arrive PENDING with a manual-gateway transaction."""
+		account = self._make_shopify_account()
+		for gateway in ("Cash on Delivery (COD)", "Bank Deposit", "Any Renamed Method"):
+			with self.subTest(gateway=gateway):
+				order, _mapping = self._make_shopify_order(
+					account,
+					financial_status="PENDING",
+					payment_transactions=[self._transaction(manual=True, gateway=gateway)],
+				)
+
+				result = sync_sales_order(order.name)
+
+				self.assertTrue(result["ok"], result.get("error"))
+
+	def test_pending_shopify_order_without_a_manual_payment_stays_blocked(self):
+		account = self._make_shopify_account()
+		cases = {
+			"online": [self._transaction(manual=False, gateway="shopify_payments")],
+			"no transactions": None,
+			"empty transactions": [],
+			"manual but failed": [self._transaction(manual=True, status="FAILURE")],
+		}
+		for label, transactions in cases.items():
+			with self.subTest(case=label):
+				order, _mapping = self._make_shopify_order(
+					account, financial_status="PENDING", payment_transactions=transactions
+				)
+
+				result = sync_sales_order(order.name)
+				order.reload()
+
+				self.assertFalse(result["ok"])
+				self.assertIn("financially eligible", result["error"])
+				self.assertFalse(order.erpnext_sales_order)
+
+	def test_blocked_pending_order_message_names_what_shopify_sent(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(
+			account,
+			financial_status="PENDING",
+			payment_transactions=[self._transaction(manual=False, gateway="paymob")],
+		)
+
+		result = sync_sales_order(order.name)
+
+		self.assertIn("SALE/PENDING/paymob/manual=no", result["error"])
+
+	def test_authorized_and_voided_orders_stay_blocked_even_with_a_manual_transaction(self):
+		account = self._make_shopify_account()
+		for status in ("AUTHORIZED", "VOIDED", "EXPIRED"):
+			with self.subTest(status=status):
+				order, _mapping = self._make_shopify_order(
+					account,
+					financial_status=status,
+					payment_transactions=[self._transaction(manual=True)],
+				)
+
+				result = sync_sales_order(order.name)
+
+				self.assertFalse(result["ok"])
+				self.assertIn("financially eligible", result["error"])
+
+	def test_cancelled_pending_manual_shopify_order_stays_blocked(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(
+			account,
+			financial_status="PENDING",
+			cancelled_at=now_datetime(),
+			payment_transactions=[self._transaction(manual=True)],
+		)
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		self.assertIn("Cancelled", result["error"])
+
+	def test_cod_order_marked_paid_keeps_its_sales_order_synced(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(
+			account,
+			financial_status="PENDING",
+			payment_transactions=[self._transaction(manual=True)],
+		)
+		first = sync_sales_order(order.name)
+		self.assertTrue(first["ok"], first.get("error"))
+		order.reload()
+		first_hash = order.last_synced_hash
+
+		order.external_financial_status = "PAID"
+		order.payment_transactions = frappe.as_json([self._transaction(manual=True, status="SUCCESS")])
+		order.save()
+		second = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(second["ok"], second.get("error"))
+		self.assertEqual(second["sales_order"], first["sales_order"])
+		self.assertEqual(order.last_synced_hash, first_hash)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
 
 	def test_never_synced_zero_quantity_shopify_line_still_blocks(self):
 		account = self._make_shopify_account()
