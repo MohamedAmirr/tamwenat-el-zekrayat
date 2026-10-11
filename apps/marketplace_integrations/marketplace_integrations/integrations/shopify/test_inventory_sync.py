@@ -34,11 +34,11 @@ LOCATION = "gid://shopify/Location/1"
 class FakeShopify:
 	"""In-memory Shopify inventory: dispatches on the query text and enforces
 	compare-and-set the way the real API is expected to (a mismatching
-	changeFromQuantity returns COMPARE_FAILED and applies nothing).
+	changeFromQuantity returns CHANGE_FROM_QUANTITY_STALE and applies nothing).
 
 	CAUTION - circular validation: by default this fake bakes in the SAME
 	assumptions the code under test makes (userErrors apply nothing, a freshly
-	activated level starts at on_hand 0, the stale code is COMPARE_FAILED, and
+	activated level starts at on_hand 0, the stale code is CHANGE_FROM_QUANTITY_STALE, and
 	reads always carry an on_hand entry). The switches below (partial_apply,
 	activate_starts_at, stale_code, error injection) make it behave differently
 	so the tests are not only agreeing with the code's own guesses."""
@@ -51,7 +51,7 @@ class FakeShopify:
 		self.fail_next_reads = 0
 		self.partial_apply = False  # on a userError, still apply the OK items
 		self.activate_starts_at = 0  # on_hand of a freshly activated level
-		self.stale_code = "COMPARE_FAILED"
+		self.stale_code = "CHANGE_FROM_QUANTITY_STALE"
 		self.extra_errors = []  # userErrors appended to the next stale response
 		self.track_errors = set()  # item ids whose inventoryItemUpdate returns userErrors
 		self.track_raises = set()  # item ids whose inventoryItemUpdate raises
@@ -384,6 +384,31 @@ class IntegrationTestStaleCompare(InventoryFixtureMixin, IntegrationTestCase):
 		self.assertEqual(state["on_hand"], 9)
 		self.assertEqual(payload["succeeded"], 1)
 
+	def test_real_shopify_stale_code_triggers_one_reread_and_resend(self):
+		# The literal code from shopify.dev InventorySetQuantitiesUserErrorCode (2026-07),
+		# not the fake's default, so a renamed constant can't pass by agreeing with itself.
+		self.shopify.stale_code = "CHANGE_FROM_QUANTITY_STALE"
+		mapping = self._one(9, shopify_on_hand=2)
+		state = self.shopify.variants[mapping.external_reference]
+		self.shopify.before_set.append(lambda: state.update(on_hand=4))
+
+		payload = self._sync([mapping.name])
+
+		self.assertEqual(len(self.shopify.calls_of("set")), 2)
+		self.assertEqual(self.shopify.kinds().count("read"), 2)
+		self.assertEqual(state["on_hand"], 9)
+		self.assertEqual(payload["succeeded"], 1)
+
+	def test_unknown_legacy_code_does_not_trigger_the_stale_retry(self):
+		self.shopify.stale_code = "COMPARE_FAILED"  # not a real Shopify code
+		mapping = self._one(9, shopify_on_hand=2)
+		state = self.shopify.variants[mapping.external_reference]
+		self.shopify.before_set.append(lambda: state.update(on_hand=4))
+
+		self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.kinds().count("read"), 1)
+
 	def test_stale_compare_gives_up_after_bounded_retries_and_marks_error(self):
 		mapping = self._one(9, shopify_on_hand=2)
 		state = self.shopify.variants[mapping.external_reference]
@@ -544,7 +569,7 @@ class IntegrationTestAlreadyChangedErrors(InventoryFixtureMixin, IntegrationTest
 
 	def test_activation_then_compare_failed_recovers_via_reread(self):
 		# Shopify's new level starts at 5 (not the assumed 0): the first set is
-		# COMPARE_FAILED, the re-read supplies the real value and the retry wins.
+		# CHANGE_FROM_QUANTITY_STALE, the re-read supplies the real value and the retry wins.
 		self.shopify.activate_starts_at = 5
 		mapping = self._one(6, has_level=False, on_hand=None)
 

@@ -3948,6 +3948,49 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 				self.assertFalse(order.erpnext_sales_order)
 				self.assertEqual(frappe.db.count("Sales Order"), before)
 
+	def test_legacy_synced_order_with_taxes_stays_synced_on_form_load_and_resync(self):
+		_account, order, result = self._sync_shopify(transaction_amount=36)
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(frappe.db.get_value("Sales Order", order.erpnext_sales_order, "docstatus"), 1)
+		# Synced before the tax block existed: the order now carries tax.
+		order.db_set({"total_taxes": 5.04, "order_total": 41.04})
+
+		self.assertEqual(get_current_sync_status(order.name), "Synced")
+		again = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(again["ok"], again.get("error"))
+		self.assertEqual(again["reconciliation"]["outcome"], "NO_ACTION")
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertNotIn("adjust", cstr(order.last_sync_error))
+
+	def test_taxes_appearing_on_a_submitted_order_do_not_produce_the_adjust_manually_blocker(self):
+		_account, order, result = self._sync_shopify(transaction_amount=36, shipping_total=0)
+		self.assertTrue(result["ok"], result.get("error"))
+		order.db_set({"total_taxes": 5, "duties_total": 2})
+
+		again = sync_sales_order(order.name)
+
+		self.assertNotIn("Taxes and duties are not synced", cstr(again.get("error")))
+		self.assertNotIn("manually", cstr(again.get("error")))
+		self.assertEqual(
+			build_sales_order_snapshot(order, for_submitted_order=True)["items"][0]["qty"], 2
+		)
+		with self.assertRaises(SyncBlocker):
+			build_sales_order_snapshot(order)
+
+	def test_draft_sales_order_with_taxes_is_still_blocked(self):
+		_account, order, result = self._sync_shopify(transaction_amount=36)
+		self.assertTrue(result["ok"], result.get("error"))
+		frappe.db.set_value("Sales Order", order.erpnext_sales_order, "docstatus", 0, update_modified=False)
+		order.db_set({"total_taxes": 5.04, "order_total": 41.04})
+
+		self.assertEqual(get_current_sync_status(order.name), "Modified After Sync")
+		again = sync_sales_order(order.name)
+
+		self.assertFalse(again["ok"])
+		self.assertIn("Taxes and duties are not synced to ERPNext yet", again["error"])
+
 	def test_shopify_shipping_sync_is_idempotent_for_submitted_and_draft_orders(self):
 		_account, order, first = self._sync_shopify(transaction_amount=36, shipping_total=50, order_total=86)
 		first_hash = order.last_synced_hash
@@ -4505,17 +4548,25 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		)
 		self.assertFalse(result["ok"])
 
-	def test_shopify_order_without_a_stored_total_and_without_shipping_skips_the_total_check(self):
+	def test_shopify_order_without_a_stored_total_blocks_unless_it_is_a_free_order(self):
 		account = self._make_shopify_account(self._income_account())
-		_account, _order, result = self._sync_shopify(account=account, transaction_amount=36, order_total=0)
-		self.assertTrue(result["ok"], result.get("error"))
+		# Items worth money but no recorded Shopify total (a row imported before totals were stored).
+		for shipping_total in (0, 50):
+			with self.subTest(shipping_total=shipping_total):
+				before = frappe.db.count("Sales Order")
+				_account, order, result = self._sync_shopify(
+					account=account, transaction_amount=36, shipping_total=shipping_total, order_total=0
+				)
+				self.assertFalse(result["ok"])
+				self.assertIn("Shopify's order total was not recorded", result["error"])
+				self.assertIn("Refresh from Shopify", result["error"])
+				self.assertNotIn("does not match", result["error"])
+				self.assertFalse(order.erpnext_sales_order)
+				self.assertEqual(frappe.db.count("Sales Order"), before)
 
-		# With shipping there is always something to compare against.
-		_account, _order, result = self._sync_shopify(
-			account=account, transaction_amount=36, shipping_total=50, order_total=0
-		)
-		self.assertFalse(result["ok"])
-		self.assertIn("Shopify total 0.0 does not match", result["error"])
+		# A genuinely free order (no shipping, every item free) has nothing to verify.
+		_account, _order, result = self._sync_shopify(account=account, transaction_amount=0, order_total=0)
+		self.assertTrue(result["ok"], result.get("error"))
 
 	def test_shopify_shipping_on_an_all_free_order_blocks_instead_of_losing_the_charge(self):
 		_account, order, result = self._sync_shopify(transaction_amount=0, shipping_total=50, order_total=50)

@@ -203,7 +203,9 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 			lines = _build_order_lines(
 				order, account, tolerate_zero_quantity=bool(sales_order and sales_order.docstatus != 0)
 			)
-			shipping = _shopify_shipping_amount(order, account)
+			shipping = _shopify_shipping_amount(
+				order, account, block_taxes=not (sales_order and sales_order.docstatus != 0)
+			)
 			if order.platform == "Shopify":
 				customer = _get_or_create_shopify_customer(order, account)
 				address = _resolve_shopify_address(order, customer) or {"name": None, "address_type": None}
@@ -370,7 +372,7 @@ def build_sales_order_snapshot(order, account=None, customer=None, for_submitted
 		_transaction_date(order),
 		_delivery_date(order),
 		address,
-		_shopify_shipping_amount(order, account),
+		_shopify_shipping_amount(order, account, block_taxes=not for_submitted_order),
 	)
 
 
@@ -748,18 +750,22 @@ def _amount_precision(account):
 	return frappe.get_precision("Sales Order Item", "amount", currency=_resolved_currency(account))
 
 
-def _shopify_shipping_amount(order, account):
+def _shopify_shipping_amount(order, account, block_taxes=True):
 	"""The Shopify shipping charge to carry on the Sales Order, or None when there is none.
 
 	Only Shopify orders carry one.  ``shipping_total`` is Shopify's ``currentShippingPriceSet``:
 	already net of shipping discounts and refunds.  Shopify includes tax in it when the shop's
 	prices include tax (``taxesIncluded``, shopify.dev, external information).  Taxes and duties are not
-	synced yet, so an order with either blocks instead of producing a wrong total.  The income
-	account is only required once there is a charge to post.
+	synced yet, so an order with either blocks instead of producing a wrong total, but only while a
+	Sales Order is being created or a Draft one updated (``block_taxes``).  An order already linked
+	to a submitted Sales Order is left to the reconciliation planner: that document exists and is
+	never re-created from this snapshot, so "create it manually" would be wrong advice (legacy
+	synced orders that carry tax must not flip to Modified After Sync).  The income account is only
+	required once there is a charge to post.
 	"""
 	if order.platform != "Shopify":
 		return None
-	if flt(order.total_taxes) or flt(order.duties_total):
+	if block_taxes and (flt(order.total_taxes) or flt(order.duties_total)):
 		raise SyncBlocker(
 			_(
 				"Shopify order {0} has taxes or duties (taxes {1}, duties {2}). Taxes and duties are not "
@@ -1399,18 +1405,26 @@ def _verify_grand_total(sales_order, snapshot, order, account):
 
 	Compares ``grand_total`` (not ``rounded_total``) within one currency-precision unit.
 	Nothing is forced to match: a gap is reported, never papered over with an adjustment
-	line.  Skipped only when Shopify recorded no total and there is no shipping to check
-	(rows imported before totals were stored, or a free order).  An ERPNext Actual charge is
-	spread over the items by value, so it is lost when every item is free.
+	line.  A recorded total of 0 is only accepted for a free order (no shipping, every item
+	free); a missing total beside a non-zero item or shipping amount (a row imported before
+	totals were stored) blocks until the order is refreshed from Shopify.  An ERPNext Actual
+	charge is spread over the items by value, so it is lost when every item is free.
 	"""
 	if order.platform != "Shopify":
 		return
 	shipping = flt(snapshot.get("shipping"))
 	shopify_total = flt(order.order_total)
-	if not shopify_total and not shipping:
-		return
 	precision = _amount_precision(account)
 	items_total = flt(sum(flt(row.amount) for row in sales_order.items), precision)
+	if not shopify_total and not shipping and not items_total:
+		return
+	if not shopify_total:
+		raise SyncBlocker(
+			_(
+				"Shopify's order total was not recorded for order {0}, so the Sales Order total cannot be "
+				"verified. Use Refresh from Shopify on the order, then synchronize it again."
+			).format(order.name)
+		)
 	if shipping and not items_total:
 		raise SyncBlocker(
 			_(

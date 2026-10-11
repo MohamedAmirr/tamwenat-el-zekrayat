@@ -39,6 +39,7 @@ class UnitTestShopifyOrderMapper(UnitTestCase):
 						"variant": {"id": "gid://shopify/ProductVariant/1"},
 						"originalUnitPriceSet": {"shopMoney": {"amount": "20.00"}},
 						"discountAllocations": [{"allocatedAmountSet": {"shopMoney": {"amount": "3.50"}}}],
+						"priceAfterAllDiscountsBeforeTaxesSet": {"shopMoney": {"amount": "36.50"}},
 					}
 				],
 			},
@@ -58,6 +59,18 @@ class UnitTestShopifyOrderMapper(UnitTestCase):
 		self.assertEqual(result["items"][0]["external_variant_id"], "gid://shopify/ProductVariant/1")
 		self.assertEqual(result["items"][0]["current_quantity"], 2)
 		self.assertEqual(result["items"][0]["net_amount"], Decimal("36.50"))
+
+	def test_net_amount_ignores_discount_allocated_to_refunded_quantity(self):
+		# 3 ordered, 2 left after a refund: allocations still hold the discount of all 3 units
+		# (3.50 + 1.50), so the old formula gave 40.00 - 5.00 = 35.00; Shopify's line total is 36.50.
+		order = self.order()
+		item = order["lineItems"]["nodes"][0]
+		item["discountAllocations"].append({"allocatedAmountSet": {"shopMoney": {"amount": "1.50"}}})
+
+		result = normalize_order(order)["items"][0]
+
+		self.assertEqual(result["net_amount"], Decimal("36.50"))
+		self.assertEqual(result["net_amount"], Decimal(result["transaction_amount"]))
 
 	def test_maps_fulfillment_quantities_and_marks_them_known(self):
 		order = self.order()
