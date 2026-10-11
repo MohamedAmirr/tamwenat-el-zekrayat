@@ -101,6 +101,8 @@ NEXT_VIEW_ERROR = "View Error"
 IMPORT_ERROR_ORDER_ID_KEYS = ("order_gid", "fbpi_order_nr", "order_id")
 
 EXPLANATION_MAX_LENGTH = 200
+# A Modified After Sync explanation is the stored sync message, which is capped at this length.
+SYNC_MESSAGE_MAX_LENGTH = 500
 CHUNK_SIZE = 500
 MAX_LISTED_SKUS = 5
 
@@ -184,7 +186,7 @@ def _item(
 		"account": account.name,
 		"reference_doctype": reference_doctype,
 		"reference_name": reference_name,
-		"explanation": cstr(explanation)[:EXPLANATION_MAX_LENGTH],
+		"explanation": cstr(explanation)[: extra.get("explanation_max_length", EXPLANATION_MAX_LENGTH)],
 		"detected_at": detected_at,
 		"next_action": next_action,
 		"next_action_reference": extra.get("next_action_reference"),
@@ -275,6 +277,7 @@ def _collect_order_status_items(accounts):
 					order.last_sync_error or _modified_after_sync_message(),
 					order.modified,
 					NEXT_OPEN_ORDER,
+					explanation_max_length=SYNC_MESSAGE_MAX_LENGTH,
 				)
 			)
 	return items

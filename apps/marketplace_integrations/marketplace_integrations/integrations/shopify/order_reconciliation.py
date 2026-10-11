@@ -17,16 +17,84 @@ import frappe
 from frappe import _
 from frappe.utils import cstr, flt
 
+# displayFulfillmentStatus values that mean nothing was shipped.  External information
+# (shopify.dev, checked 2026-10-11, not this repo's docs): on the pinned API version
+# (2026-07, SHOPIFY_API_VERSION) a fully refunded unshipped order reports UNFULFILLED
+# (https://shopify.dev/docs/api/admin-graphql/2026-07/enums/OrderDisplayFulfillmentStatus);
+# FULFILLMENT_NOT_REQUIRED ("The order has no items to be fulfilled") is only returned for
+# such orders from API 2026-10 on
+# (https://shopify.dev/changelog/posts/orderdisplayfulfillmentstatus-now-returns-fulfillmentnotrequired.md:
+# "Earlier versions are unchanged and still return UNFULFILLED for these orders").  Both stay
+# so the rule is also correct after a version bump.  Every other value keeps the
+# conservative behavior.
+_NOTHING_FULFILLED_STATUSES = {"UNFULFILLED", "FULFILLMENT_NOT_REQUIRED"}
+
+# RefundLineItem.restockType values (external information, shopify.dev, checked 2026-10-11,
+# https://shopify.dev/docs/api/admin-graphql/2026-07/enums/RefundLineItemRestockType):
+# RETURN = the line was returned (restocking items that were fulfilled); CANCEL = canceled
+# (restocking unfulfilled items); NO_RESTOCK = not restocked; LEGACY_RESTOCK is deprecated.
+# A RETURN line means goods may have shipped, so the order is never auto-cancelled.  To
+# switch to a strict "CANCEL only" rule, replace this with an allowed set.
+_BLOCKING_RESTOCK_TYPES = {"RETURN"}
+
 
 def build_evidence(order):
 	"""Return full-cancellation and not-yet-reflected refund evidence."""
 	evidence = {}
-	if order.cancelled_at:
+	if order.cancelled_at or _fully_refunded_before_fulfillment(order):
 		evidence["cancellation"] = "full"
 	if unreflected_refund_ids(order):
 		evidence["refund"] = True
 	evidence.update(_fulfillment_evidence(order))
 	return evidence
+
+
+def _fully_refunded_before_fulfillment(order):
+	"""A refunded, not-cancelled order with nothing left to ship or charge.
+
+	Shopify keeps such an order uncancelled but zeroes its current quantities and
+	totals, so it is the same decision as a cancellation.  Refund data that cannot be read,
+	or any refund line restocked as RETURN, makes the order not eligible.
+	"""
+	items = getattr(order, "items", None) or []
+	return bool(
+		items
+		and getattr(order, "external_financial_status", None) == "REFUNDED"
+		and getattr(order, "external_fulfillment_status", None) in _NOTHING_FULFILLED_STATUSES
+		and all(not flt(item.current_quantity) for item in items)
+		and not any(
+			flt(getattr(order, field, None))
+			for field in ("order_total", "shipping_total", "total_taxes", "duties_total")
+		)
+		and not _has_returned_refund_line(order)
+	)
+
+
+def _has_returned_refund_line(order):
+	"""Whether any refund line is restocked as a return, or the refunds cannot be read.
+
+	Reads ``refunds[].refundLineItems.nodes[].restockType`` as the mapper stores Shopify's raw
+	refunds.  Absent refunds, refunds without line items (money-only or shipping-only) and
+	lines without a restock type carry no return signal.  A refunds value that is present but
+	not a readable list (corrupt JSON, wrong shape) is treated as a return, the conservative
+	reading: the order is simply not auto-cancelled.
+	"""
+	refunds = order.refunds
+	if not refunds:
+		return False
+	try:
+		refunds = frappe.parse_json(refunds) if isinstance(refunds, str) else refunds
+	except TypeError, ValueError:
+		return True
+	if not isinstance(refunds, list):
+		return True
+	for refund in refunds:
+		connection = refund.get("refundLineItems") if isinstance(refund, dict) else None
+		nodes = connection.get("nodes") if isinstance(connection, dict) else None
+		for node in nodes if isinstance(nodes, list) else []:
+			if isinstance(node, dict) and cstr(node.get("restockType")).strip() in _BLOCKING_RESTOCK_TYPES:
+				return True
+	return False
 
 
 def fulfillment_started(item):
