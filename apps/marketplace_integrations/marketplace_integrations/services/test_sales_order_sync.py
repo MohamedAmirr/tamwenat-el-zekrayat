@@ -10,8 +10,12 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, cstr, flt, getdate, now_datetime, nowdate
 
 from marketplace_integrations.patches.v0_0 import backfill_last_synced_snapshot as backfill
+from marketplace_integrations.services.marketplace_attention import get_attention_items
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
-from marketplace_integrations.services.sales_order_reconciliation import SalesOrderLinesMismatch
+from marketplace_integrations.services.sales_order_reconciliation import (
+	SalesOrderLinesMismatch,
+	read_erp_state,
+)
 from marketplace_integrations.services.sales_order_sync import (
 	SyncBlocker,
 	_build_sales_order_lines,
@@ -4022,10 +4026,20 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
 
 	def test_fully_refunded_order_that_was_billed_or_has_an_advance_is_not_cancelled(self):
-		for label, change in (
-			("billed", lambda so, item: frappe.db.set_value("Sales Order Item", item, "billed_amt", 10)),
-			("advance", lambda so, item: frappe.db.set_value("Sales Order", so, "advance_paid", 50)),
-		):
+		# Billing is execution, so the refund rule applies first; an advance is not.
+		cases = (
+			(
+				"billed",
+				"UNSUPPORTED_COMPENSATING_TRANSACTION",
+				lambda so, item: frappe.db.set_value("Sales Order Item", item, "billed_amt", 10),
+			),
+			(
+				"advance",
+				"NEEDS_ATTENTION",
+				lambda so, item: frappe.db.set_value("Sales Order", so, "advance_paid", 50),
+			),
+		)
+		for label, outcome, change in cases:
 			with self.subTest(label):
 				self.setUp()
 				_account, order, sales_order = self._synced_shipping_order()
@@ -4035,7 +4049,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 				result = sync_sales_order(order.name)
 
 				self.assertFalse(result["ok"])
-				self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+				self.assertEqual(result["reconciliation"]["outcome"], outcome)
 				self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 1)
 
 	def test_fully_refunded_order_shopify_shows_fulfilled_keeps_the_shipping_attention(self):
@@ -4063,6 +4077,143 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
 		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 1)
+
+	# --- Merchant-readable blocker messages with real linked documents -------------------
+
+	def _deliver(self, sales_order_name, *, submit=True):
+		from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
+
+		delivery_note = make_delivery_note(sales_order_name)
+		delivery_note.insert()
+		if submit:
+			delivery_note.submit()
+		return delivery_note
+
+	def test_blocked_refund_names_the_real_delivery_note_and_sales_invoice(self):
+		from erpnext.controllers.sales_and_purchase_return import make_return_doc
+		from erpnext.stock.doctype.delivery_note.delivery_note import make_sales_invoice
+
+		account, order, first = self._sync_shopify(transaction_amount=36, current_quantity=2)
+		sales_order = first["sales_order"]
+		self.assertEqual(
+			read_erp_state(frappe.get_doc("Sales Order", sales_order)).get("linked_documents"), None
+		)
+
+		# A cancelled Delivery Note and another order's Delivery Note must not be named.
+		self._deliver(sales_order).cancel()
+		_other_account, _other_order, other = self._sync_shopify(account=account, transaction_amount=36)
+		self._deliver(other["sales_order"])
+		delivery_note = self._deliver(sales_order)
+		# A return against it is a compensating document, not the delivery itself.
+		return_note = make_return_doc("Delivery Note", delivery_note.name)
+		return_note.items[0].qty = -1
+		return_note.insert()
+		return_note.submit()
+		self.assertEqual(return_note.items[0].against_sales_order, sales_order)
+		# An invoice made from the Delivery Note still points at the Sales Order.
+		invoice = make_sales_invoice(delivery_note.name)
+		invoice.insert()
+		invoice.submit()
+
+		linked = read_erp_state(frappe.get_doc("Sales Order", sales_order))["linked_documents"]
+
+		self.assertEqual(linked, {"Delivery Note": [delivery_note.name], "Sales Invoice": [invoice.name]})
+
+		order.external_financial_status = "PARTIALLY_REFUNDED"
+		order.refunds = frappe.as_json([{"id": f"refund-{self.suffix}"}])
+		order.save()
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["reconciliation"]["outcome"], "UNSUPPORTED_COMPENSATING_TRANSACTION")
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertIn(delivery_note.name, order.last_sync_error)
+		self.assertIn(invoice.name, order.last_sync_error)
+		self.assertIn("compensating", order.last_sync_error)
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 1)
+		rows = {row["reference_name"]: row for row in get_attention_items({"account": account.name})}
+		self.assertEqual(rows[order.name]["problem_type"], "Modified After Sync")
+		self.assertIn(delivery_note.name, rows[order.name]["explanation"])
+		self.assertIn("review the order manually", rows[order.name]["explanation"])
+
+	def test_cancelled_order_with_a_real_sales_invoice_names_it(self):
+		from erpnext.selling.doctype.sales_order.sales_order import make_sales_invoice
+
+		_account, order, first = self._sync_shopify(transaction_amount=36, current_quantity=2)
+		invoice = make_sales_invoice(first["sales_order"])
+		invoice.insert()
+		invoice.submit()
+		order.cancelled_at = nowdate()
+		order.save()
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertIn(f"Sales Invoice {invoice.name} already bills it", order.last_sync_error)
+		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "docstatus"), 1)
+
+	def test_cancelled_order_fully_delivered_by_a_real_delivery_note_names_it(self):
+		_account, order, first = self._sync_shopify(transaction_amount=36, current_quantity=2)
+		delivery_note = self._deliver(first["sales_order"])
+		order.cancelled_at = nowdate()
+		order.save()
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertEqual(result["reconciliation"]["outcome"], "UNSUPPORTED_COMPENSATING_TRANSACTION")
+		self.assertIn(
+			f"Delivery Note {delivery_note.name} already delivered all of it", order.last_sync_error
+		)
+		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "docstatus"), 1)
+
+	def test_cancelled_order_with_a_shipping_baseline_cancels_through_the_stored_snapshot(self):
+		_account, order, first = self._sync_shopify(
+			transaction_amount=74.99, current_quantity=1, shipping_total=419.22, order_total=494.21
+		)
+		# Shopify's current* fields no longer carry the charge, but the stored baseline does.
+		order.cancelled_at = nowdate()
+		order.shipping_total = 0
+		order.order_total = 0
+		order.save()
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["reconciliation"]["outcome"], "CANCEL_ORDER")
+		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "docstatus"), 2)
+
+	def test_shipping_removed_from_a_draft_sales_order_removes_the_row(self):
+		_account, order, first = self._sync_shopify(transaction_amount=36, shipping_total=50, order_total=86)
+		frappe.db.set_value("Sales Order", first["sales_order"], "docstatus", 0, update_modified=False)
+		order.shipping_total = 0
+		order.order_total = 36
+		order.save()
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(len(self._shipping_rows(first["sales_order"])), 0)
+		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "grand_total"), 36)
+
+	def test_refund_after_delivery_with_a_shipping_baseline_is_a_compensating_transaction(self):
+		_account, order, first = self._sync_shopify(
+			transaction_amount=74.99, current_quantity=1, shipping_total=419.22, order_total=494.21
+		)
+		self._set_first_item_fields(order, delivered_qty=1)
+		order.external_financial_status = "PARTIALLY_REFUNDED"
+		order.shipping_total = 0
+		order.order_total = 74.99
+		order.refunds = frappe.as_json([{"id": f"refund-{self.suffix}"}])
+		order.save()
+
+		result = sync_sales_order(order.name)
+
+		self.assertEqual(result["reconciliation"]["outcome"], "UNSUPPORTED_COMPENSATING_TRANSACTION")
+		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "docstatus"), 1)
 
 	def test_existing_submitted_order_synced_without_shipping_needs_attention_and_is_not_mutated(self):
 		"""An order synced before shipping was carried has a baseline without the key."""

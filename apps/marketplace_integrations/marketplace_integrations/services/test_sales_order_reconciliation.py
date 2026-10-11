@@ -671,6 +671,117 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 		result = plan(self.previous, self._current(), {"cancellation": "full"}, self.erp_state)
 		self.assertIn("reopened first", result["message"])
 
+	def _linked(self, delivery_notes=(), invoices=(), **line_fields):
+		self.erp_state["lines"][0].update(line_fields)
+		self.erp_state["linked_documents"] = {
+			"Delivery Note": list(delivery_notes),
+			"Sales Invoice": list(invoices),
+		}
+
+	def test_refund_after_delivery_names_the_delivery_note(self):
+		self._linked(delivery_notes=["DN-0001"], delivered_qty=2)
+
+		result = plan(self.previous, self._current(), {"refund": True}, self.erp_state)
+
+		self.assertEqual(result["outcome"], UNSUPPORTED_COMPENSATING_TRANSACTION)
+		self.assertEqual(
+			result["message"],
+			"The marketplace refunded this order, but it was already delivered in ERPNext (Delivery Note DN-0001). "
+			"The Sales Order was not changed. If the goods came back, create a Sales Return against "
+			"Delivery Note DN-0001 (a compensating transaction), otherwise review the order manually.",
+		)
+
+	def test_refund_after_invoice_names_the_sales_invoice(self):
+		self._linked(invoices=["SI-0001"], billed_amt=100)
+
+		result = plan(self.previous, self._current(), {"refund": True}, self.erp_state)
+
+		self.assertEqual(result["outcome"], UNSUPPORTED_COMPENSATING_TRANSACTION)
+		self.assertEqual(
+			result["message"],
+			"The marketplace refunded this order, but it was already invoiced in ERPNext (Sales Invoice SI-0001). "
+			"The Sales Order was not changed. Create a Credit Note against Sales Invoice SI-0001 for the "
+			"refunded amount (a compensating transaction), or review the order manually.",
+		)
+
+	def test_refund_after_delivery_and_invoice_names_both_and_stays_short(self):
+		self._linked(
+			delivery_notes=["DN-0001", "DN-0002"], invoices=["SI-0001"], delivered_qty=2, billed_amt=100
+		)
+
+		result = plan(self.previous, self._current(), {"refund": True}, self.erp_state)
+
+		self.assertEqual(result["outcome"], UNSUPPORTED_COMPENSATING_TRANSACTION)
+		for text in ("Delivery Notes DN-0001, DN-0002", "Sales Invoice SI-0001", "compensating"):
+			self.assertIn(text, result["message"])
+		self.assertLess(len(result["message"]), 450)
+
+	def test_return_evidence_is_not_worded_as_a_refund(self):
+		self._linked(delivery_notes=["DN-0001"], delivered_qty=2)
+
+		result = plan(self.previous, self._current(), {"return": True}, self.erp_state)
+
+		self.assertIn("reported a return", result["message"])
+		self.assertNotIn("refunded", result["message"])
+
+	def test_cancellation_after_invoice_names_the_sales_invoice(self):
+		self._linked(invoices=["SI-0001"], billed_amt=100, delivered_qty=1)
+
+		result = plan(self.previous, self._current(), {"cancellation": "full"}, self.erp_state)
+
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertEqual(
+			result["message"],
+			"The marketplace cancelled this order, but Sales Invoice SI-0001 already bills it in ERPNext, "
+			"so the Sales Order cannot be cancelled automatically. Cancel the Sales Invoice (or issue a "
+			"Credit Note if it is submitted and paid), then run the update again.",
+		)
+
+	def test_cancellation_after_full_delivery_names_the_delivery_note(self):
+		self._linked(delivery_notes=["DN-0001"], delivered_qty=2)
+
+		result = plan(self.previous, self._current(), {"cancellation": "full"}, self.erp_state)
+
+		self.assertEqual(result["outcome"], UNSUPPORTED_COMPENSATING_TRANSACTION)
+		self.assertEqual(
+			result["message"],
+			"The marketplace cancelled this order, but Delivery Note DN-0001 already delivered all of it. "
+			"Create a Sales Return against Delivery Note DN-0001 for the goods that came back, "
+			"or review the order manually.",
+		)
+
+	def test_blocked_update_after_delivery_names_the_documents(self):
+		current = self._current()
+		current["items"][0]["qty"] = 3
+		current["items"][0]["fulfilled_total_price"] = 150
+		self._linked(delivery_notes=["DN-0001"], invoices=["SI-0001"], delivered_qty=1)
+
+		result = plan(self.previous, current, {}, self.erp_state)
+
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertIn("(Delivery Note DN-0001; Sales Invoice SI-0001)", result["message"])
+
+	def test_missing_or_empty_linked_documents_keep_the_generic_text(self):
+		self.erp_state["lines"][0].update(delivered_qty=2, billed_amt=100)
+		for linked in (None, {}, {"Delivery Note": [], "Sales Invoice": []}):
+			with self.subTest(linked=linked):
+				state = deepcopy(self.erp_state)
+				if linked is not None:
+					state["linked_documents"] = linked
+
+				refund = plan(self.previous, self._current(), {"refund": True}, state)
+				cancel = plan(self.previous, self._current(), {"cancellation": "full"}, state)
+
+				self.assertEqual(
+					refund["message"],
+					"Marketplace return or refund evidence needs a compensating ERP transaction.",
+				)
+				self.assertEqual(
+					cancel["message"],
+					"The cancelled marketplace order is already fully delivered in ERPNext; "
+					"a return or other compensating transaction is needed.",
+				)
+
 	def test_this_module_is_platform_neutral(self):
 		import inspect
 

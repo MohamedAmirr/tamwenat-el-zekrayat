@@ -225,6 +225,16 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		self.assertEqual(rows[order.name]["explanation"], f"{base} {instruction}")
 		self.assertIn("Cancel the order on Talabat", rows[order.name]["explanation"])
 
+	def test_a_long_sync_message_is_shown_up_to_the_stored_cap(self):
+		account = self.make_talabat_account()
+		message = ("The marketplace refunded this order, but it was already delivered. " * 7).strip()
+		self.assertGreater(len(message), 300)
+		order = self.make_order(account, erpnext_sync_status="Modified After Sync", last_sync_error=message)
+
+		rows = {row["reference_name"]: row for row in self.items_for(account)}
+
+		self.assertEqual(rows[order.name]["explanation"], message)
+
 	# -- unmapped items ---------------------------------------------------
 
 	def test_talabat_unmapped_items_use_external_sku_and_final_item_statuses_only(self):

@@ -36,9 +36,24 @@ class SalesOrderLinesMismatch(ValueError):
 	"""The snapshot lines cannot be paired one-to-one with the Sales Order rows."""
 
 
+# Most document names a merchant-readable message lists.
+_MAX_LINKED_DOCUMENTS = 3
+# (document, its item table, the item field that points at the Sales Order)
+_LINKED_DOCUMENT_SOURCES = (
+	("Delivery Note", "Delivery Note Item", "against_sales_order"),
+	("Sales Invoice", "Sales Invoice Item", "sales_order"),
+)
+
+
 def read_erp_state(sales_order):
-	"""Return the execution facts a reconciliation decision may depend on."""
-	return {
+	"""Return the execution facts a reconciliation decision may depend on.
+
+	``linked_documents`` (submitted, non-return Delivery Notes and Sales Invoices that
+	reference the order) is only read, and only present, once a line has delivery or
+	billing: an untouched order costs no extra query.  It names the documents in
+	merchant-readable messages and never changes an outcome.
+	"""
+	state = {
 		"sales_order": sales_order.name,
 		"docstatus": sales_order.docstatus,
 		"status": sales_order.status,
@@ -66,6 +81,30 @@ def read_erp_state(sales_order):
 			for item in sales_order.items
 		],
 	}
+	if _has_execution(state):
+		state["linked_documents"] = _linked_documents(sales_order.name)
+	return state
+
+
+def _linked_documents(sales_order_name):
+	linked = {}
+	for doctype, item_doctype, link_field in _LINKED_DOCUMENT_SOURCES:
+		parent = frappe.qb.DocType(doctype)
+		item = frappe.qb.DocType(item_doctype)
+		linked[doctype] = (
+			frappe.qb.from_(item)
+			.join(parent)
+			.on(item.parent == parent.name)
+			.select(parent.name)
+			.distinct()
+			.where(getattr(item, link_field) == sales_order_name)
+			.where(parent.docstatus == 1)
+			.where(parent.is_return == 0)
+			.orderby(parent.name)
+			.limit(_MAX_LINKED_DOCUMENTS)
+			.run(pluck=True)
+		)
+	return linked
 
 
 def snapshot_with_sales_order_item_names(snapshot, sales_order, refund_ids=None):
@@ -172,7 +211,8 @@ def plan(previous, current, evidence, erp_state):
 	if evidence.get("return") or (evidence.get("refund") and _has_execution(erp_state)):
 		return _result(
 			UNSUPPORTED_COMPENSATING_TRANSACTION,
-			"Marketplace return or refund evidence needs a compensating ERP transaction.",
+			_refund_message(evidence, erp_state)
+			or "Marketplace return or refund evidence needs a compensating ERP transaction.",
 		)
 
 	previous_items = _items_by_external_id(previous)
@@ -302,10 +342,17 @@ def plan(previous, current, evidence, erp_state):
 	if cancelling and _has_execution(erp_state) and not _has_outstanding_remainder(erp_state):
 		# Fully delivered (billed or not): only a compensating transaction can undo it,
 		# so this takes precedence over the "already billed" blocker below.
+		delivery_notes = _documents(erp_state, "Delivery Note")
 		return _result(
 			UNSUPPORTED_COMPENSATING_TRANSACTION,
-			"The cancelled marketplace order is already fully delivered in ERPNext; "
-			"a return or other compensating transaction is needed.",
+			(
+				f"The marketplace cancelled this order, but {delivery_notes} already delivered all of it. "
+				f"Create a Sales Return against {delivery_notes} for the goods that came back, "
+				"or review the order manually."
+				if delivery_notes
+				else "The cancelled marketplace order is already fully delivered in ERPNext; "
+				"a return or other compensating transaction is needed."
+			),
 			changes,
 		)
 	if changes or cancelling:
@@ -325,6 +372,14 @@ def plan(previous, current, evidence, erp_state):
 					"Requested quantity is below the quantity already delivered in ERPNext.", changes
 				)
 			if flt(erp_line.get("billed_amt")):
+				invoices = _documents(erp_state, "Sales Invoice")
+				if cancelling and invoices:
+					return _attention(
+						f"The marketplace cancelled this order, but {invoices} already bills it in ERPNext, "
+						"so the Sales Order cannot be cancelled automatically. Cancel the Sales Invoice "
+						"(or issue a Credit Note if it is submitted and paid), then run the update again.",
+						changes,
+					)
 				return _attention("A submitted Sales Order line is already billed in ERPNext.", changes)
 
 	if cancelling:
@@ -348,13 +403,54 @@ def plan(previous, current, evidence, erp_state):
 			)
 
 	if _has_execution(erp_state):
-		return _attention(
-			"ERPNext delivery or billing execution blocks an automatic submitted-order update.", changes
-		)
+		message = "ERPNext delivery or billing execution blocks an automatic submitted-order update"
+		named = [_documents(erp_state, "Delivery Note"), _documents(erp_state, "Sales Invoice")]
+		named = "; ".join(documents for documents in named if documents)
+		return _attention(f"{message} ({named})." if named else f"{message}.", changes)
 	return _result(
 		UPDATE_SUBMITTED_ORDER,
 		"The submitted Sales Order changes are eligible for ERPNext validation.",
 		changes,
+	)
+
+
+def _documents(erp_state, doctype):
+	"""``"Delivery Note A, B"`` (plural-aware) for the linked documents, or ``""`` if none are known."""
+	names = [cstr(name) for name in (erp_state.get("linked_documents") or {}).get(doctype) or []]
+	if not names:
+		return ""
+	return f"{doctype}{'s' if len(names) > 1 else ''} {', '.join(names)}"
+
+
+def _refund_message(evidence, erp_state):
+	"""Merchant-readable text for a refund/return on an order ERPNext already delivered or billed.
+
+	Empty when ERPNext does not name the documents (the caller keeps the generic text).
+	"""
+	delivery_notes = _documents(erp_state, "Delivery Note")
+	invoices = _documents(erp_state, "Sales Invoice")
+	if not (delivery_notes or invoices):
+		return ""
+	lead = "The marketplace refunded this order"
+	if evidence.get("return"):
+		lead = "The marketplace reported a return for this order"
+	if delivery_notes and invoices:
+		return (
+			f"{lead}, but it was already delivered ({delivery_notes}) and invoiced ({invoices}) in ERPNext. "
+			f"The Sales Order was not changed. If the goods came back, create a Sales Return against "
+			f"{delivery_notes}; create a Credit Note against {invoices} for the refunded amount "
+			"(compensating transactions), or review the order manually."
+		)
+	if delivery_notes:
+		return (
+			f"{lead}, but it was already delivered in ERPNext ({delivery_notes}). "
+			"The Sales Order was not changed. If the goods came back, create a Sales Return "
+			f"against {delivery_notes} (a compensating transaction), otherwise review the order manually."
+		)
+	return (
+		f"{lead}, but it was already invoiced in ERPNext ({invoices}). "
+		f"The Sales Order was not changed. Create a Credit Note against {invoices} for the refunded "
+		"amount (a compensating transaction), or review the order manually."
 	)
 
 
