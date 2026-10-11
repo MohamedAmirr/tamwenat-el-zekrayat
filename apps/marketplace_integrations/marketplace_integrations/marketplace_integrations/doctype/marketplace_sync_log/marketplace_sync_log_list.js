@@ -27,10 +27,22 @@ frappe.listview_settings["Marketplace Sync Log"] = {
 				)
 			);
 			const failed = results.filter((result) => result.status === "rejected").length;
+			// resync() returns {ok: false} for an expected blocker (still not
+			// syncable): the request succeeded but the order is still stuck.
+			const blocked = results.filter(
+				(result) => result.status === "fulfilled" && result.value?.message?.ok === false
+			).length;
+			const recovered = selected.length - failed - blocked;
 			frappe.msgprint(
 				failed
 					? __("Retried {0} order(s); {1} request(s) failed.", [selected.length, failed])
-					: __("Retried {0} order(s).", [selected.length])
+					: blocked
+						? __("Retried {0} order(s): {1} recovered, {2} still blocked.", [
+								selected.length,
+								recovered,
+								blocked,
+							])
+						: __("Retried {0} order(s).", [selected.length])
 			);
 			listview.refresh();
 		});

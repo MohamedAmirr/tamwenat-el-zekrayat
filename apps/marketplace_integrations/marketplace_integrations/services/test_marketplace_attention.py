@@ -334,6 +334,45 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		self.assertNotIn("NOON-OOS", rows[0]["explanation"])
 		self.assertNotIn("NOON-CANCELLED", rows[0]["explanation"])
 
+	def shopify_item(self, variant, quantity=1):
+		return {
+			"external_item_id": f"li-{frappe.generate_hash(length=6)}",
+			"external_variant_id": variant,
+			"current_quantity": quantity,
+		}
+
+	def test_shopify_unmapped_variant_raises_no_row_for_synced_cancelled_or_zero_quantity(self):
+		account = self.make_shopify_account()
+		variant = "gid://shopify/ProductVariant/404"
+		self.make_order(
+			account, erpnext_sync_status="Synced", items=[self.shopify_item(variant)]
+		)
+		self.make_order(account, cancelled_at=now_datetime(), items=[self.shopify_item(variant)])
+		self.make_order(account, items=[self.shopify_item(variant, quantity=0)])
+
+		self.assertEqual(self.items_for(account, UNMAPPED_ITEMS), [])
+
+		# Control: the same variant on a live, unsynced order is flagged.
+		live = self.make_order(account, items=[self.shopify_item(variant)])
+		self.assertEqual(
+			[row["reference_name"] for row in self.items_for(account, UNMAPPED_ITEMS)], [live.name]
+		)
+
+	def test_more_than_five_unmapped_skus_truncate_the_explanation_after_five(self):
+		account = self.make_shopify_account()
+		# Short references: the explanation itself is capped at
+		# EXPLANATION_MAX_LENGTH, so full-length Shopify GIDs would cut the list earlier.
+		variants = [f"variant-{index}" for index in range(1, 8)]
+		self.make_order(account, items=[self.shopify_item(variant) for variant in variants])
+
+		rows = self.items_for(account, UNMAPPED_ITEMS)
+
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0]["next_action_reference"], variants[0])
+		self.assertTrue(rows[0]["explanation"].startswith("7 item(s) have no enabled product mapping: "))
+		listed = rows[0]["explanation"].split(": ", 1)[1]
+		self.assertEqual(listed, ", ".join(variants[:5]) + ", ...")
+
 	def test_a_mapping_on_another_account_does_not_resolve(self):
 		account = self.make_talabat_account()
 		other = self.make_talabat_account()
@@ -388,6 +427,24 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		)
 		# modified is "now", i.e. later than the failed attempt.
 		self.make_order(account, external_order_id="fallback-order")
+
+		self.assertEqual(self.items_for(account, ORDER_IMPORT_ERROR), [])
+
+	def test_order_created_after_the_failure_resolves_it_despite_an_older_platform_time(self):
+		# Shopify's last_platform_update_on is the platform's updatedAt, which
+		# can predate the failed attempt even though the order was imported
+		# (created here) only afterwards.
+		account = self.make_shopify_account()
+		self.make_log(
+			account,
+			request_data=frappe.as_json({"account": account.name, "order_gid": "gid://shopify/Order/9"}),
+			attempted_at=now_datetime() - timedelta(minutes=1),
+		)
+		self.make_order(
+			account,
+			external_order_id="gid://shopify/Order/9",
+			last_platform_update_on=now_datetime() - timedelta(hours=1),
+		)
 
 		self.assertEqual(self.items_for(account, ORDER_IMPORT_ERROR), [])
 
