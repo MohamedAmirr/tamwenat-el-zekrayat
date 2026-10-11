@@ -11,6 +11,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import now_datetime
 
+from marketplace_integrations.integrations.shopify.test_products import make_shopify_account
 from marketplace_integrations.marketplace_integrations.report.shopify_order_import_failures.shopify_order_import_failures import (
 	execute,
 )
@@ -21,15 +22,21 @@ EXPECTED_FIELDNAMES = {"name", "marketplace_account", "trigger_source", "attempt
 
 class IntegrationTestShopifyOrderImportFailuresReport(IntegrationTestCase):
 	def test_execute_returns_expected_columns_and_matches_service_function(self):
+		# The report lists Shopify accounts' failures only, so the row needs one.
+		account = make_shopify_account(f"Import Failures Report {frappe.generate_hash(length=8)}")
+		self.addCleanup(frappe.delete_doc, "Shopify Connection", account.connection, force=True)
+		self.addCleanup(frappe.delete_doc, "Marketplace Account", account.name, force=True)
 		log = frappe.get_doc(
 			{
 				"doctype": "Marketplace Sync Log",
 				"sync_type": "Order Import",
+				"marketplace_account": account.name,
 				"status": "Error",
 				"attempted_at": now_datetime(),
 				"traceback": "report fixture failure",
 			}
 		).insert()
+		self.addCleanup(frappe.delete_doc, "Marketplace Sync Log", log.name, force=True)
 
 		columns, data = execute()
 

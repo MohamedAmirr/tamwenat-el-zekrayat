@@ -29,21 +29,41 @@ from frappe.utils import flt, get_datetime, getdate
 from marketplace_integrations.integrations.shopify.webhooks import (
 	MAX_WEBHOOK_DELIVERY_ATTEMPTS,
 )
+from marketplace_integrations.services.marketplace_attention import get_resolved_import_failures
 
 ORDER_IMPORT_FAILURES_LIMIT = 50
 
 
 def get_order_import_failures(limit=ORDER_IMPORT_FAILURES_LIMIT):
-	"""Recent ``Marketplace Sync Log`` rows for a failed Order Import
-	(#139 section 4), most recent first."""
+	"""Recent ``Marketplace Sync Log`` rows for a failed Shopify Order Import
+	(#139 section 4), most recent first. Other platforms' Order Import
+	failures are excluded, and so are failures a later import of the same
+	order already resolved (same rule as the Needs Attention report)."""
 	frappe.only_for("System Manager")
-	return frappe.get_all(
+	shopify_accounts = frappe.get_all("Marketplace Account", filters={"platform": "Shopify"}, pluck="name")
+	if not shopify_accounts:
+		return []
+	rows = frappe.get_all(
 		"Marketplace Sync Log",
-		filters={"sync_type": "Order Import", "status": "Error"},
-		fields=["name", "marketplace_account", "trigger_source", "attempted_at", "request_data", "traceback"],
+		filters={
+			"sync_type": "Order Import",
+			"status": "Error",
+			"marketplace_account": ["in", shopify_accounts],
+		},
+		fields=[
+			"name",
+			"marketplace_account",
+			"trigger_source",
+			"attempted_at",
+			"request_data",
+			"traceback",
+			"creation",
+		],
 		order_by="attempted_at desc",
-		limit_page_length=limit,
+		limit_page_length=0,
 	)
+	resolved = get_resolved_import_failures(rows)
+	return [row for row in rows if row.name not in resolved][:limit]
 
 
 def _end_of_day(date_value):

@@ -716,7 +716,7 @@ function run_noon_release_stuck_oos_reservation(frm) {
 }
 
 function load_shopify_item_presentation(frm) {
-	frappe
+	return frappe
 		.call({
 			method: "marketplace_integrations.api.marketplace_order_presentation.get_item_presentation",
 			args: { marketplace_order: frm.doc.name },
@@ -1135,6 +1135,7 @@ if (typeof module !== "undefined") {
 		add_status_indicators,
 		apply_platform_gating,
 		load_erpnext_sync_status,
+		load_shopify_item_presentation,
 		JSON_EVIDENCE_FIELDS,
 		noon_unit_checklist_options,
 		mp_item_nrs_from_unit_indices,
