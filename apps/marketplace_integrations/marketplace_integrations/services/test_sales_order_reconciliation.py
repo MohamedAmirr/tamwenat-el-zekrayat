@@ -716,6 +716,41 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 			self.assertIn(text, result["message"])
 		self.assertLess(len(result["message"]), 450)
 
+	def test_more_than_three_documents_list_three_and_say_and_more(self):
+		self._linked(
+			delivery_notes=["DN-1", "DN-2", "DN-3", "DN-4"], invoices=["SI-1", "SI-2"], delivered_qty=2
+		)
+
+		result = plan(self.previous, self._current(), {"refund": True}, self.erp_state)
+
+		self.assertIn("Delivery Notes DN-1, DN-2, DN-3, and more", result["message"])
+		self.assertNotIn("DN-4", result["message"])
+		self.assertIn("Sales Invoices SI-1, SI-2)", result["message"])
+
+	def test_three_documents_are_listed_without_and_more(self):
+		self._linked(delivery_notes=["DN-1", "DN-2", "DN-3"], delivered_qty=2)
+
+		result = plan(self.previous, self._current(), {"refund": True}, self.erp_state)
+
+		self.assertIn("Delivery Notes DN-1, DN-2, DN-3)", result["message"])
+		self.assertNotIn("and more", result["message"])
+
+	def test_longest_realistic_both_message_fits_the_stored_500_characters(self):
+		self._linked(
+			delivery_notes=[f"DN-{index}".ljust(30, "X") for index in range(4)],
+			invoices=[f"SI-{index}".ljust(30, "X") for index in range(4)],
+			delivered_qty=2,
+			billed_amt=100,
+		)
+
+		for evidence in ({"refund": True}, {"return": True}):
+			with self.subTest(evidence=evidence):
+				message = plan(self.previous, self._current(), evidence, self.erp_state)["message"]
+
+				self.assertLess(len(message), 500)
+				self.assertEqual(message.count("and more"), 2)
+				self.assertTrue(message.endswith("or review the order manually."))
+
 	def test_return_evidence_is_not_worded_as_a_refund(self):
 		self._linked(delivery_notes=["DN-0001"], delivered_qty=2)
 

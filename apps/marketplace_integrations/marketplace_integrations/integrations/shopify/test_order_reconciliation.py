@@ -192,6 +192,61 @@ class UnitTestShopifyFullRefundEvidence(UnitTestCase):
 			with self.subTest(name):
 				self.assertNotIn("cancellation", build_evidence(self._order(**overrides)))
 
+	@staticmethod
+	def _refund(*restock_types):
+		return {
+			"id": "r1",
+			"refundLineItems": {
+				"nodes": [
+					{"id": f"rli{index}", "restockType": restock_type}
+					for index, restock_type in enumerate(restock_types)
+				]
+			},
+		}
+
+	def test_restock_type_decides_whether_the_refund_can_auto_cancel(self):
+		cases = {
+			"RETURN blocks": ([self._refund("RETURN")], False),
+			"one RETURN among others blocks": (
+				[self._refund("CANCEL", "RETURN"), self._refund("NO_RESTOCK")],
+				False,
+			),
+			"RETURN in a later refund blocks": ([self._refund("CANCEL"), self._refund("RETURN")], False),
+			"CANCEL allows": ([self._refund("CANCEL")], True),
+			"NO_RESTOCK allows": ([self._refund("NO_RESTOCK")], True),
+			"refund without line items allows": (
+				[{"id": "r1"}, {"id": "r2", "refundLineItems": {"nodes": []}}],
+				True,
+			),
+			"line without restock type allows": (
+				[{"id": "r1", "refundLineItems": {"nodes": [{"id": "x"}]}}],
+				True,
+			),
+			"legacy plain refund ids allow": (["r1"], True),
+		}
+		for name, (refunds, eligible) in cases.items():
+			with self.subTest(name):
+				order = self._order(refunds=frappe.as_json(refunds))
+
+				self.assertEqual(build_evidence(order).get("cancellation") == "full", eligible)
+				self.assertTrue(build_evidence(order)["refund"])
+
+	def test_no_refunds_value_allows_the_other_conditions_to_decide(self):
+		# Nothing contradicts the cancellation; the REFUNDED status and zeroed order decide.
+		for refunds in (None, "", "[]", []):
+			with self.subTest(refunds=refunds):
+				self.assertEqual(build_evidence(self._order(refunds=refunds))["cancellation"], "full")
+
+	def test_unreadable_refunds_are_not_eligible(self):
+		for refunds in ("not json", '{"id": "r1"}', "5"):
+			with self.subTest(refunds=refunds):
+				self.assertNotIn("cancellation", build_evidence(self._order(refunds=refunds)))
+
+	def test_restock_type_does_not_affect_a_real_cancellation(self):
+		order = self._order(cancelled_at="2026-10-05", refunds=frappe.as_json([self._refund("RETURN")]))
+
+		self.assertEqual(build_evidence(order)["cancellation"], "full")
+
 	def test_cancelled_at_is_unchanged(self):
 		order = self._order(cancelled_at="2026-10-05", external_fulfillment_status="FULFILLED")
 

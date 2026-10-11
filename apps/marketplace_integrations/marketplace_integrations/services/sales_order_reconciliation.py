@@ -36,7 +36,8 @@ class SalesOrderLinesMismatch(ValueError):
 	"""The snapshot lines cannot be paired one-to-one with the Sales Order rows."""
 
 
-# Most document names a merchant-readable message lists.
+# Most document names a merchant-readable message lists per document type (the both-documents
+# refund message must stay under the 500-character stored sync message).
 _MAX_LINKED_DOCUMENTS = 3
 # (document, its item table, the item field that points at the Sales Order)
 _LINKED_DOCUMENT_SOURCES = (
@@ -101,7 +102,7 @@ def _linked_documents(sales_order_name):
 			.where(parent.docstatus == 1)
 			.where(parent.is_return == 0)
 			.orderby(parent.name)
-			.limit(_MAX_LINKED_DOCUMENTS)
+			.limit(_MAX_LINKED_DOCUMENTS + 1)
 			.run(pluck=True)
 		)
 	return linked
@@ -415,11 +416,18 @@ def plan(previous, current, evidence, erp_state):
 
 
 def _documents(erp_state, doctype):
-	"""``"Delivery Note A, B"`` (plural-aware) for the linked documents, or ``""`` if none are known."""
+	"""``"Delivery Note A, B"`` (plural-aware) for the linked documents, or ``""`` if none are known.
+
+	At most ``_MAX_LINKED_DOCUMENTS`` names are listed; ``_linked_documents()`` fetches one more
+	so ", and more" is appended when there are further documents.
+	"""
 	names = [cstr(name) for name in (erp_state.get("linked_documents") or {}).get(doctype) or []]
 	if not names:
 		return ""
-	return f"{doctype}{'s' if len(names) > 1 else ''} {', '.join(names)}"
+	listed = ", ".join(names[:_MAX_LINKED_DOCUMENTS])
+	if len(names) > _MAX_LINKED_DOCUMENTS:
+		listed += ", and more"
+	return f"{doctype}{'s' if len(names) > 1 else ''} {listed}"
 
 
 def _refund_message(evidence, erp_state):
@@ -435,11 +443,12 @@ def _refund_message(evidence, erp_state):
 	if evidence.get("return"):
 		lead = "The marketplace reported a return for this order"
 	if delivery_notes and invoices:
+		# Kept short on purpose: with the longest listing (3 + 3 names of 30 characters, each
+		# ", and more") this is 482 characters, under the 500 the stored sync message allows.
 		return (
-			f"{lead}, but it was already delivered ({delivery_notes}) and invoiced ({invoices}) in ERPNext. "
-			f"The Sales Order was not changed. If the goods came back, create a Sales Return against "
-			f"{delivery_notes}; create a Credit Note against {invoices} for the refunded amount "
-			"(compensating transactions), or review the order manually."
+			f"{lead}, but ERPNext already delivered ({delivery_notes}) and invoiced ({invoices}) it. "
+			"The Sales Order was not changed. Create a Sales Return and a Credit Note "
+			"(compensating transactions) as needed, or review the order manually."
 		)
 	if delivery_notes:
 		return (

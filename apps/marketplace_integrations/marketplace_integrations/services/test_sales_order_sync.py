@@ -2090,16 +2090,67 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertFalse(result["ok"])
 		self.assertNotIn("compensating", result["error"])
 
-	def test_never_synced_refunded_shopify_order_still_blocks(self):
+	def _make_unsynced_refunded_order(
+		self, account, financial_status="REFUNDED", restock_types=("CANCEL",), quantity=0, **changes
+	):
+		"""A never-synced Shopify order in the state of a full refund before any shipment."""
+		order, _mapping = self._make_shopify_order(account, financial_status=financial_status)
+		order.external_fulfillment_status = "UNFULFILLED"
+		order.items[0].current_quantity = quantity
+		order.items[0].unfulfilled_quantity = quantity
+		order.order_total = 0
+		order.refunds = frappe.as_json(
+			[
+				{
+					"id": f"refund-{self.suffix}",
+					"refundLineItems": {
+						"nodes": [{"id": "rli", "restockType": kind} for kind in restock_types]
+					},
+				}
+			]
+		)
+		for fieldname, value in changes.items():
+			setattr(order, fieldname, value)
+		order.save()
+		return order
+
+	def test_never_synced_fully_refunded_shopify_order_is_a_terminal_skip(self):
 		account = self._make_shopify_account()
-		for status in ("REFUNDED", "PARTIALLY_REFUNDED"):
-			with self.subTest(status=status):
-				order, _mapping = self._make_shopify_order(account, financial_status=status)
+		order = self._make_unsynced_refunded_order(account, last_sync_error="old error")
+		orders_before = frappe.db.count("Sales Order")
+
+		result = sync_sales_order(order.name)
+		order.reload()
+		logs = frappe.get_all(
+			"Marketplace Sync Log", filters={"marketplace_order": order.name}, fields=["status", "sync_type"]
+		)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertTrue(result["skipped"])
+		self.assertFalse(order.erpnext_sales_order)
+		self.assertEqual(order.erpnext_sync_status, "Not Synced")
+		self.assertFalse(order.last_sync_error)
+		self.assertEqual([(row.sync_type, row.status) for row in logs], [("Sales Order Sync", "Success")])
+		self.assertEqual(frappe.db.count("Sales Order"), orders_before)
+
+	def test_never_synced_refunded_order_that_is_not_fully_refunded_still_blocks(self):
+		account = self._make_shopify_account()
+		cases = {
+			"partially refunded": {"financial_status": "PARTIALLY_REFUNDED"},
+			"a line still has quantity": {"quantity": 1},
+			"order total left": {"order_total": 10},
+			"shipped": {"external_fulfillment_status": "FULFILLED"},
+			"restocked as a return": {"restock_types": ("CANCEL", "RETURN")},
+		}
+		for label, changes in cases.items():
+			with self.subTest(case=label):
+				order = self._make_unsynced_refunded_order(account, **changes)
 
 				result = sync_sales_order(order.name)
 				order.reload()
 
 				self.assertFalse(result["ok"])
+				self.assertNotIn("skipped", result)
 				self.assertIn("financially eligible", result["error"])
 				self.assertFalse(order.erpnext_sales_order)
 

@@ -176,7 +176,11 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 		_create_sync_log(order, trigger_source, "Invalid", None, result)
 		return result
 
-	if order.platform == "Shopify" and order.cancelled_at and not order.erpnext_sales_order:
+	if (
+		order.platform == "Shopify"
+		and not order.erpnext_sales_order
+		and _reconciliation_evidence(order).get("cancellation") == "full"
+	):
 		return _skip_cancelled_before_sync(order, trigger_source)
 
 	snapshot = None
@@ -282,6 +286,8 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 def _skip_cancelled_before_sync(order, trigger_source):
 	"""Terminal, successful skip for a Shopify order cancelled before any Sales Order existed.
 
+	"Cancelled" is the Shopify evidence's full cancellation: ``cancelledAt`` is set, or the order
+	was fully refunded before any item shipped (same test as for an already synced order).
 	No Sales Order is created just to cancel it, and the cancellation is not a sync error:
 	the order stays ``Not Synced`` with the error cleared (clearing an obsolete error from an
 	earlier attempt, e.g. a COD order first blocked as unpaid). The Marketplace Order and its
@@ -298,7 +304,8 @@ def _skip_cancelled_before_sync(order, trigger_source):
 		"skipped": True,
 		"status": order.erpnext_sync_status,
 		"message": _(
-			"The Shopify order was cancelled before an ERPNext Sales Order was created; no Sales Order is needed."
+			"The Shopify order was cancelled or fully refunded before an ERPNext Sales Order was created; "
+			"no Sales Order is needed."
 		),
 	}
 	_create_sync_log(order, trigger_source, "Success", None, result)
@@ -740,7 +747,8 @@ def _shopify_shipping_amount(order, account):
 	"""The Shopify shipping charge to carry on the Sales Order, or None when there is none.
 
 	Only Shopify orders carry one.  ``shipping_total`` is Shopify's ``currentShippingPriceSet``:
-	already net of shipping discounts and refunds, and before tax.  Taxes and duties are not
+	already net of shipping discounts and refunds.  Shopify includes tax in it when the shop's
+	prices include tax (``taxesIncluded``, shopify.dev, external information).  Taxes and duties are not
 	synced yet, so an order with either blocks instead of producing a wrong total.  The income
 	account is only required once there is a charge to post.
 	"""
@@ -1332,7 +1340,7 @@ def _apply_snapshot(sales_order, snapshot, marketplace_order_name, shipping_acco
 		so_item.is_free_item = 1 if line["effective_rate"] == 0 else 0
 
 	# The one charge row, rebuilt from scratch on every call (no template or Shipping Rule is
-	# used).  Shopify's shipping is already net of shipping discounts and before tax.
+	# used).  Shopify's shipping is already net of shipping discounts.
 	if snapshot.get("shipping"):
 		sales_order.append(
 			"taxes",
