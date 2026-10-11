@@ -51,6 +51,7 @@ const {
 	add_status_indicators,
 	apply_platform_gating,
 	load_erpnext_sync_status,
+	load_shopify_item_presentation,
 	select_noon_fulfillment_buttons,
 	JSON_EVIDENCE_FIELDS,
 } = require("./marketplace_order.js");
@@ -665,4 +666,42 @@ test("select_noon_fulfillment_buttons keeps only available actions, or all when 
 	assert.deepEqual(select_noon_fulfillment_buttons(buttons, []), []);
 	assert.equal(select_noon_fulfillment_buttons(buttons, null), buttons);
 	assert.equal(select_noon_fulfillment_buttons(buttons, undefined), buttons);
+});
+
+test("Shopify item presentation shows Unmapped, a null variant label, mapped names, and keeps markup as text", async () => {
+	const lines = [];
+	const wrapper = { empty: () => (lines.length = 0), append: (line) => lines.push(line) };
+	const original_call = global.frappe.call;
+	const original_document = global.document;
+	global.document = { createElement: () => ({ textContent: "" }) };
+	global.frappe.call = () =>
+		Promise.resolve({
+			message: {
+				items: [
+					{ external_variant_id: "gid://shopify/ProductVariant/1", mapped_item: null },
+					{ external_variant_id: null, mapped_item: null },
+					{ external_variant_id: "gid://shopify/ProductVariant/3", mapped_item: "Item A" },
+					{ external_variant_id: "gid://shopify/ProductVariant/4", mapped_item: "<img onerror=1>" },
+				],
+			},
+		});
+	try {
+		await load_shopify_item_presentation({
+			doc: { name: "MKTORD-1" },
+			get_field: () => ({ $wrapper: wrapper }),
+		});
+	} finally {
+		global.frappe.call = original_call;
+		global.document = original_document;
+	}
+
+	assert.deepEqual(
+		lines.map((line) => line.textContent),
+		[
+			"gid://shopify/ProductVariant/1: Unmapped",
+			"No Shopify variant",
+			"gid://shopify/ProductVariant/3: Item A",
+			"gid://shopify/ProductVariant/4: <img onerror=1>",
+		]
+	);
 });
