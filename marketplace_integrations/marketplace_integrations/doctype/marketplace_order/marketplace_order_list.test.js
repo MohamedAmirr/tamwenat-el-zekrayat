@@ -64,6 +64,23 @@ test("Talabat retrieval rejects invalid or reversed dates", () => {
 	});
 });
 
+test("Talabat retrieval accepts a same-day range as one full UTC day", () => {
+	assert.deepEqual(build_utc_range({ start_date: "2026-09-01", end_date: "2026-09-01" }), {
+		start: "2026-09-01T00:00:00Z",
+		end: "2026-09-01T23:59:59Z",
+	});
+});
+
+test("retrieval treats 29 February as valid only in a leap year", () => {
+	assert.deepEqual(build_utc_range({ start_date: "2026-02-29", end_date: "2026-03-01" }), {
+		error: "Start Date and End Date must be valid dates.",
+	});
+	assert.deepEqual(build_utc_range({ start_date: "2028-02-29", end_date: "2028-03-01" }), {
+		start: "2028-02-29T00:00:00Z",
+		end: "2028-03-01T23:59:59Z",
+	});
+});
+
 test("Show Refunded Orders sets a filter to Shopify orders with a refund financial status", () => {
 	const filters_added = [];
 	const listview = { filter_area: { add: (filters) => filters_added.push(filters) } };

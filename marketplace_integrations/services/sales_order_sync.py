@@ -67,6 +67,7 @@ from marketplace_integrations.services.sales_order_reconciliation import (
 	ReconciliationMismatch,
 	SalesOrderLinesMismatch,
 	execute,
+	hold_cancel_for_draft_documents,
 	plan,
 	read_erp_state,
 	snapshot_advanced_from,
@@ -176,7 +177,11 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 		_create_sync_log(order, trigger_source, "Invalid", None, result)
 		return result
 
-	if order.platform == "Shopify" and order.cancelled_at and not order.erpnext_sales_order:
+	if (
+		order.platform == "Shopify"
+		and not order.erpnext_sales_order
+		and _reconciliation_evidence(order).get("cancellation") == "full"
+	):
 		return _skip_cancelled_before_sync(order, trigger_source)
 
 	snapshot = None
@@ -198,7 +203,9 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 			lines = _build_order_lines(
 				order, account, tolerate_zero_quantity=bool(sales_order and sales_order.docstatus != 0)
 			)
-			shipping = _shopify_shipping_amount(order, account)
+			shipping = _shopify_shipping_amount(
+				order, account, block_taxes=not (sales_order and sales_order.docstatus != 0)
+			)
 			if order.platform == "Shopify":
 				customer = _get_or_create_shopify_customer(order, account)
 				address = _resolve_shopify_address(order, customer) or {"name": None, "address_type": None}
@@ -237,16 +244,20 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 		_verify_line_amounts(sales_order, snapshot, account)
 		_verify_grand_total(sales_order, snapshot, order, account)
 		# Verify the snapshot pairs with the inserted rows BEFORE submitting; on a
-		# mismatch roll the insert back so no orphan Sales Order is left unlinked
-		# (a retry would otherwise create a duplicate).
+		# mismatch, or any failure of the insert/submit, roll the insert back so no
+		# orphan draft Sales Order is left unlinked (a retry would otherwise create
+		# a duplicate).
 		frappe.db.savepoint(_FRESH_SALES_ORDER_SAVEPOINT)
 		try:
 			sales_order.insert()
 			snapshot_with_sales_order_item_names(snapshot, sales_order)
+			sales_order.submit()
 		except SalesOrderLinesMismatch as exc:
 			frappe.db.rollback(save_point=_FRESH_SALES_ORDER_SAVEPOINT)
 			raise SyncBlocker(str(exc)) from exc
-		sales_order.submit()
+		except Exception:
+			frappe.db.rollback(save_point=_FRESH_SALES_ORDER_SAVEPOINT)
+			raise
 		result = _save_success(order, current_hash, sales_order, updated=False, snapshot=snapshot)
 		result = _flag_compensating_evidence_on_new_order(order, sales_order, snapshot) or result
 		_create_sync_log(order, trigger_source, "Success", snapshot, result)
@@ -282,6 +293,8 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 def _skip_cancelled_before_sync(order, trigger_source):
 	"""Terminal, successful skip for a Shopify order cancelled before any Sales Order existed.
 
+	"Cancelled" is the Shopify evidence's full cancellation: ``cancelledAt`` is set, or the order
+	was fully refunded before any item shipped (same test as for an already synced order).
 	No Sales Order is created just to cancel it, and the cancellation is not a sync error:
 	the order stays ``Not Synced`` with the error cleared (clearing an obsolete error from an
 	earlier attempt, e.g. a COD order first blocked as unpaid). The Marketplace Order and its
@@ -298,7 +311,8 @@ def _skip_cancelled_before_sync(order, trigger_source):
 		"skipped": True,
 		"status": order.erpnext_sync_status,
 		"message": _(
-			"The Shopify order was cancelled before an ERPNext Sales Order was created; no Sales Order is needed."
+			"The Shopify order was cancelled or fully refunded before an ERPNext Sales Order was created; "
+			"no Sales Order is needed."
 		),
 	}
 	_create_sync_log(order, trigger_source, "Success", None, result)
@@ -358,7 +372,7 @@ def build_sales_order_snapshot(order, account=None, customer=None, for_submitted
 		_transaction_date(order),
 		_delivery_date(order),
 		address,
-		_shopify_shipping_amount(order, account),
+		_shopify_shipping_amount(order, account, block_taxes=not for_submitted_order),
 	)
 
 
@@ -736,17 +750,22 @@ def _amount_precision(account):
 	return frappe.get_precision("Sales Order Item", "amount", currency=_resolved_currency(account))
 
 
-def _shopify_shipping_amount(order, account):
+def _shopify_shipping_amount(order, account, block_taxes=True):
 	"""The Shopify shipping charge to carry on the Sales Order, or None when there is none.
 
 	Only Shopify orders carry one.  ``shipping_total`` is Shopify's ``currentShippingPriceSet``:
-	already net of shipping discounts and refunds, and before tax.  Taxes and duties are not
-	synced yet, so an order with either blocks instead of producing a wrong total.  The income
-	account is only required once there is a charge to post.
+	already net of shipping discounts and refunds.  Shopify includes tax in it when the shop's
+	prices include tax (``taxesIncluded``, shopify.dev, external information).  Taxes and duties are not
+	synced yet, so an order with either blocks instead of producing a wrong total, but only while a
+	Sales Order is being created or a Draft one updated (``block_taxes``).  An order already linked
+	to a submitted Sales Order is left to the reconciliation planner: that document exists and is
+	never re-created from this snapshot, so "create it manually" would be wrong advice (legacy
+	synced orders that carry tax must not flip to Modified After Sync).  The income account is only
+	required once there is a charge to post.
 	"""
 	if order.platform != "Shopify":
 		return None
-	if flt(order.total_taxes) or flt(order.duties_total):
+	if block_taxes and (flt(order.total_taxes) or flt(order.duties_total)):
 		raise SyncBlocker(
 			_(
 				"Shopify order {0} has taxes or duties (taxes {1}, duties {2}). Taxes and duties are not "
@@ -824,8 +843,11 @@ def set_sync_status_from_current_snapshot(order, preserve_sync_error=False):
 		order.last_sync_error = cstr(exc).strip()[:500] or _modified_after_sync_message()
 		return
 	if docstatus != 0:
-		reconciliation_plan = plan(
-			_parse_last_synced_snapshot(order), current_snapshot, evidence, read_erp_state(sales_order)
+		reconciliation_plan = hold_cancel_for_draft_documents(
+			plan(
+				_parse_last_synced_snapshot(order), current_snapshot, evidence, read_erp_state(sales_order)
+			),
+			sales_order.name,
 		)
 		_apply_reconciliation_status(order, reconciliation_plan)
 		if reconciliation_plan["outcome"] == NO_ACTION:
@@ -1332,7 +1354,7 @@ def _apply_snapshot(sales_order, snapshot, marketplace_order_name, shipping_acco
 		so_item.is_free_item = 1 if line["effective_rate"] == 0 else 0
 
 	# The one charge row, rebuilt from scratch on every call (no template or Shipping Rule is
-	# used).  Shopify's shipping is already net of shipping discounts and before tax.
+	# used).  Shopify's shipping is already net of shipping discounts.
 	if snapshot.get("shipping"):
 		sales_order.append(
 			"taxes",
@@ -1383,18 +1405,26 @@ def _verify_grand_total(sales_order, snapshot, order, account):
 
 	Compares ``grand_total`` (not ``rounded_total``) within one currency-precision unit.
 	Nothing is forced to match: a gap is reported, never papered over with an adjustment
-	line.  Skipped only when Shopify recorded no total and there is no shipping to check
-	(rows imported before totals were stored, or a free order).  An ERPNext Actual charge is
-	spread over the items by value, so it is lost when every item is free.
+	line.  A recorded total of 0 is only accepted for a free order (no shipping, every item
+	free); a missing total beside a non-zero item or shipping amount (a row imported before
+	totals were stored) blocks until the order is refreshed from Shopify.  An ERPNext Actual
+	charge is spread over the items by value, so it is lost when every item is free.
 	"""
 	if order.platform != "Shopify":
 		return
 	shipping = flt(snapshot.get("shipping"))
 	shopify_total = flt(order.order_total)
-	if not shopify_total and not shipping:
-		return
 	precision = _amount_precision(account)
 	items_total = flt(sum(flt(row.amount) for row in sales_order.items), precision)
+	if not shopify_total and not shipping and not items_total:
+		return
+	if not shopify_total:
+		raise SyncBlocker(
+			_(
+				"Shopify's order total was not recorded for order {0}, so the Sales Order total cannot be "
+				"verified. Use Refresh from Shopify on the order, then synchronize it again."
+			).format(order.name)
+		)
 	if shipping and not items_total:
 		raise SyncBlocker(
 			_(
@@ -1469,7 +1499,9 @@ def _reconcile_submitted_order(order, sales_order, snapshot, evidence, trigger_s
 	"""Plan one submitted-order reconciliation; execute it if supported, else record an advisory."""
 	erp_state = read_erp_state(sales_order)
 	previous = _parse_last_synced_snapshot(order)
-	reconciliation_plan = plan(previous, snapshot or {}, evidence, erp_state)
+	reconciliation_plan = hold_cancel_for_draft_documents(
+		plan(previous, snapshot or {}, evidence, erp_state), sales_order.name
+	)
 	# Single dispatch point between "act on ERPNext" and "advise only".
 	if reconciliation_plan["outcome"] in _EXECUTABLE_OUTCOMES:
 		return _execute_reconciliation_plan(

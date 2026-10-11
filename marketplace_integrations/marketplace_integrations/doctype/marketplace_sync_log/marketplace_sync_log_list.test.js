@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const test = require("node:test");
 const vm = require("node:vm");
 
-function load_list_script({selected, rejectedIndexes = []}) {
+function load_list_script({selected, rejectedIndexes = [], blockedIndexes = []}) {
 	const calls = [];
 	const messages = [];
 	let refreshCount = 0;
@@ -16,7 +16,11 @@ function load_list_script({selected, rejectedIndexes = []}) {
 				calls.push(options);
 				return rejectedIndexes.includes(calls.length - 1)
 					? Promise.reject(new Error("request failed"))
-					: Promise.resolve({message: {status: "Success"}});
+					: Promise.resolve({
+							message: blockedIndexes.includes(calls.length - 1)
+								? {ok: false, status: "Invalid"}
+								: {ok: true, status: "Success"},
+						});
 			},
 		},
 		__: (message, args) =>
@@ -109,4 +113,20 @@ test("bulk retry with only Order Import failure rows selected shows guidance and
 	assert.deepEqual(harness.calls, []);
 	assert.deepEqual(harness.messages, ["Select one or more Error rows to retry."]);
 	assert.equal(harness.refreshCount(), 0);
+});
+
+test("bulk retry counts a still-blocked resync ({ok: false}) instead of reporting it as retried", async () => {
+	const harness = load_list_script({
+		selected: [
+			{name: "MSL-00010", status: "Error", marketplace_order: "MPO-0010"},
+			{name: "MSL-00011", status: "Error", marketplace_order: "MPO-0011"},
+			{name: "MSL-00012", status: "Error", marketplace_order: "MPO-0012"},
+		],
+		blockedIndexes: [1, 2],
+	});
+
+	await harness.retry();
+
+	assert.deepEqual(harness.messages, ["Retried 3 order(s): 1 recovered, 2 still blocked."]);
+	assert.equal(harness.refreshCount(), 1);
 });
