@@ -147,6 +147,57 @@ class UnitTestShopifyFulfillmentEvidence(UnitTestCase):
 		self.assertTrue(new["refund"])
 
 
+class UnitTestShopifyFullRefundEvidence(UnitTestCase):
+	"""A fully refunded, never-shipped order that Shopify did not cancel is a full cancellation."""
+
+	def _order(self, **overrides):
+		values = {
+			"items": [_line("l1", 0, 0), _line("l2", 0, 0)],
+			"cancelled_at": None,
+			"refunds": frappe.as_json([{"id": "r1"}]),
+			"last_synced_snapshot": None,
+			"external_financial_status": "REFUNDED",
+			"external_fulfillment_status": "FULFILLMENT_NOT_REQUIRED",
+			"order_total": 0,
+			"shipping_total": 0,
+			"total_taxes": 0,
+			"duties_total": 0,
+		}
+		values.update(overrides)
+		return SimpleNamespace(**values)
+
+	def test_fully_refunded_nothing_to_fulfil_is_full_cancellation(self):
+		for status in ("FULFILLMENT_NOT_REQUIRED", "UNFULFILLED"):
+			with self.subTest(status=status):
+				evidence = build_evidence(self._order(external_fulfillment_status=status))
+
+				self.assertEqual(evidence["cancellation"], "full")
+				self.assertTrue(evidence["refund"])
+
+	def test_each_failing_condition_keeps_todays_evidence(self):
+		cases = {
+			"partially refunded": {"external_financial_status": "PARTIALLY_REFUNDED"},
+			"a line still has quantity": {"items": [_line("l1", 1, 1), _line("l2", 0, 0)]},
+			"shipping left": {"shipping_total": 10},
+			"order total left": {"order_total": 10},
+			"taxes left": {"total_taxes": 1},
+			"duties left": {"duties_total": 1},
+			"fulfilled": {"external_fulfillment_status": "FULFILLED"},
+			"partially fulfilled": {"external_fulfillment_status": "PARTIALLY_FULFILLED"},
+			"in progress": {"external_fulfillment_status": "IN_PROGRESS"},
+			"no fulfillment status": {"external_fulfillment_status": None},
+			"no items": {"items": []},
+		}
+		for name, overrides in cases.items():
+			with self.subTest(name):
+				self.assertNotIn("cancellation", build_evidence(self._order(**overrides)))
+
+	def test_cancelled_at_is_unchanged(self):
+		order = self._order(cancelled_at="2026-10-05", external_fulfillment_status="FULFILLED")
+
+		self.assertEqual(build_evidence(order)["cancellation"], "full")
+
+
 class UnitTestShopifyEvidenceThroughPlanner(UnitTestCase):
 	def setUp(self):
 		self.previous = {

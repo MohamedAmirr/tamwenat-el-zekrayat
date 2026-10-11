@@ -17,16 +17,42 @@ import frappe
 from frappe import _
 from frappe.utils import cstr, flt
 
+# displayFulfillmentStatus values that mean nothing was shipped (shopify.dev, checked
+# 2026-10-11, not this repo's docs): FULFILLMENT_NOT_REQUIRED = the order has no items
+# to fulfill; UNFULFILLED = none of the items are fulfilled (it replaces the legacy
+# OPEN and RESTOCKED).  Every other value keeps the conservative behavior.
+_NOTHING_FULFILLED_STATUSES = {"UNFULFILLED", "FULFILLMENT_NOT_REQUIRED"}
+
 
 def build_evidence(order):
 	"""Return full-cancellation and not-yet-reflected refund evidence."""
 	evidence = {}
-	if order.cancelled_at:
+	if order.cancelled_at or _fully_refunded_before_fulfillment(order):
 		evidence["cancellation"] = "full"
 	if unreflected_refund_ids(order):
 		evidence["refund"] = True
 	evidence.update(_fulfillment_evidence(order))
 	return evidence
+
+
+def _fully_refunded_before_fulfillment(order):
+	"""A refunded, not-cancelled order with nothing left to ship or charge.
+
+	Shopify keeps such an order uncancelled but zeroes its current quantities and
+	totals, so it is the same decision as a cancellation.  The refund's restock type
+	is not used (not verified against shopify.dev).
+	"""
+	items = getattr(order, "items", None) or []
+	return bool(
+		items
+		and getattr(order, "external_financial_status", None) == "REFUNDED"
+		and getattr(order, "external_fulfillment_status", None) in _NOTHING_FULFILLED_STATUSES
+		and all(not flt(item.current_quantity) for item in items)
+		and not any(
+			flt(getattr(order, field, None))
+			for field in ("order_total", "shipping_total", "total_taxes", "duties_total")
+		)
+	)
 
 
 def fulfillment_started(item):

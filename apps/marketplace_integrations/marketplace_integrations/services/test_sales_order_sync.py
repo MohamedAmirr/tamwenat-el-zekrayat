@@ -3941,6 +3941,129 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		after = frappe.get_doc("Sales Order", first["sales_order"])
 		self.assertEqual((after.grand_total, len(after.taxes), after.modified), (494.21, 1, before.modified))
 
+	# --- Shopify full refund before fulfillment (shipping charge on the Sales Order) -----
+
+	def _synced_shipping_order(self):
+		account, order, first = self._sync_shopify(
+			transaction_amount=74.99, current_quantity=1, shipping_total=419.22, order_total=494.21
+		)
+		self.assertTrue(first["ok"], first.get("error"))
+		return account, order, first["sales_order"]
+
+	def _fully_refund(self, order, fulfillment_status="FULFILLMENT_NOT_REQUIRED"):
+		"""Shopify's state after a full refund: not cancelled, current quantities and totals all zero."""
+		order.external_financial_status = "REFUNDED"
+		order.external_fulfillment_status = fulfillment_status
+		order.items[0].current_quantity = 0
+		order.items[0].unfulfilled_quantity = 0
+		order.shipping_total = 0
+		order.order_total = 0
+		order.refunds = frappe.as_json([{"id": f"refund-{self.suffix}"}])
+		order.save()
+
+	def test_fully_refunded_order_with_a_shipping_charge_cancels_the_sales_order(self):
+		_account, order, sales_order = self._synced_shipping_order()
+		self._fully_refund(order)
+		refunds = order.refunds
+		orders_before = frappe.db.count("Sales Order")
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["reconciliation"]["outcome"], "CANCEL_ORDER")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 2)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(order.refunds, refunds)
+		self.assertEqual(order.erpnext_sales_order, sales_order)
+		self.assertEqual(frappe.db.count("Sales Order"), orders_before)
+		self.assertEqual(get_current_sync_status(order.name), "Synced")
+
+		again = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(again["ok"], again.get("error"))
+		self.assertEqual(again["reconciliation"]["outcome"], "NO_ACTION")
+		self.assertNotIn("executed_action", again)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(frappe.db.count("Sales Order"), orders_before)
+
+	def test_fully_refunded_unfulfilled_status_also_cancels(self):
+		_account, order, sales_order = self._synced_shipping_order()
+		self._fully_refund(order, "UNFULFILLED")
+
+		result = sync_sales_order(order.name)
+
+		self.assertEqual(result["reconciliation"]["outcome"], "CANCEL_ORDER")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 2)
+
+	def test_fully_refunded_closed_order_is_reopened_and_cancelled(self):
+		_account, order, sales_order = self._synced_shipping_order()
+		self._fully_refund(order)
+		frappe.db.set_value("Sales Order", sales_order, "status", "Closed", update_modified=False)
+
+		result = sync_sales_order(order.name)
+
+		self.assertEqual(result["reconciliation"]["outcome"], "CANCEL_ORDER")
+		self.assertTrue(result["reconciliation"]["reopen"])
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 2)
+
+	def test_fully_refunded_order_that_was_delivered_is_a_compensating_transaction(self):
+		_account, order, sales_order = self._synced_shipping_order()
+		self._set_first_item_fields(order, delivered_qty=1)
+		self._fully_refund(order)
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["reconciliation"]["outcome"], "UNSUPPORTED_COMPENSATING_TRANSACTION")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 1)
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+
+	def test_fully_refunded_order_that_was_billed_or_has_an_advance_is_not_cancelled(self):
+		for label, change in (
+			("billed", lambda so, item: frappe.db.set_value("Sales Order Item", item, "billed_amt", 10)),
+			("advance", lambda so, item: frappe.db.set_value("Sales Order", so, "advance_paid", 50)),
+		):
+			with self.subTest(label):
+				self.setUp()
+				_account, order, sales_order = self._synced_shipping_order()
+				change(sales_order, frappe.get_doc("Sales Order", sales_order).items[0].name)
+				self._fully_refund(order)
+
+				result = sync_sales_order(order.name)
+
+				self.assertFalse(result["ok"])
+				self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+				self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 1)
+
+	def test_fully_refunded_order_shopify_shows_fulfilled_keeps_the_shipping_attention(self):
+		_account, order, sales_order = self._synced_shipping_order()
+		self._fully_refund(order, "FULFILLED")
+		modified = frappe.db.get_value("Sales Order", sales_order, "modified")
+
+		result = sync_sales_order(order.name)
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+		self.assertIn("shipping", result["error"])
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 1)
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "modified"), modified)
+
+	def test_partial_refund_of_shipping_only_stays_attention(self):
+		_account, order, sales_order = self._synced_shipping_order()
+		order.external_financial_status = "PARTIALLY_REFUNDED"
+		order.shipping_total = 0
+		order.order_total = 74.99
+		order.refunds = frappe.as_json([{"id": f"refund-{self.suffix}"}])
+		order.save()
+
+		result = sync_sales_order(order.name)
+
+		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 1)
+
 	def test_existing_submitted_order_synced_without_shipping_needs_attention_and_is_not_mutated(self):
 		"""An order synced before shipping was carried has a baseline without the key."""
 		account = self._make_shopify_account(self._income_account())
