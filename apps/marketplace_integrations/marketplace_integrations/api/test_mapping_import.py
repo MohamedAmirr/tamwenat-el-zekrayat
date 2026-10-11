@@ -10,6 +10,7 @@ from openpyxl import load_workbook
 
 from marketplace_integrations.api import mapping_import
 from marketplace_integrations.services import mapping_import as mapping_import_service
+from marketplace_integrations.tests.utils import make_role_user
 
 UOM = "Nos"
 ITEM_GROUP = "Products"
@@ -18,6 +19,22 @@ ITEM_GROUP = "Products"
 class IntegrationTestMappingImport(IntegrationTestCase):
 	def setUp(self):
 		self._counter = 0
+		self._tracked = []
+
+	def tearDown(self):
+		# make_role_user commits on cleanup, which would persist every fixture any test in
+		# this class left in the open transaction, so each helper-made fixture is deleted here.
+		accounts = [name for doctype, name in self._tracked if doctype == "Marketplace Account"]
+		if accounts:
+			# Rows the import/apply tests wrote themselves.
+			frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": ["in", accounts]})
+		for doctype, name in reversed(self._tracked):
+			if frappe.db.exists(doctype, name):
+				frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
+
+	def track(self, doc):
+		self._tracked.append((doc.doctype, doc.name))
+		return doc
 
 	def unique(self, prefix):
 		self._counter += 1
@@ -25,27 +42,31 @@ class IntegrationTestMappingImport(IntegrationTestCase):
 
 	def make_item(self):
 		item_code = self.unique("TEST-MI-ITEM")
-		return frappe.get_doc(
-			{
-				"doctype": "Item",
-				"item_code": item_code,
-				"item_group": ITEM_GROUP,
-				"stock_uom": UOM,
-				"is_stock_item": 0,
-			}
-		).insert()
+		return self.track(
+			frappe.get_doc(
+				{
+					"doctype": "Item",
+					"item_code": item_code,
+					"item_group": ITEM_GROUP,
+					"stock_uom": UOM,
+					"is_stock_item": 0,
+				}
+			).insert()
+		)
 
 	def make_account(self):
-		return frappe.get_doc(
-			{
-				"doctype": "Marketplace Account",
-				"account_name": self.unique("Mapping Import Account"),
-				"platform": "Talabat",
-				"external_account_id": self.unique("mapping-import-account"),
-				"connection_doctype": "UOM",
-				"connection": UOM,
-			}
-		).insert()
+		return self.track(
+			frappe.get_doc(
+				{
+					"doctype": "Marketplace Account",
+					"account_name": self.unique("Mapping Import Account"),
+					"platform": "Talabat",
+					"external_account_id": self.unique("mapping-import-account"),
+					"connection_doctype": "UOM",
+					"connection": UOM,
+				}
+			).insert()
+		)
 
 	def make_mapping(self, account, item, reference=None, **kwargs):
 		values = {
@@ -55,10 +76,10 @@ class IntegrationTestMappingImport(IntegrationTestCase):
 			"external_reference": reference or self.unique("listing"),
 		}
 		values.update(kwargs)
-		return frappe.get_doc(values).insert()
+		return self.track(frappe.get_doc(values).insert())
 
 	def make_file(self, content, is_private=1):
-		return (
+		return self.track(
 			frappe.get_doc(
 				{
 					"doctype": "File",
@@ -66,10 +87,8 @@ class IntegrationTestMappingImport(IntegrationTestCase):
 					"content": content,
 					"is_private": is_private,
 				}
-			)
-			.insert()
-			.file_url
-		)
+			).insert()
+		).file_url
 
 	def build_xlsx(self, rows):
 		return make_xlsx(
@@ -116,6 +135,88 @@ class IntegrationTestMappingImport(IntegrationTestCase):
 		preview = mapping_import.preview_mappings_import(self.make_file(content))
 		row = next(row for row in preview["rows"] if row["external_reference"] == mapping.external_reference)
 		self.assertEqual(row["status"], "unchanged")
+
+	def exported_rows(self, content):
+		worksheet = load_workbook(filename=BytesIO(content), data_only=True).active
+		header = [cell.value for cell in worksheet[1]]
+		return [
+			dict(zip(header, row, strict=True)) for row in worksheet.iter_rows(min_row=2, values_only=True)
+		]
+
+	def test_export_carries_every_column_of_a_shopify_style_mapping(self):
+		account = self.make_account()
+		item = self.make_item()
+		variant = "gid://shopify/ProductVariant/123"
+		mapping = self.make_mapping(
+			account,
+			item,
+			variant,
+			external_variant_id=variant,
+			external_product_id="gid://shopify/Product/55",
+			external_sku="SKU-<1>",
+			sales_uom=UOM,
+			enabled=0,
+		)
+
+		exported = self.exported_row(self.export_bytes(), variant)
+
+		# A blank column is exported as an empty cell, not the string "None".
+		self.assertIn(exported.pop("external_barcode"), ("", None))
+		self.assertEqual(
+			exported,
+			{
+				"marketplace_account": account.name,
+				"item": item.name,
+				"external_reference": variant,
+				"external_product_id": "gid://shopify/Product/55",
+				"external_sku": "SKU-<1>",
+				"external_variant_id": variant,
+				"sales_uom": UOM,
+				"enabled": 0,
+				"__modified": str(mapping.modified),
+			},
+		)
+
+	def test_export_lists_all_accounts_ordered_by_account_then_reference(self):
+		first, second = self.make_account(), self.make_account()
+		item = self.make_item()
+		prefix = self.unique("order")
+		self.make_mapping(second, item, f"{prefix}-a")
+		self.make_mapping(first, item, f"{prefix}-b")
+		self.make_mapping(first, item, f"{prefix}-a")
+
+		rows = [
+			(row["marketplace_account"], row["external_reference"])
+			for row in self.exported_rows(self.export_bytes())
+			if row["external_reference"].startswith(prefix)
+		]
+
+		self.assertEqual(
+			rows,
+			sorted([(first.name, f"{prefix}-a"), (first.name, f"{prefix}-b"), (second.name, f"{prefix}-a")]),
+		)
+
+	def test_export_is_limited_to_accounts_the_user_may_read(self):
+		allowed, other = self.make_account(), self.make_account()
+		item = self.make_item()
+		prefix = self.unique("scoped")
+		self.make_mapping(allowed, item, f"{prefix}-allowed")
+		self.make_mapping(other, item, f"{prefix}-other")
+		email, _role = make_role_user(
+			self, "Mapping Export Scoped", {"Marketplace Product Mapping": ["read"], "Marketplace Account": ["read"]}
+		)
+		user_permission = frappe.get_doc(
+			{"doctype": "User Permission", "user": email, "allow": "Marketplace Account", "for_value": allowed.name}
+		).insert()
+		self.track(user_permission)
+		frappe.clear_cache(user=email)
+
+		with self.set_user(email):
+			content = self.export_bytes()
+
+		references = {row["external_reference"] for row in self.exported_rows(content)}
+		self.assertIn(f"{prefix}-allowed", references)
+		self.assertNotIn(f"{prefix}-other", references)
 
 	def test_new_rows_create_and_existing_identity_updates_without_duplication(self):
 		account = self.make_account()

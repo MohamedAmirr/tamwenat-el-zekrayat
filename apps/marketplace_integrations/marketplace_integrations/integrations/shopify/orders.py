@@ -413,8 +413,10 @@ def queue_order_import(account_name, start, end):
 	account.check_permission("read")
 	if account.platform != "Shopify" or account.connection_doctype != "Shopify Connection":
 		frappe.throw(_("Marketplace Account {0} is not a Shopify account.").format(account.name))
-	start_dt = get_datetime(start)
-	end_dt = get_datetime(end)
+	# get_datetime(None) returns the current time, so a missing bound must be
+	# caught before parsing.
+	start_dt = get_datetime(start) if start else None
+	end_dt = get_datetime(end) if end else None
 	if not start_dt or not end_dt or start_dt > end_dt:
 		frappe.throw(_("A valid Shopify order import date range is required."))
 	if (end_dt - start_dt).days > MAX_ORDER_IMPORT_DAYS:

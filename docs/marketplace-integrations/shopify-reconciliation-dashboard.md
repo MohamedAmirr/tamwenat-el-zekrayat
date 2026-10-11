@@ -71,8 +71,11 @@ standard Frappe Script Report. Its `execute()` calls the same
 that ran this query before the conversion, so there is one source of truth
 for the query, not two implementations that could drift.
 
-Shows the most recent `Marketplace Sync Log` rows where `sync_type = "Order
-Import"` and `status = "Error"` — i.e., Shopify order retrieval/import
+Shows the most recent `Marketplace Sync Log` rows of Shopify Marketplace
+Accounts only (other platforms' import failures are not listed; they appear in
+Needs Attention) where `sync_type = "Order
+Import"` and `status = "Error"`, leaving out failures a later import of the same
+order already resolved (same rule as Needs Attention) — i.e., Shopify order retrieval/import
 itself failed (as opposed to a successfully-imported order whose later
 ERPNext sync failed, which shows up as `sync_type = "Sales Order Sync"`
 instead — see **`sync_type`** below), most recent first.

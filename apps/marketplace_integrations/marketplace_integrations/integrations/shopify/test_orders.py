@@ -16,6 +16,10 @@ from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.integrations.shopify import orders
 from marketplace_integrations.integrations.shopify.test_products import make_shopify_account
+from marketplace_integrations.marketplace_integrations.doctype.marketplace_account.test_marketplace_account import (
+	STAND_IN_CONNECTION,
+	STAND_IN_CONNECTION_DOCTYPE,
+)
 from marketplace_integrations.services.linked_sales_order_fixture import LinkedSalesOrderFixture
 
 EXECUTE_TARGET = "marketplace_integrations.integrations.shopify.client.ShopifyClient.execute"
@@ -564,3 +568,89 @@ class IntegrationTestReconcileAllAccountsOrders(IntegrationTestCase):
 		self.assertTrue(mocked.call_args_list)
 		for call in mocked.call_args_list:
 			self.assertIs(call.kwargs.get("bump_linked_changes"), True)
+
+
+class IntegrationTestQueueOrderImportDateRange(IntegrationTestCase):
+	"""The 60-day limit is measured between the two instants (`(end - start).days
+	> 60`), so the dialog's start T00:00:00Z / end T23:59:59Z allows up to 61
+	inclusive calendar days. frappe.enqueue and the status cache are patched, so
+	nothing is queued."""
+
+	def setUp(self):
+		self.account = make_shopify_account(f"Import Range {frappe.generate_hash(length=8)}")
+		self.addCleanup(frappe.delete_doc, "Shopify Connection", self.account.connection, force=True)
+		self.addCleanup(frappe.delete_doc, "Marketplace Account", self.account.name, force=True)
+
+	def queue(self, start, end, account=None, queued=True):
+		with (
+			patch.object(orders.frappe, "enqueue", return_value=object() if queued else None) as enqueue,
+			patch.object(orders, "_set_import_status"),
+		):
+			result = orders.queue_order_import(account or self.account.name, start, end)
+		return result, enqueue
+
+	def test_exactly_sixty_days_is_accepted(self):
+		result, enqueue = self.queue("2026-01-01T00:00:00Z", "2026-03-02T00:00:00Z")
+
+		self.assertEqual(result["status"], "queued")
+		enqueue.assert_called_once()
+
+	def test_sixty_one_days_is_rejected(self):
+		with self.assertRaisesRegex(frappe.ValidationError, "limited to 60 days"):
+			self.queue("2026-01-01T00:00:00Z", "2026-03-03T00:00:00Z")
+
+	def test_sixty_days_and_a_fraction_is_accepted_because_the_limit_floors_whole_days(self):
+		result, _enqueue = self.queue("2026-01-01T00:00:00Z", "2026-03-02T23:59:59Z")
+
+		self.assertEqual(result["status"], "queued")
+
+	def test_dialog_range_allows_sixty_one_inclusive_calendar_days_but_not_sixty_two(self):
+		# 2026-01-01 .. 2026-03-02 is 61 calendar days inclusive.
+		result, _enqueue = self.queue("2026-01-01T00:00:00Z", "2026-03-02T23:59:59Z")
+		self.assertEqual(result["status"], "queued")
+
+		with self.assertRaisesRegex(frappe.ValidationError, "limited to 60 days"):
+			self.queue("2026-01-01T00:00:00Z", "2026-03-03T23:59:59Z")
+
+	def test_start_after_end_or_missing_dates_are_rejected(self):
+		for start, end in (
+			("2026-02-02T00:00:00Z", "2026-02-01T00:00:00Z"),
+			(None, "2026-02-01T00:00:00Z"),
+			("2026-02-01T00:00:00Z", None),
+			("", ""),
+		):
+			with self.subTest(start=start, end=end), self.assertRaisesRegex(
+				frappe.ValidationError, "valid Shopify order import date range"
+			):
+				self.queue(start, end)
+
+	def test_equal_start_and_end_is_accepted(self):
+		result, _enqueue = self.queue("2026-02-01T10:00:00Z", "2026-02-01T10:00:00Z")
+
+		self.assertEqual(result["status"], "queued")
+
+	def test_offset_input_is_normalized_to_utc_z(self):
+		_result, enqueue = self.queue("2026-02-01T02:00:00+02:00", "2026-02-02T05:30:00+02:00")
+
+		self.assertEqual(enqueue.call_args.kwargs["start"], "2026-02-01T00:00:00Z")
+		self.assertEqual(enqueue.call_args.kwargs["end"], "2026-02-02T03:30:00Z")
+
+	def test_non_shopify_account_is_rejected(self):
+		account = frappe.get_doc(
+			{
+				"doctype": "Marketplace Account",
+				"account_name": f"Import Range Talabat {frappe.generate_hash(length=8)}",
+				"platform": "Talabat",
+				"external_account_id": f"import-range-{frappe.generate_hash(length=8)}",
+				"connection_doctype": STAND_IN_CONNECTION_DOCTYPE,
+				"connection": STAND_IN_CONNECTION,
+			}
+		).insert()
+		self.addCleanup(frappe.delete_doc, "Marketplace Account", account.name, force=True)
+
+		with self.assertRaisesRegex(frappe.ValidationError, "is not a Shopify account"):
+			self.queue("2026-02-01T00:00:00Z", "2026-02-02T00:00:00Z", account=account.name)
+
+	def test_a_second_import_for_the_same_account_is_rejected(self):
+		with self.assertRaisesRegex(frappe.ValidationError, "already running"):
+			self.queue("2026-02-01T00:00:00Z", "2026-02-02T00:00:00Z", queued=False)
