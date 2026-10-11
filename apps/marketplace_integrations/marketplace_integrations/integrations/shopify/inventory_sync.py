@@ -36,9 +36,9 @@ Locked decisions this implements (see the issue's "Implementation plan"):
   variant's inventory item id, ``tracked`` flag, and the current ``on_hand`` at
   the bound location - the compare value. Nothing is cached on the mapping.
 - **Compare-and-set** (8): ``inventorySetQuantities`` with
-  ``changeFromQuantity`` (``compareQuantity`` is deprecated), never
+  ``changeFromQuantity`` (the only quantity-compare input in the 2026-07 API), never
   ``ignoreCompareQuantity``. An item whose Shopify value already equals the
-  target is skipped (no mutation, counts as synced). ``COMPARE_FAILED`` re-reads
+  target is skipped (no mutation, counts as synced). ``CHANGE_FROM_QUANTITY_STALE`` re-reads
   and resends the whole chunk, at most ``SHOPIFY_INVENTORY_MAX_STALE_RETRIES``
   times, then marks the chunk Error. Any other userError falls back to sending
   the chunk's items one at a time so the bad item is isolated (this module -
@@ -121,7 +121,7 @@ STILL UNVERIFIED:
 4. That ``inventoryActivate`` works for an untracked item (this module enables
    tracking first, so it never relies on it), the initial level it creates
    (assumed ``on_hand`` 0, used as the compare value; a wrong guess surfaces as
-   ``COMPARE_FAILED`` and is recovered by the re-read), and its
+   ``CHANGE_FROM_QUANTITY_STALE`` and is recovered by the re-read), and its
    ``inventoryLevel { id }`` payload shape.
 5. That ``inventorySetQuantities`` is atomic when it returns userErrors (if
    not, the skip-if-equal re-read on retry/fallback is what converges; a test
@@ -132,8 +132,10 @@ STILL UNVERIFIED:
 7. Cost/throttling of a full reconciliation (``ShopifyClient.execute()`` caps at
    3 throttle attempts x 10s; progress is committed per chunk to keep finished
    work).
-8. That the stale-compare userError code is ``COMPARE_FAILED`` (seen in one doc
-   fetch; a later fetch said the code enum is not listed).
+8. How Shopify handles the IDEMPOTENCY_* userError codes
+   (``IDEMPOTENCY_CONCURRENT_REQUEST``, ``IDEMPOTENCY_KEY_PARAMETER_MISMATCH``,
+   ``IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED``): not handled specially (they take
+   the generic per-item fallback / Error path).
 
 Operating requirement (decision 3): because ``on_hand`` is pushed, orders must
 be marked fulfilled in Shopify (manually is fine) - v1 has no fulfillment sync,
@@ -802,7 +804,7 @@ def _prepare_entry(client, location_id, entry, node):
 	if on_hand is None:
 		if flipped:
 			# Tracking was just enabled; the pre-flip read may not carry a
-			# quantity. Guess 0 - a wrong guess is COMPARE_FAILED, which the
+			# quantity. Guess 0 - a wrong guess is CHANGE_FROM_QUANTITY_STALE, which the
 			# whole-chunk re-read recovers.
 			return 0
 		raise _EntryFailed(_("Could not read the current Shopify quantity at the bound Location."))

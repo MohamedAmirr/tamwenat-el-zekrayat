@@ -91,7 +91,7 @@ SHOPIFY_CATALOG_PUSH_VARIANT_CHUNK_SIZE = 100
 # lookup chunk above - re-check before raising it.
 SHOPIFY_INVENTORY_SYNC_CHUNK_SIZE = SHOPIFY_NODES_LOOKUP_CHUNK_SIZE
 
-# Bounded retries after a stale-compare (`COMPARE_FAILED`) rejection: re-read
+# Bounded retries after a stale-compare (`CHANGE_FROM_QUANTITY_STALE`) rejection: re-read
 # the whole chunk and resend it, at most this many times, then mark the chunk's
 # mappings Error (#107 decision 8).
 SHOPIFY_INVENTORY_MAX_STALE_RETRIES = 3
@@ -112,11 +112,13 @@ SHOPIFY_INVENTORY_REASON = "correction"
 # the URI below matches that style.
 SHOPIFY_INVENTORY_REFERENCE_DOCUMENT_URI = "logistics://marketplace-integrations/erpnext-stock-sync"
 
-# The stale-compare userError code. UNVERIFIED: seen in one shopify.dev fetch on
-# 2026-09-24, while a later fetch said the code enum is not listed. A wrong
-# guess is bounded: a non-matching code takes the per-item fallback, which
-# skip-if-equals on its own re-read.
-SHOPIFY_INVENTORY_STALE_COMPARE_CODE = "COMPARE_FAILED"
+# The stale-compare userError code of `inventorySetQuantities` when
+# `changeFromQuantity` does not match the persisted value. VERIFIED 2026-10-11
+# (shopify.dev `enums/InventorySetQuantitiesUserErrorCode`, 2026-07): the enum
+# has CHANGE_FROM_QUANTITY_STALE, COMPARE_QUANTITY_STALE (for the removed
+# `compareQuantity`, never sent here) and no COMPARE_FAILED. A non-matching
+# code takes the per-item fallback, which skip-if-equals on its own re-read.
+SHOPIFY_INVENTORY_STALE_COMPARE_CODE = "CHANGE_FROM_QUANTITY_STALE"
 
 # Order retrieval (#109). These page sizes are deliberately bounded; an
 # order whose relevant connection reports another page is marked Error by

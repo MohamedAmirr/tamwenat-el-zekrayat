@@ -83,11 +83,11 @@ def _normalize_item(item):
 	# ``fulfillment_quantities_known`` is what records that both were really read.
 	unfulfilled_quantity = item.get("unfulfilledQuantity")
 	non_fulfillable_quantity = item.get("nonFulfillableQuantity")
-	net_amount = _decimal(unit_price) * _decimal(current_quantity)
-	for allocation in item.get("discountAllocations") or []:
-		net_amount -= _decimal(_money(allocation.get("allocatedAmountSet")))
 	transaction_money_bag = item.get("priceAfterAllDiscountsBeforeTaxesSet")
 	transaction_amount = _money(transaction_money_bag)
+	# Not originalUnitPrice x currentQuantity minus discountAllocations: allocations still include
+	# discounts on refunded/removed quantities (shopify.dev LineItem), understating a partly refunded line.
+	net_amount = _decimal(transaction_amount)
 	transaction_amount_missing = int(
 		not isinstance(transaction_money_bag, dict)
 		or not isinstance(transaction_money_bag.get("shopMoney"), dict)
