@@ -67,6 +67,7 @@ from marketplace_integrations.services.sales_order_reconciliation import (
 	ReconciliationMismatch,
 	SalesOrderLinesMismatch,
 	execute,
+	hold_cancel_for_draft_documents,
 	plan,
 	read_erp_state,
 	snapshot_advanced_from,
@@ -836,8 +837,11 @@ def set_sync_status_from_current_snapshot(order, preserve_sync_error=False):
 		order.last_sync_error = cstr(exc).strip()[:500] or _modified_after_sync_message()
 		return
 	if docstatus != 0:
-		reconciliation_plan = plan(
-			_parse_last_synced_snapshot(order), current_snapshot, evidence, read_erp_state(sales_order)
+		reconciliation_plan = hold_cancel_for_draft_documents(
+			plan(
+				_parse_last_synced_snapshot(order), current_snapshot, evidence, read_erp_state(sales_order)
+			),
+			sales_order.name,
 		)
 		_apply_reconciliation_status(order, reconciliation_plan)
 		if reconciliation_plan["outcome"] == NO_ACTION:
@@ -1481,7 +1485,9 @@ def _reconcile_submitted_order(order, sales_order, snapshot, evidence, trigger_s
 	"""Plan one submitted-order reconciliation; execute it if supported, else record an advisory."""
 	erp_state = read_erp_state(sales_order)
 	previous = _parse_last_synced_snapshot(order)
-	reconciliation_plan = plan(previous, snapshot or {}, evidence, erp_state)
+	reconciliation_plan = hold_cancel_for_draft_documents(
+		plan(previous, snapshot or {}, evidence, erp_state), sales_order.name
+	)
 	# Single dispatch point between "act on ERPNext" and "advise only".
 	if reconciliation_plan["outcome"] in _EXECUTABLE_OUTCOMES:
 		return _execute_reconciliation_plan(

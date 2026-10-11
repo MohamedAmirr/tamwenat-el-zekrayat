@@ -4145,6 +4145,151 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			delivery_note.submit()
 		return delivery_note
 
+	# --- Auto-cancel is held while the Sales Order has unfinished (draft) documents -----
+
+	def _draft_sales_invoice(self, sales_order_name):
+		from erpnext.selling.doctype.sales_order.sales_order import make_sales_invoice
+
+		invoice = make_sales_invoice(sales_order_name)
+		invoice.insert()
+		return invoice
+
+	def _draft_payment_entry(self, sales_order_name):
+		from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
+
+		payment_entry = get_payment_entry("Sales Order", sales_order_name)
+		payment_entry.reference_no = f"draft-{self.suffix}"
+		payment_entry.reference_date = nowdate()
+		payment_entry.insert()
+		return payment_entry
+
+	def _assert_cancel_held(self, order, sales_order, result, *named):
+		order.reload()
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+		self.assertNotIn("executed_action", result)
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 1)
+		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertIn("The Sales Order was not cancelled", order.last_sync_error)
+		self.assertLess(len(order.last_sync_error), 500)
+		for name in named:
+			self.assertIn(name, order.last_sync_error)
+		self.assertEqual(
+			frappe.db.count("Marketplace Sync Log", {"marketplace_order": order.name}),
+			self._sync_log_count + 1,
+		)
+		# Opening the form re-plans from the same evidence and must keep the draft message.
+		self.assertEqual(get_current_sync_status(order.name), "Modified After Sync")
+		order.reload()
+		self.assertIn("The Sales Order was not cancelled", order.last_sync_error)
+
+	def _held_refund(self, create_draft):
+		_account, order, sales_order = self._synced_shipping_order()
+		draft = create_draft(sales_order)
+		self._fully_refund(order)
+		self._sync_log_count = frappe.db.count("Marketplace Sync Log", {"marketplace_order": order.name})
+		result = sync_sales_order(order.name)
+		return order, sales_order, draft, result
+
+	def test_full_refund_is_held_by_a_draft_delivery_note(self):
+		order, sales_order, draft, result = self._held_refund(lambda so: self._deliver(so, submit=False))
+		self._assert_cancel_held(order, sales_order, result, f"Delivery Note {draft.name}")
+
+	def test_full_refund_is_held_by_a_draft_sales_invoice(self):
+		order, sales_order, draft, result = self._held_refund(self._draft_sales_invoice)
+		self._assert_cancel_held(order, sales_order, result, f"Sales Invoice {draft.name}")
+
+	def test_full_refund_is_held_by_a_draft_payment_entry(self):
+		order, sales_order, draft, result = self._held_refund(self._draft_payment_entry)
+		self._assert_cancel_held(order, sales_order, result, f"Payment Entry {draft.name}")
+
+	def test_held_cancel_runs_once_the_draft_is_deleted_and_stays_idempotent(self):
+		order, sales_order, draft, result = self._held_refund(lambda so: self._deliver(so, submit=False))
+		self._assert_cancel_held(order, sales_order, result, draft.name)
+
+		frappe.delete_doc("Delivery Note", draft.name)
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["reconciliation"]["outcome"], "CANCEL_ORDER")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 2)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		again = sync_sales_order(order.name)
+		self.assertEqual(again["reconciliation"]["outcome"], "NO_ACTION")
+
+	def test_a_cancelled_draft_document_no_longer_holds_the_cancel(self):
+		_account, order, sales_order = self._synced_shipping_order()
+		invoice = self._draft_sales_invoice(sales_order)
+		frappe.delete_doc("Sales Invoice", invoice.name)
+		self._fully_refund(order)
+
+		result = sync_sales_order(order.name)
+
+		self.assertEqual(result["reconciliation"]["outcome"], "CANCEL_ORDER")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 2)
+
+	def test_several_drafts_are_named_per_type_and_capped(self):
+		_account, order, sales_order = self._synced_shipping_order()
+		notes = [self._deliver(sales_order, submit=False) for _ in range(5)]
+		invoice = self._draft_sales_invoice(sales_order)
+		self._fully_refund(order)
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+		self.assertIn(", and more", order.last_sync_error)
+		self.assertIn(f"Sales Invoice {invoice.name}", order.last_sync_error)
+		self.assertIn(notes[0].name, order.last_sync_error)
+		self.assertNotIn(notes[4].name, order.last_sync_error)
+		self.assertLess(len(order.last_sync_error), 500)
+
+	def test_plain_marketplace_cancellation_is_held_by_a_draft_delivery_note(self):
+		_account, order, first = self._sync_shopify(transaction_amount=36, current_quantity=2)
+		draft = self._deliver(first["sales_order"], submit=False)
+		order.cancelled_at = nowdate()
+		order.save()
+		self._sync_log_count = frappe.db.count("Marketplace Sync Log", {"marketplace_order": order.name})
+
+		result = sync_sales_order(order.name)
+
+		self._assert_cancel_held(order, first["sales_order"], result, f"Delivery Note {draft.name}")
+
+	def test_talabat_cancelled_after_pickup_is_held_by_a_draft_delivery_note(self):
+		order = self._make_order()
+		sales_order = self._sync_and_set_item_fields(order)
+		draft = self._deliver(sales_order.name, submit=False)
+		order.external_status = "CANCELLED"
+		order.post_picked_up = 1
+		order.save()
+		self._sync_log_count = frappe.db.count("Marketplace Sync Log", {"marketplace_order": order.name})
+
+		result = sync_sales_order(order.name)
+
+		self._assert_cancel_held(order, sales_order.name, result, f"Delivery Note {draft.name}")
+
+	def test_draft_documents_do_not_hold_close_remainder_or_update(self):
+		order = self._make_order()
+		sales_order = self._sync_and_set_item_fields(order, delivered_qty=1)
+		self._deliver(sales_order.name, submit=False)
+		order.external_status = "CANCELLED"
+		order.save()
+
+		result = sync_sales_order(order.name)
+
+		self.assertEqual(result["reconciliation"]["outcome"], "CLOSE_REMAINDER")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order.name, "status"), "Closed")
+
+		updated = self._synced_talabat_order()
+		self._deliver(updated.erpnext_sales_order, submit=False)
+		self._change_talabat_line(updated, 3, 1500)
+
+		result = sync_sales_order(updated.name)
+
+		self.assertEqual(result["reconciliation"]["outcome"], "UPDATE_SUBMITTED_ORDER")
+		self.assertTrue(result["ok"], result.get("error"))
+
 	def test_blocked_refund_names_the_real_delivery_note_and_sales_invoice(self):
 		from erpnext.controllers.sales_and_purchase_return import make_return_doc
 		from erpnext.stock.doctype.delivery_note.delivery_note import make_sales_invoice

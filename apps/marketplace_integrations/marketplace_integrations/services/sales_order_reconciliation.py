@@ -108,6 +108,54 @@ def _linked_documents(sales_order_name):
 	return linked
 
 
+def hold_cancel_for_draft_documents(reconciliation_plan, sales_order_name):
+	"""Return ``reconciliation_plan``, or a Needs Attention plan when cancelling it would strand drafts.
+
+	ERPNext cancels a Sales Order that still has a draft Delivery Note or Payment Entry (it
+	leaves the draft pointing at a cancelled order) and rejects one with a draft Sales
+	Invoice only with a generic error.  A ``CANCEL_ORDER`` plan is therefore held, with the
+	drafts named, until the merchant submits, cancels or deletes them.  Queries run only
+	for a ``CANCEL_ORDER`` plan; ``plan()`` itself stays free of database access.
+	"""
+	if reconciliation_plan["outcome"] != CANCEL_ORDER:
+		return reconciliation_plan
+	drafts = _draft_documents(sales_order_name)
+	listed = "; ".join(
+		named for named in (_documents({"linked_documents": drafts}, doctype) for doctype in drafts) if named
+	)
+	if not listed:
+		return reconciliation_plan
+	return _attention(
+		"The marketplace cancelled or refunded this order, but ERPNext has draft documents for it "
+		f"({listed}). The Sales Order was not cancelled. Submit, cancel or delete those documents, "
+		"then run the update again.",
+		reconciliation_plan["changes"],
+	)
+
+
+def _draft_documents(sales_order_name):
+	drafts = {}
+	for doctype, item_doctype, link_field in (
+		*_LINKED_DOCUMENT_SOURCES,
+		("Payment Entry", "Payment Entry Reference", "reference_name"),
+	):
+		parent = frappe.qb.DocType(doctype)
+		item = frappe.qb.DocType(item_doctype)
+		query = (
+			frappe.qb.from_(item)
+			.join(parent)
+			.on(item.parent == parent.name)
+			.select(parent.name)
+			.distinct()
+			.where(getattr(item, link_field) == sales_order_name)
+			.where(parent.docstatus == 0)
+		)
+		if doctype == "Payment Entry":
+			query = query.where(item.reference_doctype == "Sales Order")
+		drafts[doctype] = query.orderby(parent.name).limit(_MAX_LINKED_DOCUMENTS + 1).run(pluck=True)
+	return drafts
+
+
 def snapshot_with_sales_order_item_names(snapshot, sales_order, refund_ids=None):
 	"""Copy a successful commercial snapshot and attach ERP line identities.
 
