@@ -404,6 +404,58 @@ def _parse_request_data(value):
 	return data if isinstance(data, dict) else {}
 
 
+def _import_failure_order_id(log):
+	request_data = _parse_request_data(log.request_data)
+	return next(
+		(cstr(request_data[key]).strip() for key in IMPORT_ERROR_ORDER_ID_KEYS if request_data.get(key)),
+		"",
+	)
+
+
+def get_resolved_import_failures(logs):
+	"""Names of the Order Import failure ``logs`` that a later import resolved.
+
+	``logs`` are ``Marketplace Sync Log`` rows carrying ``name``,
+	``marketplace_account``, ``request_data``, ``attempted_at`` and
+	``creation``. A failure is resolved when a Marketplace Order with its
+	external id was created after the failed attempt (a first import that
+	succeeded later), or was updated after it (platform time, falling back to
+	``modified``). Creation is checked separately because some platforms,
+	Shopify among them, stamp ``last_platform_update_on`` with the platform's
+	own update time, which can predate the failed attempt even though the
+	order was only imported afterwards. An order that existed before the
+	failure and was not updated since (a failed update) stays unresolved.
+	Shared by the Needs Attention report and the Shopify Order Import
+	Failures report so both agree on what counts as recovered."""
+	ids_by_account = {}
+	for log in logs:
+		order_id = _import_failure_order_id(log)
+		if order_id:
+			ids_by_account.setdefault(log.marketplace_account, set()).add(order_id)
+	# (account, external id) -> (when the Marketplace Order was created,
+	# when it was last updated).
+	imported = {}
+	for account_name, order_ids in ids_by_account.items():
+		for chunk in _chunks(order_ids):
+			for row in _get_orders(
+				[account_name],
+				{"external_order_id": ["in", chunk]},
+				["external_order_id", "creation", "last_platform_update_on", "modified"],
+			):
+				imported[(account_name, cstr(row.external_order_id).strip())] = (
+					get_datetime(row.creation),
+					get_datetime(row.last_platform_update_on or row.modified),
+				)
+
+	resolved = set()
+	for log in logs:
+		order_id = _import_failure_order_id(log)
+		order = imported.get((log.marketplace_account, order_id)) if order_id else None
+		if order and max(order) > get_datetime(log.attempted_at or log.creation):
+			resolved.add(log.name)
+	return resolved
+
+
 def _collect_import_errors(accounts):
 	logs = frappe.get_list(
 		"Marketplace Sync Log",
@@ -422,11 +474,7 @@ def _collect_import_errors(accounts):
 	candidates = []
 	seen = set()
 	for log in logs:
-		request_data = _parse_request_data(log.request_data)
-		order_id = next(
-			(cstr(request_data[key]).strip() for key in IMPORT_ERROR_ORDER_ID_KEYS if request_data.get(key)),
-			"",
-		)
+		order_id = _import_failure_order_id(log)
 		if order_id:
 			key = (log.marketplace_account, order_id)
 			if key in seen:
@@ -434,29 +482,11 @@ def _collect_import_errors(accounts):
 			seen.add(key)
 		candidates.append((log, order_id))
 
-	ids_by_account = {}
-	for log, order_id in candidates:
-		if order_id:
-			ids_by_account.setdefault(log.marketplace_account, set()).add(order_id)
-	# (account, external id) -> when the imported order was last updated.
-	imported_on = {}
-	for account_name, order_ids in ids_by_account.items():
-		for chunk in _chunks(order_ids):
-			for row in _get_orders(
-				[account_name],
-				{"external_order_id": ["in", chunk]},
-				["external_order_id", "last_platform_update_on", "modified"],
-			):
-				imported_on[(account_name, cstr(row.external_order_id).strip())] = get_datetime(
-					row.last_platform_update_on or row.modified
-				)
+	resolved = get_resolved_import_failures([log for log, _order_id in candidates])
 
 	items = []
 	for log, order_id in candidates:
-		order_updated_on = imported_on.get((log.marketplace_account, order_id)) if order_id else None
-		# Resolved only by an order import/update strictly after the failure;
-		# an order that is older than the log (a failed update) stays visible.
-		if order_updated_on and order_updated_on > get_datetime(log.attempted_at or log.creation):
+		if log.name in resolved:
 			continue
 		items.append(
 			_item(

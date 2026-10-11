@@ -46,6 +46,7 @@ class IntegrationTestDashboardFailureStatesSurfaceCorrectly(IntegrationTestCase)
 		self.item = make_item("Test Dashboard Fixture Item")
 
 	def tearDown(self):
+		frappe.db.delete("Marketplace Sync Log", {"marketplace_account": self.account.name})
 		frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": self.account.name})
 		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
 		frappe.delete_doc("Shopify Connection", self.account.connection, ignore_permissions=True, force=True)
@@ -134,6 +135,7 @@ class IntegrationTestDashboardFailureStatesSurfaceCorrectly(IntegrationTestCase)
 			{
 				"doctype": "Marketplace Sync Log",
 				"sync_type": "Order Import",
+				"marketplace_account": self.account.name,
 				"status": "Error",
 				"attempted_at": frappe.utils.now_datetime(),
 				"traceback": "dashboard fixture failure",

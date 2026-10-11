@@ -10,7 +10,12 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, cstr, flt, getdate, now_datetime, nowdate
 
 from marketplace_integrations.patches.v0_0 import backfill_last_synced_snapshot as backfill
-from marketplace_integrations.services.marketplace_attention import get_attention_items
+from marketplace_integrations.services.marketplace_attention import (
+	NEXT_RETRY,
+	SYNC_ERROR,
+	UNMAPPED_ITEMS,
+	get_attention_items,
+)
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 from marketplace_integrations.services.sales_order_reconciliation import (
 	SalesOrderLinesMismatch,
@@ -4395,3 +4400,254 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertNotIn("shipping", noon_snapshot)
 		self.assertEqual(snapshot_hash(noon_snapshot), noon_order.last_synced_hash)
 
+
+	# -- retry after a blocker or error (Finding 7) ----------------------
+
+	def _sync_logs(self, order):
+		return frappe.get_all(
+			"Marketplace Sync Log",
+			filters={"marketplace_order": order.name},
+			fields=["name", "status", "trigger_source", "traceback"],
+			order_by="creation asc, name asc",
+		)
+
+	def _resync_latest(self, order):
+		"""What the list/form retry does: resync the order's latest sync log."""
+		latest = self._sync_logs(order)[-1]
+		return frappe.get_doc("Marketplace Sync Log", latest.name).resync()
+
+	def _sales_orders_of(self, order):
+		return frappe.get_all("Sales Order", filters={"custom_marketplace_order": order.name}, pluck="name")
+
+	def _attention_types(self, account):
+		return {row["problem_type"] for row in get_attention_items({"account": account.name})}
+
+	def _make_variant_mapping(self, account, variant_gid, **overrides):
+		return frappe.get_doc(
+			{
+				"doctype": "Marketplace Product Mapping",
+				"marketplace_account": account.name,
+				"item": self.item.name,
+				"external_reference": variant_gid,
+				"external_variant_id": variant_gid,
+				"sales_uom": "Nos",
+				**overrides,
+			}
+		).insert()
+
+	def _unmapped_shopify_order(self):
+		variant_gid = f"gid://shopify/ProductVariant/{frappe.generate_hash(length=12)}"
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, variant_gid=variant_gid, create_mapping=False)
+		return account, order, variant_gid
+
+	def test_missing_mapping_blocker_is_retried_until_the_mapping_exists_then_recovers_once(self):
+		account, order, variant_gid = self._unmapped_shopify_order()
+
+		first = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(first["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertEqual([log.status for log in self._sync_logs(order)], ["Invalid"])
+		rows = get_attention_items({"account": account.name})
+		by_type = {row["problem_type"]: row for row in rows}
+		self.assertEqual(set(by_type), {SYNC_ERROR, UNMAPPED_ITEMS})
+		self.assertEqual(by_type[SYNC_ERROR]["next_action"], NEXT_RETRY)
+		self.assertEqual(by_type[UNMAPPED_ITEMS]["next_action_reference"], variant_gid)
+
+		# Retrying without fixing anything stays blocked: one new log per attempt.
+		self.assertFalse(self._resync_latest(order)["ok"])
+		self.assertFalse(self._resync_latest(order)["ok"])
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertEqual(len(self._sync_logs(order)), 3)
+		self.assertFalse(self._sales_orders_of(order))
+
+		self._make_variant_mapping(account, variant_gid)
+		recovered = self._resync_latest(order)
+		order.reload()
+
+		self.assertTrue(recovered["ok"], recovered.get("error"))
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertFalse(order.last_sync_error)
+		self.assertTrue(order.erpnext_sales_order)
+		self.assertEqual(self._attention_types(account), set())
+		self.assertEqual(self._sales_orders_of(order), [order.erpnext_sales_order])
+		self.assertEqual(self._sync_logs(order)[-1].status, "Success")
+
+		again = self._resync_latest(order)
+		order.reload()
+
+		self.assertTrue(again["ok"], again.get("error"))
+		self.assertEqual(self._sales_orders_of(order), [order.erpnext_sales_order])
+
+	def test_disabled_mapping_blocker_recovers_when_re_enabled(self):
+		account, order, variant_gid = self._unmapped_shopify_order()
+		mapping = self._make_variant_mapping(account, variant_gid, enabled=0)
+
+		self.assertFalse(sync_sales_order(order.name)["ok"])
+		self.assertIn(UNMAPPED_ITEMS, self._attention_types(account))
+
+		mapping.enabled = 1
+		mapping.save()
+		result = self._resync_latest(order)
+		order.reload()
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(self._attention_types(account), set())
+		self.assertEqual(len(self._sales_orders_of(order)), 1)
+
+	def test_unusable_selling_price_list_blocker_recovers_when_fixed(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account)
+		frappe.db.set_value("Price List", self.price_list, "enabled", 0)
+		try:
+			blocked = sync_sales_order(order.name)
+			order.reload()
+			self.assertFalse(blocked["ok"])
+			self.assertEqual(order.erpnext_sync_status, "Sync Error")
+			self.assertFalse(self._sales_orders_of(order))
+		finally:
+			frappe.db.set_value("Price List", self.price_list, "enabled", 1)
+
+		result = self._resync_latest(order)
+		order.reload()
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(len(self._sales_orders_of(order)), 1)
+
+	def test_unexpected_exception_is_logged_and_the_retry_leaves_exactly_one_sales_order(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account)
+
+		with patch.object(SalesOrder, "submit", side_effect=RuntimeError("submit exploded")):
+			failed = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(failed["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertFalse(order.erpnext_sales_order)
+		log = self._sync_logs(order)[-1]
+		self.assertEqual(log.status, "Error")
+		self.assertIn("submit exploded", log.traceback)
+		self.assertIn(SYNC_ERROR, self._attention_types(account))
+
+		result = self._resync_latest(order)
+		order.reload()
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(self._sales_orders_of(order), [order.erpnext_sales_order])
+		self.assertEqual(frappe.db.get_value("Sales Order", order.erpnext_sales_order, "docstatus"), 1)
+
+	def test_permanent_accounting_blocker_stays_actionable_across_retries(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, total_taxes=5)
+		doctypes = ("Sales Invoice", "Payment Entry", "Journal Entry", "GL Entry")
+		before = {doctype: frappe.db.count(doctype) for doctype in doctypes}
+
+		results = [sync_sales_order(order.name)]
+		results += [self._resync_latest(order), self._resync_latest(order)]
+		order.reload()
+
+		self.assertTrue(all(not result["ok"] for result in results))
+		self.assertTrue(all("taxes" in result["error"] for result in results))
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertEqual(len(self._sync_logs(order)), 3)
+		self.assertEqual([log.status for log in self._sync_logs(order)], ["Invalid"] * 3)
+		self.assertFalse(self._sales_orders_of(order))
+		self.assertFalse(order.erpnext_sales_order)
+		self.assertEqual({doctype: frappe.db.count(doctype) for doctype in doctypes}, before)
+		rows = [r for r in get_attention_items({"account": account.name}) if r["problem_type"] == SYNC_ERROR]
+		self.assertEqual([row["next_action"] for row in rows], [NEXT_RETRY])
+
+	def test_manual_resync_appends_exactly_one_log_row_through_the_real_sync(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account)
+		self.assertTrue(sync_sales_order(order.name)["ok"])
+		before = self._sync_logs(order)
+
+		result = self._resync_latest(order)
+		after = self._sync_logs(order)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(len(after), len(before) + 1)
+		self.assertEqual(before[-1].trigger_source, "Manual")
+		self.assertEqual(after[-1].trigger_source, "Manual Resync")
+
+	# -- Shopify price stability (Finding 8.4) -----------------------------
+
+	def _change_item_price_and_add_pricing_rule(self):
+		"""Make ERPNext's pricing differ from what the order was synced at."""
+		item_price = frappe.get_doc(
+			"Item Price", {"item_code": self.item.name, "price_list": self.price_list}
+		)
+		item_price.price_list_rate = 99
+		item_price.save()
+		rule = self._make_pricing_rule()
+		self.addCleanup(frappe.delete_doc, "Pricing Rule", rule.name, force=True)
+
+	def _assert_shopify_line(self, sales_order_name, rate):
+		line = frappe.get_doc("Sales Order", sales_order_name).items[0]
+		self.assertEqual(line.rate, rate)
+		self.assertEqual(line.price_list_rate, rate)
+		self.assertEqual(line.discount_percentage, 0)
+		self.assertFalse(line.pricing_rules)
+
+	def test_shopify_pricing_rule_existing_before_first_sync_does_not_discount_the_order(self):
+		rule = self._make_pricing_rule()
+		self.addCleanup(frappe.delete_doc, "Pricing Rule", rule.name, force=True)
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, transaction_amount=36.0, current_quantity=2)
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self._assert_shopify_line(result["sales_order"], 18)
+		self.assertEqual(frappe.db.get_value("Sales Order", result["sales_order"], "grand_total"), 36)
+
+	def test_shopify_submitted_order_ignores_a_later_item_price_and_pricing_rule_change(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, transaction_amount=36.0, current_quantity=2)
+		first = sync_sales_order(order.name)
+		order.reload()
+		synced_hash = order.last_synced_hash
+
+		self._change_item_price_and_add_pricing_rule()
+		second = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(second["ok"], second.get("error"))
+		self.assertEqual(second["sales_order"], first["sales_order"])
+		self.assertFalse(second["updated"])
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(order.last_synced_hash, synced_hash)
+		self._assert_shopify_line(first["sales_order"], 18)
+
+	def test_shopify_draft_order_follows_shopify_only_after_item_price_and_pricing_rule_change(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, transaction_amount=36.0, current_quantity=2)
+		first = sync_sales_order(order.name)
+		frappe.db.set_value("Sales Order", first["sales_order"], "docstatus", 0, update_modified=False)
+
+		self._change_item_price_and_add_pricing_rule()
+		unchanged = sync_sales_order(order.name)
+
+		self.assertTrue(unchanged["ok"], unchanged.get("error"))
+		self.assertFalse(unchanged["updated"])
+		self._assert_shopify_line(first["sales_order"], 18)
+
+		order.reload()
+		order.items[0].transaction_amount = 40
+		order.order_total = 40
+		order.save()
+		changed = sync_sales_order(order.name)
+
+		self.assertTrue(changed["ok"], changed.get("error"))
+		self.assertTrue(changed["updated"])
+		self._assert_shopify_line(first["sales_order"], 20)
+		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "grand_total"), 40)
+		frappe.db.set_value("Sales Order", first["sales_order"], "docstatus", 1, update_modified=False)

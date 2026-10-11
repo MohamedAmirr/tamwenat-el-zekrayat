@@ -241,16 +241,20 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 		_verify_line_amounts(sales_order, snapshot, account)
 		_verify_grand_total(sales_order, snapshot, order, account)
 		# Verify the snapshot pairs with the inserted rows BEFORE submitting; on a
-		# mismatch roll the insert back so no orphan Sales Order is left unlinked
-		# (a retry would otherwise create a duplicate).
+		# mismatch, or any failure of the insert/submit, roll the insert back so no
+		# orphan draft Sales Order is left unlinked (a retry would otherwise create
+		# a duplicate).
 		frappe.db.savepoint(_FRESH_SALES_ORDER_SAVEPOINT)
 		try:
 			sales_order.insert()
 			snapshot_with_sales_order_item_names(snapshot, sales_order)
+			sales_order.submit()
 		except SalesOrderLinesMismatch as exc:
 			frappe.db.rollback(save_point=_FRESH_SALES_ORDER_SAVEPOINT)
 			raise SyncBlocker(str(exc)) from exc
-		sales_order.submit()
+		except Exception:
+			frappe.db.rollback(save_point=_FRESH_SALES_ORDER_SAVEPOINT)
+			raise
 		result = _save_success(order, current_hash, sales_order, updated=False, snapshot=snapshot)
 		result = _flag_compensating_evidence_on_new_order(order, sales_order, snapshot) or result
 		_create_sync_log(order, trigger_source, "Success", snapshot, result)
