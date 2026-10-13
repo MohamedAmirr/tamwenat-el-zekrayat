@@ -18,21 +18,25 @@
 	const BOSTA_DEFAULTS_METHOD = "marketplace_integrations.api.bosta_shipments.get_create_defaults";
 	const BOSTA_CREATE_METHOD = "marketplace_integrations.api.bosta_shipments.create_shipment";
 
+	const BOSTA_CREATOR_ROLES = ["Sales Manager", "Stock User", "System Manager"];
+
+	// The form clears custom buttons on every refresh (Form.refresh -> clear_custom_buttons),
+	// so no "already added" flag: the button is added again on each refresh.
 	function add_bosta_shipment_button(frm) {
 		if (
 			!frm.doc ||
 			frm.doc.docstatus !== 1 ||
 			frm.doc.status === "Cancelled" ||
-			frm.__mi_bosta_shipment_button_added
+			!(frappe.user && frappe.user.has_role(BOSTA_CREATOR_ROLES))
 		)
 			return;
-		frm.__mi_bosta_shipment_button_added = true;
 		frm.add_custom_button(__("Create Bosta Shipment"), () => {
 			frappe.call({ method: BOSTA_DEFAULTS_METHOD, type: "POST", args: { sales_order: frm.doc.name } }).then((r) => {
 				const defaults = r.message || {};
 				const dialog = new frappe.ui.Dialog({
 					title: __("Create Bosta Shipment"),
 					fields: [
+						{ fieldtype: "HTML", fieldname: "cod_note", options: bosta_cod_note_html(defaults) },
 						{ fieldtype: "HTML", fieldname: "address_help", options: `<p>${__("Enter District ID, or both City ID and District Name.")}</p>` },
 						{ fieldname: "receiver_name", fieldtype: "Data", label: __("Receiver Name"), reqd: 1, default: defaults.receiver_name },
 						{ fieldname: "receiver_phone", fieldtype: "Data", label: __("Receiver Phone"), reqd: 1, default: defaults.receiver_phone },
@@ -48,7 +52,7 @@
 						frappe.call({
 							method: BOSTA_CREATE_METHOD,
 							type: "POST",
-							args: { sales_order: frm.doc.name, ...values },
+							args: { sales_order: frm.doc.name, ...values, expected_cod: defaults.cod_amount },
 							freeze: true,
 							freeze_message: __("Creating Bosta shipment..."),
 						}).then(() => frm.reload_doc());
@@ -57,6 +61,31 @@
 				dialog.show();
 			});
 		});
+	}
+
+	// The COD that will be sent is the outstanding amount (total minus payments). Values are
+	// numbers from the server; formatted and escaped before they reach the HTML field.
+	function bosta_cod_note_html(defaults) {
+		const escape = frappe.utils.escape_html;
+		const format = (value) => escape(format_currency(value || 0));
+		let html = `<p><b>${escape(__("COD to be sent to Bosta"))}: ${format(defaults.cod_amount)}</b></p>`;
+		if (!defaults.cod_amount) {
+			html += `<p>${escape(__("This amount is 0. Bosta may reject a delivery without COD."))}</p>`;
+		}
+		html += `<p>${escape(
+			__(
+				"COD is the Sales Order total minus advance payments recorded on the Sales Order. Payments made against a Sales Invoice are not seen, and a partly delivered order still uses the whole-order amount."
+			)
+		)}</p>`;
+		if (defaults.advance_paid) {
+			html += `<p>${escape(
+				__("Order total {0}, less payments already received {1}.", [
+					format_currency(defaults.order_total || 0),
+					format_currency(defaults.advance_paid || 0),
+				])
+			)}</p>`;
+		}
+		return html;
 	}
 
 	// Only submitted (1) or cancelled (2) Sales Orders linked to a Marketplace Order.
@@ -277,6 +306,7 @@
 
 	if (typeof module !== "undefined") {
 		module.exports = {
+			bosta_cod_note_html,
 			blocked_message,
 			can_offer_cancel,
 			consume_close_request,

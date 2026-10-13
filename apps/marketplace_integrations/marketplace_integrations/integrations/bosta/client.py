@@ -19,6 +19,7 @@ from marketplace_integrations.integrations.bosta.constants import (
 	BOSTA_CREATE_DELIVERY_PATH,
 	BOSTA_GET_DELIVERY_PATH,
 	BOSTA_MASS_AWB_PATH,
+	BOSTA_SEARCH_DELIVERIES_PATH,
 )
 from marketplace_integrations.integrations.http import error_message_from_response, http_request
 
@@ -34,6 +35,19 @@ class BostaClient:
 	def get_settings(self):
 		return self._settings or frappe.get_single("Bosta Settings")
 
+	def ensure_ready(self):
+		"""Raise before anything is sent if Bosta is disabled or has no API key; return the key.
+
+		Callers use this to fail on configuration problems before they persist any state
+		that would otherwise look like an ambiguous (maybe-sent) request."""
+		settings = self.get_settings()
+		if not settings.enabled:
+			frappe.throw(_("Bosta Settings is disabled."))
+		api_key = settings.get_password("api_key", raise_exception=False)
+		if not api_key:
+			frappe.throw(_("Bosta Settings has no API key."))
+		return api_key
+
 	def request(self, method, path, **kwargs):
 		"""Make one Bosta request and return its raw response.
 
@@ -41,14 +55,7 @@ class BostaClient:
 		do not all document the same success status. Network errors are sanitized
 		so credentials cannot be leaked through exception text.
 		"""
-		settings = self.get_settings()
-		if not settings.enabled:
-			frappe.throw(_("Bosta Settings is disabled."))
-
-		api_key = settings.get_password("api_key", raise_exception=False)
-		if not api_key:
-			frappe.throw(_("Bosta Settings has no API key."))
-
+		api_key = self.ensure_ready()
 		path = path if path.startswith("/") else f"/{path}"
 		headers = kwargs.pop("headers", {}) or {}
 		headers.update({"Authorization": api_key, "Content-Type": "application/json"})
@@ -103,6 +110,16 @@ class BostaClient:
 			"GET", BOSTA_GET_DELIVERY_PATH.format(tracking_number=quote(tracking_number, safe=""))
 		)
 
+	def search_by_business_reference(self, business_reference):
+		"""Search Bosta's documented ``businessReference`` filter (the OpenAPI does not
+		document searching by ``uniqueBusinessReference``)."""
+		business_reference = str(business_reference or "").strip()
+		if not business_reference:
+			frappe.throw(_("A Bosta business reference is required."))
+		return self.request(
+			"POST", BOSTA_SEARCH_DELIVERIES_PATH, json={"businessReference": business_reference}
+		)
+
 	def error_message(self, response):
 		"""Return a bounded Bosta error suitable for an operator-facing message."""
 		return _("Bosta request failed (HTTP {0}): {1}").format(
@@ -123,3 +140,16 @@ def _normalise_awb_tracking_numbers(tracking_numbers):
 	if not all(numbers):
 		return []
 	return numbers
+
+
+def response_body(response):
+	"""The JSON object body of a Bosta response, or ``{}`` when it is not one."""
+	try:
+		body = response.json()
+	except ValueError:
+		return {}
+	return body if isinstance(body, dict) else {}
+
+
+def is_success_response(response):
+	return 200 <= response.status_code < 300 and response_body(response).get("success") is not False

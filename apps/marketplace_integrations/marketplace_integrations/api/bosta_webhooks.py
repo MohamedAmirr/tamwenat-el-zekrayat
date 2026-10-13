@@ -25,7 +25,15 @@ def delivery_event():
 		or not hmac.compare_digest(cstr(provided).encode(), cstr(secret).encode())
 	):
 		frappe.throw(_("Invalid Bosta webhook."), frappe.PermissionError)
-	process_webhook_event(_webhook_payload())
+	payload = _webhook_payload()
+	# Guest request: process as the system user (as the Shopify webhooks do), so the
+	# Delivery Note cancel is not refused for lack of permission; restore afterwards.
+	previous_user = frappe.session.user
+	frappe.set_user("Administrator")
+	try:
+		process_webhook_event(payload)
+	finally:
+		frappe.set_user(previous_user)
 	return {"accepted": True}
 
 

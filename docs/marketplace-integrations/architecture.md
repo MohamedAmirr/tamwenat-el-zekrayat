@@ -168,18 +168,79 @@ settings/client foundation.
 
 The `Bosta Shipment` operational record links an ERPNext Sales Order and
 Delivery Note; it is not a marketplace shipment or a generic carrier
-framework. It separately retains the last documented Bosta `state.code` and
-`state.value` snapshot from `GET /deliveries/business/{trackingNumber}`. A
-30-minute scheduled poll updates that opaque snapshot until Bosta's documented
-`Delivered` state. Bosta dashboard webhooks use the configured custom
-`X-Bosta-Webhook-Secret` header, validate the supplied event schema, find the
-shipment by tracking number, and verify the Bosta delivery ID. They persist
-only documented state, timestamp, and exception fields, never the raw event.
-The documented numeric state code is mapped to Bosta's documented state name.
-For a standard `SEND` event with state `49` (`Canceled`), an existing submitted
-linked Delivery Note is cancelled idempotently. Bosta documents state `46`
-(`Returned to business`) only for Exchange/CRP/RTO rather than `SEND`, so it
-does not create a Sales Return for this MVP.
+framework.
+
+**Creating.** Only **Sales Manager**, **Stock User** and **System Manager** may
+create or check a shipment (Sales User is read-only; Stock User can read but not
+submit a Sales Order, so the Sales Order check is `read`). The order must be
+submitted, not Closed or On Hold, and have remaining deliverable quantity; this
+is checked before any row is inserted or Bosta is called. The flow is: commit,
+lock the Sales Order as the first statement of the transaction, validate,
+insert a `Pending Bosta` row and commit, call Bosta, persist the result and
+commit, then re-lock the Sales Order and create/submit the Delivery Note inside
+a savepoint (rolled back to on failure). COD is the **outstanding** amount:
+`rounded_total` (else `grand_total`) minus `advance_paid`, never below 0, and
+rejected locally above Bosta's documented 30,000 EGP limit. The payload sends
+the same value as `businessReference` and `uniqueBusinessReference`. The OpenAPI
+says COD must be positive for type 10, so a fully paid order (COD 0) may be
+rejected by Bosta; that is unverified, the escaped Bosta message is shown and the
+shipment ends `Bosta Failed` (retryable). COD is computed only from the Sales Order total minus
+`advance_paid`: it does not see payments made against a Sales Invoice, and a
+partly delivered order still uses the whole-order outstanding amount (proportional
+COD is undecided). Orders in a currency other than the company currency are
+rejected, and the amount the dialog showed is sent back as `expected_cod`; if the
+recomputed amount differs, creation is refused until the dialog is reopened. A
+configuration problem (Bosta disabled, no API key) is rejected before anything is
+persisted. A network exception also ends
+`Bosta Failed` with an "outcome unknown" message rather than staying Pending.
+
+**Recovery.** A retry of a `Bosta Failed` shipment, and the **Check Bosta**
+action (shipments that are Pending for more than 5 minutes, Bosta Failed, Delivery
+Note Failed, or Bosta Created without a Delivery Note), first search Bosta by
+`businessReference` (`POST /deliveries/search`; searching by
+`uniqueBusinessReference` is not documented). Found: the delivery ID and
+tracking number are linked and the Delivery Note step continues. Not found:
+`Bosta Failed`, so a retry is allowed. An unrecognised search response is an
+error, never "not found".
+
+**One active shipment per Sales Order.** `Bosta Shipment.active_sales_order` is a
+unique, hidden field set to the Sales Order while the shipment is not `Canceled`
+and to NULL once it is; MariaDB's unique index therefore allows any number of
+Canceled shipments but only one active one, even under concurrency. A Bosta
+cancellation (state `49`) cancels the Delivery Note, sets the shipment to
+`Canceled`, and a new shipment may then be created. If the Delivery Note cancel
+fails, the shipment stays active (no second shipment while goods are booked out)
+and `delivery_note_error` is set; a local retry runs on every poll. There is no
+terminal Returned status: state `46` is stored only, and the "Returned to
+business" return Delivery Note remains blocked.
+
+**Delivery Note permissions (undecided).** The Delivery Note step runs as the
+real user with `ignore_permissions`, which is not enough: ERPNext's mapper needs
+Delivery Note *create* (Stock User) and its Delivery Note validation needs Account
+*read* (Accounts User) for the calling user. A creator without them ends
+`Delivery Note Failed` and an authorised user resumes it. No session switch to
+Administrator is made in desk requests (it corrupts the logged-in session).
+
+**State application.** The state is applied by one function
+(`statuses.apply_state`) for both webhooks and the 30-minute poll. It takes the
+Sales Order lock then the shipment lock, ignores events not newer than the stored
+`last_bosta_event_timestamp` (a poll uses the instant the read started, so a stale
+poll cannot overwrite a newer webhook; this assumes Bosta's clock and ours are
+roughly aligned), stores only documented fields, and runs
+the cancel handling on `49`. Unknown tracking numbers, state codes and delivery
+types are logged and skipped (HTTP 200); only bad authentication or a malformed
+body is an error. The webhook is `allow_guest`, so its processing runs as
+Administrator and restores the caller afterwards. The poll skips terminal states
+(`45` Delivered, `49` Canceled), Canceled shipments and shipments older than
+60 days. Bosta webhooks use the configured custom `X-Bosta-Webhook-Secret`
+header. System-set fields are rejected server-side for anyone but System
+Manager/Administrator, not only read-only in the form; the status snapshot JSON
+is rendered escaped, and remote error text is escaped before `frappe.throw`.
+
+**Needs Attention.** A shipment with a failed Delivery Note create or cancel
+(`delivery_note_error`) is listed as problem type `Bosta Delivery Note`
+(platform `Bosta`, no account) in Marketplace Needs Attention and as one `Bosta`
+row in Marketplace Channel Status; it clears when a later attempt succeeds.
 
 The Bosta AWB documentation confirms that `POST /deliveries/mass-awb` returns
 a base64-encoded PDF for a request of 50 or fewer AWBs. The MVP requests only

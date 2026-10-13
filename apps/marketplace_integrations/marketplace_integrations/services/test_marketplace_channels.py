@@ -194,7 +194,11 @@ class IntegrationTestMarketplaceChannels(IntegrationTestCase):
 		self.assertEqual(row["level"], "Error")
 
 	def test_no_accounts_returns_empty_list(self):
-		with patch("frappe.get_list", return_value=[]):
+		# Independent of Bosta settings/site state: the carrier row is not an account row.
+		with (
+			patch("frappe.get_list", return_value=[]),
+			patch("marketplace_integrations.services.marketplace_channels._bosta_rows", return_value=[]),
+		):
 			self.assertEqual(get_channel_status(), [])
 
 	def test_permission_scoping_denies_a_user_without_read_permission(self):

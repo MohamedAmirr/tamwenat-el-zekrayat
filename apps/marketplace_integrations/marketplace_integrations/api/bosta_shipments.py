@@ -6,6 +6,9 @@
 import frappe
 
 from marketplace_integrations.integrations.bosta.deliveries import (
+	check_bosta_shipment as _check_bosta_shipment,
+)
+from marketplace_integrations.integrations.bosta.deliveries import (
 	create_bosta_shipment as _create_bosta_shipment,
 )
 from marketplace_integrations.integrations.bosta.deliveries import (
@@ -25,10 +28,11 @@ def create_shipment(
 	receiver_name: str,
 	receiver_phone: str,
 	city: str,
-	district_id: str,
-	city_id: str,
-	district_name: str,
-	address_first_line: str,
+	district_id: str = "",
+	city_id: str = "",
+	district_name: str = "",
+	address_first_line: str = "",
+	expected_cod: float | None = None,
 ):
 	return _create_bosta_shipment(
 		sales_order,
@@ -39,7 +43,14 @@ def create_shipment(
 		city_id,
 		district_name,
 		address_first_line,
+		expected_cod,
 	)
+
+
+@frappe.whitelist(methods=["POST"])
+def check_shipment(shipment: str):
+	"""Resolve a stuck Bosta Shipment by searching Bosta for its business reference."""
+	return _check_bosta_shipment(shipment)
 
 
 @frappe.whitelist(methods=["POST"])

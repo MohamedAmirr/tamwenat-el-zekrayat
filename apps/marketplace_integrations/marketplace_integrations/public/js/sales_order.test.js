@@ -17,6 +17,7 @@ function load({
 	request_result = { ok: true, refreshed: true },
 	request_fails = false,
 	can_read = true,
+	bosta_creator = true,
 } = {}) {
 	const calls = [];
 	const alerts = [];
@@ -24,12 +25,20 @@ function load({
 	const dialogs = [];
 	const handlers = {};
 	global.frappe = {
+		user: { has_role: () => bosta_creator },
 		utils: { escape_html },
 		model: { can_read: (doctype) => can_read && doctype === "Marketplace Order" },
 		ui: {
 			form: {
 				on(doctype, hooks) {
-					handlers[doctype] = hooks;
+					// Like Frappe, clear custom buttons before every refresh.
+					handlers[doctype] = {
+						...hooks,
+						refresh(frm) {
+							if (frm.buttons) frm.buttons.length = 0;
+							return hooks.refresh(frm);
+						},
+					};
 				},
 			},
 			Dialog: class {
@@ -399,4 +408,30 @@ test("the platform name is escaped in titles and the button label", async () => 
 	blocked.handlers["Sales Order"].after_cancel(make_frm({ status: "Cancelled", docstatus: 2 }));
 	await settle();
 	assert.equal(blocked.msgprints[0].title, "Cancel on &lt;i&gt;X&lt;/i&gt;");
+});
+
+test("the Bosta dialog shows the COD to send, with a note when it is 0 or reduced by payments", () => {
+	const { module_exports } = load({ option: eligible() });
+	global.format_currency = (value) => `EGP ${value}`;
+	const paid = module_exports.bosta_cod_note_html({ cod_amount: 0, order_total: 500, advance_paid: 500 });
+	assert.match(paid, /COD to be sent to Bosta: EGP 0/);
+	assert.match(paid, /This amount is 0/);
+	assert.match(paid, /Order total EGP 500, less payments already received EGP 500/);
+
+	const unpaid = module_exports.bosta_cod_note_html({ cod_amount: 500, order_total: 500, advance_paid: 0 });
+	assert.match(unpaid, /EGP 500/);
+	assert.doesNotMatch(unpaid, /This amount is 0|less payments/);
+});
+
+test("the Bosta button is creator-only and survives a reload refresh", () => {
+	const { handlers } = load({ option: eligible({ state: "not_applicable" }), bosta_creator: false });
+	const denied = make_frm({});
+	handlers["Sales Order"].refresh(denied);
+	assert.ok(!denied.buttons.some((b) => b.label === "Create Bosta Shipment"));
+
+	const { handlers: allowed_handlers } = load({ option: eligible({ state: "not_applicable" }) });
+	const frm = make_frm({});
+	allowed_handlers["Sales Order"].refresh(frm);
+	allowed_handlers["Sales Order"].refresh(frm);
+	assert.ok(frm.buttons.some((b) => b.label === "Create Bosta Shipment"));
 });
