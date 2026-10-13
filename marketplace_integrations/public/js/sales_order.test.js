@@ -174,7 +174,7 @@ test("opening or reloading an already Closed order never prompts", async () => {
 	assert.equal(calls.length, 1);
 	assert.deepEqual(
 		frm.buttons.map((b) => b.label),
-		["Cancel on Talabat"]
+		["Create Bosta Shipment", "Cancel on Talabat"]
 	);
 });
 
@@ -188,7 +188,7 @@ test("closing via the wrapped method opens the dialog on the next Closed refresh
 	await settle();
 	assert.equal(dialogs.length, 1);
 	assert.equal(dialogs[0].shown, true);
-	assert.equal(frm.buttons.length, 1);
+	assert.equal(frm.buttons.length, 2);
 });
 
 test("open orders and orders without a marketplace order make no call", async () => {
@@ -263,7 +263,7 @@ test("a blocked order gets no Cancel button", async () => {
 	const frm = make_frm({ status: "Closed" });
 	handlers["Sales Order"].refresh(frm);
 	await settle();
-	assert.equal(frm.buttons.length, 0);
+	assert.equal(frm.buttons.length, 1);
 });
 
 test("the dialog requires a reason built from the server list", async () => {
@@ -383,7 +383,7 @@ test("without read permission on Marketplace Order nothing is fetched or shown",
 	await settle();
 	assert.equal(calls.length, 0);
 	assert.equal(dialogs.length + msgprints.length, 0);
-	assert.equal(closed.buttons.length + cancelled.buttons.length, 0);
+	assert.equal(closed.buttons.length + cancelled.buttons.length, 1);
 });
 
 test("the platform name is escaped in titles and the button label", async () => {

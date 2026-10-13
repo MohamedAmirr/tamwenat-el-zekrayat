@@ -49,7 +49,10 @@ add_to_apps_screen = [
 # page_js = {"page" : "public/js/file.js"}
 
 # include js in doctype views
-doctype_js = {"Sales Order": "public/js/sales_order.js"}
+doctype_js = {
+	"Sales Order": "public/js/sales_order.js",
+	"Bosta Shipment": "public/js/bosta_shipment.js",
+}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
@@ -197,6 +200,9 @@ scheduler_events = {
 		"* * * * *": [
 			"marketplace_integrations.services.sales_order_sync_debounce.sweep_due_sales_order_syncs",
 		],
+		"*/30 * * * *": [
+			"marketplace_integrations.integrations.bosta.statuses.poll_incomplete_shipments",
+		],
 	},
 	"daily": [
 		"marketplace_integrations.integrations.shopify.inventory_sync.reconcile_all_accounts",
@@ -301,6 +307,8 @@ fixtures = [
 				[
 					"Sales Order-custom_marketplace_order",
 					"Sales Order-custom_marketplace_platform",
+					"Payment Entry-custom_marketplace_order",
+					"Payment Entry-custom_marketplace_transaction_id",
 				],
 			]
 		],

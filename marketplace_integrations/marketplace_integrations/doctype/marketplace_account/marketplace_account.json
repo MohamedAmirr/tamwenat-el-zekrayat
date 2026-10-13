@@ -32,7 +32,9 @@
   "erpnext_selling_price_list",
   "erpnext_customer",
   "erpnext_shipping_account",
-  "enabled"
+  "enabled",
+  "shopify_payments_section",
+  "shopify_payment_gateways"
  ],
  "fields": [
   {
@@ -205,6 +207,20 @@
    "fieldtype": "Link",
    "label": "ERPNext Shipping Income Account",
    "options": "Account"
+  },
+  {
+   "depends_on": "eval:doc.platform==\"Shopify\"",
+   "fieldname": "shopify_payments_section",
+   "fieldtype": "Section Break",
+   "label": "Shopify Payments"
+  },
+  {
+   "depends_on": "eval:doc.platform==\"Shopify\"",
+   "description": "Maps each Shopify payment gateway (exact name) to the Mode of Payment and Clearing Account used for its mirrored Payment Entries.",
+   "fieldname": "shopify_payment_gateways",
+   "fieldtype": "Table",
+   "label": "Shopify Payment Gateways",
+   "options": "Shopify Payment Gateway Mapping"
   },
   {
    "default": "1",
