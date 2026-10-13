@@ -76,6 +76,23 @@ class UnitTestBostaClient(UnitTestCase):
 			{"trackingNumbers": "77873113,77873114", "requestedAwbType": "A4", "lang": "ar"},
 		)
 
+	def test_a4_arabic_awb_rejects_more_than_fifty_tracking_numbers_before_request(self):
+		tracking_numbers = [str(index) for index in range(51)]
+		with patch("marketplace_integrations.integrations.bosta.client.http_request") as request:
+			with self.assertRaises(frappe.ValidationError):
+				self.client.get_a4_arabic_awb(tracking_numbers)
+		request.assert_not_called()
+
+	def test_a4_arabic_awb_accepts_fifty_tracking_numbers(self):
+		tracking_numbers = [str(index) for index in range(50)]
+		response = FakeResponse(200)
+		with patch(
+			"marketplace_integrations.integrations.bosta.client.http_request", return_value=response
+		) as request:
+			self.client.get_a4_arabic_awb(tracking_numbers)
+
+		self.assertEqual(request.call_args.kwargs["json"]["trackingNumbers"], ",".join(tracking_numbers))
+
 	def test_get_delivery_quotes_the_tracking_number(self):
 		response = FakeResponse(200, {"success": True, "data": {}})
 		with patch(

@@ -9,6 +9,10 @@ BOSTA_MASS_AWB_PATH = "/deliveries/mass-awb"
 BOSTA_GET_DELIVERY_PATH = "/deliveries/business/{tracking_number}"
 BOSTA_WEBHOOK_PATH = "/api/method/marketplace_integrations.api.bosta_webhooks.delivery_event"
 
+# Bosta documents a different response shape above this count.  The MVP only
+# supports the documented base64-PDF response for batches of 50 or fewer.
+BOSTA_AWB_MAX_TRACKING_NUMBERS = 50
+
 # Bosta lets merchants configure an arbitrary custom header for dashboard
 # webhooks. This is the header this integration asks the merchant to configure.
 BOSTA_WEBHOOK_SECRET_HEADER = "X-Bosta-Webhook-Secret"

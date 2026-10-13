@@ -17,7 +17,7 @@ class UnitTestBostaStatuses(UnitTestCase):
 		with patch.object(statuses, "now_datetime", return_value="2026-10-13 12:00:00"):
 			self.assertTrue(statuses.update_shipment_status(shipment, response))
 
-		self.assertEqual(shipment.bosta_state_code, "10")
+		self.assertEqual(shipment.bosta_state_code, 10)
 		self.assertEqual(shipment.bosta_state_value, "Pickup requested")
 		self.assertEqual(
 			frappe.parse_json(shipment.bosta_status_snapshot), {"code": 10, "value": "Pickup requested"}

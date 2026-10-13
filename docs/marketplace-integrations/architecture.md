@@ -171,18 +171,25 @@ Delivery Note; it is not a marketplace shipment or a generic carrier
 framework. It separately retains the last documented Bosta `state.code` and
 `state.value` snapshot from `GET /deliveries/business/{trackingNumber}`. A
 30-minute scheduled poll updates that opaque snapshot until Bosta's documented
-`Delivered` state; it never changes an ERPNext Delivery Note. Bosta dashboard
-webhooks use the configured custom `X-Bosta-Webhook-Secret` header and are
-authenticated/acknowledged, but the supplied specification has no webhook
-event-body contract, so webhook bodies are not parsed or persisted.
+`Delivered` state. Bosta dashboard webhooks use the configured custom
+`X-Bosta-Webhook-Secret` header, validate the supplied event schema, find the
+shipment by tracking number, and verify the Bosta delivery ID. They persist
+only documented state, timestamp, and exception fields, never the raw event.
+The documented numeric state code is mapped to Bosta's documented state name.
+For a standard `SEND` event with state `49` (`Canceled`), an existing submitted
+linked Delivery Note is cancelled idempotently. Bosta documents state `46`
+(`Returned to business`) only for Exchange/CRP/RTO rather than `SEND`, so it
+does not create a Sales Return for this MVP.
 
-The supplied `POST /deliveries/mass-awb` contract confirms the A4/Arabic
-request but has no response media type/body schema, so the MVP client can make
-the fixed AWB request but cannot safely implement an in-ERP label download or
-print flow until Bosta confirms that response contract. Likewise, the product
-intent to automate ERPNext delivery-document changes for carrier events remains
-blocked: the specification does not define standard-Deliver return or
-cancellation semantics, and neither polling nor callbacks may infer them.
+The Bosta AWB documentation confirms that `POST /deliveries/mass-awb` returns
+a base64-encoded PDF for a request of 50 or fewer AWBs. The MVP requests only
+A4/Arabic labels, enforces that 50-label ceiling locally, decodes only a bare
+base64 PDF response, and saves each requested label as a private `File`
+attached to its `Bosta Shipment`; a shipment reader may request it on demand.
+The different response shape above 50 labels is intentionally unsupported.
+The product intent to create a Sales Return from a carrier event remains
+blocked: the supplied lifecycle does not define a standard-`SEND` return state,
+and neither polling nor callbacks may infer one.
 
 ### Marketplace Account
 
