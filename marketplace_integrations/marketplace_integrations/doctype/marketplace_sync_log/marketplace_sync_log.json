@@ -23,7 +23,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Sync Type",
-   "options": "Sales Order Sync\nOrder Import\nFulfillment\nReturn Lookup\nOrder Action",
+   "options": "Sales Order Sync\nOrder Import\nFulfillment\nReturn Lookup\nOrder Action\nPayment",
    "reqd": 1
   },
   {
