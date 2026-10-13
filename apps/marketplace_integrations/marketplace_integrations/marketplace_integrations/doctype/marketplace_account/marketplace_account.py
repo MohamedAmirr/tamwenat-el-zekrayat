@@ -99,6 +99,39 @@ def shipping_account_problem(account_name, company):
 	return None
 
 
+def clearing_account_problem(account_name, company):
+	"""Why ``account_name`` cannot be the clearing account of a mirrored Shopify payment, or None when it can.
+
+	Runs on Marketplace Account validation and again when a payment is mirrored (the account
+	can be disabled or changed after the Marketplace Account was saved).  Account types are
+	those ERPNext v16 offers for ``paid_to`` on a Receive Payment Entry (Bank and Cash).
+	"""
+	values = frappe.db.get_value(
+		"Account",
+		account_name,
+		["company", "is_group", "disabled", "account_type", "account_currency"],
+		as_dict=True,
+	)
+	if not values:
+		return _("Clearing Account {0} does not exist.").format(account_name)
+	if not company:
+		return _("Set the ERPNext Company before choosing a Clearing Account.")
+	if values.company != company:
+		return _("Clearing Account {0} does not belong to Company {1}.").format(account_name, company)
+	if values.is_group:
+		return _("Clearing Account {0} is a group account; choose a leaf account.").format(account_name)
+	if values.disabled:
+		return _("Clearing Account {0} is disabled.").format(account_name)
+	if values.account_type not in ("Bank", "Cash"):
+		return _("Clearing Account {0} must be a Bank or Cash account.").format(account_name)
+	company_currency = frappe.get_cached_value("Company", company, "default_currency")
+	if values.account_currency != company_currency:
+		return _("Clearing Account {0} is in {1}; it must be in the Company currency {2}.").format(
+			account_name, values.account_currency, company_currency
+		)
+	return None
+
+
 class MarketplaceAccount(Document):
 	def __init__(self, *args, **kwargs):
 		"""connection_doctype needs to be defaulted here, in __init__, not in
@@ -148,6 +181,7 @@ class MarketplaceAccount(Document):
 		self.validate_connection()
 		self.validate_warehouse()
 		self.validate_shipping_account()
+		self.validate_payment_gateways()
 		# validate_shopify_account() must run BEFORE validate_unique_account_identity():
 		# for a new Shopify account, external_account_id starts out blank and
 		# is only populated from the live-confirmed shop GID inside
@@ -236,6 +270,27 @@ class MarketplaceAccount(Document):
 		problem = shipping_account_problem(self.erpnext_shipping_account, self.erpnext_company)
 		if problem:
 			frappe.throw(problem)
+
+	def validate_payment_gateways(self):
+		"""Trim each gateway, allow one row per gateway, and check each clearing account
+		(see ``clearing_account_problem()``).  Shopify only."""
+		if self.platform != "Shopify":
+			return
+		seen = set()
+		for row in self.shopify_payment_gateways or []:
+			row.shopify_gateway = cstr(row.shopify_gateway).strip()
+			if not row.shopify_gateway:
+				frappe.throw(_("Row #{0}: Shopify Gateway is required.").format(row.idx))
+			if row.shopify_gateway in seen:
+				frappe.throw(
+					_("Row #{0}: Shopify Gateway {1} is listed more than once.").format(
+						row.idx, row.shopify_gateway
+					)
+				)
+			seen.add(row.shopify_gateway)
+			problem = clearing_account_problem(row.clearing_account, self.erpnext_company)
+			if problem:
+				frappe.throw(_("Row #{0}: {1}").format(row.idx, problem))
 
 	def validate_noon_account(self):
 		"""Bind a Noon account to the selected connection's project code locally."""
