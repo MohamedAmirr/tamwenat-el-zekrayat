@@ -15,6 +15,49 @@
 		"marketplace_integrations.api.marketplace_outbound.get_platform_cancel_option";
 	const REQUEST_METHOD =
 		"marketplace_integrations.api.marketplace_outbound.request_platform_cancel";
+	const BOSTA_DEFAULTS_METHOD = "marketplace_integrations.api.bosta_shipments.get_create_defaults";
+	const BOSTA_CREATE_METHOD = "marketplace_integrations.api.bosta_shipments.create_shipment";
+
+	function add_bosta_shipment_button(frm) {
+		if (
+			!frm.doc ||
+			frm.doc.docstatus !== 1 ||
+			frm.doc.status === "Cancelled" ||
+			frm.__mi_bosta_shipment_button_added
+		)
+			return;
+		frm.__mi_bosta_shipment_button_added = true;
+		frm.add_custom_button(__("Create Bosta Shipment"), () => {
+			frappe.call({ method: BOSTA_DEFAULTS_METHOD, type: "POST", args: { sales_order: frm.doc.name } }).then((r) => {
+				const defaults = r.message || {};
+				const dialog = new frappe.ui.Dialog({
+					title: __("Create Bosta Shipment"),
+					fields: [
+						{ fieldtype: "HTML", fieldname: "address_help", options: `<p>${__("Enter District ID, or both City ID and District Name.")}</p>` },
+						{ fieldname: "receiver_name", fieldtype: "Data", label: __("Receiver Name"), reqd: 1, default: defaults.receiver_name },
+						{ fieldname: "receiver_phone", fieldtype: "Data", label: __("Receiver Phone"), reqd: 1, default: defaults.receiver_phone },
+						{ fieldname: "city", fieldtype: "Data", label: __("City"), reqd: 1 },
+						{ fieldname: "district_id", fieldtype: "Data", label: __("District ID") },
+						{ fieldname: "city_id", fieldtype: "Data", label: __("City ID") },
+						{ fieldname: "district_name", fieldtype: "Data", label: __("District Name") },
+						{ fieldname: "address_first_line", fieldtype: "Small Text", label: __("Address First Line"), reqd: 1 },
+					],
+					primary_action_label: __("Create Shipment"),
+					primary_action(values) {
+						dialog.hide();
+						frappe.call({
+							method: BOSTA_CREATE_METHOD,
+							type: "POST",
+							args: { sales_order: frm.doc.name, ...values },
+							freeze: true,
+							freeze_message: __("Creating Bosta shipment..."),
+						}).then(() => frm.reload_doc());
+					},
+				});
+				dialog.show();
+			});
+		});
+	}
 
 	// Only submitted (1) or cancelled (2) Sales Orders linked to a Marketplace Order.
 	function is_marketplace_sales_order(doc) {
@@ -207,6 +250,7 @@
 	}
 
 	function on_refresh(frm) {
+		add_bosta_shipment_button(frm);
 		if (!wrap_close_sales_order(frm)) {
 			console.error(
 				"ERPNext no longer defines close_sales_order on the Sales Order form (#183)."

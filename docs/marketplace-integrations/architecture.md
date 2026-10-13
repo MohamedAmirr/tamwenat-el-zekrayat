@@ -166,8 +166,8 @@ Arabic AWB endpoints. It deliberately receives an opaque delivery payload: the
 Sales Order workflow owns the Bosta-required payload mapping, rather than the
 settings/client foundation.
 
-The later `Bosta Shipment` operational record will link an ERPNext Sales
-Order and Delivery Note; it is not a marketplace shipment or a generic carrier
+The `Bosta Shipment` operational record links an ERPNext Sales Order and
+Delivery Note; it is not a marketplace shipment or a generic carrier
 framework. Bosta dashboard webhooks use the configured custom
 `X-Bosta-Webhook-Secret` header. A later operational workflow may poll Bosta's
 documented status-read endpoint every 30 minutes. Although the product intent
