@@ -8,6 +8,7 @@ import binascii
 
 import frappe
 from frappe import _
+from frappe.utils import escape_html
 from frappe.utils.file_manager import save_file
 
 from marketplace_integrations.integrations.bosta.client import BostaClient
@@ -24,7 +25,7 @@ def create_a4_arabic_label(shipment_name):
 	client = BostaClient()
 	response = client.get_a4_arabic_awb([tracking_number])
 	if not 200 <= response.status_code < 300:
-		frappe.throw(client.error_message(response))
+		frappe.throw(escape_html(client.error_message(response)))
 
 	pdf_content = _decode_base64_pdf(response.content)
 	file_doc = save_file(

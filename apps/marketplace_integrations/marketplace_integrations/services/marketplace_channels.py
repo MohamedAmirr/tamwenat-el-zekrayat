@@ -19,7 +19,11 @@ here, since mapping errors are not part of that definition.
 
 import frappe
 
-from marketplace_integrations.services.marketplace_attention import get_attention_counts
+from marketplace_integrations.services.marketplace_attention import (
+	BOSTA_PLATFORM,
+	get_attention_counts,
+	get_attention_items,
+)
 
 EMPTY_COUNTS = {
 	"orders_needing_attention": 0,
@@ -58,7 +62,7 @@ def get_channel_status():
 		order_by="account_name asc",
 	)
 	if not accounts:
-		return []
+		return _bosta_rows()
 
 	account_names = [account.name for account in accounts]
 	shopify_connection_health = _get_shopify_connection_health(accounts)
@@ -105,7 +109,29 @@ def get_channel_status():
 		}
 		row["level"] = _compute_level(account, row, connection_health)
 		rows.append(row)
-	return rows
+	return rows + _bosta_rows()
+
+
+def _bosta_rows():
+	"""One carrier row for Bosta (not a Marketplace Account): shown when it is enabled or
+	has shipments whose Delivery Note action failed. ``orders_needing_attention`` counts
+	those shipments."""
+	enabled = frappe.db.get_single_value("Bosta Settings", "enabled")
+	failed = {item["reference_name"] for item in get_attention_items({"platform": BOSTA_PLATFORM})}
+	if not enabled and not failed:
+		return []
+	return [
+		{
+			**EMPTY_COUNTS,
+			"account": "",
+			"account_name": "Bosta",
+			"platform": BOSTA_PLATFORM,
+			"enabled": enabled,
+			"orders_needing_attention": len(failed),
+			"last_checked": None,
+			"level": "Error" if failed else ("OK" if enabled else "Disabled"),
+		}
+	]
 
 
 def _get_shopify_connection_health(accounts):

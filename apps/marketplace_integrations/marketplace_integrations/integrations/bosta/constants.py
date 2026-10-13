@@ -5,6 +5,7 @@
 
 BOSTA_API_BASE_URL = "https://app.bosta.co/api/v2"
 BOSTA_CREATE_DELIVERY_PATH = "/deliveries?apiVersion=1"
+BOSTA_SEARCH_DELIVERIES_PATH = "/deliveries/search"
 BOSTA_MASS_AWB_PATH = "/deliveries/mass-awb"
 BOSTA_GET_DELIVERY_PATH = "/deliveries/business/{tracking_number}"
 BOSTA_WEBHOOK_PATH = "/api/method/marketplace_integrations.api.bosta_webhooks.delivery_event"

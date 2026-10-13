@@ -16,6 +16,7 @@ const MARKETPLACE_ATTENTION_PROBLEM_TYPES = [
 	"Webhook Retries Exhausted",
 	"Noon Fulfillment",
 	"Noon Return Unlinked",
+	"Bosta Delivery Note",
 ];
 
 if (typeof frappe !== "undefined") {
@@ -25,7 +26,7 @@ if (typeof frappe !== "undefined") {
 				fieldname: "platform",
 				label: __("Platform"),
 				fieldtype: "Select",
-				options: ["", "Talabat", "Shopify", "Noon"],
+				options: ["", "Talabat", "Shopify", "Noon", "Bosta"],
 			},
 			{
 				fieldname: "account",
