@@ -150,6 +150,32 @@ Talabat Connection
 
 A generic abstract client/adapter hierarchy is deliberately deferred. Extract shared code only when a second implemented platform creates real duplication.
 
+### Carrier fulfillment integrations
+
+A carrier answers: **How do we hand an ERPNext delivery to a shipping
+provider and receive its carrier lifecycle?** It is distinct from a
+marketplace/storefront integration: it does not represent a seller account,
+does not own a stock partition, and is not modeled through `Marketplace
+Account` or `Marketplace Order`.
+
+The Bosta MVP starts with one site-wide, carrier-specific `Bosta Settings`
+Single containing the raw API key, one Bosta business-location ID, enabled
+flag, and generated webhook URL/secret. `integrations/bosta/client.py` owns
+the raw-API-key authenticated Bosta transport and the Create Delivery and A4
+Arabic AWB endpoints. It deliberately receives an opaque delivery payload: the
+Sales Order workflow owns the Bosta-required payload mapping, rather than the
+settings/client foundation.
+
+The later `Bosta Shipment` operational record will link an ERPNext Sales
+Order and Delivery Note; it is not a marketplace shipment or a generic carrier
+framework. Bosta dashboard webhooks use the configured custom
+`X-Bosta-Webhook-Secret` header. A later operational workflow may poll Bosta's
+documented status-read endpoint every 30 minutes. Although the product intent
+is to automate ERPNext delivery-document changes for carrier events, the
+provided Bosta API specification does not define standard-Deliver return or
+cancellation semantics. That automation remains blocked pending production
+confirmation and must not be inferred.
+
 ### Marketplace Account
 
 A Marketplace Account answers: **Which seller/store/vendor account are we operating on, and which ERPNext stock partition does it use?**
@@ -330,7 +356,8 @@ Legacy data was migrated and verified, then the legacy app was removed. Closed T
 
 The following must be designed in their own issues using authoritative platform/ERPNext references; do not infer them from this document:
 
-- Unimplemented Noon operations and Instashop/Amazon/Bosta authentication or endpoints
+- Unimplemented Noon operations and Instashop/Amazon endpoints
+- Bosta standard-Deliver return and cancellation lifecycle semantics
 - external order/webhook payload schemas
 - customer creation/deduplication policy outside #61's one generic Customer per Marketplace Account
 - exact Sales Order/reservation/Delivery Note lifecycle for marketplace orders
