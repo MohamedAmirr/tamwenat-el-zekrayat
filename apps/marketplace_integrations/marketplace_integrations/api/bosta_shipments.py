@@ -11,6 +11,7 @@ from marketplace_integrations.integrations.bosta.deliveries import (
 from marketplace_integrations.integrations.bosta.deliveries import (
 	get_sales_order_defaults,
 )
+from marketplace_integrations.integrations.bosta.labels import create_a4_arabic_label
 
 
 @frappe.whitelist(methods=["POST"])
@@ -39,3 +40,9 @@ def create_shipment(
 		district_name,
 		address_first_line,
 	)
+
+
+@frappe.whitelist(methods=["POST"])
+def print_a4_arabic_label(shipment: str):
+	"""Return a private A4 Arabic Bosta label File for an authorized reader."""
+	return create_a4_arabic_label(shipment)
