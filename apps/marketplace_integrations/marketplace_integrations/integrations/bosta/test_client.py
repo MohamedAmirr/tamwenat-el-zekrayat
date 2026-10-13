@@ -76,6 +76,16 @@ class UnitTestBostaClient(UnitTestCase):
 			{"trackingNumbers": "77873113,77873114", "requestedAwbType": "A4", "lang": "ar"},
 		)
 
+	def test_get_delivery_quotes_the_tracking_number(self):
+		response = FakeResponse(200, {"success": True, "data": {}})
+		with patch(
+			"marketplace_integrations.integrations.bosta.client.http_request", return_value=response
+		) as request:
+			self.client.get_delivery("BOS/ 123")
+
+		args, _kwargs = request.call_args
+		self.assertEqual(args[:2], ("GET", "https://app.bosta.co/api/v2/deliveries/business/BOS%2F%20123"))
+
 	def test_request_refuses_disabled_or_incomplete_settings_without_network_call(self):
 		self.settings.enabled = 0
 		with patch("marketplace_integrations.integrations.bosta.client.http_request") as request:
@@ -95,3 +105,5 @@ class UnitTestBostaClient(UnitTestCase):
 			self.client.create_delivery([])
 		with self.assertRaises(frappe.ValidationError):
 			self.client.get_a4_arabic_awb(" ")
+		with self.assertRaises(frappe.ValidationError):
+			self.client.get_delivery(" ")

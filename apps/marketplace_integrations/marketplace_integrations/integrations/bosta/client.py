@@ -8,12 +8,15 @@ Sales Order workflow owns the verified payload mapping; this module owns Bosta
 authentication and HTTP semantics, plus the A4 Arabic AWB request.
 """
 
+from urllib.parse import quote
+
 import frappe
 from frappe import _
 
 from marketplace_integrations.integrations.bosta.constants import (
 	BOSTA_API_BASE_URL,
 	BOSTA_CREATE_DELIVERY_PATH,
+	BOSTA_GET_DELIVERY_PATH,
 	BOSTA_MASS_AWB_PATH,
 )
 from marketplace_integrations.integrations.http import error_message_from_response, http_request
@@ -78,6 +81,15 @@ class BostaClient:
 				"requestedAwbType": "A4",
 				"lang": "ar",
 			},
+		)
+
+	def get_delivery(self, tracking_number):
+		"""Fetch one delivery using Bosta's documented tracking-number endpoint."""
+		tracking_number = str(tracking_number or "").strip()
+		if not tracking_number:
+			frappe.throw(_("A Bosta tracking number is required."))
+		return self.request(
+			"GET", BOSTA_GET_DELIVERY_PATH.format(tracking_number=quote(tracking_number, safe=""))
 		)
 
 	def error_message(self, response):

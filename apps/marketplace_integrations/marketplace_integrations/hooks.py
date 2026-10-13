@@ -197,6 +197,9 @@ scheduler_events = {
 		"* * * * *": [
 			"marketplace_integrations.services.sales_order_sync_debounce.sweep_due_sales_order_syncs",
 		],
+		"*/30 * * * *": [
+			"marketplace_integrations.integrations.bosta.statuses.poll_incomplete_shipments",
+		],
 	},
 	"daily": [
 		"marketplace_integrations.integrations.shopify.inventory_sync.reconcile_all_accounts",

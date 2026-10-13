@@ -168,13 +168,21 @@ settings/client foundation.
 
 The `Bosta Shipment` operational record links an ERPNext Sales Order and
 Delivery Note; it is not a marketplace shipment or a generic carrier
-framework. Bosta dashboard webhooks use the configured custom
-`X-Bosta-Webhook-Secret` header. A later operational workflow may poll Bosta's
-documented status-read endpoint every 30 minutes. Although the product intent
-is to automate ERPNext delivery-document changes for carrier events, the
-provided Bosta API specification does not define standard-Deliver return or
-cancellation semantics. That automation remains blocked pending production
-confirmation and must not be inferred.
+framework. It separately retains the last documented Bosta `state.code` and
+`state.value` snapshot from `GET /deliveries/business/{trackingNumber}`. A
+30-minute scheduled poll updates that opaque snapshot until Bosta's documented
+`Delivered` state; it never changes an ERPNext Delivery Note. Bosta dashboard
+webhooks use the configured custom `X-Bosta-Webhook-Secret` header and are
+authenticated/acknowledged, but the supplied specification has no webhook
+event-body contract, so webhook bodies are not parsed or persisted.
+
+The supplied `POST /deliveries/mass-awb` contract confirms the A4/Arabic
+request but has no response media type/body schema, so the MVP client can make
+the fixed AWB request but cannot safely implement an in-ERP label download or
+print flow until Bosta confirms that response contract. Likewise, the product
+intent to automate ERPNext delivery-document changes for carrier events remains
+blocked: the specification does not define standard-Deliver return or
+cancellation semantics, and neither polling nor callbacks may infer them.
 
 ### Marketplace Account
 
