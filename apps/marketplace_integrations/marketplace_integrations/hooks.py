@@ -301,6 +301,8 @@ fixtures = [
 				[
 					"Sales Order-custom_marketplace_order",
 					"Sales Order-custom_marketplace_platform",
+					"Payment Entry-custom_marketplace_order",
+					"Payment Entry-custom_marketplace_transaction_id",
 				],
 			]
 		],
