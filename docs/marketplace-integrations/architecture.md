@@ -239,8 +239,8 @@ shipment (none, or the latest Canceled) Create is offered again. Create stays cr
 permission. A user who cannot read Bosta Shipment triggers no request. If the read fails,
 creators still get Create (the server still enforces one active shipment). A `Bosta Failed`
 shipment without a tracking number keeps **Create** for creators: it resumes that same row
-(search Bosta, then send), using the row's stored receiver and address - the values typed in
-the dialog on a retry are ignored. `Pending Bosta` (after 5 minutes), `Bosta Created` and
+(search Bosta, then send). If Bosta has no delivery for it, the receiver and address typed in
+the dialog replace the row's stored values, so an operator can fix a bad address. `Pending Bosta` (after 5 minutes), `Bosta Created` and
 `Delivery Note Failed` are recovered with **Check Bosta** on the shipment form, reached through
 the link. Status, tracking number and
 Bosta state are escaped before they reach the dashboard HTML. Not built: Sales Order list
