@@ -28,6 +28,7 @@ test("Test Connection is offered only after the document is saved", () => {
 		"Copy Webhook URL",
 		"Copy Webhook Key",
 		"Refresh Webhook URL",
+		"Refresh Webhook Status",
 		"Test Connection",
 	]);
 });

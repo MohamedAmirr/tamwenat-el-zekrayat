@@ -317,3 +317,56 @@ class IntegrationTestNoonConnection(IntegrationTestCase):
 			"api/method/marketplace_integrations.api.noon_webhooks.event_notification",
 			result["webhook_url"],
 		)
+
+	def test_refresh_webhook_status_caches_an_active_destination(self):
+		connection = make_connection("Webhook Status Active")
+		destination = {
+			"destination_code": "dest-active",
+			"url": connection.webhook_url,
+			"is_active": True,
+			"event_types": ["FBPI::ORDER_SYNC"],
+			"credentials": {"values": {"X-Api-Key": "******"}},
+		}
+		response = SimpleNamespace(status_code=200, json=lambda: {"destinations": [destination]})
+		with patch("marketplace_integrations.integrations.noon.client.NoonClient") as client_class:
+			client_class.return_value.list_destinations.return_value = response
+			result = connection.refresh_webhook_status()
+
+		self.assertEqual(result["status"], "Active")
+		connection.reload()
+		self.assertEqual(connection.noon_destination_code, "dest-active")
+		self.assertEqual(connection.webhook_status, "Active")
+		self.assertIn("dest-active", connection.noon_destinations_debug)
+		self.assertNotIn(connection.get_password("webhook_secret"), connection.noon_destinations_debug)
+
+	def test_refresh_webhook_status_detects_stored_destination_url_mismatch(self):
+		connection = make_connection("Webhook Status URL Mismatch", noon_destination_code="dest-stored")
+		response = SimpleNamespace(
+			status_code=200,
+			json=lambda: {
+				"destinations": [
+					{
+						"destination_code": "dest-stored",
+						"url": "https://old.example.test/noon",
+						"is_active": True,
+						"event_types": ["FBPI::ORDER_SYNC"],
+					}
+				]
+			},
+		)
+		with patch("marketplace_integrations.integrations.noon.client.NoonClient") as client_class:
+			client_class.return_value.list_destinations.return_value = response
+			result = connection.refresh_webhook_status()
+
+		self.assertEqual(result["status"], "URL mismatch")
+
+	def test_refresh_webhook_status_returns_safe_noon_failure(self):
+		connection = make_connection("Webhook Status Failure")
+		response = SimpleNamespace(status_code=503)
+		with patch("marketplace_integrations.integrations.noon.client.NoonClient") as client_class:
+			client_class.return_value.list_destinations.return_value = response
+			client_class.return_value.error_message.return_value = "Noon request failed (HTTP 503)."
+			result = connection.refresh_webhook_status()
+
+		self.assertEqual(result["status"], "Could not reach Noon")
+		self.assertEqual(result["error"], "Noon request failed (HTTP 503).")

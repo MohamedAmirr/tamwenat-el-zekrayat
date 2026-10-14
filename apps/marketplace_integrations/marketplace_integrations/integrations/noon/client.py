@@ -26,6 +26,8 @@ from marketplace_integrations.integrations.http import (
 
 LOGIN_PATH = "/identity/public/v1/api/login"
 WHOAMI_PATH = "/identity/v1/whoami"
+DESTINATIONS_LIST_PATH = "/event-notifications/v1/destination/list"
+EVENT_TYPES_LIST_PATH = "/event-notifications/v1/event-type/list"
 SERVICE_NAME = "Noon"
 USER_AGENT = f"marketplace_integrations/{__version__}"
 
@@ -122,6 +124,14 @@ class NoonClient:
 	def whoami(self):
 		"""GET the documented authenticated identity endpoint."""
 		return self.request("GET", WHOAMI_PATH)
+
+	def list_destinations(self):
+		"""GET the project's configured Event Notification destinations."""
+		return self.request("GET", DESTINATIONS_LIST_PATH)
+
+	def list_event_types(self):
+		"""GET Event Notification event types available to this project."""
+		return self.request("GET", EVENT_TYPES_LIST_PATH)
 
 	def error_message(self, response):
 		"""Format a non-login error without echoing a raw response body.
