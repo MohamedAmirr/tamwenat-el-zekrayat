@@ -51,6 +51,38 @@ def get_sales_order_defaults(sales_order_name):
 	}
 
 
+def get_sales_order_shipment(sales_order_name):
+	"""The Sales Order's current Bosta shipment for its form (#246), or None.
+
+	Needs read on the Sales Order and on Bosta Shipment; a user without Bosta Shipment read
+	gets None, never any shipment detail. The active shipment (not Canceled; at most one,
+	``active_sales_order`` is unique) wins; otherwise the latest Canceled one is returned
+	with ``active`` False. Read with the caller's permissions, so user permissions apply.
+	"""
+	frappe.has_permission("Sales Order", "read", doc=sales_order_name, throw=True)
+	if not frappe.has_permission("Bosta Shipment", "read"):
+		return None
+	fields = ["name", "status", "tracking_number", "bosta_state_value"]
+	for active, status_filter in ((True, ["!=", "Canceled"]), (False, "Canceled")):
+		rows = frappe.get_list(
+			"Bosta Shipment",
+			filters={"sales_order": sales_order_name, "status": status_filter},
+			fields=fields,
+			order_by="creation desc, name desc",
+			limit=1,
+		)
+		if rows:
+			row = rows[0]
+			return {
+				"name": row.name,
+				"status": row.status,
+				"tracking_number": row.tracking_number or "",
+				"bosta_state": row.bosta_state_value or "",
+				"active": active,
+			}
+	return None
+
+
 def _address_prefill(order):
 	"""Address first line and source city for the dialog (#245).
 

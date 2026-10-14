@@ -3,9 +3,14 @@
 
 from unittest.mock import patch
 
-from frappe.tests import UnitTestCase
+import frappe
+from frappe.tests import IntegrationTestCase, UnitTestCase
 
 from marketplace_integrations.api import bosta_shipments
+from marketplace_integrations.marketplace_integrations.doctype.bosta_shipment.bosta_shipment import (
+	save_as_system,
+)
+from marketplace_integrations.tests.bosta_fixtures import BostaFixtureMixin, created
 
 
 class UnitTestBostaShipments(UnitTestCase):
@@ -15,3 +20,120 @@ class UnitTestBostaShipments(UnitTestCase):
 			self.assertEqual(bosta_shipments.print_a4_arabic_label("BOSTA-SHP-00001"), expected)
 
 		create.assert_called_once_with("BOSTA-SHP-00001")
+
+
+class IntegrationTestBostaShipmentSummary(BostaFixtureMixin, IntegrationTestCase):
+	"""get_sales_order_shipment on a real database (#246); no HTTP is involved."""
+
+	def _shipment(self, order, status, **values):
+		fields = {
+			"doctype": "Bosta Shipment",
+			"sales_order": order.name,
+			"receiver_name": self._receiver(),
+			"receiver_phone": "01000000000",
+			"city": "Cairo",
+			"district_id": "district-id",
+			"address_first_line": "12 Example Street",
+			"status": status,
+			**values,
+		}
+		shipment = save_as_system(frappe.get_doc(fields), insert=True)
+		frappe.db.commit()
+		return shipment
+
+	def _as(self, email, order):
+		frappe.set_user(email)
+		try:
+			return bosta_shipments.get_sales_order_shipment(order.name)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_order_without_a_shipment_returns_nothing(self):
+		self.assertIsNone(bosta_shipments.get_sales_order_shipment(self.make_order().name))
+
+	def test_active_shipment_summary(self):
+		order = self.make_order()
+		shipment = self._shipment(
+			order,
+			"Bosta Created",
+			tracking_number="TRK-9",
+			bosta_state_value="Picked up",
+		)
+		self.assertEqual(
+			bosta_shipments.get_sales_order_shipment(order.name),
+			{
+				"name": shipment.name,
+				"status": "Bosta Created",
+				"tracking_number": "TRK-9",
+				"bosta_state": "Picked up",
+				"active": True,
+			},
+		)
+
+	def test_summary_has_exactly_the_fields_the_form_uses(self):
+		order = self.make_order()
+		self._shipment(order, "Pending Bosta")
+		self.assertEqual(
+			set(bosta_shipments.get_sales_order_shipment(order.name)),
+			{"name", "status", "tracking_number", "bosta_state", "active"},
+		)
+
+	def test_only_canceled_returns_the_latest_canceled_as_inactive(self):
+		order = self.make_order()
+		self._shipment(order, "Canceled", tracking_number="OLD")
+		latest = self._shipment(order, "Canceled", tracking_number="NEWER")
+		summary = bosta_shipments.get_sales_order_shipment(order.name)
+		self.assertEqual(summary["name"], latest.name)
+		self.assertEqual((summary["status"], summary["active"]), ("Canceled", False))
+
+	def test_canceled_then_new_active_returns_the_active_one(self):
+		order = self.make_order()
+		self._shipment(order, "Canceled", tracking_number="OLD")
+		active = self._shipment(order, "Pending Bosta")
+		summary = bosta_shipments.get_sales_order_shipment(order.name)
+		self.assertEqual((summary["name"], summary["active"]), (active.name, True))
+
+	def test_summary_is_for_the_requested_order_only(self):
+		other = self.make_order()
+		self._shipment(other, "Pending Bosta")
+		self.assertIsNone(bosta_shipments.get_sales_order_shipment(self.make_order().name))
+
+	def test_permission_matrix(self):
+		order = self.make_order()
+		shipment = self._shipment(order, "Completed", tracking_number="TRK-1")
+		users = {
+			"Sales Manager": self.make_user("Sales Manager"),
+			"Stock User": self.make_user("Stock User"),
+			"Sales User": self.make_user("Sales User"),
+			# Reads Sales Orders but has no Bosta Shipment permission at all.
+			"Accounts User": self.make_user("Accounts User"),
+		}
+		for role in ("Sales Manager", "Stock User", "Sales User"):
+			with self.subTest(role=role):
+				summary = self._as(users[role], order)
+				self.assertEqual((summary["name"], summary["tracking_number"]), (shipment.name, "TRK-1"))
+		with self.subTest(role="Accounts User"):
+			self.assertTrue(
+				frappe.has_permission("Sales Order", "read", doc=order.name, user=users["Accounts User"])
+			)
+			self.assertFalse(frappe.has_permission("Bosta Shipment", "read", user=users["Accounts User"]))
+			self.assertIsNone(self._as(users["Accounts User"], order))
+
+	def test_a_user_who_cannot_read_the_sales_order_is_refused(self):
+		order = self.make_order()
+		self._shipment(order, "Completed", tracking_number="TRK-1")
+		for user in ("Guest", self.make_user("Website Manager")):
+			with self.subTest(user=user):
+				frappe.set_user(user)
+				try:
+					with self.assertRaises(frappe.PermissionError):
+						bosta_shipments.get_sales_order_shipment(order.name)
+				finally:
+					frappe.set_user("Administrator")
+
+	def test_the_method_is_post_only_and_whitelisted(self):
+		self.assertIn(bosta_shipments.get_sales_order_shipment, frappe.whitelisted)
+		self.assertEqual(
+			frappe.allowed_http_methods_for_whitelisted_func[bosta_shipments.get_sales_order_shipment],
+			["POST"],
+		)

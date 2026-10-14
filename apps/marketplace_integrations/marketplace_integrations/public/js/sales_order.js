@@ -22,21 +22,129 @@
 
 	const BOSTA_CREATOR_ROLES = ["Sales Manager", "Stock User", "System Manager"];
 
-	// The form clears custom buttons on every refresh (Form.refresh -> clear_custom_buttons),
-	// so no "already added" flag: the button is added again on each refresh.
-	function add_bosta_shipment_button(frm) {
-		if (
-			!frm.doc ||
-			frm.doc.docstatus !== 1 ||
-			frm.doc.status === "Cancelled" ||
-			!(frappe.user && frappe.user.has_role(BOSTA_CREATOR_ROLES))
-		)
-			return;
+	const BOSTA_SHIPMENT_METHOD = "marketplace_integrations.api.bosta_shipments.get_sales_order_shipment";
+	const BOSTA_LABEL_METHOD = "marketplace_integrations.api.bosta_shipments.print_a4_arabic_label";
+
+	// Colours for the Bosta Shipment doctype's own statuses; the status text is the doctype's value.
+	const BOSTA_STATUS_COLORS = {
+		"Pending Bosta": "orange",
+		"Bosta Created": "blue",
+		"Delivery Note Failed": "red",
+		Completed: "green",
+		"Bosta Failed": "red",
+		Canceled: "gray",
+	};
+
+	function can_create_bosta_shipment(frm) {
+		return Boolean(
+			frm.doc &&
+				frm.doc.docstatus === 1 &&
+				frm.doc.status !== "Cancelled" &&
+				frappe.user &&
+				frappe.user.has_role(BOSTA_CREATOR_ROLES)
+		);
+	}
+
+	function add_create_bosta_button(frm) {
 		frm.add_custom_button(__("Create Bosta Shipment"), () => {
 			frappe.call({ method: BOSTA_DEFAULTS_METHOD, type: "POST", args: { sales_order: frm.doc.name } }).then((r) => {
 				show_bosta_dialog(frm, r.message || {});
 			});
 		});
+	}
+
+	// Status, tracking number and Bosta state are stored/remote text: escaped before they
+	// reach the dashboard (which renders raw HTML).
+	function bosta_indicator_html(shipment) {
+		const escape = frappe.utils.escape_html;
+		const href = `/app/bosta-shipment/${encodeURIComponent(shipment.name)}`;
+		let html = `<a href="${escape(href)}">${escape(__("Bosta Shipment"))}: ${escape(__(shipment.status))}</a>`;
+		if (shipment.tracking_number) {
+			html += ` &middot; ${escape(__("Tracking"))}: ${escape(shipment.tracking_number)}`;
+		}
+		if (shipment.bosta_state) html += ` (${escape(shipment.bosta_state)})`;
+		return html;
+	}
+
+	// The window is opened inside the click (a popup blocker only allows that) and pointed at
+	// the file when the server answers. window.open with "noopener" returns null, so the
+	// opener is cut by hand instead. If the browser blocks the window, the URL is offered as
+	// a link; if the call fails or returns no file, the blank window is closed.
+	function add_bosta_label_button(frm, shipment) {
+		frm.add_custom_button(__("Print Bosta A4 Label"), () => {
+			const label_window = window.open("", "_blank");
+			if (label_window) label_window.opener = null;
+			const close = () => {
+				if (label_window) label_window.close();
+			};
+			frappe
+				.call({
+					method: BOSTA_LABEL_METHOD,
+					type: "POST",
+					args: { shipment: shipment.name },
+					freeze: true,
+					freeze_message: __("Preparing Bosta label..."),
+				})
+				.then((r) => {
+					const label = r.message || {};
+					if (!label.file_url) return close();
+					if (label_window) {
+						label_window.location.href = label.file_url;
+						return;
+					}
+					const escape = frappe.utils.escape_html;
+					frappe.msgprint({
+						title: __("Bosta A4 Label"),
+						message: `<a href="${escape(label.file_url)}" target="_blank" rel="noopener">${escape(
+							__("Open the label")
+						)}</a>`,
+						indicator: "green",
+					});
+				})
+				.catch(close);
+		});
+	}
+
+	// The form clears custom buttons and the dashboard indicators on every refresh
+	// (Form.refresh), so nothing here is remembered: it is all added again each time. The
+	// current shipment is read from the server; a reply that arrives after a newer refresh
+	// (or for another document) is dropped, so the indicator is never added twice. A user
+	// who cannot read Bosta Shipment never asks and sees no shipment details. If the read
+	// fails, Create stays available to creators (the server still allows one active
+	// shipment per order). A Bosta Failed shipment without a tracking number keeps Create:
+	// that retry (search Bosta, then send) is what the server resumes on the same row.
+	function add_bosta_shipment_ux(frm) {
+		if (!frm.doc || !frm.doc.name || frm.doc.docstatus < 1) return Promise.resolve();
+		const request = (frm.__mi_bosta_request = (frm.__mi_bosta_request || 0) + 1);
+		const sales_order = frm.doc.name;
+		const create = can_create_bosta_shipment(frm);
+		if (!(frappe.model && frappe.model.can_read("Bosta Shipment"))) {
+			if (create) add_create_bosta_button(frm);
+			return Promise.resolve();
+		}
+		return frappe
+			.call({ method: BOSTA_SHIPMENT_METHOD, type: "POST", args: { sales_order }, silent: true })
+			.then(
+				(r) => r.message || null,
+				() => null
+			)
+			.then((shipment) => {
+				if (request !== frm.__mi_bosta_request || frm.doc.name !== sales_order) return;
+				if (shipment && shipment.active) {
+					if (frm.dashboard) {
+						frm.dashboard.add_indicator(
+							bosta_indicator_html(shipment),
+							BOSTA_STATUS_COLORS[shipment.status] || "gray"
+						);
+					}
+					if (shipment.tracking_number) add_bosta_label_button(frm, shipment);
+					if (create && shipment.status === "Bosta Failed" && !shipment.tracking_number) {
+						add_create_bosta_button(frm);
+					}
+				} else if (create) {
+					add_create_bosta_button(frm);
+				}
+			});
 	}
 
 	// Bosta city / district names are remote text. Frappe renders an Autocomplete label as
@@ -401,7 +509,7 @@
 	}
 
 	function on_refresh(frm) {
-		add_bosta_shipment_button(frm);
+		add_bosta_shipment_ux(frm);
 		if (!wrap_close_sales_order(frm)) {
 			console.error(
 				"ERPNext no longer defines close_sales_order on the Sales Order form (#183)."
@@ -428,7 +536,9 @@
 
 	if (typeof module !== "undefined") {
 		module.exports = {
+			add_bosta_shipment_ux,
 			bosta_cod_note_html,
+			bosta_indicator_html,
 			location_options,
 			match_city,
 			show_bosta_dialog,

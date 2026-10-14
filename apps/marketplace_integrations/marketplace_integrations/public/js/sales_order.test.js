@@ -8,7 +8,7 @@ global.__ = (message, args) => {
 };
 
 const escape_html = (value) =>
-	String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+	String(value).replace(/[&<>"'`=]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "`": "&#x60;", "=": "&#x3D;" })[c]);
 
 // Loads sales_order.js fresh against a mock frappe. `options` is what
 // get_platform_cancel_option returns; `request_result` what request_platform_cancel returns.
@@ -18,8 +18,12 @@ function load({
 	request_fails = false,
 	can_read = true,
 	bosta_creator = true,
+	bosta_read = true,
+	shipment = null,
+	shipment_fails = false,
 } = {}) {
 	const calls = [];
+	const bosta_calls = [];
 	const alerts = [];
 	const msgprints = [];
 	const dialogs = [];
@@ -27,7 +31,10 @@ function load({
 	global.frappe = {
 		user: { has_role: () => bosta_creator },
 		utils: { escape_html },
-		model: { can_read: (doctype) => can_read && doctype === "Marketplace Order" },
+		model: {
+			can_read: (doctype) =>
+				doctype === "Bosta Shipment" ? bosta_read : can_read && doctype === "Marketplace Order",
+		},
 		ui: {
 			form: {
 				on(doctype, hooks) {
@@ -36,6 +43,7 @@ function load({
 						...hooks,
 						refresh(frm) {
 							if (frm.buttons) frm.buttons.length = 0;
+							if (frm.indicators) frm.indicators.length = 0;
 							return hooks.refresh(frm);
 						},
 					};
@@ -56,6 +64,12 @@ function load({
 			},
 		},
 		call(opts) {
+			if (opts.method.endsWith("get_sales_order_shipment")) {
+				bosta_calls.push(opts);
+				return shipment_fails
+					? Promise.reject(new Error("boom"))
+					: Promise.resolve({ message: shipment });
+			}
 			calls.push(opts);
 			if (opts.method.endsWith("get_platform_cancel_option")) {
 				return Promise.resolve({ message: option });
@@ -70,7 +84,7 @@ function load({
 	const path = require.resolve("./sales_order.js");
 	delete require.cache[path];
 	const module_exports = require(path);
-	return { calls, alerts, msgprints, dialogs, handlers, module_exports };
+	return { calls, bosta_calls, alerts, msgprints, dialogs, handlers, module_exports };
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
@@ -90,6 +104,7 @@ const eligible = (extra = {}) => ({
 
 function make_frm(doc, { close_sales_order } = {}) {
 	const buttons = [];
+	const indicators = [];
 	const frm = {
 		doc: {
 			name: "SAL-ORD-1",
@@ -101,6 +116,8 @@ function make_frm(doc, { close_sales_order } = {}) {
 		cscript: {},
 		buttons,
 		reloads: 0,
+		indicators,
+		dashboard: { add_indicator: (label, color) => indicators.push({ label, color }) },
 		add_custom_button: (label, action) => buttons.push({ label, action }),
 		reload_doc() {
 			frm.reloads += 1;
@@ -181,9 +198,10 @@ test("opening or reloading an already Closed order never prompts", async () => {
 	assert.equal(msgprints.length, 0);
 	// One fetch, only to decide on the button.
 	assert.equal(calls.length, 1);
+	// Button order is intentionally unspecified: Create is added after an async reply.
 	assert.deepEqual(
-		frm.buttons.map((b) => b.label),
-		["Create Bosta Shipment", "Cancel on Talabat"]
+		frm.buttons.map((b) => b.label).sort(),
+		["Cancel on Talabat", "Create Bosta Shipment"]
 	);
 });
 
@@ -423,17 +441,312 @@ test("the Bosta dialog shows the COD to send, with a note when it is 0 or reduce
 	assert.doesNotMatch(unpaid, /This amount is 0|less payments/);
 });
 
-test("the Bosta button is creator-only and survives a reload refresh", () => {
+test("the Bosta button is creator-only and survives a reload refresh", async () => {
 	const { handlers } = load({ option: eligible({ state: "not_applicable" }), bosta_creator: false });
 	const denied = make_frm({});
 	handlers["Sales Order"].refresh(denied);
+	await settle();
 	assert.ok(!denied.buttons.some((b) => b.label === "Create Bosta Shipment"));
 
 	const { handlers: allowed_handlers } = load({ option: eligible({ state: "not_applicable" }) });
 	const frm = make_frm({});
 	allowed_handlers["Sales Order"].refresh(frm);
 	allowed_handlers["Sales Order"].refresh(frm);
-	assert.ok(frm.buttons.some((b) => b.label === "Create Bosta Shipment"));
+	await settle();
+	assert.deepEqual(frm.buttons.map((b) => b.label), ["Create Bosta Shipment"]);
+});
+
+// ---- Bosta shipment status, tracking and label on the Sales Order (#246) ----
+
+const shipment_summary = (extra = {}) => ({
+	name: "BOSTA-SHP-00001",
+	status: "Completed",
+	tracking_number: "77873113",
+	bosta_state: "Delivered",
+	active: true,
+	...extra,
+});
+const NO_PLATFORM = eligible({ state: "not_applicable" });
+const labels = (frm) => frm.buttons.map((b) => b.label);
+
+test("an active shipment shows status, tracking and a link, with a label button and no Create", async () => {
+	const { handlers, bosta_calls } = load({ option: NO_PLATFORM, shipment: shipment_summary() });
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.deepEqual(bosta_calls.map((c) => c.args), [{ sales_order: "SAL-ORD-1" }]);
+	assert.equal(frm.indicators.length, 1);
+	assert.equal(frm.indicators[0].color, "green");
+	assert.match(frm.indicators[0].label, /<a href="\/app\/bosta-shipment\/BOSTA-SHP-00001">Bosta Shipment: Completed<\/a>/);
+	assert.match(frm.indicators[0].label, /Tracking: 77873113 \(Delivered\)/);
+	assert.deepEqual(labels(frm), ["Print Bosta A4 Label"]);
+});
+
+test("indicator colour follows the shipment status", async () => {
+	const expected = {
+		"Pending Bosta": "orange",
+		"Bosta Created": "blue",
+		"Delivery Note Failed": "red",
+		Completed: "green",
+		"Bosta Failed": "red",
+	};
+	for (const [status, color] of Object.entries(expected)) {
+		const { handlers } = load({ option: NO_PLATFORM, shipment: shipment_summary({ status }) });
+		const frm = make_frm({});
+		handlers["Sales Order"].refresh(frm);
+		await settle();
+		assert.equal(frm.indicators[0].color, color, status);
+		assert.match(frm.indicators[0].label, new RegExp(`Bosta Shipment: ${status}</a>`));
+	}
+});
+
+test("a shipment without a tracking number shows the status but no label button", async () => {
+	const { handlers } = load({
+		option: NO_PLATFORM,
+		shipment: shipment_summary({ status: "Pending Bosta", tracking_number: "", bosta_state: "" }),
+	});
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.equal(frm.indicators.length, 1);
+	assert.doesNotMatch(frm.indicators[0].label, /Tracking/);
+	assert.deepEqual(labels(frm), []);
+});
+
+function click_label(frm) {
+	frm.buttons.find((b) => b.label === "Print Bosta A4 Label").action();
+}
+
+// Loads a form with an active shipment, a window stub that records what happens to it, and a
+// label call that is answered by `answer` (a function returning a promise).
+async function label_setup({ window_blocked = false, answer }) {
+	const { handlers, calls, msgprints } = load({ option: NO_PLATFORM, shipment: shipment_summary() });
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	const win = { opener: "set", closed: false, location: { href: "" }, close() { this.closed = true; } };
+	const opens = [];
+	global.window = {
+		open: (...args) => {
+			opens.push(args);
+			return window_blocked ? null : win;
+		},
+	};
+	const original = global.frappe.call;
+	global.frappe.call = (opts) => {
+		calls.push(opts);
+		return answer(opts);
+	};
+	return { frm, win, opens, calls, msgprints, restore: () => (global.frappe.call = original) };
+}
+
+test("Print label opens the window synchronously, then points it at that shipment's label", async () => {
+	let resolve;
+	const s = await label_setup({ answer: () => new Promise((r) => (resolve = r)) });
+	click_label(s.frm);
+	// Before the server answers, a blank window already exists and cannot reach back to us.
+	assert.deepEqual(s.opens, [["", "_blank"]]);
+	assert.equal(s.win.opener, null);
+	assert.equal(s.win.location.href, "");
+	resolve({ message: { file_url: "/private/files/bosta-awb.pdf" } });
+	await settle();
+	const request = s.calls.at(-1);
+	assert.equal(request.method, "marketplace_integrations.api.bosta_shipments.print_a4_arabic_label");
+	assert.deepEqual(request.args, { shipment: "BOSTA-SHP-00001" });
+	assert.equal(s.win.location.href, "/private/files/bosta-awb.pdf");
+	assert.equal(s.win.closed, false);
+	s.restore();
+});
+
+test("Print label closes the blank window when the call fails or returns no file", async () => {
+	for (const answer of [() => Promise.reject(new Error("boom")), () => Promise.resolve({ message: {} })]) {
+		const s = await label_setup({ answer });
+		click_label(s.frm);
+		await settle();
+		assert.equal(s.win.closed, true);
+		assert.equal(s.win.location.href, "");
+		s.restore();
+	}
+});
+
+test("Print label falls back to an escaped link when the browser blocks the window", async () => {
+	const s = await label_setup({
+		window_blocked: true,
+		answer: () => Promise.resolve({ message: { file_url: '/private/files/a"><img src=x>.pdf' } }),
+	});
+	click_label(s.frm);
+	await settle();
+	assert.equal(s.msgprints.length, 1);
+	assert.doesNotMatch(s.msgprints[0].message, /<img/);
+	assert.match(s.msgprints[0].message, /href="\/private\/files\/a&quot;&gt;&lt;img src&#x3D;x&gt;\.pdf"/);
+	s.restore();
+});
+
+test("a Bosta Failed shipment without tracking keeps Create next to the indicator", async () => {
+	const { handlers } = load({
+		option: NO_PLATFORM,
+		shipment: shipment_summary({ status: "Bosta Failed", tracking_number: "", bosta_state: "" }),
+	});
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.equal(frm.indicators.length, 1);
+	assert.equal(frm.indicators[0].color, "red");
+	assert.deepEqual(labels(frm), ["Create Bosta Shipment"]);
+
+	// A read-only user gets the indicator but no Create.
+	const { handlers: h2 } = load({
+		option: NO_PLATFORM,
+		bosta_creator: false,
+		shipment: shipment_summary({ status: "Bosta Failed", tracking_number: "" }),
+	});
+	const reader = make_frm({});
+	h2["Sales Order"].refresh(reader);
+	await settle();
+	assert.equal(reader.indicators.length, 1);
+	assert.deepEqual(labels(reader), []);
+});
+
+test("no other active status offers Create", async () => {
+	const cases = [
+		{ status: "Bosta Failed", tracking_number: "77873113" },
+		{ status: "Pending Bosta", tracking_number: "" },
+		{ status: "Bosta Created", tracking_number: "77873113" },
+		{ status: "Delivery Note Failed", tracking_number: "77873113" },
+		{ status: "Completed", tracking_number: "77873113" },
+	];
+	for (const extra of cases) {
+		const { handlers } = load({ option: NO_PLATFORM, shipment: shipment_summary(extra) });
+		const frm = make_frm({});
+		handlers["Sales Order"].refresh(frm);
+		await settle();
+		assert.equal(frm.indicators.length, 1, extra.status);
+		assert.ok(!labels(frm).includes("Create Bosta Shipment"), `${extra.status} ${extra.tracking_number}`);
+	}
+});
+
+test("a Canceled latest shipment (or none) shows Create again, with no indicator", async () => {
+	for (const shipment of [shipment_summary({ status: "Canceled", active: false }), null]) {
+		const { handlers } = load({ option: NO_PLATFORM, shipment });
+		const frm = make_frm({});
+		handlers["Sales Order"].refresh(frm);
+		await settle();
+		assert.deepEqual(labels(frm), ["Create Bosta Shipment"]);
+		assert.equal(frm.indicators.length, 0);
+	}
+});
+
+test("a read-only user sees the status and label but never Create", async () => {
+	const { handlers } = load({ option: NO_PLATFORM, bosta_creator: false, shipment: shipment_summary() });
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.equal(frm.indicators.length, 1);
+	assert.deepEqual(labels(frm), ["Print Bosta A4 Label"]);
+
+	const { handlers: h2 } = load({
+		option: NO_PLATFORM,
+		bosta_creator: false,
+		shipment: shipment_summary({ status: "Canceled", active: false }),
+	});
+	const canceled = make_frm({});
+	h2["Sales Order"].refresh(canceled);
+	await settle();
+	assert.deepEqual(labels(canceled), []);
+});
+
+test("without read permission on Bosta Shipment nothing is requested and no details show", async () => {
+	const { handlers, bosta_calls } = load({
+		option: NO_PLATFORM,
+		bosta_read: false,
+		bosta_creator: false,
+		shipment: shipment_summary(),
+	});
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.equal(bosta_calls.length, 0);
+	assert.equal(frm.indicators.length, 0);
+	assert.deepEqual(labels(frm), []);
+});
+
+test("the server returning nothing (no permission) shows no details either", async () => {
+	const { handlers } = load({ option: NO_PLATFORM, bosta_creator: false, shipment: null });
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.equal(frm.indicators.length, 0);
+	assert.deepEqual(labels(frm), []);
+});
+
+test("remote text in the shipment is escaped in the indicator", async () => {
+	const { handlers } = load({
+		option: NO_PLATFORM,
+		shipment: shipment_summary({
+			name: 'BOSTA-SHP-"1',
+			tracking_number: "<img src=x onerror=alert(1)>",
+			bosta_state: "<script>x</script>",
+			status: "Completed",
+		}),
+	});
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	const html = frm.indicators[0].label;
+	assert.doesNotMatch(html, /<img|<script/);
+	assert.match(html, /&lt;img src&#x3D;x onerror&#x3D;alert\(1\)&gt;/);
+	assert.match(html, /&lt;script&gt;/);
+	assert.match(html, /href="\/app\/bosta-shipment\/BOSTA-SHP-%221"/);
+});
+
+test("a reload refresh re-adds the indicator and buttons once, not twice", async () => {
+	const { handlers } = load({ option: NO_PLATFORM, shipment: shipment_summary() });
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	handlers["Sales Order"].refresh(frm); // like frm.reload_doc(): everything is cleared first
+	await settle();
+	assert.equal(frm.indicators.length, 1);
+	assert.deepEqual(labels(frm), ["Print Bosta A4 Label"]);
+});
+
+test("a slow reply that lands after a newer refresh is dropped", async () => {
+	const { handlers } = load({ option: NO_PLATFORM, shipment: shipment_summary() });
+	const replies = [];
+	global.frappe.call = (opts) => {
+		if (!opts.method.endsWith("get_sales_order_shipment")) return Promise.resolve({ message: null });
+		return new Promise((resolve) => replies.push(resolve));
+	};
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	handlers["Sales Order"].refresh(frm);
+	replies.forEach((resolve) => resolve({ message: shipment_summary() }));
+	await settle();
+	assert.equal(frm.indicators.length, 1);
+	assert.deepEqual(labels(frm), ["Print Bosta A4 Label"]);
+});
+
+test("a failed shipment read leaves Create available to creators and shows no indicator", async () => {
+	const { handlers } = load({ option: NO_PLATFORM, shipment_fails: true });
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.equal(frm.indicators.length, 0);
+	assert.deepEqual(labels(frm), ["Create Bosta Shipment"]);
+});
+
+test("Draft and Cancelled-status orders get no Create button; drafts are not asked about shipments", async () => {
+	const { handlers, bosta_calls } = load({ option: NO_PLATFORM });
+	const draft = make_frm({ docstatus: 0 });
+	handlers["Sales Order"].refresh(draft);
+	await settle();
+	assert.equal(bosta_calls.length, 0);
+	assert.deepEqual(labels(draft), []);
+
+	const cancelled = make_frm({ status: "Cancelled", docstatus: 2 });
+	handlers["Sales Order"].refresh(cancelled);
+	await settle();
+	assert.deepEqual(labels(cancelled), []);
 });
 
 // ---- Bosta create dialog: city / district dropdowns and address prefill (#245) ----
