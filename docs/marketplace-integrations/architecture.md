@@ -194,6 +194,32 @@ configuration problem (Bosta disabled, no API key) is rejected before anything i
 persisted. A network exception also ends
 `Bosta Failed` with an "outcome unknown" message rather than staying Pending.
 
+**City and district pickers, address prefill (#245).** The create dialog picks the
+city and district from Bosta's lists instead of typing IDs.
+`integrations/bosta/locations.py` fetches `GET /cities` (`data.list[]`: `_id`,
+`name`, `nameAr`) and `GET /cities/{cityId}/districts` (`data[]`: `districtId`,
+`districtName`, `districtOtherName`, `zoneName`, `dropOffAvailability`) through
+`BostaClient` and caches each list for 24 hours in the Frappe cache; districts
+with `dropOffAvailability` explicitly false are dropped, and nothing is cached
+when Bosta fails or answers in an unrecognised shape. These shapes come from the
+OpenAPI examples and are unverified against the live API. The whitelisted POST
+methods `api.bosta_shipments.get_cities` / `get_districts` (`refresh=1`
+refetches; a failed refresh keeps the previous lists) require a creator role. The
+dialog uses Frappe `Autocomplete` controls (searchable, label = escaped name plus
+Arabic name, value = Bosta ID); a load failure shows an error with Retry and
+disables Create. `create_shipment` takes `city` (the city name) and `district_id`;
+the City ID / District Name path is removed from the dialog and the create
+method (the doctype and payload builder still accept it only for rows created
+earlier). Prefill: the address first line comes from the Sales Order's shipping
+Address (`address_line1`, `address_line2`), else the Marketplace Order's
+`customer_formatted_address`; the City is preselected only when the shipping
+Address city equals a Bosta city name (case-insensitive, trimmed), and the
+district is never guessed.
+Prefill reads Address / Marketplace Order values without permission checks, after the Sales Order read check and the creator-role check (a conscious decision; `shipping_address_name` is not validated against the order's customer).
+`get_districts` rejects any city id not in the cached/fetched Bosta city list, so no unknown id reaches `/cities/{id}/districts` or the cache.
+The API key is sent to the public `/cities` endpoints too (unverified whether Bosta needs it).
+The legacy City ID / District Name validation path is kept only for old `Bosta Failed` rows.
+
 **Recovery.** A retry of a `Bosta Failed` shipment, and the **Check Bosta**
 action (shipments that are Pending for more than 5 minutes, Bosta Failed, Delivery
 Note Failed, or Bosta Created without a Delivery Note), first search Bosta by

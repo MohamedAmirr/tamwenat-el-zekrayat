@@ -16,7 +16,9 @@ from frappe import _
 from marketplace_integrations.integrations.bosta.constants import (
 	BOSTA_API_BASE_URL,
 	BOSTA_AWB_MAX_TRACKING_NUMBERS,
+	BOSTA_CITIES_PATH,
 	BOSTA_CREATE_DELIVERY_PATH,
+	BOSTA_DISTRICTS_PATH,
 	BOSTA_GET_DELIVERY_PATH,
 	BOSTA_MASS_AWB_PATH,
 	BOSTA_SEARCH_DELIVERIES_PATH,
@@ -119,6 +121,17 @@ class BostaClient:
 		return self.request(
 			"POST", BOSTA_SEARCH_DELIVERIES_PATH, json={"businessReference": business_reference}
 		)
+
+	def get_cities(self):
+		"""Bosta's documented ``GET /cities`` (public endpoint; the key is sent anyway)."""
+		return self.request("GET", BOSTA_CITIES_PATH)
+
+	def get_districts(self, city_id):
+		"""Bosta's documented ``GET /cities/{cityId}/districts``."""
+		city_id = str(city_id or "").strip()
+		if not city_id:
+			frappe.throw(_("A Bosta city ID is required."))
+		return self.request("GET", BOSTA_DISTRICTS_PATH.format(city_id=quote(city_id, safe="")))
 
 	def error_message(self, response):
 		"""Return a bounded Bosta error suitable for an operator-facing message."""
