@@ -59,7 +59,14 @@ OTHER_DOCTYPE_RECORD = "Products"
 # dependency). These tests construct only their required Warehouse with the
 # site's real configured company, so skip generic generation for every
 # optional ERPNext Link target.
-IGNORE_TEST_RECORD_DEPENDENCIES = ["Warehouse", "Company", "Price List", "Customer", "Account"]
+IGNORE_TEST_RECORD_DEPENDENCIES = [
+	"Warehouse",
+	"Company",
+	"Price List",
+	"Customer",
+	"Account",
+	"Mode of Payment",
+]
 
 
 class IntegrationTestMarketplaceAccount(IntegrationTestCase):
