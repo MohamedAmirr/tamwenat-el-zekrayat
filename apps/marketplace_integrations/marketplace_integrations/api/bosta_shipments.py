@@ -17,12 +17,21 @@ from marketplace_integrations.integrations.bosta.deliveries import (
 from marketplace_integrations.integrations.bosta.deliveries import (
 	create_bosta_shipment as _create_bosta_shipment,
 )
+from marketplace_integrations.integrations.bosta.deliveries import (
+	get_sales_order_shipment as _get_sales_order_shipment,
+)
 from marketplace_integrations.integrations.bosta.labels import create_a4_arabic_label
 
 
 @frappe.whitelist(methods=["POST"])
 def get_create_defaults(sales_order: str):
 	return get_sales_order_defaults(sales_order)
+
+
+@frappe.whitelist(methods=["POST"])
+def get_sales_order_shipment(sales_order: str):
+	"""The order's current Bosta shipment summary for the Sales Order form (#246)."""
+	return _get_sales_order_shipment(sales_order)
 
 
 @frappe.whitelist(methods=["POST"])

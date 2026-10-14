@@ -101,6 +101,25 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 			(shipment.status, shipment.tracking_number, shipment.last_error), ("Completed", "TRK-2", "")
 		)
 
+	def test_retry_of_a_failed_shipment_keeps_the_original_row_and_ignores_new_dialog_values(self):
+		order = self.make_order()
+		self.http.queue["create"].append(FakeResponse(400, {"success": False, "message": "bad"}))
+		with self.assertRaises(frappe.ValidationError):
+			self.create(order)
+		original = self.shipment_for(order)
+
+		self.http.queue["search"].append(FakeResponse(200, {"success": True, "data": []}))
+		self.http.queue["create"].append(created("TRK-3", "DELIVERY-3"))
+		self.create(order, city="Alexandria", district_id="other", address_first_line="Elsewhere 1")
+
+		retried = self.shipment_for(order)
+		self.assertEqual(retried.name, original.name)
+		self.assertEqual(
+			(retried.city, retried.district_id, retried.address_first_line),
+			(original.city, original.district_id, original.address_first_line),
+		)
+		self.assertEqual(retried.status, "Completed")
+
 	def test_network_exception_does_not_leave_the_shipment_pending(self):
 		order = self.make_order()
 		self.http.queue["create"].append(frappe.ValidationError("Failed to reach Bosta."))
