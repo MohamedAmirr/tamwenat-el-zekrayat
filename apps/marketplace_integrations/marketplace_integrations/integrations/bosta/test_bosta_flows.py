@@ -378,7 +378,7 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		finally:
 			frappe.set_user("Administrator")
 
-	def test_dialog_payload_and_address_args_default_to_empty(self):
+	def test_dialog_defaults_and_district_is_required(self):
 		order = self.make_order(rate=500, advance_paid=500)
 		defaults = bosta_shipments.get_create_defaults(order.name)
 		self.assertEqual(
@@ -386,12 +386,12 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		)
 		self.assertEqual(defaults["receiver_name"], self.customer.customer_name)
 
-		# The dialog marks district/city fields optional: omitting them must reach validation.
+		# A missing district is refused before anything is sent.
 		with self.assertRaises(frappe.ValidationError) as raised:
 			bosta_shipments.create_shipment(
-				order.name, self._receiver(), "01000000000", "Cairo", address_first_line="12 Example Street"
+				order.name, self._receiver(), "01000000000", "Cairo", "", "12 Example Street"
 			)
-		self.assertIn("District ID", str(raised.exception))
+		self.assertIn("district", str(raised.exception))
 		self.assertEqual(self.http.calls, [])
 
 	def test_only_one_active_shipment_per_sales_order_but_a_new_one_after_cancel(self):

@@ -41,6 +41,7 @@ def get_sales_order_defaults(sales_order_name):
 	_validate_deliverable(order)
 	cod = _cod_breakdown(order)
 	return {
+		**_address_prefill(order),
 		"receiver_name": cstr(order.customer_name).strip(),
 		"receiver_phone": cstr(order.contact_mobile or order.contact_phone).strip(),
 		"cod_amount": cod["cod"],
@@ -50,15 +51,44 @@ def get_sales_order_defaults(sales_order_name):
 	}
 
 
+def _address_prefill(order):
+	"""Address first line and source city for the dialog (#245).
+
+	The Sales Order's shipping Address wins; the Marketplace Order's formatted address is
+	only a fallback for the first line (it has no structured city, so none is offered).
+	The district is never guessed. Read without per-user permissions: the caller can already
+	read this Sales Order, and Address / Marketplace Order are not readable by every creator
+	role.
+	"""
+	if order.get("shipping_address_name"):
+		address = frappe.db.get_value(
+			"Address",
+			order.shipping_address_name,
+			["address_line1", "address_line2", "city"],
+			as_dict=True,
+		)
+		if address:
+			lines = [cstr(line).strip() for line in (address.address_line1, address.address_line2)]
+			return {
+				"address_first_line": ", ".join(line for line in lines if line),
+				"address_city": cstr(address.city).strip(),
+			}
+	marketplace_order = order.get("custom_marketplace_order")
+	formatted = (
+		frappe.db.get_value("Marketplace Order", marketplace_order, "customer_formatted_address")
+		if marketplace_order
+		else ""
+	)
+	return {"address_first_line": cstr(formatted).strip(), "address_city": ""}
+
+
 def create_bosta_shipment(
 	sales_order_name,
 	receiver_name,
 	receiver_phone,
 	city,
-	district_id="",
-	city_id="",
-	district_name="",
-	address_first_line="",
+	district_id,
+	address_first_line,
 	expected_cod=None,
 ):
 	"""Create Bosta's delivery, then the full remaining ERPNext Delivery Note.
@@ -74,6 +104,10 @@ def create_bosta_shipment(
 	the request is refused so the operator never sends an amount they have not seen.
 	"""
 	_require_creator_role()
+	if not cstr(district_id).strip():
+		frappe.throw(_("Choose a Bosta district."))
+	if not cstr(address_first_line).strip():
+		frappe.throw(_("Enter the address first line."))
 	order = lock_and_load_sales_order(sales_order_name)
 	_validate_deliverable(order)
 	BostaClient().ensure_ready()
@@ -91,8 +125,6 @@ def create_bosta_shipment(
 			"receiver_phone": receiver_phone,
 			"city": city,
 			"district_id": district_id,
-			"city_id": city_id,
-			"district_name": district_name,
 			"address_first_line": address_first_line,
 			"bosta_requested_on": now_datetime(),
 		}

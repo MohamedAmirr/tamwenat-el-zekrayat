@@ -16,6 +16,8 @@
 	const REQUEST_METHOD =
 		"marketplace_integrations.api.marketplace_outbound.request_platform_cancel";
 	const BOSTA_DEFAULTS_METHOD = "marketplace_integrations.api.bosta_shipments.get_create_defaults";
+	const BOSTA_CITIES_METHOD = "marketplace_integrations.api.bosta_shipments.get_cities";
+	const BOSTA_DISTRICTS_METHOD = "marketplace_integrations.api.bosta_shipments.get_districts";
 	const BOSTA_CREATE_METHOD = "marketplace_integrations.api.bosta_shipments.create_shipment";
 
 	const BOSTA_CREATOR_ROLES = ["Sales Manager", "Stock User", "System Manager"];
@@ -32,35 +34,155 @@
 			return;
 		frm.add_custom_button(__("Create Bosta Shipment"), () => {
 			frappe.call({ method: BOSTA_DEFAULTS_METHOD, type: "POST", args: { sales_order: frm.doc.name } }).then((r) => {
-				const defaults = r.message || {};
-				const dialog = new frappe.ui.Dialog({
-					title: __("Create Bosta Shipment"),
-					fields: [
-						{ fieldtype: "HTML", fieldname: "cod_note", options: bosta_cod_note_html(defaults) },
-						{ fieldtype: "HTML", fieldname: "address_help", options: `<p>${__("Enter District ID, or both City ID and District Name.")}</p>` },
-						{ fieldname: "receiver_name", fieldtype: "Data", label: __("Receiver Name"), reqd: 1, default: defaults.receiver_name },
-						{ fieldname: "receiver_phone", fieldtype: "Data", label: __("Receiver Phone"), reqd: 1, default: defaults.receiver_phone },
-						{ fieldname: "city", fieldtype: "Data", label: __("City"), reqd: 1 },
-						{ fieldname: "district_id", fieldtype: "Data", label: __("District ID") },
-						{ fieldname: "city_id", fieldtype: "Data", label: __("City ID") },
-						{ fieldname: "district_name", fieldtype: "Data", label: __("District Name") },
-						{ fieldname: "address_first_line", fieldtype: "Small Text", label: __("Address First Line"), reqd: 1 },
-					],
-					primary_action_label: __("Create Shipment"),
-					primary_action(values) {
-						dialog.hide();
-						frappe.call({
-							method: BOSTA_CREATE_METHOD,
-							type: "POST",
-							args: { sales_order: frm.doc.name, ...values, expected_cod: defaults.cod_amount },
-							freeze: true,
-							freeze_message: __("Creating Bosta shipment..."),
-						}).then(() => frm.reload_doc());
-					},
-				});
-				dialog.show();
+				show_bosta_dialog(frm, r.message || {});
 			});
 		});
+	}
+
+	// Bosta city / district names are remote text. Frappe renders an Autocomplete label as
+	// dropdown HTML and also uses it as the input text, so escaping "&" would show "&amp;"
+	// after picking. Only "<" and ">" are swapped for look-alikes: a label can then never
+	// open a tag, and "&" stays readable.
+	function safe_text(text) {
+		return String(text).replace(/</g, "\u2039").replace(/>/g, "\u203a");
+	}
+	function location_label(item, suffix) {
+		const label = [item.name, item.name_ar].filter(Boolean).map(safe_text).join(" - ");
+		return suffix ? `${label} (${safe_text(suffix)})` : label;
+	}
+
+	// Autocomplete matches the typed text back to an option by label, so two districts with
+	// the same label would collide: those get their zone appended.
+	function location_options(items) {
+		const counts = {};
+		items.forEach((item) => {
+			const label = location_label(item);
+			counts[label] = (counts[label] || 0) + 1;
+		});
+		return items.map((item) => ({
+			value: item.id,
+			label: location_label(item, counts[location_label(item)] > 1 ? item.zone : ""),
+		}));
+	}
+
+	function match_city(cities, source_city) {
+		const wanted = String(source_city || "").trim().toLowerCase();
+		if (!wanted) return null;
+		return cities.find((city) => city.name.trim().toLowerCase() === wanted) || null;
+	}
+
+	function show_bosta_dialog(frm, defaults) {
+		const state = { cities: [], error: false, loading_districts: 0 };
+		const dialog = new frappe.ui.Dialog({
+			title: __("Create Bosta Shipment"),
+			fields: [
+				{ fieldtype: "HTML", fieldname: "cod_note", options: bosta_cod_note_html(defaults) },
+				{ fieldtype: "HTML", fieldname: "lists_error", options: "", hidden: 1 },
+				{ fieldtype: "Button", fieldname: "retry_lists", label: __("Retry"), hidden: 1, click: () => load_cities(false) },
+				{ fieldname: "receiver_name", fieldtype: "Data", label: __("Receiver Name"), reqd: 1, default: defaults.receiver_name },
+				{ fieldname: "receiver_phone", fieldtype: "Data", label: __("Receiver Phone"), reqd: 1, default: defaults.receiver_phone },
+				// Autocomplete: searchable (hundreds of districts), shows the name label and stores the Bosta ID.
+				{ fieldname: "city", fieldtype: "Autocomplete", label: __("City"), reqd: 1, max_items: 1000, options: [], change: on_city_change },
+				{ fieldname: "district", fieldtype: "Autocomplete", label: __("District"), reqd: 1, max_items: 1000, options: [] },
+				{ fieldname: "address_first_line", fieldtype: "Small Text", label: __("Address First Line"), reqd: 1, default: defaults.address_first_line },
+			],
+			primary_action_label: __("Create Shipment"),
+			primary_action(values) {
+				const city = state.cities.find((c) => c.id === values.city);
+				if (!city || !values.district) return;
+				dialog.hide();
+				frappe.call({
+					method: BOSTA_CREATE_METHOD,
+					type: "POST",
+					args: {
+						sales_order: frm.doc.name,
+						receiver_name: values.receiver_name,
+						receiver_phone: values.receiver_phone,
+						city: city.name,
+						district_id: values.district,
+						address_first_line: values.address_first_line,
+						expected_cod: defaults.cod_amount,
+					},
+					freeze: true,
+					freeze_message: __("Creating Bosta shipment..."),
+				}).then(() => frm.reload_doc());
+			},
+			secondary_action_label: __("Refresh Bosta Lists"),
+			secondary_action() {
+				load_cities(true);
+			},
+		});
+
+		function set_ready(ready, error_text) {
+			state.error = !ready && Boolean(error_text);
+			dialog.get_primary_btn().prop("disabled", !ready);
+			dialog.set_df_property("lists_error", "hidden", state.error ? 0 : 1);
+			dialog.set_df_property("retry_lists", "hidden", state.error ? 0 : 1);
+			if (state.error) {
+				dialog.set_df_property(
+					"lists_error",
+					"options",
+					`<p class="text-danger">${frappe.utils.escape_html(error_text)}</p>`
+				);
+			}
+		}
+
+		function fail(what) {
+			set_ready(false, __("Could not load the Bosta {0}. Check Bosta Settings and try again.", [what]));
+		}
+
+		function on_city_change() {
+			// Any city change (typed, picked or programmatic) invalidates the district.
+			dialog.set_value("district", "");
+			dialog.fields_dict.district.set_data([]);
+			load_districts(false);
+		}
+
+		function load_districts(refresh) {
+			const city_id = dialog.get_value("city");
+			const request = ++state.loading_districts;
+			if (!city_id || !state.cities.some((c) => c.id === city_id)) {
+				if (!state.error) set_ready(true);
+				return Promise.resolve();
+			}
+			set_ready(false);
+			return frappe
+				.call({ method: BOSTA_DISTRICTS_METHOD, type: "POST", silent: true, args: { city_id, refresh: refresh ? 1 : 0 } })
+				.then((r) => {
+					// A newer city choice has superseded this answer.
+					if (request !== state.loading_districts) return;
+					dialog.fields_dict.district.set_data(location_options(r.message || []));
+					set_ready(true);
+				})
+				.catch(() => {
+					if (request === state.loading_districts) fail(__("districts"));
+				});
+		}
+
+		function load_cities(refresh) {
+			set_ready(false);
+			return frappe
+				.call({ method: BOSTA_CITIES_METHOD, type: "POST", silent: true, args: { refresh: refresh ? 1 : 0 } })
+				.then((r) => {
+					state.cities = r.message || [];
+					dialog.fields_dict.city.set_data(location_options(state.cities));
+					const selected = dialog.get_value("city");
+					if (selected && state.cities.some((c) => c.id === selected)) {
+						// Refreshing keeps the chosen city; reload its districts too.
+						return load_districts(refresh);
+					}
+					dialog.set_value("city", "");
+					dialog.fields_dict.district.set_data([]);
+					dialog.set_value("district", "");
+					const match = match_city(state.cities, defaults.address_city);
+					set_ready(true);
+					if (match) return dialog.set_value("city", match.id);
+				})
+				.catch(() => fail(__("cities")));
+		}
+
+		dialog.show();
+		return load_cities(false);
 	}
 
 	// The COD that will be sent is the outstanding amount (total minus payments). Values are
@@ -307,6 +429,9 @@
 	if (typeof module !== "undefined") {
 		module.exports = {
 			bosta_cod_note_html,
+			location_options,
+			match_city,
+			show_bosta_dialog,
 			blocked_message,
 			can_offer_cancel,
 			consume_close_request,
