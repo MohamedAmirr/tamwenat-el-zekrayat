@@ -13,7 +13,7 @@ import hashlib
 import frappe
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import cstr
+from frappe.utils import cstr, now_datetime
 
 
 def compute_return_identity_key(marketplace_account, purchase_item_nr):
@@ -32,6 +32,33 @@ def compute_return_identity_key(marketplace_account, purchase_item_nr):
 
 
 class NoonReturn(Document):
+	@frappe.whitelist()
+	def acknowledge_receipt(self, receipt_note=None):
+		"""Record one internal receipt acknowledgement without calling Noon."""
+		self.check_permission("write")
+		if self.is_new():
+			frappe.throw(_("Save the Noon Return before acknowledging its receipt."))
+
+		locked = frappe.get_doc("Noon Return", self.name, for_update=True)
+		if locked.receipt_acknowledged_on:
+			return {
+				"acknowledged": True,
+				"already_acknowledged": True,
+				"acknowledged_by": locked.receipt_acknowledged_by,
+				"acknowledged_on": locked.receipt_acknowledged_on,
+			}
+
+		locked.receipt_acknowledged_on = now_datetime()
+		locked.receipt_acknowledged_by = frappe.session.user
+		locked.receipt_acknowledgement_note = cstr(receipt_note).strip()
+		locked.save(ignore_permissions=True)
+		return {
+			"acknowledged": True,
+			"already_acknowledged": False,
+			"acknowledged_by": locked.receipt_acknowledged_by,
+			"acknowledged_on": locked.receipt_acknowledged_on,
+		}
+
 	def validate(self):
 		# Guard against missing required fields - let Frappe's mandatory field
 		# validation throw the appropriate MandatoryError after this method completes.
@@ -58,4 +85,6 @@ class NoonReturn(Document):
 		# validation throw the appropriate MandatoryError. Only compute the identity
 		# key if both required fields are present.
 		if self.marketplace_account and self.purchase_item_nr:
-			self.return_identity_key = compute_return_identity_key(self.marketplace_account, self.purchase_item_nr)
+			self.return_identity_key = compute_return_identity_key(
+				self.marketplace_account, self.purchase_item_nr
+			)

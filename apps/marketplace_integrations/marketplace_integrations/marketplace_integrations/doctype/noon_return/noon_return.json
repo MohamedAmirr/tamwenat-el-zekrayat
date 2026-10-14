@@ -16,7 +16,11 @@
   "references",
   "found_via",
   "first_seen_on",
-  "last_seen_on"
+  "last_seen_on",
+  "receipt_section",
+  "receipt_acknowledged_on",
+  "receipt_acknowledged_by",
+  "receipt_acknowledgement_note"
  ],
  "fields": [
   {
@@ -121,11 +125,37 @@
    "label": "Last Seen On",
    "read_only": 1,
    "reqd": 1
+  },
+  {
+   "fieldname": "receipt_section",
+   "fieldtype": "Section Break",
+   "label": "Internal Receipt"
+  },
+  {
+   "description": "ERPNext-only confirmation that the return was received. It does not acknowledge or resolve the return on Noon.",
+   "fieldname": "receipt_acknowledged_on",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Receipt Acknowledged On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "receipt_acknowledged_by",
+   "fieldtype": "Link",
+   "label": "Receipt Acknowledged By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "receipt_acknowledgement_note",
+   "fieldtype": "Small Text",
+   "label": "Receipt Acknowledgement Note",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-10-03 00:00:00.000000",
+ "modified": "2026-10-14 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Noon Return",

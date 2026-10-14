@@ -265,9 +265,13 @@ have been checked against a real Noon account.
 
 ## Returns: FBPI return reference lookup and evidence (#153)
 
-Pure evidence capture only — no Credit Note, Sales Invoice, Payment Entry,
-GL entry, stock ledger entry, or Sales Order change is ever created by this
-work. It records what Noon's `ListReturnReferences`
+Return evidence capture is still read-only toward Noon and ERPNext financial,
+stock, and sales documents: no Credit Note, Sales Invoice, Payment Entry, GL
+entry, stock ledger entry, or Sales Order change is ever created. Operations
+can record a one-time internal receipt acknowledgement on a `Noon Return`;
+it records the ERPNext user, time, and optional note only — it is not sent to
+or treated as an acknowledgement or resolution on Noon. The lookup records
+what Noon's `ListReturnReferences`
 (`POST /returns/v1/return-references/list`) returns, as a new standalone
 `Noon Return` doctype (not a Marketplace Order child table, so an unlinked
 return still persists as a real record).
@@ -352,8 +356,8 @@ items have been checked against a real Noon account.
 ## Out of scope (#153)
 
 - Any ERPNext-side correction from a return (Credit Note, Sales Invoice
-  adjustment, Payment Entry, stock ledger entry, or Sales Order change) —
-  this issue is pure evidence capture only.
+  adjustment, Payment Entry, stock ledger entry, or Sales Order change). The
+  local receipt acknowledgement is operational evidence only.
 - A separate reconciliation report: the evidence surfaces through Needs
   Attention and the planner instead (#164).
 - Any write-path Noon call (e.g. acknowledging or resolving a return) —
