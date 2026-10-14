@@ -36,6 +36,23 @@ frappe.ui.form.on("Noon Connection", {
 			});
 		});
 
+		frm.add_custom_button(__("Refresh Webhook Status"), () => {
+			frm.call("refresh_webhook_status").then((response) => {
+				const result = response.message || {};
+				frm.set_value("webhook_status", result.status || "");
+				frm.set_value("other_noon_destinations", result.other_destinations || 0);
+				frm.set_value("last_webhook_event_received_on", result.last_event_received_on || null);
+				if (result.error) {
+					frappe.msgprint(frappe.utils.escape_html(result.error));
+					return;
+				}
+				frappe.show_alert({
+					message: __("Webhook status: {0}", [frappe.utils.escape_html(result.status || "")]),
+					indicator: result.status === "Active" ? "green" : "orange",
+				});
+			});
+		});
+
 		frm.add_custom_button(__("Test Connection"), () => {
 			frm.call("test_connection").then((response) => {
 				if (response.message && response.message.connected) {
