@@ -101,7 +101,7 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 			(shipment.status, shipment.tracking_number, shipment.last_error), ("Completed", "TRK-2", "")
 		)
 
-	def test_retry_of_a_failed_shipment_keeps_the_original_row_and_ignores_new_dialog_values(self):
+	def test_retry_of_a_failed_shipment_reuses_the_row_and_applies_the_new_dialog_values(self):
 		order = self.make_order()
 		self.http.queue["create"].append(FakeResponse(400, {"success": False, "message": "bad"}))
 		with self.assertRaises(frappe.ValidationError):
@@ -116,7 +116,7 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual(retried.name, original.name)
 		self.assertEqual(
 			(retried.city, retried.district_id, retried.address_first_line),
-			(original.city, original.district_id, original.address_first_line),
+			("Alexandria", "other", "Elsewhere 1"),
 		)
 		self.assertEqual(retried.status, "Completed")
 

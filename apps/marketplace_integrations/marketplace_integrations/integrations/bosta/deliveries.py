@@ -146,7 +146,14 @@ def create_bosta_shipment(
 
 	existing = _active_shipment(order.name)
 	if existing:
-		return _resume_existing(existing, order, expected_cod)
+		details = {
+			"receiver_name": receiver_name,
+			"receiver_phone": receiver_phone,
+			"city": city,
+			"district_id": district_id,
+			"address_first_line": address_first_line,
+		}
+		return _resume_existing(existing, order, expected_cod, details)
 
 	cod = _current_cod(order, expected_cod)
 	shipment = frappe.get_doc(
@@ -273,7 +280,7 @@ def _active_shipment(sales_order):
 	return frappe.get_doc("Bosta Shipment", name) if name else None
 
 
-def _resume_existing(shipment, order, expected_cod=None):
+def _resume_existing(shipment, order, expected_cod=None, details=None):
 	if shipment.status in ("Delivery Note Failed", "Bosta Created") and shipment.bosta_delivery_id:
 		frappe.db.commit()
 		return _create_delivery_note(shipment, order.name)
@@ -290,6 +297,8 @@ def _resume_existing(shipment, order, expected_cod=None):
 			return _create_delivery_note(shipment, order.name)
 		lock_and_load_sales_order(order.name)
 		shipment.reload()
+		# Nothing reached Bosta, so the operator may correct the receiver or address.
+		shipment.update(details or {})
 		shipment.status = "Pending Bosta"
 		shipment.bosta_requested_on = now_datetime()
 		save_as_system(shipment)
