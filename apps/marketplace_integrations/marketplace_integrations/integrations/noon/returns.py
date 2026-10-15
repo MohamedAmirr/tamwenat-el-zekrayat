@@ -4,8 +4,9 @@
 """Noon FBPI return reference lookup and evidence (#153).
 
 Evidence capture only: this module never creates a Credit Note, Sales
-Invoice, Payment Entry, GL entry, stock ledger entry, or touches a Sales
-Order. It only calls Noon's ``ListReturnReferences`` and records what Noon
+Invoice, Payment Entry, GL entry, stock ledger entry, or Sales Return, and
+never touches a Sales Order (the draft Sales Return of #261 is created by a
+user action on the ``Noon Return`` doctype, not here). It only calls Noon's ``ListReturnReferences`` and records what Noon
 returns, linking it to an existing ``Marketplace Order`` only on an exact
 ``order_nr`` match. (#164) A newly linked return on an order that already
 has a Sales Order also re-queues that order's sync via the debounce, so the

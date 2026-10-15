@@ -20,7 +20,10 @@
   "receipt_section",
   "receipt_acknowledged_on",
   "receipt_acknowledged_by",
-  "receipt_acknowledgement_note"
+  "receipt_acknowledgement_note",
+  "inspection_section",
+  "inspection_outcome",
+  "sales_return"
  ],
  "fields": [
   {
@@ -150,6 +153,30 @@
    "fieldname": "receipt_acknowledgement_note",
    "fieldtype": "Small Text",
    "label": "Receipt Acknowledgement Note",
+   "read_only": 1
+  },
+  {
+   "fieldname": "inspection_section",
+   "fieldtype": "Section Break",
+   "label": "Inspection"
+  },
+  {
+   "description": "The merchant's decision for the returned item. Sellable creates a draft Sales Return into the account warehouse; Damaged records only (Noon is responsible for it).",
+   "fieldname": "inspection_outcome",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Inspection Outcome",
+   "options": "\nSellable\nDamaged",
+   "read_only": 1
+  },
+  {
+   "description": "Draft or submitted return Delivery Note created from a Sellable outcome.",
+   "fieldname": "sales_return",
+   "fieldtype": "Link",
+   "label": "Sales Return",
+   "no_copy": 1,
+   "options": "Delivery Note",
    "read_only": 1
   }
  ],

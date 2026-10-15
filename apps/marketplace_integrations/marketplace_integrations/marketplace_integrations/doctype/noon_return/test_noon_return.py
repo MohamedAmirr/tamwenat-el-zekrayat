@@ -9,7 +9,7 @@ from frappe.utils import now_datetime
 
 from marketplace_integrations.tests.utils import make_role_user
 
-IGNORE_TEST_RECORD_DEPENDENCIES = ["Marketplace Order", "Account", "User", "Mode of Payment"]
+IGNORE_TEST_RECORD_DEPENDENCIES = ["Marketplace Order", "Account", "User", "Mode of Payment", "Delivery Note"]
 
 
 class TestNoonReturn(IntegrationTestCase):

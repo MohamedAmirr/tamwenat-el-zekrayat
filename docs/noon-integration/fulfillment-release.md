@@ -265,9 +265,11 @@ have been checked against a real Noon account.
 
 ## Returns: FBPI return reference lookup and evidence (#153)
 
-Return evidence capture is still read-only toward Noon and ERPNext financial,
-stock, and sales documents: no Credit Note, Sales Invoice, Payment Entry, GL
-entry, stock ledger entry, or Sales Order change is ever created. Operations
+Return evidence capture is read-only toward Noon. Toward ERPNext it creates
+nothing on its own: the only document it can create is the draft Sales Return
+described under "Inspection and draft Sales Return (#261)" below, and only when
+a user records a Sellable outcome. No Credit Note, Sales Invoice, Payment Entry,
+GL entry or Sales Order change is ever created. Operations
 can record a one-time internal receipt acknowledgement on a `Noon Return`;
 it records the ERPNext user, time, and optional note only — it is not sent to
 or treated as an acknowledgement or resolution on Noon. The lookup records
@@ -353,11 +355,36 @@ production:
 Do not roll this out to production Noon returns handling before these five
 items have been checked against a real Noon account.
 
+### Inspection and draft Sales Return (#261)
+
+After a return is acknowledged as received, a user with write permission records
+the merchant's decision with **Record Inspection** on the `Noon Return`:
+
+- **Sellable**: creates one **draft** return Delivery Note for one unit (qty -1)
+  using ERPNext's own `make_sales_return` against the one submitted, non-return
+  Delivery Note row for the mapped Item on the linked Sales Order. The return
+  row's warehouse is forced to the Marketplace Account's warehouse, the only one
+  the Noon stock sync reads, so staff submitting the draft raises the quantity
+  that the hourly sync pushes. No Noon call is made, nothing is auto-submitted,
+  and the user needs create permission on Delivery Note.
+- **Damaged**: recorded only. Noon is responsible for damaged items, so no
+  document is created and no stock moves.
+
+It refuses, creating nothing, when the return is unacknowledged or unlinked, the
+Marketplace Order has no submitted Sales Order, the Partner SKU has no enabled
+mapping, the account has no warehouse, or there is not exactly one candidate
+Delivery Note row (the message names the candidates). A recorded outcome cannot
+be changed. Re-running Sellable returns the existing draft or submitted return;
+a cancelled or deleted one is replaced. ERPNext cannot make a Sales Return from a
+Sales Order, and this app never creates a Delivery Note for a Noon order, so
+staff must already have delivered the order with a Delivery Note.
+
 ## Out of scope (#153)
 
-- Any ERPNext-side correction from a return (Credit Note, Sales Invoice
-  adjustment, Payment Entry, stock ledger entry, or Sales Order change). The
-  local receipt acknowledgement is operational evidence only.
+- Any ERPNext-side correction from a return other than the draft Sales Return of
+  #261 (Credit Note, Sales Invoice adjustment, Payment Entry, or Sales Order
+  change; the Credit Note is #262). The local receipt acknowledgement is
+  operational evidence only.
 - A separate reconciliation report: the evidence surfaces through Needs
   Attention and the planner instead (#164).
 - Any write-path Noon call (e.g. acknowledging or resolving a return) —
