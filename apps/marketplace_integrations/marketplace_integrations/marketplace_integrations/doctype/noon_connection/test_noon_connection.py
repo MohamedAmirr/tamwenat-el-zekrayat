@@ -484,3 +484,56 @@ class IntegrationTestNoonConnection(IntegrationTestCase):
 			):
 				with self.assertRaises(frappe.PermissionError):
 					call()
+
+	def test_refresh_stores_every_destination_and_replaces_rows_on_next_refresh(self):
+		connection = make_connection("Webhook Rows")
+		ours = {
+			"destination_code": "dest-ours",
+			"destination_name": "ours",
+			"url": connection.webhook_url,
+			"is_active": True,
+			"event_types": ["FBPI::ORDER_SYNC"],
+		}
+		other = {
+			"destination_code": "dest-other",
+			"destination_name": "probe",
+			"url": "https://other.example.test/hook",
+			"is_active": False,
+			"event_types": [],
+		}
+		with self._client_patch() as client_class:
+			client = client_class.return_value
+			client.list_destinations.return_value = self._list_response([ours, other])
+			connection.refresh_webhook_status()
+			connection.reload()
+			rows = {row.destination_code: row for row in connection.noon_destinations}
+			self.assertEqual(set(rows), {"dest-ours", "dest-other"})
+			self.assertEqual(rows["dest-ours"].is_ours, 1)
+			self.assertEqual(rows["dest-ours"].event_types, "FBPI::ORDER_SYNC")
+			self.assertEqual((rows["dest-other"].is_ours, rows["dest-other"].is_active), (0, 0))
+
+			client.list_destinations.return_value = self._list_response([ours])
+			connection.refresh_webhook_status()
+			connection.reload()
+			self.assertEqual([row.destination_code for row in connection.noon_destinations], ["dest-ours"])
+
+	def test_set_destination_active_works_for_any_listed_destination_only(self):
+		connection = make_connection("Webhook Row Toggle")
+		other = {
+			"destination_code": "dest-other",
+			"destination_name": "probe",
+			"url": "https://other.example.test/hook",
+			"is_active": True,
+			"event_types": [],
+		}
+		with self._client_patch() as client_class:
+			client = client_class.return_value
+			client.list_destinations.return_value = self._list_response([other])
+			client.update_destination.return_value = SimpleNamespace(status_code=200)
+			connection.refresh_webhook_status()
+			connection.reload()
+			with self.assertRaises(frappe.ValidationError):
+				connection.set_destination_active("dest-unlisted", 0)
+			client.update_destination.assert_not_called()
+			connection.set_destination_active("dest-other", 0)
+			client.update_destination.assert_called_once_with("dest-other", is_active=False)

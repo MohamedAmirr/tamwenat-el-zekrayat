@@ -18,6 +18,7 @@
   "webhook_status",
   "last_webhook_event_received_on",
   "other_noon_destinations",
+  "noon_destinations",
   "enabled"
  ],
  "fields": [
@@ -103,6 +104,15 @@
    "fieldname": "other_noon_destinations",
    "fieldtype": "Int",
    "label": "Other Noon Destinations",
+   "read_only": 1
+  },
+  {
+   "cannot_add_rows": 1,
+   "cannot_delete_rows": 1,
+   "fieldname": "noon_destinations",
+   "fieldtype": "Table",
+   "label": "Noon Destinations",
+   "options": "Noon Destination",
    "read_only": 1
   },
   {

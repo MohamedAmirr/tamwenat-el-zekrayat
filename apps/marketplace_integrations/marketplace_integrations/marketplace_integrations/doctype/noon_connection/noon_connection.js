@@ -146,3 +146,18 @@ frappe.ui.form.on("Noon Connection", {
 		});
 	},
 });
+
+frappe.ui.form.on("Noon Destination", {
+	toggle_active(frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		const activate = !row.is_active;
+		frappe.confirm(
+			activate
+				? __("Activate destination {0}?", [frappe.utils.escape_html(row.destination_name || row.destination_code)])
+				: __("Deactivate destination {0}? Noon stops sending events to it.", [
+						frappe.utils.escape_html(row.destination_name || row.destination_code),
+				  ]),
+			() => call_webhook_method(frm, "set_destination_active", { destination_code: row.destination_code, active: activate ? 1 : 0 })
+		);
+	},
+});
