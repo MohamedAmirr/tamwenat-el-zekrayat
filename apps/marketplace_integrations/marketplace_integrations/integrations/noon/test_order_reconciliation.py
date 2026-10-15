@@ -308,10 +308,45 @@ class UnitTestNoonEvidenceThroughThePlanner(UnitTestCase):
 
 
 class IntegrationTestNoonReturnLookup(IntegrationTestCase):
-	def test_return_evidence_is_looked_up_by_the_marketplace_order_link(self):
-		for found in ("NOONRET-00001", None):
-			with self.subTest(found=found):
-				with patch("frappe.db.exists", return_value=found) as exists:
-					self.assertIs(_has_noon_return(SimpleNamespace(name="MO-164")), bool(found))
+	"""#262: return evidence lasts only while a linked Noon Return is unresolved."""
 
-				exists.assert_called_once_with("Noon Return", {"marketplace_order": "MO-164"})
+	ORDER = SimpleNamespace(name="MO-164")
+
+	def _evidence(self, returns, submitted=()):
+		"""``submitted`` is the set of (doctype, name) pairs with docstatus 1."""
+
+		def docstatus(doctype, name, fieldname):
+			return 1 if (doctype, name) in submitted else 0
+
+		with patch("frappe.get_all", return_value=returns) as get_all:
+			with patch("frappe.db.get_value", side_effect=docstatus):
+				result = _has_noon_return(self.ORDER)
+		get_all.assert_called_once()
+		self.assertEqual(get_all.call_args.kwargs["filters"], {"marketplace_order": "MO-164"})
+		return result
+
+	def _row(self, outcome=None, sales_return=None, credit_note=None):
+		return SimpleNamespace(inspection_outcome=outcome, sales_return=sales_return, credit_note=credit_note)
+
+	def test_no_linked_returns_means_no_evidence(self):
+		self.assertFalse(self._evidence([]))
+		self.assertFalse(_has_noon_return(SimpleNamespace()))
+
+	def test_an_uninspected_return_is_unresolved(self):
+		self.assertTrue(self._evidence([self._row()]))
+
+	def test_sellable_resolves_only_with_a_submitted_return_and_credit_note(self):
+		row = self._row("Sellable", "DN-1", "SI-1")
+		self.assertTrue(self._evidence([row]))
+		self.assertTrue(self._evidence([row], {("Delivery Note", "DN-1")}))
+		self.assertTrue(self._evidence([row], {("Sales Invoice", "SI-1")}))
+		self.assertFalse(self._evidence([row], {("Delivery Note", "DN-1"), ("Sales Invoice", "SI-1")}))
+
+	def test_damaged_resolves_with_only_a_submitted_credit_note(self):
+		row = self._row("Damaged", None, "SI-2")
+		self.assertTrue(self._evidence([row]))
+		self.assertFalse(self._evidence([row], {("Sales Invoice", "SI-2")}))
+
+	def test_any_unresolved_return_keeps_the_evidence(self):
+		resolved = self._row("Damaged", None, "SI-2")
+		self.assertTrue(self._evidence([resolved, self._row()], {("Sales Invoice", "SI-2")}))
