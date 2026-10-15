@@ -398,7 +398,11 @@ class IntegrationTestNoonConnection(IntegrationTestCase):
 		self.assertEqual(url, connection.webhook_url)
 		self.assertEqual(headers, {"X-Api-Key": secret})
 		client.update_destination.assert_called_once_with(
-			"dest-new", event_types=[{"event_type": "FBPI::ORDER_SYNC", "is_active": True}]
+			"dest-new",
+			event_types=[
+				{"event_type": "FBPI::ORDER_SYNC", "is_active": True},
+				{"event_type": "RETURNS::REFERENCE_UPDATE", "is_active": True},
+			],
 		)
 		connection.reload()
 		self.assertEqual(connection.noon_destination_code, "dest-new")

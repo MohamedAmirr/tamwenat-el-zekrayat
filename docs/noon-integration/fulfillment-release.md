@@ -355,6 +355,10 @@ production:
 Do not roll this out to production Noon returns handling before these five
 items have been checked against a real Noon account.
 
+### Return reference webhook (#263)
+
+Besides the manual lookup and the daily AWB scan, a `RETURNS::REFERENCE_UPDATE` event queues the same lookup (`found_via` "Webhook"). Its payload fields are unverified; see `docs/noon-integration/event-notifications.md`. It only creates or updates `Noon Return` rows.
+
 ### Inspection, draft Sales Return and draft Credit Note (#261, #262)
 
 After a return is acknowledged as received, a user with write permission records

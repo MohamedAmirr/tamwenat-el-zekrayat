@@ -49,6 +49,14 @@ NOON_EVENT_WEBHOOK_PATH = "/api/method/marketplace_integrations.api.noon_webhook
 # stops retrying a type we don't handle (#163 scope).
 NOON_FBPI_ORDER_SYNC_EVENT_TYPE = "FBPI::ORDER_SYNC"
 
+# #263: the return-reference event. Its payload shape (barcode, barcode_type) comes
+# from an AI-written summary, not a Noon page, so it is unverified; the receiver
+# stores the raw payload (capped) so the first real delivery can confirm it.
+NOON_RETURN_REFERENCE_UPDATE_EVENT_TYPE = "RETURNS::REFERENCE_UPDATE"
+NOON_SUBSCRIBED_EVENT_TYPES = (NOON_FBPI_ORDER_SYNC_EVENT_TYPE, NOON_RETURN_REFERENCE_UPDATE_EVENT_TYPE)
+NOON_RETURN_EVENT_PAYLOAD_LOG_MAX = 4096
+NOON_RETURN_BARCODE_MAX = 255
+
 # #253: Noon allows at most this many Event Notification destinations per project.
 NOON_MAX_DESTINATIONS = 5
 

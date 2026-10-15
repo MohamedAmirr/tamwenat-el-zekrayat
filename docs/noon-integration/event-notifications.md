@@ -122,7 +122,7 @@ with body `{}`; the Static Sandbox project had no destinations and an empty
 event-type list, so subscribing could not be exercised there. The
 `CreateHttpsDestination` answers HTTP 200 with `{"destination_code": "..."}`
 and creates the destination **active with no event types**, so Register always
-needs the subscribe step. There is no delete endpoint: an unwanted destination
+needs the subscribe step (it now subscribes both `FBPI::ORDER_SYNC` and `RETURNS::REFERENCE_UPDATE`). There is no delete endpoint: an unwanted destination
 can only be deactivated, and it still counts toward the 5-destination limit.
 A deactivated destination can still be subscribed (`UpdateDestination` 200).
 
@@ -156,3 +156,34 @@ hourly poll cycle (#145), up to about an hour later. This is accepted
 behavior, not a bug: it follows directly from relying entirely on #145's
 existing per-account job_id dedup rather than introducing a new dedup
 doctype/mechanism for this receiver (see "Delivery semantics" above).
+
+## RETURNS::REFERENCE_UPDATE (#263)
+
+Noon's event-type list for this project includes `RETURNS::REFERENCE_UPDATE`
+(observed with `ListEventTypes` on the production account, 2026-10-15). Register
+and Update destination subscribe it next to `FBPI::ORDER_SYNC`; an existing
+destination gets it through **Update Noon Destination**.
+
+**Payload fields are UNVERIFIED.** The only description, `barcode` (string) and
+`barcode_type` (`awb_nr` or `rms_barcode`), came from an AI-written summary of
+Noon's docs, not from a Noon page or a real delivery. A web search on 2026-10-15
+found nothing else, official or unofficial. The receiver therefore:
+
+- reads only `payload.barcode`; when it is a non-empty string of at most 255
+  characters it queues the existing `ListReturnReferences` lookup as a
+  deduplicated `long`-queue job (`found_via` "Webhook", log `trigger_source`
+  "Noon Webhook"), with no Noon call in the request;
+- otherwise logs and ignores the event, and still answers 200 so Noon stops
+  retrying;
+- stores the raw `payload` on a `Marketplace Sync Log` row (`sync_type` Return
+  Lookup, `request_data.payload`), capped at 4096 characters (larger payloads are
+  kept as `truncated_payload`). Headers and the key are never stored. This is for
+  this event only: `FBPI::ORDER_SYNC` logging is unchanged because its payload can
+  hold customer data. Look at the first real payload before widening this.
+
+**To verify after the first real delivery:** open the newest `Return Lookup` /
+`Noon Webhook` row in Marketplace Sync Log, compare `request_data.payload` with
+the assumed fields, and correct `api/noon_webhooks.py` and this section if they
+differ. Until then the lookup is evidence capture only: it creates or updates
+`Noon Return` rows and nothing in ERPNext.
+
