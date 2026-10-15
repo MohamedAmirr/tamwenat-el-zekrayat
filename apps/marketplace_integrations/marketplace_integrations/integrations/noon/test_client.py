@@ -274,3 +274,23 @@ class UnitTestNoonHttpHelper(UnitTestCase):
 		self.assertNotIn("private-key-in-error", str(ctx.exception))
 		self.assertIn("Failed to reach Noon", str(ctx.exception))
 		self.assertEqual(send.call_args.kwargs["timeout"], REQUEST_TIMEOUT_SECONDS)
+
+	def test_destination_write_calls_use_documented_paths_and_bodies(self):
+		client = NoonClient("unused")
+		with patch.object(client, "request") as request:
+			client.create_https_destination("name", "https://x.test/hook", {"X-Api-Key": "k"})
+			request.assert_called_with(
+				"POST",
+				"/event-notifications/v1/destination/https-destination/create",
+				json={
+					"destination_name": "name",
+					"url": "https://x.test/hook",
+					"credentials": {"values": {"X-Api-Key": "k"}},
+				},
+			)
+			client.update_destination("DEST/1", is_active=False)
+			request.assert_called_with(
+				"POST",
+				"/event-notifications/v1/destination/https-destination/DEST%2F1/update",
+				json={"is_active": False},
+			)
