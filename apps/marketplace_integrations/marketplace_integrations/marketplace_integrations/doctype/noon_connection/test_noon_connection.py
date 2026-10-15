@@ -537,3 +537,73 @@ class IntegrationTestNoonConnection(IntegrationTestCase):
 			client.update_destination.assert_not_called()
 			connection.set_destination_active("dest-other", 0)
 			client.update_destination.assert_called_once_with("dest-other", is_active=False)
+
+	def _refresh_with(self, connection, destinations):
+		with self._client_patch() as client_class:
+			client_class.return_value.list_destinations.return_value = self._list_response(destinations)
+			return connection.refresh_webhook_status()
+
+	def test_refresh_webhook_status_reports_each_remaining_state(self):
+		connection = make_connection("Webhook Status States")
+		ours = {
+			"destination_code": "dest-ours",
+			"url": connection.webhook_url,
+			"is_active": True,
+			"event_types": ["FBPI::ORDER_SYNC"],
+		}
+		self.assertEqual(self._refresh_with(connection, [])["status"], "Not registered")
+		self.assertEqual(self._refresh_with(connection, [{**ours, "is_active": False}])["status"], "Inactive")
+		self.assertEqual(
+			self._refresh_with(connection, [{**ours, "event_types": []}])["status"],
+			"Registered, not subscribed",
+		)
+
+	def test_refresh_webhook_status_counts_other_destinations(self):
+		connection = make_connection("Webhook Status Others")
+		ours = {
+			"destination_code": "dest-ours",
+			"url": connection.webhook_url,
+			"is_active": True,
+			"event_types": ["FBPI::ORDER_SYNC"],
+		}
+		others = [{"destination_code": f"other-{i}", "url": f"https://x.test/{i}"} for i in range(4)]
+		result = self._refresh_with(connection, [ours, *others])
+		self.assertEqual((result["status"], result["other_destinations"]), ("Active", 4))
+		self.assertEqual(self._refresh_with(connection, others)["other_destinations"], 4)
+		connection.reload()
+		self.assertEqual(connection.other_noon_destinations, 4)
+
+	def test_refresh_webhook_status_reports_last_webhook_event_received(self):
+		with patch("marketplace_integrations.integrations.noon.catalog.validate_warehouse_code"):
+			connection = make_connection("Webhook Status Last Event")
+			account = frappe.get_doc(
+				{
+					"doctype": "Marketplace Account",
+					"account_name": "Webhook Status Last Event Account",
+					"platform": "Noon",
+					"external_account_id": connection.project_code,
+					"connection_doctype": "Noon Connection",
+					"connection": connection.name,
+					"noon_warehouse_code": "NOON-WH-001",
+					"noon_country_code": "ae",
+					"enabled": 1,
+				}
+			).insert()
+		self.addCleanup(account.delete)
+		self.assertIsNone(self._refresh_with(connection, [])["last_event_received_on"])
+
+		log = frappe.get_doc(
+			{
+				"doctype": "Marketplace Sync Log",
+				"marketplace_account": account.name,
+				"sync_type": "Order Import",
+				"status": "Success",
+				"trigger_source": "Noon Webhook",
+				"attempted_at": frappe.utils.now_datetime(),
+				"completed_at": "2026-10-03 10:00:00",
+			}
+		).insert()
+		self.addCleanup(log.delete)
+		self.assertEqual(
+			str(self._refresh_with(connection, [])["last_event_received_on"]), "2026-10-03 10:00:00"
+		)
