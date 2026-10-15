@@ -48,6 +48,7 @@ function makeForm({ isNew = false, acknowledgedOn = null, canWrite = true, doc =
 		add_custom_button(label, action) {
 			this.button = { label, action };
 			(this.buttons = this.buttons || []).push(label);
+			(this.actions = this.actions || {})[label] = action;
 		},
 		call(method, args) {
 			this.callArgs = { method, args };
@@ -111,7 +112,31 @@ test("a recorded outcome hides Record Inspection and a Sales Return can be opene
 		doc: { inspection_outcome: "Sellable", sales_return: "MAT-DN-0001" },
 	});
 	handlers.refresh(form);
-	assert.deepEqual(form.buttons, ["Open Sales Return"]);
-	form.button.action();
+	assert.deepEqual(form.buttons, ["Open Sales Return", "Create Credit Note"]);
+	form.actions["Open Sales Return"]();
 	assert.deepEqual(route, ["Form", "Delivery Note", "MAT-DN-0001"]);
+});
+
+test("Create Credit Note confirms, calls the server and Open Credit Note replaces it", async () => {
+	alerts.length = 0;
+	let confirmed;
+	global.frappe.confirm = (_message, action) => {
+		confirmed = action;
+	};
+	const form = makeForm({ acknowledgedOn: "2026-10-14 10:00:00", doc: { inspection_outcome: "Damaged" } });
+	handlers.refresh(form);
+	assert.deepEqual(form.buttons, ["Create Credit Note"]);
+	form.actions["Create Credit Note"]();
+	await confirmed();
+	assert.equal(form.callArgs.method, "create_credit_note");
+	assert.equal(alerts.at(-1).message, "Draft Credit Note created.");
+
+	const linked = makeForm({
+		acknowledgedOn: "2026-10-14 10:00:00",
+		doc: { inspection_outcome: "Damaged", credit_note: "ACC-SINV-0001" },
+	});
+	handlers.refresh(linked);
+	assert.deepEqual(linked.buttons, ["Open Credit Note"]);
+	linked.actions["Open Credit Note"]();
+	assert.deepEqual(route, ["Form", "Sales Invoice", "ACC-SINV-0001"]);
 });

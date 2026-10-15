@@ -7,7 +7,26 @@ frappe.ui.form.on("Noon Return", {
 				frappe.set_route("Form", "Delivery Note", frm.doc.sales_return);
 			});
 		}
+		if (frm.doc.credit_note) {
+			frm.add_custom_button(__("Open Credit Note"), () => {
+				frappe.set_route("Form", "Sales Invoice", frm.doc.credit_note);
+			});
+		}
 		if (!frm.perm[0].write) return;
+
+		if (frm.doc.inspection_outcome && !frm.doc.credit_note) {
+			frm.add_custom_button(__("Create Credit Note"), () => {
+				frappe.confirm(
+					__("Create a draft Credit Note (return Sales Invoice) for one unit of this returned item?"),
+					() => {
+						frm.call("create_credit_note").then(() => {
+							frm.reload_doc();
+							frappe.show_alert({ message: __("Draft Credit Note created."), indicator: "green" });
+						});
+					}
+				);
+			});
+		}
 
 		if (frm.doc.receipt_acknowledged_on && !frm.doc.inspection_outcome) {
 			frm.add_custom_button(__("Record Inspection"), () => {

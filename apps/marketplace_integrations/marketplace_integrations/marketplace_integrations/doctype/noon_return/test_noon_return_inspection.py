@@ -4,7 +4,7 @@
 from unittest.mock import patch
 
 import frappe
-from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
+from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note, make_sales_invoice
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, now_datetime, nowdate
 
@@ -12,7 +12,14 @@ from marketplace_integrations.services.listing_quantity import get_sellable_qty
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 from marketplace_integrations.tests.utils import make_role_user
 
-IGNORE_TEST_RECORD_DEPENDENCIES = ["Marketplace Order", "Account", "User", "Mode of Payment", "Delivery Note"]
+IGNORE_TEST_RECORD_DEPENDENCIES = [
+	"Marketplace Order",
+	"Account",
+	"User",
+	"Mode of Payment",
+	"Delivery Note",
+	"Sales Invoice",
+]
 
 
 class TestNoonReturnInspection(IntegrationTestCase):
@@ -352,3 +359,122 @@ class TestNoonReturnInspection(IntegrationTestCase):
 		with patch("marketplace_integrations.integrations.noon.client.NoonClient.request") as request:
 			noon_return.record_inspection("Damaged")
 		request.assert_not_called()
+
+	def make_invoice(self, sales_order, update_stock=0):
+		invoice = make_sales_invoice(sales_order.name)
+		invoice.update_stock = update_stock
+		invoice.insert()
+		invoice.submit()
+		self.track("Sales Invoice", invoice.name)
+		return invoice
+
+	def inspected_return(self, order, outcome="Damaged"):
+		noon_return = self.make_return(order)
+		result = noon_return.record_inspection(outcome)
+		if result.get("sales_return"):
+			self.track("Delivery Note", result["sales_return"])
+		noon_return.reload()
+		return noon_return
+
+	def test_credit_note_creates_one_draft_return_row_for_one_unit(self):
+		order, sales_order, _delivery_note = self.make_delivered_order(qty=2)
+		invoice = self.make_invoice(sales_order)
+		noon_return = self.inspected_return(order)
+
+		result = noon_return.create_credit_note()
+
+		draft = frappe.get_doc("Sales Invoice", result["credit_note"])
+		self.track("Sales Invoice", draft.name)
+		self.assertEqual(draft.docstatus, 0)
+		self.assertEqual(draft.is_return, 1)
+		self.assertEqual(draft.return_against, invoice.name)
+		self.assertEqual(len(draft.items), 1)
+		self.assertEqual(draft.items[0].qty, -1)
+		self.assertEqual(draft.items[0].item_code, self.item.name)
+		self.assertEqual(draft.items[0].sales_order, sales_order.name)
+		self.assertEqual(frappe.db.count("Payment Entry Reference", {"reference_name": draft.name}), 0)
+		noon_return.reload()
+		self.assertEqual(noon_return.credit_note, draft.name)
+
+	def test_credit_note_needs_an_inspection_outcome_first(self):
+		order, sales_order, _delivery_note = self.make_delivered_order(qty=2)
+		self.make_invoice(sales_order)
+		noon_return = self.make_return(order)
+		with self.assertRaises(frappe.ValidationError):
+			noon_return.create_credit_note()
+
+	def test_credit_note_refuses_without_an_invoice_or_with_an_update_stock_invoice(self):
+		order, sales_order, _delivery_note = self.make_delivered_order(qty=2)
+		noon_return = self.inspected_return(order)
+		credit_notes_before = frappe.db.count("Sales Invoice", {"is_return": 1})
+
+		with self.assertRaises(frappe.ValidationError) as raised:
+			noon_return.create_credit_note()
+		self.assertIn("exactly one", str(raised.exception))
+
+		# An invoice that already updates stock would return the stock a second time. The
+		# delivery above already consumed the Sales Order quantity, so this one is built
+		# by editing the flag on a normal submitted invoice.
+		invoice = self.make_invoice(sales_order)
+		frappe.db.set_value("Sales Invoice", invoice.name, "update_stock", 1)
+		with self.assertRaises(frappe.ValidationError) as raised:
+			noon_return.create_credit_note()
+		self.assertIn("updates stock", str(raised.exception))
+		self.assertEqual(frappe.db.count("Sales Invoice", {"is_return": 1}), credit_notes_before)
+
+	def test_credit_note_second_call_is_idempotent_and_a_cancelled_one_is_replaced(self):
+		order, sales_order, _delivery_note = self.make_delivered_order(qty=2)
+		self.make_invoice(sales_order)
+		noon_return = self.inspected_return(order)
+		first = noon_return.create_credit_note()
+		self.track("Sales Invoice", first["credit_note"])
+
+		again = noon_return.create_credit_note()
+		self.assertEqual(again["credit_note"], first["credit_note"])
+		self.assertTrue(again["already_created"])
+
+		draft = frappe.get_doc("Sales Invoice", first["credit_note"])
+		draft.submit()
+		draft.cancel()
+		noon_return.reload()
+		replaced = noon_return.create_credit_note()
+		self.track("Sales Invoice", replaced["credit_note"])
+		self.assertNotEqual(replaced["credit_note"], first["credit_note"])
+
+	def test_credit_note_requires_invoice_create_permission_and_makes_no_noon_call(self):
+		order, sales_order, _delivery_note = self.make_delivered_order(qty=2)
+		self.make_invoice(sales_order)
+		noon_return = self.inspected_return(order)
+		email, _ = make_role_user(
+			self, "Noon Return Editor", {"Noon Return": ["read", "write"], "Sales Invoice": ["read"]}
+		)
+		original_user = frappe.session.user
+		frappe.set_user(email)
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				noon_return.create_credit_note()
+		finally:
+			frappe.set_user(original_user)
+
+		with patch("marketplace_integrations.integrations.noon.client.NoonClient.request") as request:
+			result = noon_return.create_credit_note()
+		self.track("Sales Invoice", result["credit_note"])
+		request.assert_not_called()
+
+	def test_return_evidence_clears_only_after_submitted_documents(self):
+		from marketplace_integrations.integrations.noon.order_reconciliation import _has_noon_return
+
+		order, sales_order, _delivery_note = self.make_delivered_order(qty=2)
+		self.make_invoice(sales_order)
+		noon_return = self.inspected_return(order, "Sellable")
+		self.assertTrue(_has_noon_return(order))
+
+		credit = frappe.get_doc("Sales Invoice", noon_return.create_credit_note()["credit_note"])
+		self.track("Sales Invoice", credit.name)
+		self.assertTrue(_has_noon_return(order))  # drafts do not count
+
+		credit.submit()
+		self.assertTrue(_has_noon_return(order))  # Sellable still needs its Sales Return
+
+		frappe.get_doc("Delivery Note", noon_return.sales_return).submit()
+		self.assertFalse(_has_noon_return(order))

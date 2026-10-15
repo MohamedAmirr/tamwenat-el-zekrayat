@@ -103,12 +103,57 @@ class NoonReturn(Document):
 		locked.save(ignore_permissions=True)
 		return {"outcome": outcome, "sales_return": sales_return, "already_created": False}
 
-	def _existing_sales_return(self):
-		"""The linked return while it is draft or submitted; a cancelled or deleted one is replaced."""
-		if not self.sales_return:
+	@frappe.whitelist()
+	def create_credit_note(self):
+		"""Draft a return Sales Invoice (Credit Note) for one unit; never submitted, no Noon call."""
+		from erpnext.accounts.doctype.sales_invoice.sales_invoice import make_sales_return
+
+		self.check_permission("write")
+		if self.is_new():
+			frappe.throw(_("Save the Noon Return before creating its Credit Note."))
+		frappe.has_permission("Sales Invoice", "create", throw=True)
+
+		locked = frappe.get_doc("Noon Return", self.name, for_update=True)
+		if not locked.inspection_outcome:
+			frappe.throw(_("Record the inspection outcome before creating the Credit Note."))
+		existing = locked._existing_linked("credit_note")
+		if existing:
+			return {"credit_note": existing, "already_created": True}
+
+		sales_order = locked._require_submitted_sales_order()
+		candidate = locked._find_source_row("Sales Invoice", "Sales Invoice Item", "sales_order", sales_order)
+		if frappe.db.get_value("Sales Invoice", candidate.parent, "update_stock"):
+			frappe.throw(
+				_(
+					"Sales Invoice {0} updates stock, so a Credit Note from it would return the stock a second time."
+				).format(candidate.parent)
+			)
+
+		doc = make_sales_return(candidate.parent)
+		kept = [row for row in doc.items if row.sales_invoice_item == candidate.name]
+		if len(kept) != 1:
+			frappe.throw(_("Could not match the invoice row on {0}.").format(candidate.parent))
+		row = kept[0]
+		row.qty = -1
+		row.stock_qty = flt(-1 * flt(row.conversion_factor or 1))
+		doc.set("items", [row])
+		doc.run_method("calculate_taxes_and_totals")
+		doc.insert()
+
+		locked.credit_note = doc.name
+		locked.save(ignore_permissions=True)
+		return {"credit_note": doc.name, "already_created": False}
+
+	def _existing_linked(self, fieldname):
+		"""A linked return document while it is draft or submitted; a cancelled or deleted one is replaced."""
+		doctype = {"sales_return": "Delivery Note", "credit_note": "Sales Invoice"}[fieldname]
+		name = self.get(fieldname)
+		if not name:
 			return None
-		docstatus = frappe.db.get_value("Delivery Note", self.sales_return, "docstatus")
-		return self.sales_return if docstatus in (0, 1) else None
+		return name if frappe.db.get_value(doctype, name, "docstatus") in (0, 1) else None
+
+	def _existing_sales_return(self):
+		return self._existing_linked("sales_return")
 
 	def _require_submitted_sales_order(self):
 		if not self.marketplace_order:
@@ -118,14 +163,8 @@ class NoonReturn(Document):
 			frappe.throw(_("The linked Marketplace Order has no submitted Sales Order."))
 		return sales_order
 
-	def _make_draft_sales_return(self):
-		from erpnext.stock.doctype.delivery_note.delivery_note import make_sales_return
-
-		frappe.has_permission("Delivery Note", "create", throw=True)
-		sales_order = self._require_submitted_sales_order()
-		warehouse = frappe.db.get_value("Marketplace Account", self.marketplace_account, "warehouse")
-		if not warehouse:
-			frappe.throw(_("The Marketplace Account has no warehouse; returned stock needs one."))
+	def _find_source_row(self, parent_doctype, child_doctype, sales_order_field, sales_order):
+		"""The one submitted, non-return source row for this return's mapped Item on the Sales Order."""
 		if not cstr(self.partner_sku).strip():
 			frappe.throw(_("This return has no Partner SKU, so its Item cannot be resolved."))
 		mapping = resolve_mapping_and_item(self.marketplace_account, cstr(self.partner_sku).strip())
@@ -133,13 +172,13 @@ class NoonReturn(Document):
 			frappe.throw(_("No enabled mapping exists for Partner SKU {0}.").format(self.partner_sku))
 
 		rows = frappe.get_all(
-			"Delivery Note Item",
-			filters={"against_sales_order": sales_order, "item_code": mapping["item"], "docstatus": 1},
+			child_doctype,
+			filters={sales_order_field: sales_order, "item_code": mapping["item"], "docstatus": 1},
 			fields=["name", "parent"],
 		)
-		delivery_notes = set(
+		parents = set(
 			frappe.get_all(
-				"Delivery Note",
+				parent_doctype,
 				filters={
 					"name": ["in", [row.parent for row in rows] or [""]],
 					"is_return": 0,
@@ -148,15 +187,27 @@ class NoonReturn(Document):
 				pluck="name",
 			)
 		)
-		candidates = [row for row in rows if row.parent in delivery_notes]
+		candidates = [row for row in rows if row.parent in parents]
 		if len(candidates) != 1:
 			names = ", ".join(sorted({row.parent for row in candidates})) or _("none")
 			frappe.throw(
 				_(
-					"Expected exactly one submitted Delivery Note row for Item {0} on Sales Order {1}; found: {2}."
-				).format(mapping["item"], sales_order, names)
+					"Expected exactly one submitted {0} row for Item {1} on Sales Order {2}; found: {3}."
+				).format(parent_doctype, mapping["item"], sales_order, names)
 			)
-		candidate = candidates[0]
+		return candidates[0]
+
+	def _make_draft_sales_return(self):
+		from erpnext.stock.doctype.delivery_note.delivery_note import make_sales_return
+
+		frappe.has_permission("Delivery Note", "create", throw=True)
+		sales_order = self._require_submitted_sales_order()
+		warehouse = frappe.db.get_value("Marketplace Account", self.marketplace_account, "warehouse")
+		if not warehouse:
+			frappe.throw(_("The Marketplace Account has no warehouse; returned stock needs one."))
+		candidate = self._find_source_row(
+			"Delivery Note", "Delivery Note Item", "against_sales_order", sales_order
+		)
 
 		doc = make_sales_return(candidate.parent)
 		kept = [row for row in doc.items if row.dn_detail == candidate.name]

@@ -355,7 +355,7 @@ production:
 Do not roll this out to production Noon returns handling before these five
 items have been checked against a real Noon account.
 
-### Inspection and draft Sales Return (#261)
+### Inspection, draft Sales Return and draft Credit Note (#261, #262)
 
 After a return is acknowledged as received, a user with write permission records
 the merchant's decision with **Record Inspection** on the `Noon Return`:
@@ -379,12 +379,29 @@ a cancelled or deleted one is replaced. ERPNext cannot make a Sales Return from 
 Sales Order, and this app never creates a Delivery Note for a Noon order, so
 staff must already have delivered the order with a Delivery Note.
 
+**Create Credit Note** (#262) is offered once an outcome is recorded, for both
+Sellable and Damaged. It drafts a return Sales Invoice (qty -1, one unit) with
+ERPNext's `make_sales_return` against the one submitted, non-return Sales
+Invoice row for the mapped Item on the Sales Order. It refuses, creating
+nothing, when there is not exactly one such invoice row, or when that invoice
+updates stock (a Credit Note from it would return the stock a second time). It
+needs Sales Invoice create permission, creates no Payment Entry, makes no Noon
+call, and is never submitted. Re-running returns the existing draft or submitted
+Credit Note; a cancelled or deleted one is replaced.
+
+**Needs Attention clearing.** A `Noon Return` linked to an order keeps the
+order's `return` evidence (and so the compensating-transaction outcome) only
+while it is unresolved. Resolved means a submitted Credit Note AND either a
+Damaged outcome or a Sellable outcome with a submitted Sales Return. Drafts,
+cancelled documents and returns with no recorded outcome count as unresolved.
+The hourly sweep re-plans such orders, so no document events are needed.
+
 ## Out of scope (#153)
 
 - Any ERPNext-side correction from a return other than the draft Sales Return of
-  #261 (Credit Note, Sales Invoice adjustment, Payment Entry, or Sales Order
-  change; the Credit Note is #262). The local receipt acknowledgement is
-  operational evidence only.
+  #261 and the draft Credit Note of #262 (Payment Entry, refund payment, Sales
+  Order change, or any other Sales Invoice adjustment). The local receipt
+  acknowledgement is operational evidence only.
 - A separate reconciliation report: the evidence surfaces through Needs
   Attention and the planner instead (#164).
 - Any write-path Noon call (e.g. acknowledging or resolving a return) —

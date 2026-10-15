@@ -23,7 +23,8 @@
   "receipt_acknowledgement_note",
   "inspection_section",
   "inspection_outcome",
-  "sales_return"
+  "sales_return",
+  "credit_note"
  ],
  "fields": [
   {
@@ -177,6 +178,15 @@
    "label": "Sales Return",
    "no_copy": 1,
    "options": "Delivery Note",
+   "read_only": 1
+  },
+  {
+   "description": "Draft or submitted return Sales Invoice (Credit Note) for this returned item.",
+   "fieldname": "credit_note",
+   "fieldtype": "Link",
+   "label": "Credit Note",
+   "no_copy": 1,
+   "options": "Sales Invoice",
    "read_only": 1
   }
  ],
