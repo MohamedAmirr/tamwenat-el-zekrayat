@@ -32,8 +32,9 @@ JSON envelope:
   Not read or validated by `api/noon_webhooks.py` (#163 only checks the
   fields it actually needs).
 - `event_type` — identifies what happened (e.g. `FBPI::ORDER_SYNC`). This
-  receiver only acts on `FBPI::ORDER_SYNC`; every other value is
-  acknowledged (200) without being processed, so Noon stops retrying it.
+  receiver acts on `FBPI::ORDER_SYNC` (queues the order import) and
+  `RETURNS::REFERENCE_UPDATE` (queues a return lookup, see below); every other
+  value is acknowledged (200) without being processed, so Noon stops retrying it.
 - `metadata.message_id` — a per-delivery identifier. Recorded on the
   `Marketplace Sync Log` row this receiver writes, but not used as a
   dedup key itself — see "Delivery semantics" below.
@@ -45,13 +46,12 @@ JSON envelope:
   event belongs to. This receiver resolves it to exactly one enabled
   `Noon Connection`, and that connection to exactly one enabled `Marketplace
   Account`; otherwise the request is rejected.
-- `payload` — the event-type-specific body. **Never parsed as business
-  data by this receiver** — only checked to be a JSON object. Per-event-type
-  payload handling is explicitly out of scope for #163 (a follow-up once a
-  real payload schema is captured); the receiver currently only re-triggers
-  the existing FBPI order-import job, which re-fetches state from Noon's own
-  `ListFbpiOrders`/`GetFbpiOrder` endpoints rather than trusting anything in
-  this payload.
+- `payload` — the event-type-specific body, checked to be a JSON object. For
+  `FBPI::ORDER_SYNC` it is **not parsed**: the receiver only re-triggers the
+  existing FBPI order-import job, which re-fetches state from Noon's own
+  `ListFbpiOrders` endpoint rather than trusting anything in this payload (so
+  the payload's `order_nr` is not used). For `RETURNS::REFERENCE_UPDATE` the
+  receiver reads `barcode` only (#263, see below).
 
 ## Authentication
 
@@ -105,7 +105,7 @@ webhook status (use Refresh Webhook Status first):
 - **Register Webhook in Noon** (status "Not registered"): confirms, then
   `CreateHttpsDestination` with name `<project_code>-webhook`, the connection's
   webhook URL and `credentials.values = {"X-Api-Key": <webhook_secret>}`, then
-  `UpdateDestination` to subscribe `FBPI::ORDER_SYNC`. If the second step fails
+  `UpdateDestination` to subscribe `FBPI::ORDER_SYNC` only. If the second step fails
   the destination is kept and the status becomes "Registered, not subscribed".
   Refused when Noon already holds 5 destinations (Noon's per-project limit).
 - **Subscribe to Order Sync** (status "Registered, not subscribed").
@@ -122,12 +122,18 @@ with body `{}`; the Static Sandbox project had no destinations and an empty
 event-type list, so subscribing could not be exercised there. The
 `CreateHttpsDestination` answers HTTP 200 with `{"destination_code": "..."}`
 and creates the destination **active with no event types**, so Register always
-needs the subscribe step (it now subscribes both `FBPI::ORDER_SYNC` and `RETURNS::REFERENCE_UPDATE`). There is no delete endpoint: an unwanted destination
+needs the subscribe step (it subscribes `FBPI::ORDER_SYNC` only). There is no delete endpoint: an unwanted destination
 can only be deactivated, and it still counts toward the 5-destination limit.
 A deactivated destination can still be subscribed (`UpdateDestination` 200).
 
-Deleting destinations (deactivate instead), other event types and multiple destinations per
-connection are not supported.
+Register, Subscribe and Update never touch `RETURNS::REFERENCE_UPDATE`; the
+returns destination is created by hand in the Partner Center (see the returns
+section below). When several destinations share this connection's URL, Refresh
+Webhook Status and the destination lookup pick the one subscribed to
+`FBPI::ORDER_SYNC`, or one with no event types yet; a destination on our URL whose
+event types are non-empty and lack `FBPI::ORDER_SYNC` (a returns destination) is
+never adopted as ours, though it still shows "This Site" in the table. Deleting destinations (deactivate instead) and editing other
+destinations are not supported.
 
 ## Delivery semantics
 
@@ -140,6 +146,12 @@ handled event enqueues the existing per-account deduplicated
 paths), so redelivery of the same event (or a burst of several events for
 the same account) can never queue more than one import job per account at a
 time.
+
+**Accepted gap, orders older than 7 days:** the order import only looks back
+`ORDER_IMPORT_LOOKBACK_DAYS` (7) days from its start, and the webhook payload's
+`order_nr` is not used to fetch a specific order. A webhook for an order created
+more than 7 days ago therefore changes nothing; only a manual **Refresh from
+Noon** on that Marketplace Order picks up the change.
 
 **Accepted dedup gap:** if a webhook event arrives while that account's
 import job is already queued/running, RQ's own `deduplicate=True` makes
@@ -160,9 +172,16 @@ doctype/mechanism for this receiver (see "Delivery semantics" above).
 ## RETURNS::REFERENCE_UPDATE (#263)
 
 Noon's event-type list for this project includes `RETURNS::REFERENCE_UPDATE`
-(observed with `ListEventTypes` on the production account, 2026-10-15). Register
-and Update destination subscribe it next to `FBPI::ORDER_SYNC`; an existing
-destination gets it through **Update Noon Destination**.
+(observed with `ListEventTypes` on the production account, 2026-10-15). Our
+Register/Update never subscribe it. In production, create a second destination in
+the Partner Center (same URL, `X-Api-Key` header holding the connection's webhook
+key) subscribed only to `RETURNS::REFERENCE_UPDATE`.
+
+If our webhook URL changes (Refresh Webhook URL, then Update Noon Destination),
+Update pushes the new URL only to our order destination (`noon_destination_code`).
+The hand-made returns destination keeps the old URL and silently stops receiving
+events, so update it by hand in the Partner Center. The webhook key is never
+regenerated, so the key is unaffected.
 
 **Payload fields are UNVERIFIED.** The only description, `barcode` (string) and
 `barcode_type` (`awb_nr` or `rms_barcode`), came from an AI-written summary of

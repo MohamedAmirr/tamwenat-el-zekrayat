@@ -6,13 +6,12 @@ import secrets
 import frappe
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import get_url
+from frappe.utils import cstr, get_url
 
 from marketplace_integrations.integrations.noon.constants import (
 	NOON_EVENT_WEBHOOK_PATH,
 	NOON_FBPI_ORDER_SYNC_EVENT_TYPE,
 	NOON_MAX_DESTINATIONS,
-	NOON_SUBSCRIBED_EVENT_TYPES,
 	NOON_WEBHOOK_SECRET_HEADER,
 )
 
@@ -98,7 +97,11 @@ class NoonConnection(Document):
 					"Could not reach Noon", error=client.error_message(response)
 				)
 			payload = response.json()
-		except ValueError, frappe.ValidationError:
+		except frappe.ValidationError as exc:
+			# The client's own messages are static and redacted (e.g. "Noon authentication
+			# failed (HTTP 401)."), so they are safe to show.
+			return self._cache_webhook_status("Could not reach Noon", error=cstr(exc) or None)
+		except ValueError:
 			return self._cache_webhook_status("Could not reach Noon")
 
 		destinations = payload.get("destinations") if isinstance(payload, dict) else None
@@ -150,9 +153,7 @@ class NoonConnection(Document):
 
 		return self._update_destination_step(
 			_("Subscribing the new destination to FBPI order sync"),
-			event_types=[
-				{"event_type": event_type, "is_active": True} for event_type in NOON_SUBSCRIBED_EVENT_TYPES
-			],
+			event_types=[{"event_type": NOON_FBPI_ORDER_SYNC_EVENT_TYPE, "is_active": True}],
 			created=True,
 		)
 
@@ -163,9 +164,7 @@ class NoonConnection(Document):
 		self._require_destination_code()
 		return self._update_destination_step(
 			_("Subscribing to FBPI order sync"),
-			event_types=[
-				{"event_type": event_type, "is_active": True} for event_type in NOON_SUBSCRIBED_EVENT_TYPES
-			],
+			event_types=[{"event_type": NOON_FBPI_ORDER_SYNC_EVENT_TYPE, "is_active": True}],
 		)
 
 	@frappe.whitelist()
@@ -246,7 +245,7 @@ class NoonConnection(Document):
 					"url": destination.get("url"),
 					"is_active": 1 if destination.get("is_active") else 0,
 					"event_types": ", ".join(event_types) if isinstance(event_types, list) else "",
-					"is_ours": 1 if destination is ours else 0,
+					"is_ours": 1 if destination is ours or destination.get("url") == self.webhook_url else 0,
 				},
 			)
 			row.name = frappe.generate_hash(length=10)
@@ -263,9 +262,18 @@ class NoonConnection(Document):
 				),
 				None,
 			)
-		return next(
-			(destination for destination in destinations if destination.get("url") == self.webhook_url), None
-		)
+		matches = [destination for destination in destinations if destination.get("url") == self.webhook_url]
+		# A separate destination can share our URL and key but carry only other event types
+		# (e.g. a hand-made returns one). Only an order-sync destination, or a freshly
+		# created one with no event types yet, is ours; never adopt a returns-only one.
+		candidates = []
+		for destination in matches:
+			event_types = destination.get("event_types")
+			if not event_types:
+				candidates.append((1, destination))
+			elif isinstance(event_types, list) and NOON_FBPI_ORDER_SYNC_EVENT_TYPE in event_types:
+				candidates.append((0, destination))
+		return min(candidates, key=lambda pair: pair[0])[1] if candidates else None
 
 	def _destination_status(self, destination):
 		if not destination:
@@ -297,6 +305,12 @@ class NoonConnection(Document):
 		self.db_set(fieldname, value, update_modified=False)
 
 	def _last_webhook_event_received_on(self):
+		"""When the receiver last accepted an event for this connection.
+
+		Only rows the receiver itself writes count: a successful Order Import row
+		(written for order-sync events and for unhandled event types) or a Return
+		Lookup row carrying a ``message_id`` (return events). Worker-written rows that also say "Noon Webhook" (a webhook-triggered
+		return lookup, an import failure) are excluded."""
 		accounts = frappe.get_all(
 			"Marketplace Account",
 			filters={"platform": "Noon", "connection_doctype": "Noon Connection", "connection": self.name},
@@ -304,9 +318,22 @@ class NoonConnection(Document):
 		)
 		if not accounts:
 			return None
-		return frappe.db.get_value(
-			"Marketplace Sync Log",
-			{"marketplace_account": ["in", accounts], "trigger_source": "Noon Webhook"},
-			"completed_at",
-			order_by="completed_at desc",
-		)
+		base = {
+			"marketplace_account": ["in", accounts],
+			"trigger_source": "Noon Webhook",
+			"status": "Success",
+		}
+		times = [
+			frappe.db.get_value(
+				"Marketplace Sync Log",
+				{**base, **extra},
+				"completed_at",
+				order_by="completed_at desc",
+			)
+			for extra in (
+				{"sync_type": "Order Import"},
+				{"sync_type": "Return Lookup", "request_data": ["like", '%"message_id"%']},
+			)
+		]
+		times = [value for value in times if value]
+		return max(times) if times else None
