@@ -47,6 +47,7 @@ from marketplace_integrations.integrations.noon.client import NoonClient
 from marketplace_integrations.integrations.noon.constants import (
 	AWB_SCAN_LOOKBACK_DAYS,
 	MERCHANT_CODES_MAX,
+	MERCHANT_CODES_SCAN_ORDERS,
 	RETURN_REFERENCES_LIST_PATH,
 )
 from marketplace_integrations.marketplace_integrations.doctype.noon_return.noon_return import (
@@ -64,7 +65,8 @@ RQ_JOB_PREFIX = "marketplace-noon-return"
 
 def _account_merchant_codes(account):
 	"""Derive ``merchant_codes`` from every distinct ``merchant_code`` value
-	seen in this account's already-imported Noon orders' ``latest_payload``
+	seen in this account's ``MERCHANT_CODES_SCAN_ORDERS`` most recently modified
+	imported Noon orders' ``latest_payload``
 	(order-level field - ``order_mapper.py``'s ``REQUIRED_ORDER_FIELDS``
 	requires every imported order to carry one).
 
@@ -87,6 +89,7 @@ def _account_merchant_codes(account):
 		filters={"marketplace_account": account.name, "platform": "Noon"},
 		fields=["latest_payload"],
 		order_by="modified desc",
+		limit=MERCHANT_CODES_SCAN_ORDERS,
 	)
 	if not rows:
 		return None
@@ -359,19 +362,25 @@ def upsert_return_item(account, item, found_via):
 		doc.references = references
 		doc.found_via = found_via
 		previous_order = doc.marketplace_order
-		doc.marketplace_order = marketplace_order
+		# Never unlink: a later sighting that resolves no (or an ambiguous) order must not
+		# drop the link of a return that may already be inspected or have documents drafted.
+		linked_order = marketplace_order or previous_order
+		doc.marketplace_order = linked_order
 		doc.last_seen_on = now
 		doc.save(ignore_permissions=True)
 		# #164: a return newly linked to an order that already has a Sales Order is
 		# planner evidence, so re-plan that order. A repeat sighting of an unchanged
 		# link (the daily AWB scan) does not re-bump. Same transaction as the save.
 		if (
-			marketplace_order
-			and marketplace_order != previous_order
-			and frappe.db.get_value("Marketplace Order", marketplace_order, "erpnext_sales_order")
+			linked_order
+			and linked_order != previous_order
+			and frappe.db.get_value("Marketplace Order", linked_order, "erpnext_sales_order")
 		):
 			bump_sync_debounce(
-				marketplace_order, "Manual" if found_via == "Manual Lookup" else "Scheduled Reconciliation"
+				linked_order,
+				{"Manual Lookup": "Manual", "Webhook": "Noon Webhook"}.get(
+					found_via, "Scheduled Reconciliation"
+				),
 			)
 		frappe.db.commit()
 		return doc
@@ -390,6 +399,20 @@ def upsert_return_item(account, item, found_via):
 # ---------------------------------------------------------------------------
 
 
+def _upsert_items(account, items, found_via):
+	"""Upsert each returned item on its own, so one bad item (a duplicate-key race,
+	an over-long Noon field, a future validation error) is logged and skipped
+	instead of dropping the rest of the batch, like the AWB scan does per AWB."""
+	for item in items:
+		if not isinstance(item, dict):
+			continue
+		try:
+			upsert_return_item(account, item, found_via)
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(title="Noon return lookup: item failed", message=frappe.get_traceback())
+
+
 def run_webhook_lookup(account_name, barcode):
 	"""The enqueued worker target for a ``RETURNS::REFERENCE_UPDATE`` event (#263).
 
@@ -400,10 +423,7 @@ def run_webhook_lookup(account_name, barcode):
 	account = get_account(account_name)
 	validate_connection_enabled(account)
 	items = list_return_references(account, barcode, trigger_source="Noon Webhook")
-	for item in items:
-		if not isinstance(item, dict):
-			continue
-		upsert_return_item(account, item, "Webhook")
+	_upsert_items(account, items, "Webhook")
 
 
 def queue_webhook_lookup(account_name, barcode):
@@ -434,10 +454,7 @@ def run_manual_lookup(account_name, barcode):
 	account = get_account(account_name)
 	validate_connection_enabled(account)
 	items = list_return_references(account, barcode)
-	for item in items:
-		if not isinstance(item, dict):
-			continue
-		upsert_return_item(account, item, "Manual Lookup")
+	_upsert_items(account, items, "Manual Lookup")
 
 
 def queue_manual_lookup(account_name, barcode):

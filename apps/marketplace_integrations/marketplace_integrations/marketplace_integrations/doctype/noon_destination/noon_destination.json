@@ -20,7 +20,8 @@
    "in_list_view": 1,
    "label": "Name",
    "length": 255,
-   "read_only": 1
+   "read_only": 1,
+   "ignore_xss_filter": 1
   },
   {
    "fieldname": "is_ours",
@@ -42,21 +43,24 @@
    "in_list_view": 1,
    "label": "Event Types",
    "length": 255,
-   "read_only": 1
+   "read_only": 1,
+   "ignore_xss_filter": 1
   },
   {
    "fieldname": "url",
    "fieldtype": "Data",
    "label": "URL",
    "length": 500,
-   "read_only": 1
+   "read_only": 1,
+   "ignore_xss_filter": 1
   },
   {
    "fieldname": "destination_code",
    "fieldtype": "Data",
    "label": "Destination Code",
    "length": 255,
-   "read_only": 1
+   "read_only": 1,
+   "ignore_xss_filter": 1
   },
   {
    "fieldname": "toggle_active",

@@ -22,6 +22,25 @@ def make_connection(connection_name, **kwargs):
 
 
 class IntegrationTestNoonConnection(IntegrationTestCase):
+	def setUp(self):
+		super().setUp()
+		self._connections_before = set(frappe.get_all("Noon Connection", pluck="name"))
+
+	def tearDown(self):
+		"""Delete every connection the test created (with its accounts and sync logs) instead
+		of relying on a rollback."""
+		for name in set(frappe.get_all("Noon Connection", pluck="name")) - self._connections_before:
+			for account in frappe.get_all(
+				"Marketplace Account",
+				filters={"connection_doctype": "Noon Connection", "connection": name},
+				pluck="name",
+			):
+				frappe.db.delete("Marketplace Sync Log", {"marketplace_account": account})
+				frappe.delete_doc("Marketplace Account", account, force=True, ignore_permissions=True)
+			frappe.delete_doc("Noon Connection", name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+		super().tearDown()
+
 	def test_connection_uses_whoami_and_returns_no_remote_identity(self):
 		connection = make_connection("Test Noon Whoami")
 		response = SimpleNamespace(status_code=200)
@@ -398,11 +417,7 @@ class IntegrationTestNoonConnection(IntegrationTestCase):
 		self.assertEqual(url, connection.webhook_url)
 		self.assertEqual(headers, {"X-Api-Key": secret})
 		client.update_destination.assert_called_once_with(
-			"dest-new",
-			event_types=[
-				{"event_type": "FBPI::ORDER_SYNC", "is_active": True},
-				{"event_type": "RETURNS::REFERENCE_UPDATE", "is_active": True},
-			],
+			"dest-new", event_types=[{"event_type": "FBPI::ORDER_SYNC", "is_active": True}]
 		)
 		connection.reload()
 		self.assertEqual(connection.noon_destination_code, "dest-new")
@@ -610,4 +625,95 @@ class IntegrationTestNoonConnection(IntegrationTestCase):
 		self.addCleanup(log.delete)
 		self.assertEqual(
 			str(self._refresh_with(connection, [])["last_event_received_on"]), "2026-10-03 10:00:00"
+		)
+
+	def test_status_prefers_the_order_sync_destination_when_a_returns_destination_shares_the_url(self):
+		connection = make_connection("Webhook Status Shared Url")
+		orders = {
+			"destination_code": "dest-orders",
+			"url": connection.webhook_url,
+			"is_active": True,
+			"event_types": ["FBPI::ORDER_SYNC"],
+		}
+		returns_only = {
+			"destination_code": "dest-returns",
+			"url": connection.webhook_url,
+			"is_active": True,
+			"event_types": ["RETURNS::REFERENCE_UPDATE"],
+		}
+		for destinations in ([returns_only, orders], [orders, returns_only]):
+			result = self._refresh_with(connection, destinations)
+			self.assertEqual(result["status"], "Active")
+			connection.reload()
+			self.assertEqual(connection.noon_destination_code, "dest-orders")
+			connection.db_set("noon_destination_code", "")
+			rows = {row.destination_code: row.is_ours for row in connection.noon_destinations}
+			self.assertEqual(rows, {"dest-orders": 1, "dest-returns": 1})
+
+	def test_returns_only_destination_on_our_url_is_not_adopted_as_ours(self):
+		connection = make_connection("Webhook Status Returns Only")
+		returns_only = {
+			"destination_code": "dest-returns",
+			"url": connection.webhook_url,
+			"is_active": True,
+			"event_types": ["RETURNS::REFERENCE_UPDATE"],
+		}
+		result = self._refresh_with(connection, [returns_only])
+		self.assertEqual(result["status"], "Not registered")
+		connection.reload()
+		self.assertFalse(connection.noon_destination_code)
+		rows = {row.destination_code: row.is_ours for row in connection.noon_destinations}
+		self.assertEqual(rows, {"dest-returns": 1})
+
+	def test_refresh_webhook_status_shows_a_noon_login_failure(self):
+		connection = make_connection("Webhook Status Login Failure")
+		with self._client_patch() as client_class:
+			client_class.return_value.list_destinations.side_effect = frappe.ValidationError(
+				"Noon authentication failed (HTTP 401)."
+			)
+			result = connection.refresh_webhook_status()
+		self.assertEqual(result["status"], "Could not reach Noon")
+		self.assertEqual(result["error"], "Noon authentication failed (HTTP 401).")
+
+	def test_last_event_ignores_worker_written_webhook_rows(self):
+		with patch("marketplace_integrations.integrations.noon.catalog.validate_warehouse_code"):
+			connection = make_connection("Webhook Last Event Receiver Only")
+			account = frappe.get_doc(
+				{
+					"doctype": "Marketplace Account",
+					"account_name": "Webhook Last Event Receiver Account",
+					"platform": "Noon",
+					"external_account_id": connection.project_code,
+					"connection_doctype": "Noon Connection",
+					"connection": connection.name,
+					"noon_warehouse_code": "NOON-WH-001",
+					"noon_country_code": "ae",
+					"enabled": 1,
+				}
+			).insert()
+
+		def log(sync_type, status, completed_at, request_data=None):
+			frappe.get_doc(
+				{
+					"doctype": "Marketplace Sync Log",
+					"marketplace_account": account.name,
+					"sync_type": sync_type,
+					"status": status,
+					"trigger_source": "Noon Webhook",
+					"attempted_at": frappe.utils.now_datetime(),
+					"completed_at": completed_at,
+					"request_data": request_data,
+				}
+			).insert()
+
+		# Worker rows: a webhook-triggered lookup and an import failure.
+		log("Return Lookup", "Success", "2026-10-05 10:00:00", '{"barcode": "RMS-1"}')
+		log("Order Import", "Error", "2026-10-06 10:00:00")
+		self.assertIsNone(self._refresh_with(connection, [])["last_event_received_on"])
+
+		# Receiver rows: an accepted order event and an accepted return event.
+		log("Order Import", "Success", "2026-10-03 10:00:00")
+		log("Return Lookup", "Success", "2026-10-04 10:00:00", '{"message_id": "m-1", "payload": {}}')
+		self.assertEqual(
+			str(self._refresh_with(connection, [])["last_event_received_on"]), "2026-10-04 10:00:00"
 		)

@@ -5,10 +5,13 @@
 
 Auth and envelope-shape validation finish synchronously so an invalid
 request never reaches a worker - no Noon HTTP call happens in the request
-itself. ``payload`` is ONLY ever checked to be an object; its contents are
-never read/stored/logged by this module, matching #163's locked scope
-(per-event-type payload parsing is explicitly a future, separate issue).
-The secret header value and the raw request payload are never logged.
+itself. ``FBPI::ORDER_SYNC`` only queues the existing order import: its
+payload is checked to be an object but never parsed, stored or logged.
+``RETURNS::REFERENCE_UPDATE`` (#263) reads ``payload.barcode``, queues a
+deduplicated return-reference lookup and stores the raw payload (capped) on
+a ``Return Lookup`` sync log row; every other event type is acknowledged
+with 200 and takes no action, but is still recorded as an Order Import /
+Success / ``Noon Webhook`` log row (it counts as a received event). The secret header value is never logged.
 
 Unlike Talabat's webhook pair (``api/talabat_webhooks.py``), Noon's Event
 Notifications have no HMAC/signature scheme - only a static per-connection

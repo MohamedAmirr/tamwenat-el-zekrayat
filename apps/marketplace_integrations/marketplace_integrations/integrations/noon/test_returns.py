@@ -141,6 +141,20 @@ class IntegrationTestUpsertReturnItem(IntegrationTestNoonReturnsBase):
 		doc = returns.upsert_return_item(self.account, item, "Manual Lookup")
 		self.assertEqual(doc.marketplace_order, order.name)
 
+	def test_a_later_sighting_that_resolves_no_order_keeps_the_existing_link(self):
+		"""Review finding L1: a return in progress must not lose its order link."""
+		order = _make_order(self.account, "FBPI-KEEP-LINK")
+		linked = returns.upsert_return_item(
+			self.account, _return_item("PI-KEEP-LINK", order_nr="FBPI-KEEP-LINK"), "Manual Lookup"
+		)
+		self.assertEqual(linked.marketplace_order, order.name)
+
+		again = returns.upsert_return_item(
+			self.account, _return_item("PI-KEEP-LINK", order_nr="NO-SUCH-ORDER"), "AWB Scan"
+		)
+
+		self.assertEqual(again.marketplace_order, order.name)
+
 	def test_malformed_item_without_purchase_item_nr_is_skipped(self):
 		doc = returns.upsert_return_item(self.account, {}, "Manual Lookup")
 		self.assertIsNone(doc)
@@ -182,6 +196,16 @@ class IntegrationTestUpsertReturnItemBumpsSync(IntegrationTestNoonReturnsBase):
 		)
 
 		self.assertEqual(self._debounce(order).pending_sync_trigger_source, "Scheduled Reconciliation")
+
+	def test_webhook_return_uses_the_webhook_trigger_source(self):
+		order = _make_order(self.account, "FBPI-BUMP-WEBHOOK")
+		self._link_sales_order(order)
+
+		returns.upsert_return_item(
+			self.account, _return_item("PI-BUMP-WEBHOOK", order_nr="FBPI-BUMP-WEBHOOK"), "Webhook"
+		)
+
+		self.assertEqual(self._debounce(order).pending_sync_trigger_source, "Noon Webhook")
 
 	def test_order_without_a_sales_order_is_not_bumped(self):
 		order = _make_order(self.account, "FBPI-NO-SO")
@@ -284,9 +308,7 @@ class IntegrationTestListReturnReferences(IntegrationTestNoonReturnsBase):
 		)
 		self.assertEqual(log.status, "Success")
 		self.assertEqual(
-			frappe.db.count(
-				"Noon Return", filters={"marketplace_account": self.account.name}
-			),
+			frappe.db.count("Noon Return", filters={"marketplace_account": self.account.name}),
 			0,
 		)
 
@@ -392,6 +414,52 @@ class IntegrationTestMerchantCodes(IntegrationTestNoonReturnsBase):
 		self.assertIn("MC-CAP-204", codes)
 
 
+class IntegrationTestMerchantCodesScanLimit(IntegrationTestNoonReturnsBase):
+	def test_only_the_most_recent_orders_are_read(self):
+		"""Review finding M4: the scan is bounded, not every order ever imported."""
+		for i in range(5):
+			upsert_marketplace_order(
+				self.account.name,
+				{
+					"external_order_id": f"ORD-MC-LIMIT-{i}",
+					"latest_payload": {"merchant_code": f"MC-LIMIT-{i}", "items": []},
+					"items": [],
+				},
+			)
+		with patch("marketplace_integrations.integrations.noon.returns.MERCHANT_CODES_SCAN_ORDERS", 2):
+			codes = returns._account_merchant_codes(self.account)
+		self.assertEqual(len(codes), 2)
+		self.assertIn("MC-LIMIT-4", codes)
+		self.assertNotIn("MC-LIMIT-0", codes)
+
+
+class IntegrationTestLookupItemIsolation(IntegrationTestNoonReturnsBase):
+	"""Review finding L3: one bad item must not drop the rest of a lookup's items."""
+
+	def _run(self, worker):
+		items = [_return_item("PI-ISO-1"), _return_item("PI-ISO-2")]
+		with (
+			patch.object(returns, "get_account", return_value=self.account),
+			patch.object(returns, "validate_connection_enabled"),
+			patch.object(returns, "list_return_references", return_value=items),
+			patch.object(
+				returns, "upsert_return_item", side_effect=[Exception("boom"), MagicMock()]
+			) as upsert,
+			patch("marketplace_integrations.integrations.noon.returns.frappe.log_error") as log_error,
+			patch.object(frappe.db, "rollback") as rollback,
+		):
+			worker(self.account.name, "BARCODE-1")
+		log_error.assert_called_once()
+		rollback.assert_called_once()
+		return upsert
+
+	def test_webhook_lookup_continues_after_a_failed_item(self):
+		self.assertEqual(self._run(returns.run_webhook_lookup).call_count, 2)
+
+	def test_manual_lookup_continues_after_a_failed_item(self):
+		self.assertEqual(self._run(returns.run_manual_lookup).call_count, 2)
+
+
 class IntegrationTestOrderLinkingAmbiguity(IntegrationTestNoonReturnsBase):
 	def test_ambiguous_order_nr_leaves_return_unlinked(self):
 		"""#153 review finding #5: more than one Marketplace Order matching
@@ -460,7 +528,8 @@ class IntegrationTestAccountAwbNumbers(IntegrationTestNoonReturnsBase):
 	def _make_order_with_shipment(self, fbpi_order_nr, shipment_nr, status, awb_nr, modified=None):
 		order = _make_order(self.account, fbpi_order_nr)
 		order.append(
-			"noon_shipments", {"integration_shipment_nr": shipment_nr, "status": status, "awb_source": "Own Courier"}
+			"noon_shipments",
+			{"integration_shipment_nr": shipment_nr, "status": status, "awb_source": "Own Courier"},
 		)
 		order.append(
 			"noon_shipment_awbs",

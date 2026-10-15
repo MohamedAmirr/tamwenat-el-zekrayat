@@ -62,13 +62,16 @@ Setup, per Noon Connection:
    site URL changes, use "Refresh Webhook URL" to re-derive and save it (it
    refuses on an unsaved form, so save first), then update the destination in
    Noon by hand.
-2. In Noon's Partner Center, Integrator Configuration, Webhook tab, register
-   a destination pointing at the connection's `Webhook URL`
+2. Create the destination either from the Noon Connection form ("Register
+   Webhook in Noon", #253, which creates it with the URL and key below and
+   subscribes `FBPI::ORDER_SYNC`) or by hand: in Noon's Partner Center,
+   Integrator Configuration, Webhook tab, register a destination pointing at
+   the connection's `Webhook URL`
    (`https://<your-site-domain>/api/method/marketplace_integrations.api.noon_webhooks.event_notification`).
-3. In that same Webhook tab, set the header `X-Api-Key` to
-   exactly the connection's `Webhook Secret`. Existing connections must
-   change their Webhook tab header from `X-Noon-Webhook-Secret` to `X-Api-Key`
-   manually.
+3. For a hand-made destination, set the header `X-Api-Key` in that same Webhook
+   tab to exactly the connection's `Webhook Secret` (the form button sends it
+   for you). Existing connections must change their Webhook tab header from
+   `X-Noon-Webhook-Secret` to `X-Api-Key` manually.
 4. Subscribe that destination to the `FBPI::ORDER_SYNC` event type. Any
    other event type delivered to this receiver is acknowledged (200) and
    ignored — it does not need to be excluded from the subscription, but
@@ -78,8 +81,9 @@ Setup, per Noon Connection:
    to the right connection/account — no separate configuration is needed for
    that resolution.
 
-This receiver never parses `payload` as business data (see
-`docs/noon-integration/event-notifications.md`) — a handled event only re-triggers the
+For `FBPI::ORDER_SYNC` this receiver never parses `payload` (see
+`docs/noon-integration/event-notifications.md`; `RETURNS::REFERENCE_UPDATE` is
+covered under Returns below) — a handled event only re-triggers the
 existing #145 order-import job for the resolved account, which re-fetches
 current order state from Noon's own API rather than trusting anything in
 the notification body.
@@ -91,7 +95,9 @@ the receiver still returns 200 and logs success, but that specific order
 isn't actually re-imported until the already-running job (or, in the worst
 case, the next hourly poll) picks it up, up to about an hour later. See
 `docs/noon-integration/event-notifications.md`'s "Accepted dedup gap" for
-the full explanation - this is accepted behavior, not a bug.
+the full explanation - this is accepted behavior, not a bug. Likewise, the
+import only looks back 7 days, so a webhook for an older order changes nothing;
+only a manual "Refresh from Noon" picks up that change.
 
 ## Permissions
 
@@ -257,7 +263,9 @@ have been checked against a real Noon account.
   bulk AWB pre-generation, `CreateSandboxOrder` tooling.
 - Automatic Sales Order amendment after delivery (cancellation of an
   undelivered, unbilled order is done by the reconciliation planner, #179), Delivery Note, Sales
-  Invoice, Payment Entry, Credit Note, or stock ledger entries.
+  Invoice, Payment Entry, Credit Note, or stock ledger entries. (A draft Sales
+  Return and draft Credit Note are created later only by the user actions in
+  the returns section, #261/#262.)
 - A Noon webhook/event-notification receiver was #145's own deferral at the
   time this release shipped; it has since been built under #163 — see
   "Noon event-notification webhook (#163)" above. The hourly poll remains
@@ -266,10 +274,10 @@ have been checked against a real Noon account.
 ## Returns: FBPI return reference lookup and evidence (#153)
 
 Return evidence capture is read-only toward Noon. Toward ERPNext it creates
-nothing on its own: the only document it can create is the draft Sales Return
-described under "Inspection and draft Sales Return (#261)" below, and only when
-a user records a Sellable outcome. No Credit Note, Sales Invoice, Payment Entry,
-GL entry or Sales Order change is ever created. Operations
+nothing on its own: the only documents it can create are the draft Sales Return
+and draft Credit Note described under "Inspection, draft Sales Return and draft
+Credit Note (#261, #262)" below, each only on a user action and never
+submitted. No Payment Entry, GL entry or Sales Order change is ever created. Operations
 can record a one-time internal receipt acknowledgement on a `Noon Return`;
 it records the ERPNext user, time, and optional note only — it is not sent to
 or treated as an acknowledgement or resolution on Noon. The lookup records
@@ -278,7 +286,7 @@ what Noon's `ListReturnReferences`
 `Noon Return` doctype (not a Marketplace Order child table, so an unlinked
 return still persists as a real record).
 
-Two triggers:
+Three triggers:
 - **Manual barcode lookup**: the "Look Up Noon Return" button on a Noon
   Marketplace Account (`marketplace_account.js`) prompts for a barcode and
   calls the whitelisted `api/noon_returns.py::lookup_return()`, which
@@ -292,6 +300,8 @@ Two triggers:
   an **unverified assumption** that a response reference of type `awb_nr`
   means the outbound shipment AWB this app itself generated — see item 2
   below.
+- **`RETURNS::REFERENCE_UPDATE` webhook (#263)**: queues the same lookup for
+  the event's `barcode` (see "Return reference webhook (#263)" below).
 
 Order linking is an exact match of the response's `order_nr` against either
 `external_order_id` or `platform_order_reference` on a Marketplace Order
@@ -354,6 +364,9 @@ production:
 
 Do not roll this out to production Noon returns handling before these five
 items have been checked against a real Noon account.
+
+**Decision (2026-10-15):** the user chose to accept the risk of using the return
+actions in production before these five items are verified.
 
 ### Return reference webhook (#263)
 
