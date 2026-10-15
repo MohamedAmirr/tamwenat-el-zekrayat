@@ -12,6 +12,7 @@ from marketplace_integrations.integrations.noon.constants import (
 	NOON_EVENT_WEBHOOK_PATH,
 	NOON_FBPI_ORDER_SYNC_EVENT_TYPE,
 	NOON_MAX_DESTINATIONS,
+	NOON_SUBSCRIBED_EVENT_TYPES,
 	NOON_WEBHOOK_SECRET_HEADER,
 )
 
@@ -149,7 +150,9 @@ class NoonConnection(Document):
 
 		return self._update_destination_step(
 			_("Subscribing the new destination to FBPI order sync"),
-			event_types=[{"event_type": NOON_FBPI_ORDER_SYNC_EVENT_TYPE, "is_active": True}],
+			event_types=[
+				{"event_type": event_type, "is_active": True} for event_type in NOON_SUBSCRIBED_EVENT_TYPES
+			],
 			created=True,
 		)
 
@@ -160,7 +163,9 @@ class NoonConnection(Document):
 		self._require_destination_code()
 		return self._update_destination_step(
 			_("Subscribing to FBPI order sync"),
-			event_types=[{"event_type": NOON_FBPI_ORDER_SYNC_EVENT_TYPE, "is_active": True}],
+			event_types=[
+				{"event_type": event_type, "is_active": True} for event_type in NOON_SUBSCRIBED_EVENT_TYPES
+			],
 		)
 
 	@frappe.whitelist()
