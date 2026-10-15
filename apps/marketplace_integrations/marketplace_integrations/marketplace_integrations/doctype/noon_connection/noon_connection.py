@@ -105,6 +105,7 @@ class NoonConnection(Document):
 			return self._cache_webhook_status("Could not reach Noon")
 
 		ours = self._find_noon_destination(destinations)
+		self._store_destinations(destinations, ours)
 		status = self._destination_status(ours)
 		if ours and not self.noon_destination_code:
 			code = ours.get("destination_code")
@@ -178,7 +179,20 @@ class NoonConnection(Document):
 		self._check_webhook_write()
 		self._require_destination_code()
 		return self._update_destination_step(
-			_("Changing the Noon destination's active state"), is_active=bool(frappe.utils.cint(active))
+			_("Changing the Noon destination's active state"),
+			is_active=bool(frappe.utils.cint(active)),
+		)
+
+	@frappe.whitelist()
+	def set_destination_active(self, destination_code, active):
+		"""Activate or deactivate any destination listed by the last status refresh."""
+		self._check_webhook_write()
+		if destination_code not in {row.destination_code for row in self.noon_destinations}:
+			frappe.throw(_("Refresh the webhook status first: that destination is not in the list."))
+		return self._update_destination_step(
+			_("Changing the Noon destination's active state"),
+			destination_code=destination_code,
+			is_active=bool(frappe.utils.cint(active)),
 		)
 
 	def _check_webhook_write(self):
@@ -202,13 +216,37 @@ class NoonConnection(Document):
 	def _webhook_credential_values(self):
 		return {NOON_WEBHOOK_SECRET_HEADER: self.get_password("webhook_secret", raise_exception=False)}
 
-	def _update_destination_step(self, step, *, created=False, **fields):
+	def _update_destination_step(self, step, *, created=False, destination_code=None, **fields):
 		client = self._noon_client()
-		response = client.update_destination(self.noon_destination_code, **fields)
+		response = client.update_destination(destination_code or self.noon_destination_code, **fields)
 		if response.status_code != 200:
 			prefix = _("The destination was created, but") if created else _("The step failed:")
 			frappe.throw(f"{prefix} {step}: {client.error_message(response)}")
 		return self.refresh_webhook_status()
+
+	def _store_destinations(self, destinations, ours):
+		"""Replace the cached destination rows without a full document save."""
+		frappe.db.delete(
+			"Noon Destination",
+			{"parent": self.name, "parenttype": "Noon Connection", "parentfield": "noon_destinations"},
+		)
+		self.set("noon_destinations", [])
+		for destination in destinations:
+			event_types = destination.get("event_types")
+			row = self.append(
+				"noon_destinations",
+				{
+					"destination_code": destination.get("destination_code"),
+					"destination_name": destination.get("destination_name"),
+					"url": destination.get("url"),
+					"is_active": 1 if destination.get("is_active") else 0,
+					"event_types": ", ".join(event_types) if isinstance(event_types, list) else "",
+					"is_ours": 1 if destination is ours else 0,
+				},
+			)
+			row.name = frappe.generate_hash(length=10)
+			row.set_user_and_timestamp()
+			row.db_insert()
 
 	def _find_noon_destination(self, destinations):
 		if self.noon_destination_code:

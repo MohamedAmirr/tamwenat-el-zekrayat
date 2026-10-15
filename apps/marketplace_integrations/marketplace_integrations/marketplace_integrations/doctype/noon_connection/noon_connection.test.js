@@ -3,12 +3,14 @@ const test = require("node:test");
 
 global.__ = (message) => message;
 let handlers;
+let handlers_destination;
 const alerts = [];
 global.frappe = {
 	ui: {
 		form: {
-			on(_doctype, events) {
-				handlers = events;
+			on(doctype, events) {
+				if (doctype === "Noon Destination") handlers_destination = events;
+				else handlers = events;
 			},
 		},
 	},
@@ -274,4 +276,21 @@ test("Register is blocked with an explanation when Noon already has five destina
 	});
 	register();
 	assert.match(message, /Noon allows .* destinations/);
+});
+
+test("Destination row button asks for confirmation then toggles the listed destination", () => {
+	let confirmed;
+	let args;
+	global.frappe.utils = { ...global.frappe.utils, escape_html: (text) => text };
+	global.frappe.confirm = (_message, action) => {
+		confirmed = action;
+	};
+	global.locals = { "Noon Destination": { r1: { destination_code: "d1", destination_name: "n", is_active: 1 } } };
+	handlers_destination.toggle_active(
+		{ set_value() {}, reload_doc() {}, call: (_method, call_args) => ((args = call_args), Promise.resolve({ message: {} })) },
+		"Noon Destination",
+		"r1"
+	);
+	confirmed();
+	assert.deepEqual(args, { destination_code: "d1", active: 0 });
 });

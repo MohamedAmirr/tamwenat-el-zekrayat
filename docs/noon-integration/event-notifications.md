@@ -113,6 +113,7 @@ webhook status (use Refresh Webhook Status first):
   the key is sent only when the "Also send the current webhook key" box is
   ticked. Omitting `credentials` leaves Noon's stored key unchanged.
 - **Activate / Deactivate Destination**: toggles destination-level `is_active`.
+- **Noon Destinations table** (#258): Refresh Webhook Status caches every destination Noon holds (name, URL, active, event types, which one is this site's) from the same `ListDestinations` call. The row button activates or deactivates any listed destination after a confirm. Other destinations can only be toggled, not edited; deleting is not possible (Noon has no delete endpoint).
 
 Observed on the live account (read plus one idempotent Update, 2026-10-15,
 not Noon contract): `ListDestinations` returns `event_types` as a list of
