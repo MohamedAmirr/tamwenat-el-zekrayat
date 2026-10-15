@@ -48,6 +48,11 @@ Problem sources (``problem_type``):
   invoice error / Out of Stock parts have no age threshold.
 - Noon Return Unlinked (#164): one row per Noon Return with no Marketplace
   Order (no exact order_nr match, see integrations/noon/returns.py).
+- Bosta Delivery Note: one row per Bosta Shipment whose ERPNext Delivery Note
+  create or cancel action failed (``delivery_note_error`` set; cleared when a
+  later attempt succeeds). Bosta is a carrier, not a Marketplace Account, so
+  these rows have platform "Bosta" and no account; they appear when no account
+  filter is set and the platform filter is blank or "Bosta".
 """
 
 import json
@@ -77,6 +82,8 @@ FULFILLMENT_ERROR = "Fulfillment Error"
 WEBHOOK_RETRIES_EXHAUSTED = "Webhook Retries Exhausted"
 NOON_FULFILLMENT = "Noon Fulfillment"
 NOON_RETURN_UNLINKED = "Noon Return Unlinked"
+BOSTA_DELIVERY_NOTE = "Bosta Delivery Note"
+BOSTA_PLATFORM = "Bosta"
 
 PROBLEM_TYPES = [
 	SYNC_ERROR,
@@ -87,8 +94,10 @@ PROBLEM_TYPES = [
 	WEBHOOK_RETRIES_EXHAUSTED,
 	NOON_FULFILLMENT,
 	NOON_RETURN_UNLINKED,
+	BOSTA_DELIVERY_NOTE,
 ]
 
+NEXT_OPEN_SHIPMENT = "Open Shipment"
 NEXT_MAP_ITEM = "Map Item"
 NEXT_RETRY = "Retry"
 NEXT_OPEN_ORDER = "Open Order"
@@ -118,8 +127,15 @@ def get_attention_items(filters=None):
 	disabled Marketplace Product Mapping for that SKU, otherwise None).
 	"""
 	filters = frappe._dict(filters or {})
-	accounts = _get_accounts(filters)
-	if not accounts:
+	items = []
+	if (
+		not filters.account
+		and filters.platform in (None, "", BOSTA_PLATFORM)
+		and filters.problem_type in (None, "", BOSTA_DELIVERY_NOTE)
+	):
+		items.extend(_collect_bosta_delivery_note_items())
+	accounts = {} if filters.platform == BOSTA_PLATFORM else _get_accounts(filters)
+	if not accounts and not items:
 		return []
 
 	collectors = [
@@ -131,9 +147,8 @@ def get_attention_items(filters=None):
 		({NOON_FULFILLMENT}, _collect_noon_rollups),
 		({NOON_RETURN_UNLINKED}, _collect_unlinked_noon_returns),
 	]
-	items = []
 	for types, collector in collectors:
-		if filters.problem_type and filters.problem_type not in types:
+		if not accounts or (filters.problem_type and filters.problem_type not in types):
 			continue
 		items.extend(collector(accounts))
 
@@ -394,6 +409,29 @@ def _collect_unmapped_items(accounts):
 			)
 		)
 	return items
+
+
+def _collect_bosta_delivery_note_items():
+	if not frappe.has_permission("Bosta Shipment", "read"):
+		return []
+	carrier = frappe._dict(name="", platform=BOSTA_PLATFORM)
+	return [
+		_item(
+			BOSTA_DELIVERY_NOTE,
+			carrier,
+			"Bosta Shipment",
+			row.name,
+			row.delivery_note_error,
+			row.delivery_note_error_at or row.modified,
+			NEXT_OPEN_SHIPMENT,
+		)
+		for row in frappe.get_list(
+			"Bosta Shipment",
+			filters={"delivery_note_error": ["!=", ""]},
+			fields=["name", "delivery_note_error", "delivery_note_error_at", "modified"],
+			limit_page_length=0,
+		)
+	]
 
 
 def _parse_request_data(value):

@@ -4,45 +4,287 @@
  "creation": "2026-10-13 00:00:00.000000",
  "doctype": "DocType",
  "engine": "InnoDB",
- "field_order": ["sales_order", "delivery_note", "status", "receiver_section", "receiver_name", "receiver_phone", "address_section", "city", "district_id", "city_id", "district_name", "address_first_line", "bosta_section", "bosta_delivery_id", "tracking_number", "unique_business_reference", "bosta_status_section", "bosta_state_code", "bosta_state_value", "last_bosta_event_timestamp", "bosta_exception_reason", "bosta_exception_code", "bosta_status_snapshot", "last_bosta_status_on", "last_error"],
+ "field_order": [
+  "sales_order",
+  "delivery_note",
+  "status",
+  "receiver_section",
+  "receiver_name",
+  "receiver_phone",
+  "address_section",
+  "city",
+  "district_id",
+  "city_id",
+  "district_name",
+  "address_first_line",
+  "bosta_section",
+  "bosta_delivery_id",
+  "tracking_number",
+  "unique_business_reference",
+  "bosta_status_section",
+  "bosta_state_code",
+  "bosta_state_value",
+  "last_bosta_event_timestamp",
+  "bosta_exception_reason",
+  "bosta_exception_code",
+  "bosta_status_snapshot",
+  "last_bosta_status_on",
+  "last_error",
+  "delivery_note_error",
+  "delivery_note_error_at",
+  "bosta_requested_on",
+  "active_sales_order"
+ ],
  "fields": [
-  {"fieldname":"sales_order","fieldtype":"Link","label":"Sales Order","options":"Sales Order","reqd":1,"unique":1,"read_only":1},
-  {"fieldname":"delivery_note","fieldtype":"Link","label":"Delivery Note","options":"Delivery Note","read_only":1},
-  {"default":"Pending Bosta","fieldname":"status","fieldtype":"Select","in_list_view":1,"label":"Status","options":"Pending Bosta\nBosta Created\nDelivery Note Failed\nCompleted\nBosta Failed","read_only":1,"reqd":1},
-  {"fieldname":"receiver_section","fieldtype":"Section Break","label":"Receiver"},
-  {"fieldname":"receiver_name","fieldtype":"Data","ignore_xss_filter":1,"label":"Receiver Name","reqd":1},
-  {"fieldname":"receiver_phone","fieldtype":"Data","ignore_xss_filter":1,"label":"Receiver Phone","reqd":1},
-  {"fieldname":"address_section","fieldtype":"Section Break","label":"Required Delivery Address"},
-  {"fieldname":"city","fieldtype":"Data","ignore_xss_filter":1,"label":"City","reqd":1},
-  {"description":"Use this, or enter both City ID and District Name.","fieldname":"district_id","fieldtype":"Data","ignore_xss_filter":1,"label":"District ID"},
-  {"fieldname":"city_id","fieldtype":"Data","ignore_xss_filter":1,"label":"City ID"},
-  {"fieldname":"district_name","fieldtype":"Data","ignore_xss_filter":1,"label":"District Name"},
-  {"fieldname":"address_first_line","fieldtype":"Small Text","ignore_xss_filter":1,"label":"Address First Line","reqd":1},
-  {"fieldname":"bosta_section","fieldtype":"Section Break","label":"Bosta"},
-  {"fieldname":"bosta_delivery_id","fieldtype":"Data","ignore_xss_filter":1,"label":"Bosta Delivery ID","read_only":1},
-  {"fieldname":"tracking_number","fieldtype":"Data","ignore_xss_filter":1,"label":"Tracking Number","read_only":1},
-  {"fieldname":"unique_business_reference","fieldtype":"Data","ignore_xss_filter":1,"label":"Unique Business Reference","read_only":1},
-  {"fieldname":"bosta_status_section","fieldtype":"Section Break","label":"Bosta Status"},
-  {"fieldname":"bosta_state_code","fieldtype":"Int","label":"Bosta State Code","read_only":1},
-  {"fieldname":"bosta_state_value","fieldtype":"Data","ignore_xss_filter":1,"label":"Bosta State","read_only":1},
-  {"description":"Bosta webhook timeStamp in milliseconds since the Unix epoch.","fieldname":"last_bosta_event_timestamp","fieldtype":"Data","ignore_xss_filter":1,"label":"Last Bosta Event Timestamp","read_only":1},
-  {"fieldname":"bosta_exception_reason","fieldtype":"Small Text","ignore_xss_filter":1,"label":"Bosta Exception Reason","read_only":1},
-  {"fieldname":"bosta_exception_code","fieldtype":"Int","label":"Bosta Exception Code","read_only":1},
-  {"fieldname":"bosta_status_snapshot","fieldtype":"JSON","ignore_xss_filter":1,"label":"Bosta Status Snapshot","read_only":1},
-  {"fieldname":"last_bosta_status_on","fieldtype":"Datetime","label":"Last Bosta Status Check","read_only":1},
-  {"fieldname":"last_error","fieldtype":"Small Text","ignore_xss_filter":1,"label":"Last Error","read_only":1}
+  {
+   "fieldname": "sales_order",
+   "fieldtype": "Link",
+   "label": "Sales Order",
+   "options": "Sales Order",
+   "reqd": 1,
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "delivery_note",
+   "fieldtype": "Link",
+   "label": "Delivery Note",
+   "options": "Delivery Note",
+   "read_only": 1
+  },
+  {
+   "default": "Pending Bosta",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Pending Bosta\nBosta Created\nDelivery Note Failed\nCompleted\nBosta Failed\nCanceled",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "receiver_section",
+   "fieldtype": "Section Break",
+   "label": "Receiver"
+  },
+  {
+   "fieldname": "receiver_name",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Receiver Name",
+   "reqd": 1
+  },
+  {
+   "fieldname": "receiver_phone",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Receiver Phone",
+   "reqd": 1
+  },
+  {
+   "fieldname": "address_section",
+   "fieldtype": "Section Break",
+   "label": "Required Delivery Address"
+  },
+  {
+   "fieldname": "city",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "City",
+   "reqd": 1
+  },
+  {
+   "description": "Use this, or enter both City ID and District Name.",
+   "fieldname": "district_id",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "District ID"
+  },
+  {
+   "fieldname": "city_id",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "City ID"
+  },
+  {
+   "fieldname": "district_name",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "District Name"
+  },
+  {
+   "fieldname": "address_first_line",
+   "fieldtype": "Small Text",
+   "ignore_xss_filter": 1,
+   "label": "Address First Line",
+   "reqd": 1
+  },
+  {
+   "fieldname": "bosta_section",
+   "fieldtype": "Section Break",
+   "label": "Bosta"
+  },
+  {
+   "fieldname": "bosta_delivery_id",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Bosta Delivery ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "tracking_number",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Tracking Number",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "unique_business_reference",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Unique Business Reference",
+   "read_only": 1
+  },
+  {
+   "fieldname": "bosta_status_section",
+   "fieldtype": "Section Break",
+   "label": "Bosta Status"
+  },
+  {
+   "fieldname": "bosta_state_code",
+   "fieldtype": "Int",
+   "label": "Bosta State Code",
+   "read_only": 1
+  },
+  {
+   "fieldname": "bosta_state_value",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Bosta State",
+   "read_only": 1
+  },
+  {
+   "description": "Bosta webhook timeStamp in milliseconds since the Unix epoch.",
+   "fieldname": "last_bosta_event_timestamp",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Last Bosta Event Timestamp",
+   "read_only": 1
+  },
+  {
+   "fieldname": "bosta_exception_reason",
+   "fieldtype": "Small Text",
+   "ignore_xss_filter": 1,
+   "label": "Bosta Exception Reason",
+   "read_only": 1
+  },
+  {
+   "fieldname": "bosta_exception_code",
+   "fieldtype": "Int",
+   "label": "Bosta Exception Code",
+   "read_only": 1
+  },
+  {
+   "fieldname": "bosta_status_snapshot",
+   "fieldtype": "JSON",
+   "ignore_xss_filter": 1,
+   "label": "Bosta Status Snapshot",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_bosta_status_on",
+   "fieldtype": "Datetime",
+   "label": "Last Bosta Status Check",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_error",
+   "fieldtype": "Small Text",
+   "ignore_xss_filter": 1,
+   "label": "Last Error",
+   "read_only": 1
+  },
+  {
+   "description": "Set while a Delivery Note create/cancel action has failed; cleared when a later attempt succeeds. Drives Marketplace Needs Attention.",
+   "fieldname": "delivery_note_error",
+   "fieldtype": "Small Text",
+   "ignore_xss_filter": 1,
+   "label": "Delivery Note Error",
+   "read_only": 1
+  },
+  {
+   "description": "Equals Sales Order while this shipment is active (not Canceled), otherwise empty. Its unique index allows only one active shipment per Sales Order.",
+   "fieldname": "active_sales_order",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "ignore_xss_filter": 1,
+   "label": "Active Sales Order",
+   "no_copy": 1,
+   "read_only": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "delivery_note_error_at",
+   "fieldtype": "Datetime",
+   "label": "Delivery Note Error Since",
+   "read_only": 1
+  },
+  {
+   "description": "When the current Bosta create request was started; used to tell a stuck Pending shipment from one in flight.",
+   "fieldname": "bosta_requested_on",
+   "fieldtype": "Datetime",
+   "label": "Bosta Requested On",
+   "read_only": 1
+  }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-13 00:00:00.000000",
+ "modified": "2026-10-13 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Bosta Shipment",
  "naming_rule": "Expression",
  "owner": "Administrator",
  "permissions": [
-  {"create":1,"delete":1,"email":1,"export":1,"print":1,"read":1,"report":1,"role":"System Manager","share":1,"write":1},
-  {"create":1,"email":1,"export":1,"print":1,"read":1,"report":1,"role":"Sales User","share":1,"write":1}
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Sales Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Stock User",
+   "write": 1
+  },
+  {
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Sales User"
+  }
  ],
  "sort_field": "modified",
  "sort_order": "DESC",

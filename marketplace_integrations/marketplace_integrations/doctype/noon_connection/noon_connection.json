@@ -11,8 +11,14 @@
   "key_id",
   "private_key",
   "environment",
+  "webhook_section",
   "webhook_url",
   "webhook_secret",
+  "noon_destination_code",
+  "webhook_status",
+  "last_webhook_event_received_on",
+  "other_noon_destinations",
+  "noon_destinations",
   "enabled"
  ],
  "fields": [
@@ -56,6 +62,11 @@
    "reqd": 1
   },
   {
+   "fieldname": "webhook_section",
+   "fieldtype": "Section Break",
+   "label": "Event Notifications"
+  },
+  {
    "fieldname": "webhook_url",
    "fieldtype": "Data",
    "label": "Webhook URL",
@@ -68,6 +79,41 @@
    "fieldtype": "Password",
    "ignore_xss_filter": 1,
    "label": "Webhook Secret"
+  },
+  {
+   "fieldname": "noon_destination_code",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "ignore_xss_filter": 1,
+   "label": "Noon Destination Code",
+   "read_only": 1
+  },
+  {
+   "fieldname": "webhook_status",
+   "fieldtype": "Data",
+   "label": "Webhook Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_webhook_event_received_on",
+   "fieldtype": "Datetime",
+   "label": "Last Event Received",
+   "read_only": 1
+  },
+  {
+   "fieldname": "other_noon_destinations",
+   "fieldtype": "Int",
+   "label": "Other Noon Destinations",
+   "read_only": 1
+  },
+  {
+   "cannot_add_rows": 1,
+   "cannot_delete_rows": 1,
+   "fieldname": "noon_destinations",
+   "fieldtype": "Table",
+   "label": "Noon Destinations",
+   "options": "Noon Destination",
+   "read_only": 1
   },
   {
    "default": "1",

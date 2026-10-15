@@ -1,11 +1,22 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
+from unittest.mock import patch
+
 import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import now_datetime
 
-IGNORE_TEST_RECORD_DEPENDENCIES = ["Marketplace Order", "Account"]
+from marketplace_integrations.tests.utils import make_role_user
+
+IGNORE_TEST_RECORD_DEPENDENCIES = [
+	"Marketplace Order",
+	"Account",
+	"User",
+	"Mode of Payment",
+	"Delivery Note",
+	"Sales Invoice",
+]
 
 
 class TestNoonReturn(IntegrationTestCase):
@@ -84,6 +95,9 @@ class TestNoonReturn(IntegrationTestCase):
 
 		self.assertTrue(fields["first_seen_on"].reqd)
 		self.assertTrue(fields["last_seen_on"].reqd)
+		self.assertEqual(fields["receipt_acknowledged_on"].fieldtype, "Datetime")
+		self.assertEqual(fields["receipt_acknowledged_by"].options, "User")
+		self.assertEqual(fields["receipt_acknowledgement_note"].fieldtype, "Small Text")
 
 		for fieldname in (
 			"marketplace_account",
@@ -98,6 +112,9 @@ class TestNoonReturn(IntegrationTestCase):
 			"found_via",
 			"first_seen_on",
 			"last_seen_on",
+			"receipt_acknowledged_on",
+			"receipt_acknowledged_by",
+			"receipt_acknowledgement_note",
 		):
 			self.assertTrue(fields[fieldname].read_only, fieldname)
 
@@ -123,3 +140,37 @@ class TestNoonReturn(IntegrationTestCase):
 	def test_unlinked_return_has_blank_marketplace_order(self):
 		doc = self.make_return()
 		self.assertFalse(doc.marketplace_order)
+
+	def test_acknowledge_receipt_records_internal_actor_time_and_note_without_remote_call(self):
+		doc = self.make_return()
+		with patch("requests.sessions.Session.request") as request:
+			result = doc.acknowledge_receipt("  Parcel received at warehouse  ")
+
+		self.assertTrue(result["acknowledged"])
+		self.assertFalse(result["already_acknowledged"])
+		request.assert_not_called()
+		doc.reload()
+		self.assertEqual(doc.receipt_acknowledged_by, "Administrator")
+		self.assertTrue(doc.receipt_acknowledged_on)
+		self.assertEqual(doc.receipt_acknowledgement_note, "Parcel received at warehouse")
+
+	def test_acknowledge_receipt_preserves_the_original_acknowledgement(self):
+		doc = self.make_return()
+		first = doc.acknowledge_receipt("First note")
+		second = doc.acknowledge_receipt("Changed note")
+
+		self.assertFalse(first["already_acknowledged"])
+		self.assertTrue(second["already_acknowledged"])
+		doc.reload()
+		self.assertEqual(doc.receipt_acknowledgement_note, "First note")
+		self.assertEqual(doc.receipt_acknowledged_by, "Administrator")
+
+	def test_acknowledge_receipt_requires_write_permission(self):
+		doc = self.make_return()
+		email, _ = make_role_user(self, "Noon Return Receipt", {"Noon Return": ["read"]})
+
+		with self.set_user(email), self.assertRaises(frappe.PermissionError):
+			doc.acknowledge_receipt("Not permitted")
+
+		doc.reload()
+		self.assertFalse(doc.receipt_acknowledged_on)

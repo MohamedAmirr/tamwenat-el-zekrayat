@@ -29,7 +29,8 @@ status-grouped Marketplace Order Item id):
 
 A ``Noon Return`` linked to the order (``marketplace_order``, #153/#164) makes
 ``return`` evidence, which the planner turns into the compensating-transaction
-outcome.  This is the one DB read here (a single ``exists``).  Own
+outcome, until the return is resolved (#262: see ``_has_noon_return``).  This
+is the one DB read here (a small ``get_all`` plus status lookups).  Own
 ``UpdateOrder`` out-of-stock marks cannot be told apart from a customer
 cancellation with the data stored today.
 """
@@ -67,8 +68,33 @@ def _started_shipment_mp_item_nrs(order):
 
 
 def _has_noon_return(order):
+	"""True while any Noon Return linked to the order is unresolved (#262).
+
+	Resolved means a submitted Credit Note AND either a Damaged outcome (Noon is
+	responsible, no stock returns) or a Sellable outcome with a submitted Sales
+	Return. A draft or cancelled document does not count as resolved.
+	"""
 	order_name = getattr(order, "name", None)
-	return bool(order_name and frappe.db.exists("Noon Return", {"marketplace_order": order_name}))
+	if not order_name:
+		return False
+	returns = frappe.get_all(
+		"Noon Return",
+		filters={"marketplace_order": order_name},
+		fields=["inspection_outcome", "sales_return", "credit_note"],
+	)
+	return any(not _is_return_resolved(row) for row in returns)
+
+
+def _submitted(doctype, name):
+	return bool(name) and frappe.db.get_value(doctype, name, "docstatus") == 1
+
+
+def _is_return_resolved(row):
+	if not _submitted("Sales Invoice", row.credit_note):
+		return False
+	if row.inspection_outcome == "Damaged":
+		return True
+	return row.inspection_outcome == "Sellable" and _submitted("Delivery Note", row.sales_return)
 
 
 def build_evidence(order):

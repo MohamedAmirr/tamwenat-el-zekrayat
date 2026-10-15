@@ -28,7 +28,7 @@ frappe.query_reports["Marketplace Channel Status"] = {
 		}
 
 		if (column.fieldname === "orders_needing_attention" && data.orders_needing_attention) {
-			return wrap_count_link(value, orders_needing_attention_url(data.account));
+			return wrap_count_link(value, orders_needing_attention_url(data.account, data.platform));
 		}
 
 		if (column.fieldname === "product_sync_errors" && data.product_sync_errors) {
@@ -57,7 +57,11 @@ function needs_attention_url(account) {
 	return `/app/query-report/Marketplace%20Needs%20Attention?${to_query_string({ account })}`;
 }
 
-function orders_needing_attention_url(account) {
+// Bosta is a carrier, not a Marketplace Account: its row has no account, so it links by platform.
+function orders_needing_attention_url(account, platform) {
+	if (!account && platform === "Bosta") {
+		return `/app/query-report/Marketplace%20Needs%20Attention?${to_query_string({ platform })}`;
+	}
 	return needs_attention_url(account);
 }
 

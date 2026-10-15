@@ -1,0 +1,80 @@
+{
+ "actions": [],
+ "creation": "2026-10-15 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "destination_name",
+  "is_ours",
+  "is_active",
+  "event_types",
+  "url",
+  "destination_code",
+  "toggle_active"
+ ],
+ "fields": [
+  {
+   "fieldname": "destination_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Name",
+   "length": 255,
+   "read_only": 1
+  },
+  {
+   "fieldname": "is_ours",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "This Site",
+   "read_only": 1
+  },
+  {
+   "fieldname": "is_active",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Active",
+   "read_only": 1
+  },
+  {
+   "fieldname": "event_types",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Event Types",
+   "length": 255,
+   "read_only": 1
+  },
+  {
+   "fieldname": "url",
+   "fieldtype": "Data",
+   "label": "URL",
+   "length": 500,
+   "read_only": 1
+  },
+  {
+   "fieldname": "destination_code",
+   "fieldtype": "Data",
+   "label": "Destination Code",
+   "length": 255,
+   "read_only": 1
+  },
+  {
+   "fieldname": "toggle_active",
+   "fieldtype": "Button",
+   "in_list_view": 1,
+   "label": "Activate / Deactivate"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-10-15 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Marketplace Integrations",
+ "name": "Noon Destination",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "creation",
+ "sort_order": "ASC",
+ "states": []
+}
