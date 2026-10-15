@@ -1,3 +1,23 @@
+function is_cancelled(doctype, name) {
+	return frappe.db.get_value(doctype, name, "docstatus").then((response) => {
+		return Boolean(response.message) && response.message.docstatus === 2;
+	});
+}
+
+function add_credit_note_button(frm) {
+	frm.add_custom_button(__("Create Credit Note"), () => {
+		frappe.confirm(
+			__("Create a draft Credit Note (return Sales Invoice) for one unit of this returned item?"),
+			() => {
+				frm.call("create_credit_note").then(() => {
+					frm.reload_doc();
+					frappe.show_alert({ message: __("Draft Credit Note created."), indicator: "green" });
+				});
+			}
+		);
+	});
+}
+
 frappe.ui.form.on("Noon Return", {
 	refresh(frm) {
 		if (frm.is_new()) return;
@@ -15,16 +35,25 @@ frappe.ui.form.on("Noon Return", {
 		if (!frm.perm[0].write) return;
 
 		if (frm.doc.inspection_outcome && !frm.doc.credit_note) {
-			frm.add_custom_button(__("Create Credit Note"), () => {
-				frappe.confirm(
-					__("Create a draft Credit Note (return Sales Invoice) for one unit of this returned item?"),
-					() => {
-						frm.call("create_credit_note").then(() => {
-							frm.reload_doc();
-							frappe.show_alert({ message: __("Draft Credit Note created."), indicator: "green" });
-						});
-					}
-				);
+			add_credit_note_button(frm);
+		} else if (frm.doc.credit_note) {
+			// A cancelled Credit Note can be replaced; the server allows it.
+			const credit_note = frm.doc.credit_note;
+			is_cancelled("Sales Invoice", credit_note).then((cancelled) => {
+				// Skip if the user moved to another record while the lookup ran.
+				if (cancelled && frm.doc.credit_note === credit_note) add_credit_note_button(frm);
+			});
+		}
+		if (frm.doc.inspection_outcome === "Sellable" && frm.doc.sales_return) {
+			const sales_return = frm.doc.sales_return;
+			is_cancelled("Delivery Note", sales_return).then((cancelled) => {
+				if (!cancelled || frm.doc.sales_return !== sales_return) return;
+				frm.add_custom_button(__("Create Sales Return"), () => {
+					frm.call("record_inspection", { outcome: "Sellable" }).then(() => {
+						frm.reload_doc();
+						frappe.show_alert({ message: __("Draft Sales Return created."), indicator: "green" });
+					});
+				});
 			});
 		}
 

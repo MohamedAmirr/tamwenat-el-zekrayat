@@ -7,7 +7,11 @@ const alerts = [];
 
 global.__ = (value) => value;
 let route;
+let docstatus = 1;
 global.frappe = {
+	db: {
+		get_value: () => Promise.resolve({ message: { docstatus } }),
+	},
 	set_route(...args) {
 		route = args;
 	},
@@ -139,4 +143,41 @@ test("Create Credit Note confirms, calls the server and Open Credit Note replace
 	assert.deepEqual(linked.buttons, ["Open Credit Note"]);
 	linked.actions["Open Credit Note"]();
 	assert.deepEqual(route, ["Form", "Sales Invoice", "ACC-SINV-0001"]);
+});
+
+test("a cancelled Credit Note or Sales Return can be created again", async () => {
+	docstatus = 2;
+	const form = makeForm({
+		acknowledgedOn: "2026-10-14 10:00:00",
+		doc: { inspection_outcome: "Sellable", sales_return: "MAT-DN-0002", credit_note: "ACC-SINV-0002" },
+	});
+	handlers.refresh(form);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	docstatus = 1;
+	assert.ok(form.buttons.includes("Create Credit Note"));
+	assert.ok(form.buttons.includes("Create Sales Return"));
+
+	const live = makeForm({
+		acknowledgedOn: "2026-10-14 10:00:00",
+		doc: { inspection_outcome: "Sellable", sales_return: "MAT-DN-0003", credit_note: "ACC-SINV-0003" },
+	});
+	handlers.refresh(live);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.ok(!live.buttons.includes("Create Credit Note"));
+	assert.ok(!live.buttons.includes("Create Sales Return"));
+});
+
+test("a late cancelled-document lookup adds no button once the form shows another record", async () => {
+	docstatus = 2;
+	const form = makeForm({
+		acknowledgedOn: "2026-10-14 10:00:00",
+		doc: { inspection_outcome: "Sellable", sales_return: "MAT-DN-0004", credit_note: "ACC-SINV-0004" },
+	});
+	handlers.refresh(form);
+	form.doc.credit_note = "ACC-SINV-0005";
+	form.doc.sales_return = "MAT-DN-0005";
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	docstatus = 1;
+	assert.ok(!(form.buttons || []).includes("Create Credit Note"));
+	assert.ok(!(form.buttons || []).includes("Create Sales Return"));
 });

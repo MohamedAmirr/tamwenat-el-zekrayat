@@ -5,10 +5,13 @@
 
 Auth and envelope-shape validation finish synchronously so an invalid
 request never reaches a worker - no Noon HTTP call happens in the request
-itself. ``payload`` is ONLY ever checked to be an object; its contents are
-never read/stored/logged by this module, matching #163's locked scope
-(per-event-type payload parsing is explicitly a future, separate issue).
-The secret header value and the raw request payload are never logged.
+itself. ``FBPI::ORDER_SYNC`` only queues the existing order import: its
+payload is checked to be an object but never parsed, stored or logged.
+``RETURNS::REFERENCE_UPDATE`` (#263) reads ``payload.barcode``, queues a
+deduplicated return-reference lookup and stores the raw payload (capped) on
+a ``Return Lookup`` sync log row; every other event type is acknowledged
+with 200 and takes no action, but is still recorded as an Order Import /
+Success / ``Noon Webhook`` log row (it counts as a received event). The secret header value is never logged.
 
 Unlike Talabat's webhook pair (``api/talabat_webhooks.py``), Noon's Event
 Notifications have no HMAC/signature scheme - only a static per-connection
@@ -26,9 +29,13 @@ from frappe.utils.password import get_decrypted_password
 
 from marketplace_integrations.integrations.noon.constants import (
 	NOON_FBPI_ORDER_SYNC_EVENT_TYPE,
+	NOON_RETURN_BARCODE_MAX,
+	NOON_RETURN_EVENT_PAYLOAD_LOG_MAX,
+	NOON_RETURN_REFERENCE_UPDATE_EVENT_TYPE,
 	NOON_WEBHOOK_SECRET_HEADER,
 )
 from marketplace_integrations.integrations.noon.orders import enqueue_order_import
+from marketplace_integrations.integrations.noon.returns import queue_webhook_lookup
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -74,6 +81,10 @@ def event_notification():
 	if not secret or not hmac.compare_digest(cstr(header_value).encode(), cstr(secret).encode()):
 		_invalid_webhook()
 
+	if event_type == NOON_RETURN_REFERENCE_UPDATE_EVENT_TYPE:
+		_handle_return_reference_update(account, message_id, payload)
+		return {"accepted": True}
+
 	import_queued = False
 	if event_type == NOON_FBPI_ORDER_SYNC_EVENT_TYPE:
 		job = enqueue_order_import(account.name, trigger_source="Noon Webhook")
@@ -82,6 +93,58 @@ def event_notification():
 	_log_accepted_event(account, message_id, event_type, import_queued)
 
 	return {"accepted": True}
+
+
+def _handle_return_reference_update(account, message_id, payload):
+	"""#263: queue a lookup for the payload's ``barcode`` and keep the raw payload.
+
+	The ``barcode`` field name is an unverified assumption (AI-written summary),
+	so the capped raw payload goes on the log row to let the first real delivery
+	confirm or correct it. A payload without a usable string ``barcode`` is
+	logged and ignored; the caller still answers 200 so Noon stops retrying."""
+	barcode = payload.get("barcode")
+	barcode = barcode.strip() if isinstance(barcode, str) else ""
+	lookup_queued = False
+	if barcode and len(barcode) <= NOON_RETURN_BARCODE_MAX:
+		lookup_queued = queue_webhook_lookup(account.name, barcode)
+	_log_return_reference_event(account, message_id, payload, lookup_queued)
+
+
+def _capped_payload(payload):
+	raw = frappe.as_json(payload)
+	if len(raw) <= NOON_RETURN_EVENT_PAYLOAD_LOG_MAX:
+		return payload
+	return {"truncated_payload": raw[:NOON_RETURN_EVENT_PAYLOAD_LOG_MAX]}
+
+
+def _log_return_reference_event(account, message_id, payload, lookup_queued):
+	"""One committed ``Return Lookup`` log row per accepted return-reference
+	event. Never raises outward, like ``_log_accepted_event``. Headers and the
+	key are never stored."""
+	try:
+		now = frappe.utils.now_datetime()
+		frappe.get_doc(
+			{
+				"doctype": "Marketplace Sync Log",
+				"sync_type": "Return Lookup",
+				"marketplace_account": account.name,
+				"status": "Success",
+				"trigger_source": "Noon Webhook",
+				"attempted_at": now,
+				"completed_at": now,
+				"request_data": frappe.as_json(
+					{
+						"message_id": message_id,
+						"event_type": NOON_RETURN_REFERENCE_UPDATE_EVENT_TYPE,
+						"lookup_queued": lookup_queued,
+						"payload": _capped_payload(payload),
+					}
+				),
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+	except Exception:
+		frappe.log_error(title="Noon webhook: failed to write sync log", message=frappe.get_traceback())
 
 
 def _is_bare_order_body(body):

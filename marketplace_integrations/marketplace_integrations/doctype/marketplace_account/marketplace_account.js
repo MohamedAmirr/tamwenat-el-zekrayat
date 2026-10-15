@@ -288,18 +288,18 @@ function show_noon_warehouse_picker(frm) {
 				frappe.msgprint(__("No active Noon Warehouses were returned."));
 				return;
 			}
-			const by_label = {};
-			const labels = warehouses.map((row) => {
-				const label = `${row.display_name} (${row.warehouse_code})`;
-				by_label[label] = row.warehouse_code;
-				return label;
-			});
+			// Value = warehouse code (unique), so two warehouses with the same display name
+			// cannot overwrite each other; Noon's text is escaped in the label.
+			const options = warehouses.map((row) => ({
+				label: frappe.utils.escape_html(`${row.display_name} (${row.warehouse_code})`),
+				value: row.warehouse_code,
+			}));
 			const dialog = new frappe.ui.Dialog({
 				title: __("Select Noon Warehouse"),
-				fields: [{ fieldname: "warehouse", fieldtype: "Select", label: __("Warehouse"), options: labels.join("\n"), reqd: 1 }],
+				fields: [{ fieldname: "warehouse", fieldtype: "Select", label: __("Warehouse"), options, reqd: 1 }],
 				primary_action_label: __("Use Warehouse"),
 				primary_action(values) {
-					frm.set_value("noon_warehouse_code", by_label[values.warehouse]);
+					frm.set_value("noon_warehouse_code", values.warehouse);
 					dialog.hide();
 				},
 			});

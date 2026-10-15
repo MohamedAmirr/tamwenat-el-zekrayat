@@ -49,6 +49,13 @@ NOON_EVENT_WEBHOOK_PATH = "/api/method/marketplace_integrations.api.noon_webhook
 # stops retrying a type we don't handle (#163 scope).
 NOON_FBPI_ORDER_SYNC_EVENT_TYPE = "FBPI::ORDER_SYNC"
 
+# #263: the return-reference event. Its payload shape (barcode, barcode_type) comes
+# from an AI-written summary, not a Noon page, so it is unverified; the receiver
+# stores the raw payload (capped) so the first real delivery can confirm it.
+NOON_RETURN_REFERENCE_UPDATE_EVENT_TYPE = "RETURNS::REFERENCE_UPDATE"
+NOON_RETURN_EVENT_PAYLOAD_LOG_MAX = 4096
+NOON_RETURN_BARCODE_MAX = 255
+
 # #253: Noon allows at most this many Event Notification destinations per project.
 NOON_MAX_DESTINATIONS = 5
 
@@ -57,6 +64,11 @@ NOON_MAX_DESTINATIONS = 5
 # shape, but flags its own paired .yml entry as empty/unconfirmed (see
 # integrations/noon/returns.py's module docstring).
 RETURN_REFERENCES_LIST_PATH = "/returns/v1/return-references/list"
+
+# Review finding M4: bound how many of an account's most recent Noon orders are
+# read to derive ``merchant_codes`` for a return lookup. A merchant's code is the
+# same on nearly every order, so the recent orders are enough.
+MERCHANT_CODES_SCAN_ORDERS = 200
 
 # #153 review finding #3: bounds the daily AWB scan to shipments modified
 # within this window (and not Cancelled/Discarded) rather than scanning
