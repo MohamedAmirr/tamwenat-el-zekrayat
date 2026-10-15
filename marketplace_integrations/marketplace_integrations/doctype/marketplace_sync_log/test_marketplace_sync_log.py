@@ -77,7 +77,7 @@ class TestMarketplaceSyncLog(IntegrationTestCase):
 		self.assertEqual(fields["sync_type"].fieldtype, "Select")
 		self.assertEqual(
 			fields["sync_type"].options.splitlines(),
-			["Sales Order Sync", "Order Import", "Fulfillment", "Return Lookup", "Order Action"],
+			["Sales Order Sync", "Order Import", "Fulfillment", "Return Lookup", "Order Action", "Payment"],
 		)
 		self.assertEqual(fields["sync_type"].default, "Sales Order Sync")
 		self.assertTrue(fields["sync_type"].reqd)
@@ -87,7 +87,9 @@ class TestMarketplaceSyncLog(IntegrationTestCase):
 		# has no Marketplace Order yet to link to. Still mandatory for the
 		# original Sales Order Sync rows.
 		self.assertFalse(fields["marketplace_order"].reqd)
-		self.assertEqual(fields["marketplace_order"].mandatory_depends_on, 'eval:doc.sync_type=="Sales Order Sync"')
+		self.assertEqual(
+			fields["marketplace_order"].mandatory_depends_on, 'eval:doc.sync_type=="Sales Order Sync"'
+		)
 		self.assertEqual(fields["status"].options.splitlines(), ["Queued", "Success", "Error", "Invalid"])
 		self.assertEqual(fields["status"].default, "Queued")
 		self.assertTrue(fields["status"].read_only)

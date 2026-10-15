@@ -87,7 +87,7 @@ class TestNoonReturn(IntegrationTestCase):
 		self.assertFalse(fields["marketplace_order"].reqd)
 
 		self.assertEqual(fields["found_via"].fieldtype, "Select")
-		self.assertEqual(fields["found_via"].options.splitlines(), ["Manual Lookup", "AWB Scan"])
+		self.assertEqual(fields["found_via"].options.splitlines(), ["Manual Lookup", "AWB Scan", "Webhook"])
 		self.assertTrue(fields["found_via"].reqd)
 
 		self.assertEqual(fields["references"].fieldtype, "JSON")

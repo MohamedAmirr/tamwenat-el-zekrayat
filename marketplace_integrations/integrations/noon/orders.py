@@ -3,9 +3,10 @@
 
 """Noon FBPI order polling and persistence (#145).
 
-Polling-only: #145 deliberately ships no webhook/event-notification
-receiver (Noon's FBPI event payload schema isn't reachable in the checked-in
-docs snapshot). ``poll_all_accounts()`` is the hourly ``hooks.py``
+Triggered by the hourly poll, a manual Desk action, and the
+``FBPI::ORDER_SYNC`` webhook (``api/noon_webhooks.py``, #163), which queues
+this same deduplicated import without reading the event payload.
+``poll_all_accounts()`` is the hourly ``hooks.py``
 scheduler entry; ``queue_order_import()``/``run_order_import()`` are the
 manual Desk-triggered equivalent, both funnelled through the same
 ``import_orders_created_between()`` so neither path reimplements the

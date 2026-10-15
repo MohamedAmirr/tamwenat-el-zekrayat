@@ -7,7 +7,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api import noon_webhooks
-from marketplace_integrations.integrations.noon import orders
+from marketplace_integrations.integrations.noon import orders, returns
 from marketplace_integrations.integrations.noon.orders import _ORDER_IMPORT_RQ_JOB_PREFIX, run_order_import
 
 _PRIVATE_KEY = (
@@ -349,7 +349,9 @@ class IntegrationTestNoonWebhookReceiver(IntegrationTestCase):
 		never enqueues, regardless of which connection the key belongs to."""
 		# Create a second connection with a different secret
 		suffix = frappe.generate_hash(length=8)
-		second_connection = _make_connection(f"Second Webhook Connection {suffix}", webhook_secret="second-webhook-secret")
+		second_connection = _make_connection(
+			f"Second Webhook Connection {suffix}", webhook_secret="second-webhook-secret"
+		)
 		self._other_connection = second_connection.name
 		# Create a second account for this second connection
 		second_account = _make_account(f"Second Webhook Account {suffix}", second_connection)
@@ -418,3 +420,91 @@ class IntegrationTestNoonWebhookReceiver(IntegrationTestCase):
 			with self.assertRaises(frappe.PermissionError):
 				noon_webhooks.event_notification()
 		enqueue.assert_not_called()
+
+	# --- #263: RETURNS::REFERENCE_UPDATE (payload shape is an unverified assumption) ---
+
+	def _return_event_logs(self):
+		return frappe.get_all(
+			"Marketplace Sync Log",
+			filters={
+				"marketplace_account": self.account.name,
+				"trigger_source": "Noon Webhook",
+				"sync_type": "Return Lookup",
+			},
+			fields=["name", "status", "request_data"],
+		)
+
+	@patch.object(returns.frappe, "enqueue")
+	def test_return_reference_event_queues_one_deduplicated_lookup_and_logs_the_payload(
+		self, returns_enqueue
+	):
+		payload = {"barcode": "RMS-12345", "barcode_type": "rms_barcode"}
+		envelope = _envelope(self.connection, event_type="RETURNS::REFERENCE_UPDATE", payload=payload)
+
+		result = self._call_webhook(envelope, "test-webhook-secret")
+
+		self.assertEqual(result, {"accepted": True})
+		returns_enqueue.assert_called_once()
+		kwargs = returns_enqueue.call_args.kwargs
+		self.assertEqual(kwargs["barcode"], "RMS-12345")
+		self.assertEqual(kwargs["account_name"], self.account.name)
+		self.assertTrue(kwargs["deduplicate"])
+		# One job only, and it is the return lookup, not an order import.
+		self.assertTrue(kwargs["job_id"].startswith("marketplace-noon-return-webhook-"))
+
+		logs = self._return_event_logs()
+		self.assertEqual(len(logs), 1)
+		logged = frappe.parse_json(logs[0].request_data)
+		self.assertEqual(logged["payload"], payload)
+		self.assertTrue(logged["lookup_queued"])
+		self.assertNotIn("test-webhook-secret", logs[0].request_data)
+
+	@patch.object(returns.frappe, "enqueue")
+	def test_return_reference_event_without_a_string_barcode_is_logged_and_ignored(self, enqueue):
+		for payload in (
+			{"barcode_type": "awb_nr"},
+			{"barcode": 123},
+			{"barcode": "  "},
+			{"barcode": "x" * 300},
+		):
+			with self.subTest(payload=payload):
+				envelope = _envelope(self.connection, event_type="RETURNS::REFERENCE_UPDATE", payload=payload)
+				result = self._call_webhook(envelope, "test-webhook-secret")
+				self.assertEqual(result, {"accepted": True})
+		enqueue.assert_not_called()
+		for log in self._return_event_logs():
+			self.assertFalse(frappe.parse_json(log.request_data)["lookup_queued"])
+
+	@patch.object(returns.frappe, "enqueue")
+	def test_return_reference_payload_is_capped_in_the_log(self, enqueue):
+		payload = {"barcode": "RMS-1", "extra": "y" * 10000}
+		envelope = _envelope(self.connection, event_type="RETURNS::REFERENCE_UPDATE", payload=payload)
+
+		self._call_webhook(envelope, "test-webhook-secret")
+
+		logged = frappe.parse_json(self._return_event_logs()[0].request_data)
+		self.assertEqual(list(logged["payload"]), ["truncated_payload"])
+		self.assertLessEqual(len(logged["payload"]["truncated_payload"]), 4096)
+
+	@patch.object(returns.frappe, "enqueue")
+	def test_return_reference_event_still_requires_the_webhook_key(self, enqueue):
+		envelope = _envelope(
+			self.connection, event_type="RETURNS::REFERENCE_UPDATE", payload={"barcode": "RMS-1"}
+		)
+		with self.assertRaises(frappe.PermissionError):
+			self._call_webhook(envelope, "wrong-secret")
+		enqueue.assert_not_called()
+		self.assertEqual(self._return_event_logs(), [])
+
+	def test_webhook_lookup_records_returns_found_via_webhook(self):
+		item = {"purchase_item_nr": "PIN-1", "partner_sku": "SKU-1", "order_nr": "ORD-1"}
+		with (
+			patch.object(returns, "get_account", return_value=self.account),
+			patch.object(returns, "validate_connection_enabled"),
+			patch.object(returns, "list_return_references", return_value=[item, "not-a-dict"]) as listed,
+			patch.object(returns, "upsert_return_item") as upsert,
+		):
+			returns.run_webhook_lookup(self.account.name, "RMS-1")
+
+		listed.assert_called_once_with(self.account, "RMS-1", trigger_source="Noon Webhook")
+		upsert.assert_called_once_with(self.account, item, "Webhook")
