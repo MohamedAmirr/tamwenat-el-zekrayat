@@ -11,7 +11,7 @@ site-wide cache or exposed through a whitelisted method.
 
 import time
 import uuid
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import frappe
 import jwt
@@ -26,6 +26,10 @@ from marketplace_integrations.integrations.http import (
 
 LOGIN_PATH = "/identity/public/v1/api/login"
 WHOAMI_PATH = "/identity/v1/whoami"
+DESTINATIONS_LIST_PATH = "/event-notifications/v1/destination/list"
+EVENT_TYPES_LIST_PATH = "/event-notifications/v1/event-type/list"
+DESTINATION_CREATE_PATH = "/event-notifications/v1/destination/https-destination/create"
+DESTINATION_UPDATE_PATH = "/event-notifications/v1/destination/https-destination/{destination_code}/update"
 SERVICE_NAME = "Noon"
 USER_AGENT = f"marketplace_integrations/{__version__}"
 
@@ -122,6 +126,38 @@ class NoonClient:
 	def whoami(self):
 		"""GET the documented authenticated identity endpoint."""
 		return self.request("GET", WHOAMI_PATH)
+
+	def list_destinations(self):
+		"""GET the project's configured Event Notification destinations."""
+		return self.request("GET", DESTINATIONS_LIST_PATH)
+
+	def list_event_types(self):
+		"""GET Event Notification event types available to this project."""
+		return self.request("GET", EVENT_TYPES_LIST_PATH)
+
+	def create_https_destination(self, destination_name, url, header_values):
+		"""POST a new HTTPS destination; ``header_values`` maps header name to value."""
+		return self.request(
+			"POST",
+			DESTINATION_CREATE_PATH,
+			json={
+				"destination_name": destination_name,
+				"url": url,
+				"credentials": {"values": header_values},
+			},
+		)
+
+	def update_destination(self, destination_code, **fields):
+		"""POST only the given destination fields (omitted fields stay unchanged).
+
+		Supported: ``url``, ``is_active``, ``credentials`` and ``event_types``
+		(a list of ``{"event_type", "is_active"}``).
+		"""
+		return self.request(
+			"POST",
+			DESTINATION_UPDATE_PATH.format(destination_code=quote(destination_code, safe="")),
+			json=fields,
+		)
 
 	def error_message(self, response):
 		"""Format a non-login error without echoing a raw response body.

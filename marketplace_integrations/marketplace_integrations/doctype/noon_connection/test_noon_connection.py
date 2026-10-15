@@ -317,3 +317,293 @@ class IntegrationTestNoonConnection(IntegrationTestCase):
 			"api/method/marketplace_integrations.api.noon_webhooks.event_notification",
 			result["webhook_url"],
 		)
+
+	def test_refresh_webhook_status_caches_an_active_destination(self):
+		connection = make_connection("Webhook Status Active")
+		destination = {
+			"destination_code": "dest-active",
+			"url": connection.webhook_url,
+			"is_active": True,
+			"event_types": ["FBPI::ORDER_SYNC"],
+			"credentials": {"values": {"X-Api-Key": "******"}},
+		}
+		response = SimpleNamespace(status_code=200, json=lambda: {"destinations": [destination]})
+		with patch("marketplace_integrations.integrations.noon.client.NoonClient") as client_class:
+			client_class.return_value.list_destinations.return_value = response
+			result = connection.refresh_webhook_status()
+
+		self.assertEqual(result["status"], "Active")
+		connection.reload()
+		self.assertEqual(connection.noon_destination_code, "dest-active")
+		self.assertEqual(connection.webhook_status, "Active")
+
+	def test_refresh_webhook_status_detects_stored_destination_url_mismatch(self):
+		connection = make_connection("Webhook Status URL Mismatch", noon_destination_code="dest-stored")
+		response = SimpleNamespace(
+			status_code=200,
+			json=lambda: {
+				"destinations": [
+					{
+						"destination_code": "dest-stored",
+						"url": "https://old.example.test/noon",
+						"is_active": True,
+						"event_types": ["FBPI::ORDER_SYNC"],
+					}
+				]
+			},
+		)
+		with patch("marketplace_integrations.integrations.noon.client.NoonClient") as client_class:
+			client_class.return_value.list_destinations.return_value = response
+			result = connection.refresh_webhook_status()
+
+		self.assertEqual(result["status"], "URL mismatch")
+
+	def test_refresh_webhook_status_returns_safe_noon_failure(self):
+		connection = make_connection("Webhook Status Failure")
+		response = SimpleNamespace(status_code=503)
+		with patch("marketplace_integrations.integrations.noon.client.NoonClient") as client_class:
+			client_class.return_value.list_destinations.return_value = response
+			client_class.return_value.error_message.return_value = "Noon request failed (HTTP 503)."
+			result = connection.refresh_webhook_status()
+
+		self.assertEqual(result["status"], "Could not reach Noon")
+		self.assertEqual(result["error"], "Noon request failed (HTTP 503).")
+
+	def _client_patch(self):
+		return patch("marketplace_integrations.integrations.noon.client.NoonClient")
+
+	def _list_response(self, destinations):
+		return SimpleNamespace(status_code=200, json=lambda: {"destinations": destinations})
+
+	def test_register_webhook_creates_then_subscribes_without_exposing_secret(self):
+		connection = make_connection("Webhook Register")
+		secret = connection.get_password("webhook_secret")
+		active = {
+			"destination_code": "dest-new",
+			"url": connection.webhook_url,
+			"is_active": True,
+			"event_types": ["FBPI::ORDER_SYNC"],
+		}
+		with self._client_patch() as client_class:
+			client = client_class.return_value
+			client.list_destinations.side_effect = [self._list_response([]), self._list_response([active])]
+			client.create_https_destination.return_value = SimpleNamespace(
+				status_code=200, json=lambda: {"destination_code": "dest-new"}
+			)
+			client.update_destination.return_value = SimpleNamespace(status_code=200)
+			result = connection.register_webhook()
+
+		self.assertEqual(result["status"], "Active")
+		_name, url, headers = client.create_https_destination.call_args.args
+		self.assertEqual(url, connection.webhook_url)
+		self.assertEqual(headers, {"X-Api-Key": secret})
+		client.update_destination.assert_called_once_with(
+			"dest-new", event_types=[{"event_type": "FBPI::ORDER_SYNC", "is_active": True}]
+		)
+		connection.reload()
+		self.assertEqual(connection.noon_destination_code, "dest-new")
+
+	def test_register_webhook_failure_after_create_leaves_subscribe_possible(self):
+		connection = make_connection("Webhook Register Partial")
+		with self._client_patch() as client_class:
+			client = client_class.return_value
+			client.list_destinations.return_value = self._list_response([])
+			client.create_https_destination.return_value = SimpleNamespace(
+				status_code=200, json=lambda: {"destination_code": "dest-partial"}
+			)
+			client.update_destination.return_value = SimpleNamespace(status_code=500)
+			client.error_message.return_value = "Noon request failed (HTTP 500)."
+			with self.assertRaises(frappe.ValidationError) as raised:
+				connection.register_webhook()
+
+		self.assertIn("created", str(raised.exception))
+		connection.reload()
+		self.assertEqual(connection.noon_destination_code, "dest-partial")
+
+	def test_register_webhook_refuses_when_already_registered_or_full(self):
+		connection = make_connection("Webhook Register Refused")
+		ours = {
+			"destination_code": "dest-ours",
+			"url": connection.webhook_url,
+			"is_active": True,
+			"event_types": ["FBPI::ORDER_SYNC"],
+		}
+		with self._client_patch() as client_class:
+			client = client_class.return_value
+			client.list_destinations.return_value = self._list_response([ours])
+			with self.assertRaises(frappe.ValidationError):
+				connection.register_webhook()
+
+		others = [{"destination_code": f"other-{i}", "url": f"https://x.test/{i}"} for i in range(5)]
+		with self._client_patch() as client_class:
+			client = client_class.return_value
+			client.list_destinations.return_value = self._list_response(others)
+			with self.assertRaises(frappe.ValidationError):
+				connection.register_webhook()
+			client.create_https_destination.assert_not_called()
+
+	def test_update_webhook_destination_sends_credentials_only_when_asked(self):
+		connection = make_connection("Webhook Update", noon_destination_code="dest-upd")
+		secret = connection.get_password("webhook_secret")
+		with self._client_patch() as client_class:
+			client = client_class.return_value
+			client.list_destinations.return_value = self._list_response([])
+			client.update_destination.return_value = SimpleNamespace(status_code=200)
+			connection.update_webhook_destination()
+			client.update_destination.assert_called_with("dest-upd", url=connection.webhook_url)
+			connection.update_webhook_destination(send_key=1)
+			client.update_destination.assert_called_with(
+				"dest-upd",
+				url=connection.webhook_url,
+				credentials={"values": {"X-Api-Key": secret}},
+			)
+
+	def test_set_webhook_active_and_subscribe_need_a_known_destination(self):
+		connection = make_connection("Webhook Active")
+		with self.assertRaises(frappe.ValidationError):
+			connection.set_webhook_active(0)
+		with self.assertRaises(frappe.ValidationError):
+			connection.subscribe_webhook()
+
+		connection.db_set("noon_destination_code", "dest-act")
+		with self._client_patch() as client_class:
+			client = client_class.return_value
+			client.list_destinations.return_value = self._list_response([])
+			client.update_destination.return_value = SimpleNamespace(status_code=200)
+			connection.set_webhook_active(0)
+			client.update_destination.assert_called_once_with("dest-act", is_active=False)
+
+	def test_webhook_actions_require_write_permission(self):
+		connection = make_connection("Webhook Perm")
+		with patch.object(type(connection), "check_permission", side_effect=frappe.PermissionError):
+			for call in (
+				connection.register_webhook,
+				connection.subscribe_webhook,
+				connection.update_webhook_destination,
+				lambda: connection.set_webhook_active(1),
+			):
+				with self.assertRaises(frappe.PermissionError):
+					call()
+
+	def test_refresh_stores_every_destination_and_replaces_rows_on_next_refresh(self):
+		connection = make_connection("Webhook Rows")
+		ours = {
+			"destination_code": "dest-ours",
+			"destination_name": "ours",
+			"url": connection.webhook_url,
+			"is_active": True,
+			"event_types": ["FBPI::ORDER_SYNC"],
+		}
+		other = {
+			"destination_code": "dest-other",
+			"destination_name": "probe",
+			"url": "https://other.example.test/hook",
+			"is_active": False,
+			"event_types": [],
+		}
+		with self._client_patch() as client_class:
+			client = client_class.return_value
+			client.list_destinations.return_value = self._list_response([ours, other])
+			connection.refresh_webhook_status()
+			connection.reload()
+			rows = {row.destination_code: row for row in connection.noon_destinations}
+			self.assertEqual(set(rows), {"dest-ours", "dest-other"})
+			self.assertEqual(rows["dest-ours"].is_ours, 1)
+			self.assertEqual(rows["dest-ours"].event_types, "FBPI::ORDER_SYNC")
+			self.assertEqual((rows["dest-other"].is_ours, rows["dest-other"].is_active), (0, 0))
+
+			client.list_destinations.return_value = self._list_response([ours])
+			connection.refresh_webhook_status()
+			connection.reload()
+			self.assertEqual([row.destination_code for row in connection.noon_destinations], ["dest-ours"])
+
+	def test_set_destination_active_works_for_any_listed_destination_only(self):
+		connection = make_connection("Webhook Row Toggle")
+		other = {
+			"destination_code": "dest-other",
+			"destination_name": "probe",
+			"url": "https://other.example.test/hook",
+			"is_active": True,
+			"event_types": [],
+		}
+		with self._client_patch() as client_class:
+			client = client_class.return_value
+			client.list_destinations.return_value = self._list_response([other])
+			client.update_destination.return_value = SimpleNamespace(status_code=200)
+			connection.refresh_webhook_status()
+			connection.reload()
+			with self.assertRaises(frappe.ValidationError):
+				connection.set_destination_active("dest-unlisted", 0)
+			client.update_destination.assert_not_called()
+			connection.set_destination_active("dest-other", 0)
+			client.update_destination.assert_called_once_with("dest-other", is_active=False)
+
+	def _refresh_with(self, connection, destinations):
+		with self._client_patch() as client_class:
+			client_class.return_value.list_destinations.return_value = self._list_response(destinations)
+			return connection.refresh_webhook_status()
+
+	def test_refresh_webhook_status_reports_each_remaining_state(self):
+		connection = make_connection("Webhook Status States")
+		ours = {
+			"destination_code": "dest-ours",
+			"url": connection.webhook_url,
+			"is_active": True,
+			"event_types": ["FBPI::ORDER_SYNC"],
+		}
+		self.assertEqual(self._refresh_with(connection, [])["status"], "Not registered")
+		self.assertEqual(self._refresh_with(connection, [{**ours, "is_active": False}])["status"], "Inactive")
+		self.assertEqual(
+			self._refresh_with(connection, [{**ours, "event_types": []}])["status"],
+			"Registered, not subscribed",
+		)
+
+	def test_refresh_webhook_status_counts_other_destinations(self):
+		connection = make_connection("Webhook Status Others")
+		ours = {
+			"destination_code": "dest-ours",
+			"url": connection.webhook_url,
+			"is_active": True,
+			"event_types": ["FBPI::ORDER_SYNC"],
+		}
+		others = [{"destination_code": f"other-{i}", "url": f"https://x.test/{i}"} for i in range(4)]
+		result = self._refresh_with(connection, [ours, *others])
+		self.assertEqual((result["status"], result["other_destinations"]), ("Active", 4))
+		self.assertEqual(self._refresh_with(connection, others)["other_destinations"], 4)
+		connection.reload()
+		self.assertEqual(connection.other_noon_destinations, 4)
+
+	def test_refresh_webhook_status_reports_last_webhook_event_received(self):
+		with patch("marketplace_integrations.integrations.noon.catalog.validate_warehouse_code"):
+			connection = make_connection("Webhook Status Last Event")
+			account = frappe.get_doc(
+				{
+					"doctype": "Marketplace Account",
+					"account_name": "Webhook Status Last Event Account",
+					"platform": "Noon",
+					"external_account_id": connection.project_code,
+					"connection_doctype": "Noon Connection",
+					"connection": connection.name,
+					"noon_warehouse_code": "NOON-WH-001",
+					"noon_country_code": "ae",
+					"enabled": 1,
+				}
+			).insert()
+		self.addCleanup(account.delete)
+		self.assertIsNone(self._refresh_with(connection, [])["last_event_received_on"])
+
+		log = frappe.get_doc(
+			{
+				"doctype": "Marketplace Sync Log",
+				"marketplace_account": account.name,
+				"sync_type": "Order Import",
+				"status": "Success",
+				"trigger_source": "Noon Webhook",
+				"attempted_at": frappe.utils.now_datetime(),
+				"completed_at": "2026-10-03 10:00:00",
+			}
+		).insert()
+		self.addCleanup(log.delete)
+		self.assertEqual(
+			str(self._refresh_with(connection, [])["last_event_received_on"]), "2026-10-03 10:00:00"
+		)

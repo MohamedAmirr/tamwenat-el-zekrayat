@@ -3,12 +3,14 @@ const test = require("node:test");
 
 global.__ = (message) => message;
 let handlers;
+let handlers_destination;
 const alerts = [];
 global.frappe = {
 	ui: {
 		form: {
-			on(_doctype, events) {
-				handlers = events;
+			on(doctype, events) {
+				if (doctype === "Noon Destination") handlers_destination = events;
+				else handlers = events;
 			},
 		},
 	},
@@ -23,11 +25,12 @@ test("Test Connection is offered only after the document is saved", () => {
 	const buttons = [];
 	handlers.refresh({ is_new: () => true, add_custom_button: (label) => buttons.push(label) });
 	assert.deepEqual(buttons, []);
-	handlers.refresh({ is_new: () => false, add_custom_button: (label) => buttons.push(label) });
+	handlers.refresh({ is_new: () => false, doc: {}, add_custom_button: (label) => buttons.push(label) });
 	assert.deepEqual(buttons, [
 		"Copy Webhook URL",
 		"Copy Webhook Key",
 		"Refresh Webhook URL",
+		"Refresh Webhook Status",
 		"Test Connection",
 	]);
 });
@@ -230,4 +233,64 @@ test("Refresh Webhook URL with unsaved changes shows msgprint and does not call 
 	assert.equal(message, "Save your changes first, then refresh the webhook URL.");
 	assert.equal(called, false);
 	assert.deepEqual(alerts, []);
+});
+
+function destination_buttons(doc) {
+	const buttons = [];
+	handlers.refresh({
+		is_new: () => false,
+		doc,
+		add_custom_button: (label) => buttons.push(label),
+	});
+	return buttons.filter((label) => !/^(Copy|Refresh|Test)/.test(label));
+}
+
+test("Destination actions follow the cached webhook status", () => {
+	assert.deepEqual(destination_buttons({ webhook_status: "Not registered" }), ["Register Webhook in Noon"]);
+	assert.deepEqual(destination_buttons({ webhook_status: "Registered, not subscribed", noon_destination_code: "d" }), [
+		"Subscribe to Order Sync",
+		"Update Noon Destination",
+	]);
+	assert.deepEqual(destination_buttons({ webhook_status: "Active", noon_destination_code: "d" }), [
+		"Update Noon Destination",
+		"Deactivate Destination",
+	]);
+	assert.deepEqual(destination_buttons({ webhook_status: "Inactive", noon_destination_code: "d" }), [
+		"Update Noon Destination",
+		"Activate Destination",
+	]);
+});
+
+test("Register is blocked with an explanation when Noon already has five destinations", () => {
+	let register;
+	let message;
+	global.frappe.msgprint = (text) => {
+		message = text;
+	};
+	handlers.refresh({
+		is_new: () => false,
+		doc: { webhook_status: "Not registered", other_noon_destinations: 5 },
+		add_custom_button(label, action) {
+			if (label === "Register Webhook in Noon") register = action;
+		},
+	});
+	register();
+	assert.match(message, /Noon allows .* destinations/);
+});
+
+test("Destination row button asks for confirmation then toggles the listed destination", () => {
+	let confirmed;
+	let args;
+	global.frappe.utils = { ...global.frappe.utils, escape_html: (text) => text };
+	global.frappe.confirm = (_message, action) => {
+		confirmed = action;
+	};
+	global.locals = { "Noon Destination": { r1: { destination_code: "d1", destination_name: "n", is_active: 1 } } };
+	handlers_destination.toggle_active(
+		{ set_value() {}, reload_doc() {}, call: (_method, call_args) => ((args = call_args), Promise.resolve({ message: {} })) },
+		"Noon Destination",
+		"r1"
+	);
+	confirmed();
+	assert.deepEqual(args, { destination_code: "d1", active: 0 });
 });
