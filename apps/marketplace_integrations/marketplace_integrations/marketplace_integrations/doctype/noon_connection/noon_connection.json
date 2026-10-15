@@ -18,7 +18,6 @@
   "webhook_status",
   "last_webhook_event_received_on",
   "other_noon_destinations",
-  "noon_destinations_debug",
   "enabled"
  ],
  "fields": [
@@ -104,16 +103,6 @@
    "fieldname": "other_noon_destinations",
    "fieldtype": "Int",
    "label": "Other Noon Destinations",
-   "read_only": 1
-  },
-  {
-   "description": "Temporary diagnostic data for webhook registration. Values returned by Noon are redacted.",
-   "fieldname": "noon_destinations_debug",
-   "fieldtype": "Code",
-   "hidden": 1,
-   "ignore_xss_filter": 1,
-   "label": "Noon Destinations Debug",
-   "options": "JSON",
    "read_only": 1
   },
   {

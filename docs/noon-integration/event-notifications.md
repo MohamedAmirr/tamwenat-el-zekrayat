@@ -96,9 +96,37 @@ Observed in a sandbox test on 2026-10-07, not Noon contract:
 - `order_created_at` has no timezone suffix; it matched UTC.
 - `delivered_invoice_price` on sandbox orders is a dummy value.
 
-Destination registration and `UpdateDestination` are not supported by this
-app (out of scope, not mandatory); destinations are set up by hand in the
-Partner Center.
+## Registering the destination from the Noon Connection (#253)
+
+The Noon Connection form can create and manage its own destination, so the
+Partner Center no longer has to be edited by hand. Actions appear by cached
+webhook status (use Refresh Webhook Status first):
+
+- **Register Webhook in Noon** (status "Not registered"): confirms, then
+  `CreateHttpsDestination` with name `<project_code>-webhook`, the connection's
+  webhook URL and `credentials.values = {"X-Api-Key": <webhook_secret>}`, then
+  `UpdateDestination` to subscribe `FBPI::ORDER_SYNC`. If the second step fails
+  the destination is kept and the status becomes "Registered, not subscribed".
+  Refused when Noon already holds 5 destinations (Noon's per-project limit).
+- **Subscribe to Order Sync** (status "Registered, not subscribed").
+- **Update Noon Destination** (any known destination): sends the current URL;
+  the key is sent only when the "Also send the current webhook key" box is
+  ticked. Omitting `credentials` leaves Noon's stored key unchanged.
+- **Activate / Deactivate Destination**: toggles destination-level `is_active`.
+
+Observed on the live account (read plus one idempotent Update, 2026-10-15,
+not Noon contract): `ListDestinations` returns `event_types` as a list of
+strings, e.g. `["FBPI::ORDER_SYNC"]`; `UpdateDestination` answers HTTP 200
+with body `{}`; the Static Sandbox project had no destinations and an empty
+event-type list, so subscribing could not be exercised there. The
+`CreateHttpsDestination` answers HTTP 200 with `{"destination_code": "..."}`
+and creates the destination **active with no event types**, so Register always
+needs the subscribe step. There is no delete endpoint: an unwanted destination
+can only be deactivated, and it still counts toward the 5-destination limit.
+A deactivated destination can still be subscribed (`UpdateDestination` 200).
+
+Deleting destinations (deactivate instead), other event types and multiple destinations per
+connection are not supported.
 
 ## Delivery semantics
 

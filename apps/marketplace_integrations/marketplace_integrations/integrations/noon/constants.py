@@ -49,6 +49,9 @@ NOON_EVENT_WEBHOOK_PATH = "/api/method/marketplace_integrations.api.noon_webhook
 # stops retrying a type we don't handle (#163 scope).
 NOON_FBPI_ORDER_SYNC_EVENT_TYPE = "FBPI::ORDER_SYNC"
 
+# #253: Noon allows at most this many Event Notification destinations per project.
+NOON_MAX_DESTINATIONS = 5
+
 # #153 FBPI return reference lookup/evidence - docs/noon-integration/
 # noon_api_full.md's "Returns" section documents this path/body/response
 # shape, but flags its own paired .yml entry as empty/unconfirmed (see

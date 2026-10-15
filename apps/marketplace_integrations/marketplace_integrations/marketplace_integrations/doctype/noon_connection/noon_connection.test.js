@@ -23,7 +23,7 @@ test("Test Connection is offered only after the document is saved", () => {
 	const buttons = [];
 	handlers.refresh({ is_new: () => true, add_custom_button: (label) => buttons.push(label) });
 	assert.deepEqual(buttons, []);
-	handlers.refresh({ is_new: () => false, add_custom_button: (label) => buttons.push(label) });
+	handlers.refresh({ is_new: () => false, doc: {}, add_custom_button: (label) => buttons.push(label) });
 	assert.deepEqual(buttons, [
 		"Copy Webhook URL",
 		"Copy Webhook Key",
@@ -231,4 +231,47 @@ test("Refresh Webhook URL with unsaved changes shows msgprint and does not call 
 	assert.equal(message, "Save your changes first, then refresh the webhook URL.");
 	assert.equal(called, false);
 	assert.deepEqual(alerts, []);
+});
+
+function destination_buttons(doc) {
+	const buttons = [];
+	handlers.refresh({
+		is_new: () => false,
+		doc,
+		add_custom_button: (label) => buttons.push(label),
+	});
+	return buttons.filter((label) => !/^(Copy|Refresh|Test)/.test(label));
+}
+
+test("Destination actions follow the cached webhook status", () => {
+	assert.deepEqual(destination_buttons({ webhook_status: "Not registered" }), ["Register Webhook in Noon"]);
+	assert.deepEqual(destination_buttons({ webhook_status: "Registered, not subscribed", noon_destination_code: "d" }), [
+		"Subscribe to Order Sync",
+		"Update Noon Destination",
+	]);
+	assert.deepEqual(destination_buttons({ webhook_status: "Active", noon_destination_code: "d" }), [
+		"Update Noon Destination",
+		"Deactivate Destination",
+	]);
+	assert.deepEqual(destination_buttons({ webhook_status: "Inactive", noon_destination_code: "d" }), [
+		"Update Noon Destination",
+		"Activate Destination",
+	]);
+});
+
+test("Register is blocked with an explanation when Noon already has five destinations", () => {
+	let register;
+	let message;
+	global.frappe.msgprint = (text) => {
+		message = text;
+	};
+	handlers.refresh({
+		is_new: () => false,
+		doc: { webhook_status: "Not registered", other_noon_destinations: 5 },
+		add_custom_button(label, action) {
+			if (label === "Register Webhook in Noon") register = action;
+		},
+	});
+	register();
+	assert.match(message, /Noon allows .* destinations/);
 });

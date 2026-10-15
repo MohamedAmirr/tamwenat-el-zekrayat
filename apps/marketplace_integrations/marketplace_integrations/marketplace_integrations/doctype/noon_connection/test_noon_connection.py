@@ -336,8 +336,6 @@ class IntegrationTestNoonConnection(IntegrationTestCase):
 		connection.reload()
 		self.assertEqual(connection.noon_destination_code, "dest-active")
 		self.assertEqual(connection.webhook_status, "Active")
-		self.assertIn("dest-active", connection.noon_destinations_debug)
-		self.assertNotIn(connection.get_password("webhook_secret"), connection.noon_destinations_debug)
 
 	def test_refresh_webhook_status_detects_stored_destination_url_mismatch(self):
 		connection = make_connection("Webhook Status URL Mismatch", noon_destination_code="dest-stored")
@@ -370,3 +368,119 @@ class IntegrationTestNoonConnection(IntegrationTestCase):
 
 		self.assertEqual(result["status"], "Could not reach Noon")
 		self.assertEqual(result["error"], "Noon request failed (HTTP 503).")
+
+	def _client_patch(self):
+		return patch("marketplace_integrations.integrations.noon.client.NoonClient")
+
+	def _list_response(self, destinations):
+		return SimpleNamespace(status_code=200, json=lambda: {"destinations": destinations})
+
+	def test_register_webhook_creates_then_subscribes_without_exposing_secret(self):
+		connection = make_connection("Webhook Register")
+		secret = connection.get_password("webhook_secret")
+		active = {
+			"destination_code": "dest-new",
+			"url": connection.webhook_url,
+			"is_active": True,
+			"event_types": ["FBPI::ORDER_SYNC"],
+		}
+		with self._client_patch() as client_class:
+			client = client_class.return_value
+			client.list_destinations.side_effect = [self._list_response([]), self._list_response([active])]
+			client.create_https_destination.return_value = SimpleNamespace(
+				status_code=200, json=lambda: {"destination_code": "dest-new"}
+			)
+			client.update_destination.return_value = SimpleNamespace(status_code=200)
+			result = connection.register_webhook()
+
+		self.assertEqual(result["status"], "Active")
+		_name, url, headers = client.create_https_destination.call_args.args
+		self.assertEqual(url, connection.webhook_url)
+		self.assertEqual(headers, {"X-Api-Key": secret})
+		client.update_destination.assert_called_once_with(
+			"dest-new", event_types=[{"event_type": "FBPI::ORDER_SYNC", "is_active": True}]
+		)
+		connection.reload()
+		self.assertEqual(connection.noon_destination_code, "dest-new")
+
+	def test_register_webhook_failure_after_create_leaves_subscribe_possible(self):
+		connection = make_connection("Webhook Register Partial")
+		with self._client_patch() as client_class:
+			client = client_class.return_value
+			client.list_destinations.return_value = self._list_response([])
+			client.create_https_destination.return_value = SimpleNamespace(
+				status_code=200, json=lambda: {"destination_code": "dest-partial"}
+			)
+			client.update_destination.return_value = SimpleNamespace(status_code=500)
+			client.error_message.return_value = "Noon request failed (HTTP 500)."
+			with self.assertRaises(frappe.ValidationError) as raised:
+				connection.register_webhook()
+
+		self.assertIn("created", str(raised.exception))
+		connection.reload()
+		self.assertEqual(connection.noon_destination_code, "dest-partial")
+
+	def test_register_webhook_refuses_when_already_registered_or_full(self):
+		connection = make_connection("Webhook Register Refused")
+		ours = {
+			"destination_code": "dest-ours",
+			"url": connection.webhook_url,
+			"is_active": True,
+			"event_types": ["FBPI::ORDER_SYNC"],
+		}
+		with self._client_patch() as client_class:
+			client = client_class.return_value
+			client.list_destinations.return_value = self._list_response([ours])
+			with self.assertRaises(frappe.ValidationError):
+				connection.register_webhook()
+
+		others = [{"destination_code": f"other-{i}", "url": f"https://x.test/{i}"} for i in range(5)]
+		with self._client_patch() as client_class:
+			client = client_class.return_value
+			client.list_destinations.return_value = self._list_response(others)
+			with self.assertRaises(frappe.ValidationError):
+				connection.register_webhook()
+			client.create_https_destination.assert_not_called()
+
+	def test_update_webhook_destination_sends_credentials_only_when_asked(self):
+		connection = make_connection("Webhook Update", noon_destination_code="dest-upd")
+		secret = connection.get_password("webhook_secret")
+		with self._client_patch() as client_class:
+			client = client_class.return_value
+			client.list_destinations.return_value = self._list_response([])
+			client.update_destination.return_value = SimpleNamespace(status_code=200)
+			connection.update_webhook_destination()
+			client.update_destination.assert_called_with("dest-upd", url=connection.webhook_url)
+			connection.update_webhook_destination(send_key=1)
+			client.update_destination.assert_called_with(
+				"dest-upd",
+				url=connection.webhook_url,
+				credentials={"values": {"X-Api-Key": secret}},
+			)
+
+	def test_set_webhook_active_and_subscribe_need_a_known_destination(self):
+		connection = make_connection("Webhook Active")
+		with self.assertRaises(frappe.ValidationError):
+			connection.set_webhook_active(0)
+		with self.assertRaises(frappe.ValidationError):
+			connection.subscribe_webhook()
+
+		connection.db_set("noon_destination_code", "dest-act")
+		with self._client_patch() as client_class:
+			client = client_class.return_value
+			client.list_destinations.return_value = self._list_response([])
+			client.update_destination.return_value = SimpleNamespace(status_code=200)
+			connection.set_webhook_active(0)
+			client.update_destination.assert_called_once_with("dest-act", is_active=False)
+
+	def test_webhook_actions_require_write_permission(self):
+		connection = make_connection("Webhook Perm")
+		with patch.object(type(connection), "check_permission", side_effect=frappe.PermissionError):
+			for call in (
+				connection.register_webhook,
+				connection.subscribe_webhook,
+				connection.update_webhook_destination,
+				lambda: connection.set_webhook_active(1),
+			):
+				with self.assertRaises(frappe.PermissionError):
+					call()
