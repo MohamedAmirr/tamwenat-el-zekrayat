@@ -11,6 +11,7 @@ BOSTA_GET_DELIVERY_PATH = "/deliveries/business/{tracking_number}"
 BOSTA_UPDATE_DELIVERY_PATH = "/deliveries/business/{tracking_number}"
 BOSTA_TERMINATE_DELIVERY_PATH = "/deliveries/business/{tracking_number}/terminate"
 BOSTA_CITIES_PATH = "/cities"
+BOSTA_PICKUP_LOCATIONS_PATH = "/pickup-locations"
 BOSTA_DISTRICTS_PATH = "/cities/{city_id}/districts"
 BOSTA_WEBHOOK_PATH = "/api/method/marketplace_integrations.api.bosta_webhooks.delivery_event"
 

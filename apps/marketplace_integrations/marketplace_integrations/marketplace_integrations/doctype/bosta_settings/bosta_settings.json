@@ -26,11 +26,12 @@
    "label": "API Key"
   },
   {
-   "description": "The one Bosta business pickup location used for this site.",
+   "description": "The one Bosta business pickup location used for this site. Pick it with Fetch Locations.",
    "fieldname": "business_location_id",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
-   "label": "Business Location ID"
+   "label": "Business Location ID",
+   "read_only": 1
   },
   {
    "fieldname": "webhook_section",
