@@ -5,6 +5,7 @@
 
 import base64
 import binascii
+import json
 
 import frappe
 from frappe import _
@@ -39,16 +40,27 @@ def create_a4_arabic_label(shipment_name):
 
 
 def _decode_base64_pdf(encoded_content):
-	"""Decode only Bosta's documented bare base64 PDF response.
+	"""Decode Bosta's base64 PDF label.
 
-	The label endpoint documentation confirms a base64-encoded PDF for no
-	more than 50 AWBs.  It does not document a JSON wrapper or data URI, so
-	those shapes are deliberately rejected instead of being guessed.
+	The label endpoint documentation only says the response is a base64-encoded PDF for no
+	more than 50 AWBs. A live call (checked 2026-10-16) answers a JSON object
+	``{"success": true, "data": "<base64 PDF>"}``; a bare base64 body is accepted too. Any
+	other shape (data URI, JSON without a string ``data``) is rejected, not guessed.
 	"""
 	if isinstance(encoded_content, str):
 		encoded_content = encoded_content.encode()
 	if not isinstance(encoded_content, bytes):
 		frappe.throw(_("Bosta returned an invalid label response."))
+
+	if encoded_content.lstrip().startswith(b"{"):
+		try:
+			body = json.loads(encoded_content)
+		except ValueError:
+			frappe.throw(_("Bosta returned a label that is not a valid base64 PDF."))
+		data = body.get("data") if isinstance(body, dict) else None
+		if not isinstance(data, str):
+			frappe.throw(_("Bosta returned an invalid label response."))
+		encoded_content = data.encode()
 
 	try:
 		pdf_content = base64.b64decode(b"".join(encoded_content.split()), validate=True)

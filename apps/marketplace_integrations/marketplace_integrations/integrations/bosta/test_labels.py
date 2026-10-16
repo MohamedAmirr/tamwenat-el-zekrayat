@@ -2,6 +2,7 @@
 # For license information, please see license.txt
 
 import base64
+import json
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -19,6 +20,15 @@ class UnitTestBostaLabels(UnitTestCase):
 			labels._decode_base64_pdf(b"not base64")
 		with self.assertRaises(frappe.ValidationError):
 			labels._decode_base64_pdf(base64.b64encode(b"not a PDF"))
+
+	def test_decode_accepts_the_json_wrapper_bosta_really_returns(self):
+		pdf_content = b"%PDF-1.4\nlabel"
+		wrapped = json.dumps({"success": True, "data": base64.b64encode(pdf_content).decode()}).encode()
+		self.assertEqual(labels._decode_base64_pdf(wrapped), pdf_content)
+
+		for bad in (b'{"success": true}', b'{"data": 5}', b"{not json", b'["x"]'):
+			with self.assertRaises(frappe.ValidationError):
+				labels._decode_base64_pdf(bad)
 
 	def test_create_label_checks_shipment_read_permission_and_saves_private_file(self):
 		shipment = MagicMock()
