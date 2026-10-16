@@ -16,6 +16,7 @@ from marketplace_integrations.integrations.bosta.client import (
 from marketplace_integrations.marketplace_integrations.doctype.bosta_shipment.bosta_shipment import (
 	save_as_system,
 )
+from marketplace_integrations.services import sales_order_sync
 
 BOSTA_DELIVERY_TYPE = 10
 
@@ -43,12 +44,29 @@ def get_sales_order_defaults(sales_order_name):
 	return {
 		**_address_prefill(order),
 		"receiver_name": cstr(order.customer_name).strip(),
-		"receiver_phone": cstr(order.contact_mobile or order.contact_phone).strip(),
+		"receiver_phone": _receiver_phone_prefill(order),
 		"cod_amount": cod["cod"],
 		"order_total": cod["total"],
 		"advance_paid": cod["advance_paid"],
 		"cod_limit": BOSTA_COD_LIMIT,
 	}
+
+
+def _receiver_phone_prefill(order):
+	"""The Sales Order's contact phone, else the Shopify buyer's phone.
+
+	The buyer's phone is only on the Marketplace Order; which platforms may use it is decided
+	in one place, ``sales_order_sync.buyer_phone_for_sales_order``. Read without per-user
+	permissions for the same reason as ``_address_prefill``.
+	"""
+	phone = cstr(order.contact_mobile or order.contact_phone).strip()
+	marketplace_order = order.get("custom_marketplace_order")
+	if phone or not marketplace_order:
+		return phone
+	buyer = frappe.db.get_value(
+		"Marketplace Order", marketplace_order, ["platform", "customer_phone_number"], as_dict=True
+	)
+	return sales_order_sync.buyer_phone_for_sales_order(buyer) if buyer else ""
 
 
 def get_sales_order_shipment(sales_order_name):

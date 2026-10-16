@@ -290,6 +290,8 @@ fixtures = [
 				[
 					"Sales Order Item-rate-precision",
 					"Sales Order Item-price_list_rate-precision",
+					"Sales Order-contact_mobile-read_only",
+					"Sales Order-contact_mobile-allow_on_submit",
 				],
 			]
 		],
