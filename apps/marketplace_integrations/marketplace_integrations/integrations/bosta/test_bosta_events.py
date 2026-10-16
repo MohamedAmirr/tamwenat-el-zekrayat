@@ -489,3 +489,185 @@ class IntegrationTestBostaRefresh(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual(
 			frappe.allowed_http_methods_for_whitelisted_func[bosta_shipments.refresh_shipment], ["POST"]
 		)
+
+
+class IntegrationTestBostaCancel(BostaFixtureMixin, IntegrationTestCase):
+	"""cancel_bosta_shipment (#272)."""
+
+	def _live(self, tracking="TRK-C"):
+		order = self.make_order()
+		self.http.queue["create"].append(created(tracking, f"D-{tracking}"))
+		self.create(order)
+		return order, self.shipment_for(order)
+
+	def _ok(self):
+		return FakeResponse(200, {"success": True, "message": "terminated", "data": {"_id": "x"}})
+
+	def _state(self, code):
+		return FakeResponse(200, {"success": True, "data": {"state": {"code": code, "value": "x"}}})
+
+	def test_blocked_cases_never_reach_bosta(self):
+		_, shipment = self._live()
+		blocked = []
+		# No tracking number.
+		no_tracking = save_as_system(
+			frappe.get_doc(
+				{
+					"doctype": "Bosta Shipment",
+					"sales_order": self.make_order(submit=False).name,
+					"receiver_name": self._receiver(),
+					"receiver_phone": "0100",
+					"city": "Cairo",
+					"district_id": "d",
+					"address_first_line": "12 Example Street",
+					"status": "Bosta Failed",
+				}
+			),
+			insert=True,
+		)
+		frappe.db.commit()
+		blocked.append(no_tracking.name)
+		# Delivered.
+		frappe.db.set_value("Bosta Shipment", shipment.name, "bosta_state_code", 45)
+		blocked.append(shipment.name)
+		for name in blocked:
+			with self.subTest(shipment=name), self.assertRaises(frappe.ValidationError):
+				bosta_shipments.cancel_shipment(name)
+		# Delivery Note on a submitted Sales Invoice.
+		frappe.db.set_value("Bosta Shipment", shipment.name, "bosta_state_code", 24)
+		real_exists = frappe.db.exists
+
+		def invoiced(doctype, *args, **kwargs):
+			return True if doctype == "Sales Invoice Item" else real_exists(doctype, *args, **kwargs)
+
+		with (
+			patch.object(frappe.db, "exists", side_effect=invoiced),
+			self.assertRaises(frappe.ValidationError),
+		):
+			bosta_shipments.cancel_shipment(shipment.name)
+		# Already Canceled.
+		frappe.db.set_value("Bosta Shipment", shipment.name, "status", "Canceled")
+		with self.assertRaises(frappe.ValidationError):
+			bosta_shipments.cancel_shipment(shipment.name)
+		frappe.db.set_value("Bosta Shipment", shipment.name, "status", "Completed")
+		self.assertEqual(self.http.calls_of("terminate"), [])
+		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 1)
+
+	def test_every_other_state_is_sent_to_bosta_and_a_bosta_error_changes_nothing(self):
+		_, shipment = self._live()
+		for code in (0, 10, 24, 46, 47, 48, 60, 100):
+			with self.subTest(state=code):
+				frappe.db.set_value("Bosta Shipment", shipment.name, "bosta_state_code", code)
+				self.http.queue["terminate"].append(
+					FakeResponse(400, {"success": False, "message": "<img src=x onerror=1> not allowed"})
+				)
+				with self.assertRaises(frappe.ValidationError) as caught:
+					bosta_shipments.cancel_shipment(shipment.name)
+				self.assertNotIn("<img", str(caught.exception))
+		self.assertEqual(len(self.http.calls_of("terminate")), 8)
+		shipment.reload()
+		self.assertEqual((shipment.status, shipment.bosta_terminated_on), ("Completed", None))
+		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 1)
+
+	def test_success_cancels_the_delivery_note_and_frees_the_sales_order(self):
+		order, shipment = self._live()
+		self.http.queue["terminate"].append(self._ok())
+
+		result = bosta_shipments.cancel_shipment(shipment.name)
+
+		self.assertEqual(result, {"canceled": True, "delivery_note_error": ""})
+		self.assertTrue(self.http.calls_of("terminate")[0].endswith("/business/TRK-C/terminate"))
+		shipment.reload()
+		self.assertEqual(shipment.status, "Canceled")
+		self.assertTrue(shipment.bosta_terminated_on)
+		self.assertIsNone(shipment.active_sales_order)
+		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 2)
+		self.http.queue["create"].append(created("TRK-NEW", "D-NEW"))
+		self.create(order)
+		self.assertEqual(self.shipment_for(order, status="Completed").tracking_number, "TRK-NEW")
+
+	def test_a_delivery_note_failure_keeps_the_shipment_active_and_the_poll_retries_it(self):
+		_, shipment = self._live()
+		self.http.queue["terminate"].append(self._ok())
+		with patch(
+			"erpnext.stock.doctype.delivery_note.delivery_note.DeliveryNote.cancel",
+			side_effect=frappe.ValidationError("linked invoice"),
+		):
+			result = bosta_shipments.cancel_shipment(shipment.name)
+
+		self.assertFalse(result["canceled"])
+		self.assertIn("linked invoice", result["delivery_note_error"])
+		shipment.reload()
+		# State is NOT 49, yet the shipment is retried because Bosta accepted the terminate.
+		self.assertEqual((shipment.status, shipment.bosta_state_code), ("Completed", 0))
+		self.assertTrue(shipment.bosta_terminated_on)
+		self.assertTrue(shipment.delivery_note_error)
+		self.assertEqual(shipment.active_sales_order, shipment.sales_order)
+
+		statuses.retry_failed_cancellations()
+
+		shipment.reload()
+		self.assertEqual((shipment.status, shipment.delivery_note_error), ("Canceled", ""))
+		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 2)
+
+	def test_the_retry_ignores_a_failed_note_without_49_or_a_terminate(self):
+		_, shipment = self._live()
+		frappe.db.set_value("Bosta Shipment", shipment.name, "delivery_note_error", "some failure")
+		statuses.retry_failed_cancellations()
+		shipment.reload()
+		self.assertEqual(shipment.status, "Completed")
+		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 1)
+
+	def test_a_network_error_changes_nothing_then_reads_the_delivery_back(self):
+		for reported, finished in ((10, False), (48, True), (49, True)):
+			with self.subTest(reported=reported):
+				_, shipment = self._live(f"TRK-N{reported}")
+				self.http.queue["terminate"].append(frappe.ValidationError("Failed to reach Bosta."))
+				self.http.queue["get"].append(self._state(reported))
+				if finished:
+					bosta_shipments.cancel_shipment(shipment.name)
+				else:
+					with self.assertRaises(frappe.ValidationError) as caught:
+						bosta_shipments.cancel_shipment(shipment.name)
+					self.assertIn("Check the delivery in Bosta", str(caught.exception))
+				shipment.reload()
+				self.assertEqual(shipment.status == "Canceled", finished)
+				self.assertEqual(
+					frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"),
+					2 if finished else 1,
+				)
+				if reported == 48:
+					self.assertTrue(shipment.bosta_terminated_on)
+				if not finished:
+					self.assertIsNone(shipment.bosta_terminated_on)
+					self.assertEqual(shipment.bosta_state_code, 10)
+
+	def test_a_network_error_and_a_failed_read_back_asks_the_user_to_verify(self):
+		_, shipment = self._live()
+		self.http.queue["terminate"].append(frappe.ValidationError("Failed to reach Bosta."))
+		self.http.queue["get"].append(frappe.ValidationError("Failed to reach Bosta."))
+		with self.assertRaises(frappe.ValidationError) as caught:
+			bosta_shipments.cancel_shipment(shipment.name)
+		self.assertIn("Check the delivery in Bosta", str(caught.exception))
+		shipment.reload()
+		self.assertEqual((shipment.status, shipment.bosta_terminated_on), ("Completed", None))
+
+	def test_cancel_is_creator_only_and_post_only(self):
+		_, shipment = self._live()
+		frappe.set_user(self.make_user("Sales User"))
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				bosta_shipments.cancel_shipment(shipment.name)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(self.http.calls_of("terminate"), [])
+		self.http.queue["terminate"].append(self._ok())
+		frappe.set_user(self.make_user("Stock User"))
+		try:
+			self.assertTrue(bosta_shipments.cancel_shipment(shipment.name)["canceled"])
+		finally:
+			frappe.set_user("Administrator")
+		self.assertIn(bosta_shipments.cancel_shipment, frappe.whitelisted)
+		self.assertEqual(
+			frappe.allowed_http_methods_for_whitelisted_func[bosta_shipments.cancel_shipment], ["POST"]
+		)

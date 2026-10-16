@@ -33,6 +33,9 @@ TERMINAL_STATE_CODES = (45, 49)
 # terminal state we never observe cannot be polled forever.
 POLL_MAX_AGE_DAYS = 60
 
+# Bosta state code for Delivered; a delivered shipment cannot be cancelled from here.
+DELIVERED_STATE_CODE = 45
+
 CANCEL_SAVEPOINT = "bosta_cancel_delivery_note"
 
 # Names are deliberately from Bosta's supplied webhook guide.  We do not
@@ -157,16 +160,98 @@ def refresh_shipment_state(shipment_name):
 	return {"result": result}
 
 
+def cancel_bosta_shipment(shipment_name):
+	"""Terminate the delivery in Bosta, then cancel the Delivery Note and the shipment (#272).
+
+	Creator roles only. Refused locally, without calling Bosta, only when there is no tracking
+	number, the shipment is already Canceled, the stored state is Delivered (45), or the
+	Delivery Note is on a submitted Sales Invoice; every other state goes to Bosta and its
+	error is shown escaped. A failed request leaves everything unchanged. A network error
+	has an unknown outcome: nothing is changed, the delivery is read back, and only a
+	reported 48/49 finishes the local cancel. Returns ``{"canceled": bool, "delivery_note_error"}``;
+	``canceled`` is False when Bosta terminated the delivery but the Delivery Note could not
+	be cancelled (the shipment then stays active, listed in Needs Attention, retried by the poll).
+	"""
+	frappe.only_for(CREATOR_ROLES)
+	shipment = frappe.get_doc("Bosta Shipment", shipment_name)
+	shipment.check_permission("read")
+	lock_and_load_sales_order(shipment.sales_order)
+	shipment.reload()
+	_refuse_cancel_locally(shipment)
+	client = BostaClient()
+	client.ensure_ready()
+	# Release the Sales Order lock before the HTTP call.
+	frappe.db.commit()
+
+	try:
+		response = client.terminate_delivery(shipment.tracking_number)
+	except Exception:
+		return _finish_after_unknown_outcome(shipment)
+	if not is_success_response(response):
+		frappe.throw(escape_html(client.error_message(response)))
+	return _finish_cancel(shipment)
+
+
+def _refuse_cancel_locally(shipment):
+	if not shipment.tracking_number:
+		frappe.throw(_("This Bosta Shipment has no tracking number, so there is nothing to cancel in Bosta."))
+	if shipment.status == CANCELED:
+		frappe.throw(_("This Bosta Shipment is already canceled."))
+	if shipment.bosta_state_code == DELIVERED_STATE_CODE:
+		frappe.throw(_("Bosta reports this delivery as Delivered; it cannot be cancelled."))
+	if shipment.delivery_note and frappe.db.exists(
+		"Sales Invoice Item", {"delivery_note": shipment.delivery_note, "docstatus": 1}
+	):
+		frappe.throw(
+			_("Delivery Note {0} is on a submitted Sales Invoice; cancel the invoice first.").format(
+				shipment.delivery_note
+			)
+		)
+
+
+def _finish_after_unknown_outcome(shipment):
+	"""The terminate request failed without an answer: it may or may not have been applied."""
+	frappe.db.rollback()
+	try:
+		refresh_shipment_state(shipment.name)
+		shipment.reload()
+	except Exception:
+		frappe.db.rollback()
+		shipment = None
+	if shipment and shipment.status == CANCELED:
+		return {"canceled": True, "delivery_note_error": ""}
+	if shipment and shipment.bosta_state_code in (48, 49):
+		return _finish_cancel(shipment)
+	frappe.throw(
+		_(
+			"Could not confirm that Bosta terminated the delivery. Nothing was changed here. "
+			"Check the delivery in Bosta before trying again."
+		)
+	)
+
+
+def _finish_cancel(shipment):
+	lock_and_load_sales_order(shipment.sales_order)
+	shipment.reload()
+	if not shipment.bosta_terminated_on:
+		shipment.bosta_terminated_on = now_datetime()
+		save_as_system(shipment)
+	canceled = shipment.status == CANCELED or _cancel_linked_delivery_note(shipment)
+	frappe.db.commit()
+	return {"canceled": bool(canceled), "delivery_note_error": shipment.delivery_note_error or ""}
+
+
 def retry_failed_cancellations():
-	"""Bosta cancelled the shipment but ERPNext could not cancel the Delivery Note:
-	try again (local only; no Bosta call)."""
+	"""Bosta cancelled or terminated the shipment but ERPNext could not cancel the Delivery
+	Note: try again (local only; no Bosta call)."""
 	for row in frappe.get_all(
 		"Bosta Shipment",
 		filters={
-			"bosta_state_code": 49,
 			"status": ["!=", CANCELED],
 			"delivery_note_error": ["!=", ""],
 		},
+		# Bosta cancelled it (state 49) or accepted our terminate request.
+		or_filters=[["bosta_state_code", "=", 49], ["bosta_terminated_on", "is", "set"]],
 		fields=["name", "sales_order"],
 	):
 		try:

@@ -260,6 +260,26 @@ newer webhook. Unlike the poll it does not skip an unchanged state, so the last-
 moves. A Bosta error (escaped), a network failure, a body without a readable state or an
 unrecognised state code raises and stores nothing.
 
+**Cancelling (#272).** `statuses.cancel_bosta_shipment` (creator roles; whitelisted as
+`api.bosta_shipments.cancel_shipment`, POST; the tab's **Cancel Bosta Shipment** button asks
+for confirmation first and nothing is sent before it) terminates the delivery with
+`BostaClient.terminate_delivery` (`DELETE /deliveries/business/{trackingNumber}/terminate`, no
+body; the documented success reply is `success: true`). It refuses locally, without calling
+Bosta, only when there is no tracking number, the shipment is already `Canceled`, the stored
+state is Delivered (45), or the Delivery Note is on a submitted Sales Invoice; every other
+state goes to Bosta and a Bosta error is shown escaped with nothing changed. On success it
+sets `Bosta Shipment.bosta_terminated_on`, then cancels the Delivery Note and marks the
+shipment `Canceled` through the same `_cancel_linked_delivery_note` as state 49, which frees the
+Sales Order for a new shipment. If the Delivery Note cancel fails the shipment stays active
+with `delivery_note_error` (Needs Attention) and `retry_failed_cancellations` retries it on
+the poll when the state is 49 **or** `bosta_terminated_on` is set. A network error has an
+unknown outcome: nothing is changed, then `refresh_shipment_state` reads the delivery back; a
+reported 48 (Terminated) or 49 finishes the local cancel, anything else (or a failed read)
+tells the user to verify in Bosta. The tab hides the button for non-creators, `Canceled`
+shipments, shipments without a tracking number and state 45 (the summary carries
+`bosta_state_code` for this). Not built: side effects for a webhook state 48, cancelling
+Sales Invoices, bulk cancel.
+
 **Recovery.** A retry of a `Bosta Failed` shipment, and the **Check Bosta**
 action (shipments that are Pending for more than 5 minutes, Bosta Failed, Delivery
 Note Failed, or Bosta Created without a Delivery Note), first search Bosta by

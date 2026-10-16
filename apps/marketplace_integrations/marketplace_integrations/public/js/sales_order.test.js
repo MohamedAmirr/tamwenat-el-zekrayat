@@ -499,7 +499,7 @@ test("an active shipment shows status, tracking and a link, with a label button 
 	assert.equal(frm.indicators[0].color, "green");
 	assert.match(frm.indicators[0].label, /<a href="\/app\/bosta-shipment\/BOSTA-SHP-00001">Bosta Shipment: Completed<\/a>/);
 	assert.match(frm.indicators[0].label, /Tracking: 77873113 \(Delivered\)/);
-	assert.deepEqual(labels(frm), ["print", "refresh"]);
+	assert.deepEqual(labels(frm), ["print", "refresh", "cancel"]);
 });
 
 test("indicator colour follows the shipment status", async () => {
@@ -823,7 +823,7 @@ test("a failed read says so instead of 'No Bosta shipment'", async () => {
 
 test("Refresh from Bosta is creator-only, needs a tracking number and calls the server then reloads", async () => {
 	const { frm } = await tab_for();
-	assert.deepEqual(labels(frm), ["print", "refresh"]);
+	assert.deepEqual(labels(frm), ["print", "refresh", "cancel"]);
 	const refreshes = [];
 	global.frappe.call = (opts) => {
 		refreshes.push(opts);
@@ -851,6 +851,78 @@ test("a Bosta error on refresh does not reload the form", async () => {
 	assert.equal(frm.reloads, 0);
 });
 
+// ---- Cancel Bosta Shipment (#272) ----
+
+function with_confirm() {
+	const confirms = [];
+	global.frappe.confirm = (message, on_yes) => confirms.push({ message, on_yes });
+	return confirms;
+}
+
+test("Cancel is hidden for non-creators, Canceled, no tracking number and Delivered", async () => {
+	const cases = [
+		[{}, { bosta_creator: false }, false],
+		[{ status: "Canceled", active: false }, {}, false],
+		[{ status: "Pending Bosta", tracking_number: "" }, {}, false],
+		[{ bosta_state_code: 45 }, {}, false],
+		[{ bosta_state_code: 24 }, {}, true],
+		[{ bosta_state_code: 0 }, {}, true],
+		[{ bosta_state_code: 47 }, {}, true],
+	];
+	for (const [extra, options, shown] of cases) {
+		const { frm } = await tab_for(extra, options);
+		assert.equal(labels(frm).includes("cancel"), shown, JSON.stringify([extra, options]));
+	}
+});
+
+test("Cancel sends nothing until the confirm is accepted, and the confirm text is escaped", async () => {
+	const { frm } = await tab_for({ tracking_number: "<b>T</b>", delivery_note: "<i>DN</i>" });
+	const confirms = with_confirm();
+	const sent = [];
+	global.frappe.call = (opts) => {
+		sent.push(opts);
+		return Promise.resolve({ message: { canceled: true, delivery_note_error: "" } });
+	};
+	global.frappe.show_alert = () => {};
+	click(frm, "cancel");
+	assert.equal(sent.length, 0);
+	assert.equal(confirms.length, 1);
+	assert.doesNotMatch(confirms[0].message, /<b>|<i>/);
+	assert.match(confirms[0].message, /&lt;b&gt;T&lt;\/b&gt;/);
+	assert.equal(frm.reloads, 0);
+
+	confirms[0].on_yes();
+	await settle();
+	assert.equal(sent.length, 1);
+	assert.equal(sent[0].method, "marketplace_integrations.api.bosta_shipments.cancel_shipment");
+	assert.deepEqual(sent[0].args, { shipment: "BOSTA-SHP-00001" });
+	assert.equal(frm.reloads, 1);
+});
+
+test("a Delivery Note failure after Bosta accepted the cancel is explained and the form reloads", async () => {
+	const { frm } = await tab_for();
+	const confirms = with_confirm();
+	const printed = [];
+	global.frappe.msgprint = (m) => printed.push(m);
+	global.frappe.call = () => Promise.resolve({ message: { canceled: false, delivery_note_error: "x" } });
+	click(frm, "cancel");
+	confirms[0].on_yes();
+	await settle();
+	assert.equal(printed.length, 1);
+	assert.match(printed[0].message, /Needs Attention/);
+	assert.equal(frm.reloads, 1);
+});
+
+test("a server error on cancel does not reload the form", async () => {
+	const { frm } = await tab_for();
+	const confirms = with_confirm();
+	global.frappe.call = () => Promise.reject(new Error("Bosta request failed"));
+	click(frm, "cancel");
+	confirms[0].on_yes();
+	await settle();
+	assert.equal(frm.reloads, 0);
+});
+
 test("Create in the tab fetches the defaults and opens the dialog", async () => {
 	const { handlers } = load({ option: NO_PLATFORM, shipment: null });
 	const frm = make_frm({});
@@ -874,7 +946,7 @@ test("a reload refresh re-adds the indicator and buttons once, not twice", async
 	handlers["Sales Order"].refresh(frm); // like frm.reload_doc(): everything is cleared first
 	await settle();
 	assert.equal(frm.indicators.length, 1);
-	assert.deepEqual(labels(frm), ["print", "refresh"]);
+	assert.deepEqual(labels(frm), ["print", "refresh", "cancel"]);
 });
 
 test("a slow reply that lands after a newer refresh is dropped", async () => {
@@ -890,7 +962,7 @@ test("a slow reply that lands after a newer refresh is dropped", async () => {
 	replies.forEach((resolve) => resolve({ message: shipment_summary() }));
 	await settle();
 	assert.equal(frm.indicators.length, 1);
-	assert.deepEqual(labels(frm), ["print", "refresh"]);
+	assert.deepEqual(labels(frm), ["print", "refresh", "cancel"]);
 });
 
 test("a failed shipment read leaves Create available to creators and shows no indicator", async () => {

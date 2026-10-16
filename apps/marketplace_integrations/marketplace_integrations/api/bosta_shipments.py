@@ -22,6 +22,9 @@ from marketplace_integrations.integrations.bosta.deliveries import (
 )
 from marketplace_integrations.integrations.bosta.labels import create_a4_arabic_label
 from marketplace_integrations.integrations.bosta.statuses import (
+	cancel_bosta_shipment as _cancel_bosta_shipment,
+)
+from marketplace_integrations.integrations.bosta.statuses import (
 	refresh_shipment_state as _refresh_shipment_state,
 )
 
@@ -82,6 +85,12 @@ def check_shipment(shipment: str):
 def refresh_shipment(shipment: str):
 	"""Read the shipment's current state from Bosta and apply it (creator roles only)."""
 	return _refresh_shipment_state(shipment)
+
+
+@frappe.whitelist(methods=["POST"])
+def cancel_shipment(shipment: str):
+	"""Terminate the delivery in Bosta and cancel its Delivery Note (creator roles only)."""
+	return _cancel_bosta_shipment(shipment)
 
 
 @frappe.whitelist(methods=["POST"])

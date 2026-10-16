@@ -25,6 +25,8 @@
 	const BOSTA_SHIPMENT_METHOD = "marketplace_integrations.api.bosta_shipments.get_sales_order_shipment";
 	const BOSTA_LABEL_METHOD = "marketplace_integrations.api.bosta_shipments.print_a4_arabic_label";
 	const BOSTA_REFRESH_METHOD = "marketplace_integrations.api.bosta_shipments.refresh_shipment";
+	const BOSTA_CANCEL_METHOD = "marketplace_integrations.api.bosta_shipments.cancel_shipment";
+	const BOSTA_DELIVERED_STATE = 45;
 	const BOSTA_TAB_FIELD = "custom_bosta_delivery_html";
 
 	// Colours for the Bosta Shipment doctype's own statuses; the status text is the doctype's value.
@@ -121,6 +123,45 @@
 			.catch(() => {});
 	}
 
+	// Cancel Bosta Shipment (#272). Nothing is sent before the confirm is accepted; the confirm
+	// text is HTML, so the tracking number and Delivery Note name are escaped into it.
+	function cancel_bosta_shipment(frm, shipment) {
+		const escape = frappe.utils.escape_html;
+		const message = escape(
+			__("Cancel Bosta delivery {0}? Bosta will terminate it and Delivery Note {1} will be cancelled. This cannot be undone.", [
+				shipment.tracking_number,
+				shipment.delivery_note || "-",
+			])
+		);
+		frappe.confirm(message, () => {
+			frappe
+				.call({
+					method: BOSTA_CANCEL_METHOD,
+					type: "POST",
+					args: { shipment: shipment.name },
+					freeze: true,
+					freeze_message: __("Cancelling the Bosta delivery..."),
+				})
+				.then((r) => {
+					const result = r.message || {};
+					if (result.canceled) {
+						frappe.show_alert({ message: __("Bosta delivery cancelled."), indicator: "green" });
+					} else {
+						frappe.msgprint({
+							title: __("Bosta Cancel"),
+							message: escape(
+								__("Bosta terminated the delivery, but ERPNext could not cancel the Delivery Note. The shipment stays active and is listed in Needs Attention; the cancellation is retried automatically.")
+							),
+							indicator: "orange",
+						});
+					}
+					return frm.reload_doc();
+				})
+				// A server error already showed Frappe's message; nothing changed.
+				.catch(() => {});
+		});
+	}
+
 	function bosta_row(label, value_html) {
 		const escape = frappe.utils.escape_html;
 		return `<tr><th style="width: 30%">${escape(label)}</th><td>${value_html}</td></tr>`;
@@ -171,6 +212,9 @@
 			if (shipment.active && shipment.tracking_number) {
 				buttons.push(bosta_button("print", __("Print A4 Label")));
 				if (create) buttons.push(bosta_button("refresh", __("Refresh from Bosta")));
+				if (create && shipment.bosta_state_code !== BOSTA_DELIVERED_STATE) {
+					buttons.push(bosta_button("cancel", __("Cancel Bosta Shipment")));
+				}
 			}
 			// A Bosta Failed shipment without a tracking number keeps Create: that retry
 			// (search Bosta, then send) is what the server resumes on the same row.
@@ -191,6 +235,7 @@
 			if (action === "create") start_create_bosta_shipment(frm);
 			else if (action === "print") print_bosta_label(shipment);
 			else if (action === "refresh") refresh_bosta_shipment(frm, shipment);
+			else if (action === "cancel") cancel_bosta_shipment(frm, shipment);
 		});
 	}
 

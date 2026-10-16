@@ -34,6 +34,7 @@
   "delivery_note_error_at",
   "bosta_requested_on",
   "cod_amount",
+  "bosta_terminated_on",
   "active_sales_order"
  ],
  "fields": [
@@ -243,6 +244,13 @@
    "fieldname": "cod_amount",
    "fieldtype": "Currency",
    "label": "COD Amount",
+   "read_only": 1
+  },
+  {
+   "description": "When Bosta accepted the terminate request from the Sales Order. Lets the poll retry a failed Delivery Note cancellation.",
+   "fieldname": "bosta_terminated_on",
+   "fieldtype": "Datetime",
+   "label": "Bosta Terminated On",
    "read_only": 1
   }
  ],

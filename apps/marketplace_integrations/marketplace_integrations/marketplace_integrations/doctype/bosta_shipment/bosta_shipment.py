@@ -27,6 +27,7 @@ SYSTEM_FIELDS = (
 	"delivery_note_error_at",
 	"bosta_requested_on",
 	"cod_amount",
+	"bosta_terminated_on",
 )
 
 
