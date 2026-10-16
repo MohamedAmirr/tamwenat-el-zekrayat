@@ -31,6 +31,7 @@ function load({
 	global.frappe = {
 		user: { has_role: () => bosta_creator },
 		utils: { escape_html },
+		datetime: { str_to_user: (value) => `user:${value}` },
 		model: {
 			can_read: (doctype) =>
 				doctype === "Bosta Shipment" ? bosta_read : can_read && doctype === "Marketplace Order",
@@ -105,7 +106,27 @@ const eligible = (extra = {}) => ({
 function make_frm(doc, { close_sales_order } = {}) {
 	const buttons = [];
 	const indicators = [];
+	const tab = { html: "", handler: null };
 	const frm = {
+		tab,
+		get_field: (name) =>
+			name === "custom_bosta_delivery_html"
+				? {
+						$wrapper: {
+							html(value) {
+								tab.html = value;
+								return this;
+							},
+							off() {
+								return this;
+							},
+							on(_event, _selector, handler) {
+								tab.handler = handler;
+								return this;
+							},
+						},
+				  }
+				: null,
 		doc: {
 			name: "SAL-ORD-1",
 			custom_marketplace_order: "MO-1",
@@ -198,11 +219,7 @@ test("opening or reloading an already Closed order never prompts", async () => {
 	assert.equal(msgprints.length, 0);
 	// One fetch, only to decide on the button.
 	assert.equal(calls.length, 1);
-	// Button order is intentionally unspecified: Create is added after an async reply.
-	assert.deepEqual(
-		frm.buttons.map((b) => b.label).sort(),
-		["Cancel on Talabat", "Create Bosta Shipment"]
-	);
+	assert.deepEqual(frm.buttons.map((b) => b.label), ["Cancel on Talabat"]);
 });
 
 test("closing via the wrapped method opens the dialog on the next Closed refresh", async () => {
@@ -215,7 +232,7 @@ test("closing via the wrapped method opens the dialog on the next Closed refresh
 	await settle();
 	assert.equal(dialogs.length, 1);
 	assert.equal(dialogs[0].shown, true);
-	assert.equal(frm.buttons.length, 2);
+	assert.equal(frm.buttons.length, 1);
 });
 
 test("open orders and orders without a marketplace order make no call", async () => {
@@ -290,7 +307,7 @@ test("a blocked order gets no Cancel button", async () => {
 	const frm = make_frm({ status: "Closed" });
 	handlers["Sales Order"].refresh(frm);
 	await settle();
-	assert.equal(frm.buttons.length, 1);
+	assert.equal(frm.buttons.length, 0);
 });
 
 test("the dialog requires a reason built from the server list", async () => {
@@ -410,7 +427,7 @@ test("without read permission on Marketplace Order nothing is fetched or shown",
 	await settle();
 	assert.equal(calls.length, 0);
 	assert.equal(dialogs.length + msgprints.length, 0);
-	assert.equal(closed.buttons.length + cancelled.buttons.length, 1);
+	assert.equal(closed.buttons.length + cancelled.buttons.length, 0);
 });
 
 test("the platform name is escaped in titles and the button label", async () => {
@@ -446,14 +463,14 @@ test("the Bosta button is creator-only and survives a reload refresh", async () 
 	const denied = make_frm({});
 	handlers["Sales Order"].refresh(denied);
 	await settle();
-	assert.ok(!denied.buttons.some((b) => b.label === "Create Bosta Shipment"));
+	assert.deepEqual(labels(denied), []);
 
 	const { handlers: allowed_handlers } = load({ option: eligible({ state: "not_applicable" }) });
 	const frm = make_frm({});
 	allowed_handlers["Sales Order"].refresh(frm);
 	allowed_handlers["Sales Order"].refresh(frm);
 	await settle();
-	assert.deepEqual(frm.buttons.map((b) => b.label), ["Create Bosta Shipment"]);
+	assert.deepEqual(labels(frm), ["create"]);
 });
 
 // ---- Bosta shipment status, tracking and label on the Sales Order (#246) ----
@@ -467,7 +484,10 @@ const shipment_summary = (extra = {}) => ({
 	...extra,
 });
 const NO_PLATFORM = eligible({ state: "not_applicable" });
-const labels = (frm) => frm.buttons.map((b) => b.label);
+// The Bosta tab's buttons, as their data-bosta-action names.
+const labels = (frm) => [...frm.tab.html.matchAll(/data-bosta-action="([^"]+)"/g)].map((m) => m[1]);
+const click = (frm, action) =>
+	frm.tab.handler({ currentTarget: { getAttribute: () => action } });
 
 test("an active shipment shows status, tracking and a link, with a label button and no Create", async () => {
 	const { handlers, bosta_calls } = load({ option: NO_PLATFORM, shipment: shipment_summary() });
@@ -479,7 +499,7 @@ test("an active shipment shows status, tracking and a link, with a label button 
 	assert.equal(frm.indicators[0].color, "green");
 	assert.match(frm.indicators[0].label, /<a href="\/app\/bosta-shipment\/BOSTA-SHP-00001">Bosta Shipment: Completed<\/a>/);
 	assert.match(frm.indicators[0].label, /Tracking: 77873113 \(Delivered\)/);
-	assert.deepEqual(labels(frm), ["Print Bosta A4 Label"]);
+	assert.deepEqual(labels(frm), ["print", "refresh", "cancel"]);
 });
 
 test("indicator colour follows the shipment status", async () => {
@@ -514,7 +534,7 @@ test("a shipment without a tracking number shows the status but no label button"
 });
 
 function click_label(frm) {
-	frm.buttons.find((b) => b.label === "Print Bosta A4 Label").action();
+	click(frm, "print");
 }
 
 // Loads a form with an active shipment, a window stub that records what happens to it, and a
@@ -592,7 +612,7 @@ test("a Bosta Failed shipment without tracking keeps Create next to the indicato
 	await settle();
 	assert.equal(frm.indicators.length, 1);
 	assert.equal(frm.indicators[0].color, "red");
-	assert.deepEqual(labels(frm), ["Create Bosta Shipment"]);
+	assert.deepEqual(labels(frm), ["create"]);
 
 	// A read-only user gets the indicator but no Create.
 	const { handlers: h2 } = load({
@@ -621,7 +641,7 @@ test("no other active status offers Create", async () => {
 		handlers["Sales Order"].refresh(frm);
 		await settle();
 		assert.equal(frm.indicators.length, 1, extra.status);
-		assert.ok(!labels(frm).includes("Create Bosta Shipment"), `${extra.status} ${extra.tracking_number}`);
+		assert.ok(!labels(frm).includes("create"), `${extra.status} ${extra.tracking_number}`);
 	}
 });
 
@@ -631,7 +651,7 @@ test("a Canceled latest shipment (or none) shows Create again, with no indicator
 		const frm = make_frm({});
 		handlers["Sales Order"].refresh(frm);
 		await settle();
-		assert.deepEqual(labels(frm), ["Create Bosta Shipment"]);
+		assert.deepEqual(labels(frm), ["create"]);
 		assert.equal(frm.indicators.length, 0);
 	}
 });
@@ -642,7 +662,7 @@ test("a read-only user sees the status and label but never Create", async () => 
 	handlers["Sales Order"].refresh(frm);
 	await settle();
 	assert.equal(frm.indicators.length, 1);
-	assert.deepEqual(labels(frm), ["Print Bosta A4 Label"]);
+	assert.deepEqual(labels(frm), ["print"]);
 
 	const { handlers: h2 } = load({
 		option: NO_PLATFORM,
@@ -699,6 +719,225 @@ test("remote text in the shipment is escaped in the indicator", async () => {
 	assert.match(html, /href="\/app\/bosta-shipment\/BOSTA-SHP-%221"/);
 });
 
+// ---- Bosta Delivery tab (#271) ----
+
+const detailed = (extra = {}) =>
+	shipment_summary({
+		last_update: "2026-10-16 10:30:00.000000",
+		receiver_name: "Mona",
+		receiver_phone: "0100",
+		city: "Cairo",
+		district_id: "d-1",
+		address_first_line: "12 Example Street",
+		cod_amount: 250,
+		delivery_note: "MAT-DN-1",
+		delivery_note_status: "To Bill",
+		...extra,
+	});
+
+async function tab_for(shipment_extra, options = {}) {
+	global.format_currency = (value) => `EGP ${value}`;
+	const { handlers, calls } = load({ option: NO_PLATFORM, shipment: detailed(shipment_extra), ...options });
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	return { frm, calls, html: frm.tab.html };
+}
+
+test("the tab shows every listed value, with the district as its ID", async () => {
+	const { html } = await tab_for();
+	for (const expected of [
+		"Completed",
+		"77873113",
+		"Delivered",
+		"user:2026-10-16 10:30:00.000000",
+		"EGP 250",
+		"Mona - 0100",
+		"12 Example Street, Cairo",
+		"District ID: d-1",
+		'href="/app/delivery-note/MAT-DN-1"',
+		"MAT-DN-1</a> (To Bill)",
+	]) {
+		assert.ok(html.includes(expected), expected);
+	}
+});
+
+test("a zero COD is shown as 0, and the Delivery Note status is only shown when given", async () => {
+	const { html } = await tab_for({ cod_amount: 0, delivery_note_status: "" });
+	assert.match(html, /COD Sent<\/th><td>EGP 0<\/td>/);
+	assert.doesNotMatch(html, /\(To Bill\)/);
+	assert.match(html, /MAT-DN-1<\/a><\/td>/);
+});
+
+test("stored values render as text in the tab", async () => {
+	const evil = "<img src=x onerror=alert(1)>";
+	const { html } = await tab_for({
+		receiver_name: evil,
+		receiver_phone: evil,
+		city: evil,
+		district_id: evil,
+		address_first_line: evil,
+		tracking_number: evil,
+		bosta_state: evil,
+		delivery_note: evil,
+		delivery_note_status: evil,
+	});
+	assert.doesNotMatch(html, /<img/);
+	assert.match(html, /&lt;img src&#x3D;x onerror&#x3D;alert\(1\)&gt;/);
+});
+
+test("with no shipment the tab says so and offers Create to creators only", async () => {
+	const { handlers } = load({ option: NO_PLATFORM, shipment: null });
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.match(frm.tab.html, /No Bosta shipment/);
+	assert.deepEqual(labels(frm), ["create"]);
+
+	const { handlers: h2 } = load({ option: NO_PLATFORM, shipment: null, bosta_creator: false });
+	const reader = make_frm({});
+	h2["Sales Order"].refresh(reader);
+	await settle();
+	assert.match(reader.tab.html, /No Bosta shipment/);
+	assert.deepEqual(labels(reader), []);
+});
+
+test("without read permission the tab stays empty and nothing is requested", async () => {
+	const { handlers, bosta_calls } = load({ option: NO_PLATFORM, bosta_read: false, shipment: detailed() });
+	const frm = make_frm({});
+	frm.tab.html = "stale";
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.equal(bosta_calls.length, 0);
+	assert.equal(frm.tab.html, "");
+});
+
+test("a failed read says so instead of 'No Bosta shipment'", async () => {
+	const { handlers } = load({ option: NO_PLATFORM, shipment_fails: true });
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.match(frm.tab.html, /Could not load the Bosta shipment/);
+	assert.doesNotMatch(frm.tab.html, /No Bosta shipment/);
+});
+
+test("Refresh from Bosta is creator-only, needs a tracking number and calls the server then reloads", async () => {
+	const { frm } = await tab_for();
+	assert.deepEqual(labels(frm), ["print", "refresh", "cancel"]);
+	const refreshes = [];
+	global.frappe.call = (opts) => {
+		refreshes.push(opts);
+		return Promise.resolve({ message: { result: "applied" } });
+	};
+	global.frappe.show_alert = () => {};
+	click(frm, "refresh");
+	await settle();
+	assert.equal(refreshes.length, 1);
+	assert.equal(refreshes[0].method, "marketplace_integrations.api.bosta_shipments.refresh_shipment");
+	assert.deepEqual(refreshes[0].args, { shipment: "BOSTA-SHP-00001" });
+	assert.equal(frm.reloads, 1);
+
+	const pending = await tab_for({ status: "Pending Bosta", tracking_number: "" });
+	assert.deepEqual(labels(pending.frm), []);
+	const reader = await tab_for({}, { bosta_creator: false });
+	assert.deepEqual(labels(reader.frm), ["print"]);
+});
+
+test("a Bosta error on refresh does not reload the form", async () => {
+	const { frm } = await tab_for();
+	global.frappe.call = () => Promise.reject(new Error("Bosta request failed"));
+	click(frm, "refresh");
+	await settle();
+	assert.equal(frm.reloads, 0);
+});
+
+// ---- Cancel Bosta Shipment (#272) ----
+
+function with_confirm() {
+	const confirms = [];
+	global.frappe.confirm = (message, on_yes) => confirms.push({ message, on_yes });
+	return confirms;
+}
+
+test("Cancel is hidden for non-creators, Canceled, no tracking number and Delivered", async () => {
+	const cases = [
+		[{}, { bosta_creator: false }, false],
+		[{ status: "Canceled", active: false }, {}, false],
+		[{ status: "Pending Bosta", tracking_number: "" }, {}, false],
+		[{ bosta_state_code: 45 }, {}, false],
+		[{ bosta_state_code: 24 }, {}, true],
+		[{ bosta_state_code: 0 }, {}, true],
+		[{ bosta_state_code: 47 }, {}, true],
+	];
+	for (const [extra, options, shown] of cases) {
+		const { frm } = await tab_for(extra, options);
+		assert.equal(labels(frm).includes("cancel"), shown, JSON.stringify([extra, options]));
+	}
+});
+
+test("Cancel sends nothing until the confirm is accepted, and the confirm text is escaped", async () => {
+	const { frm } = await tab_for({ tracking_number: "<b>T</b>", delivery_note: "<i>DN</i>" });
+	const confirms = with_confirm();
+	const sent = [];
+	global.frappe.call = (opts) => {
+		sent.push(opts);
+		return Promise.resolve({ message: { canceled: true, delivery_note_error: "" } });
+	};
+	global.frappe.show_alert = () => {};
+	click(frm, "cancel");
+	assert.equal(sent.length, 0);
+	assert.equal(confirms.length, 1);
+	assert.doesNotMatch(confirms[0].message, /<b>|<i>/);
+	assert.match(confirms[0].message, /&lt;b&gt;T&lt;\/b&gt;/);
+	assert.equal(frm.reloads, 0);
+
+	confirms[0].on_yes();
+	await settle();
+	assert.equal(sent.length, 1);
+	assert.equal(sent[0].method, "marketplace_integrations.api.bosta_shipments.cancel_shipment");
+	assert.deepEqual(sent[0].args, { shipment: "BOSTA-SHP-00001" });
+	assert.equal(frm.reloads, 1);
+});
+
+test("a Delivery Note failure after Bosta accepted the cancel is explained and the form reloads", async () => {
+	const { frm } = await tab_for();
+	const confirms = with_confirm();
+	const printed = [];
+	global.frappe.msgprint = (m) => printed.push(m);
+	global.frappe.call = () => Promise.resolve({ message: { canceled: false, delivery_note_error: "x" } });
+	click(frm, "cancel");
+	confirms[0].on_yes();
+	await settle();
+	assert.equal(printed.length, 1);
+	assert.match(printed[0].message, /Needs Attention/);
+	assert.equal(frm.reloads, 1);
+});
+
+test("a server error on cancel does not reload the form", async () => {
+	const { frm } = await tab_for();
+	const confirms = with_confirm();
+	global.frappe.call = () => Promise.reject(new Error("Bosta request failed"));
+	click(frm, "cancel");
+	confirms[0].on_yes();
+	await settle();
+	assert.equal(frm.reloads, 0);
+});
+
+test("Create in the tab fetches the defaults and opens the dialog", async () => {
+	const { handlers } = load({ option: NO_PLATFORM, shipment: null });
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	const seen = [];
+	global.frappe.call = (opts) => {
+		seen.push(opts.method.split(".").pop());
+		return new Promise(() => {});
+	};
+	click(frm, "create");
+	await settle();
+	assert.equal(seen[0], "get_create_defaults");
+});
+
 test("a reload refresh re-adds the indicator and buttons once, not twice", async () => {
 	const { handlers } = load({ option: NO_PLATFORM, shipment: shipment_summary() });
 	const frm = make_frm({});
@@ -707,7 +946,7 @@ test("a reload refresh re-adds the indicator and buttons once, not twice", async
 	handlers["Sales Order"].refresh(frm); // like frm.reload_doc(): everything is cleared first
 	await settle();
 	assert.equal(frm.indicators.length, 1);
-	assert.deepEqual(labels(frm), ["Print Bosta A4 Label"]);
+	assert.deepEqual(labels(frm), ["print", "refresh", "cancel"]);
 });
 
 test("a slow reply that lands after a newer refresh is dropped", async () => {
@@ -723,7 +962,7 @@ test("a slow reply that lands after a newer refresh is dropped", async () => {
 	replies.forEach((resolve) => resolve({ message: shipment_summary() }));
 	await settle();
 	assert.equal(frm.indicators.length, 1);
-	assert.deepEqual(labels(frm), ["Print Bosta A4 Label"]);
+	assert.deepEqual(labels(frm), ["print", "refresh", "cancel"]);
 });
 
 test("a failed shipment read leaves Create available to creators and shows no indicator", async () => {
@@ -732,7 +971,7 @@ test("a failed shipment read leaves Create available to creators and shows no in
 	handlers["Sales Order"].refresh(frm);
 	await settle();
 	assert.equal(frm.indicators.length, 0);
-	assert.deepEqual(labels(frm), ["Create Bosta Shipment"]);
+	assert.deepEqual(labels(frm), ["create"]);
 });
 
 test("Draft and Cancelled-status orders get no Create button; drafts are not asked about shipments", async () => {
@@ -765,7 +1004,7 @@ const DISTRICTS = {
 
 // Opens the Bosta dialog against scripted server answers. `server` maps a method suffix to
 // a function(args) returning the answer or throwing to simulate a failing call.
-async function open_bosta_dialog(defaults, server = {}) {
+async function open_bosta_dialog(defaults, server = {}, open = (m, frm) => m.show_bosta_dialog(frm, defaults)) {
 	const { module_exports } = load({ option: eligible({ state: "not_applicable" }) });
 	const calls = [];
 	const dialogs = [];
@@ -820,7 +1059,7 @@ async function open_bosta_dialog(defaults, server = {}) {
 		}
 	};
 	const frm = make_frm({});
-	await module_exports.show_bosta_dialog(frm, defaults);
+	await open(module_exports, frm);
 	await settle();
 	return { dialog: dialogs[0], calls, frm, module_exports };
 }
@@ -997,4 +1236,137 @@ test("without any address source the address fields stay blank and editable", as
 	assert.equal(dialog.values.address_first_line, "");
 	assert.equal(dialog.df.address_first_line.read_only, undefined);
 	assert.equal(dialog.values.receiver_name, "Ahmed");
+});
+
+// ---- Edit Bosta Shipment (#273) ----
+
+const editable = (extra = {}) =>
+	detailed({ bosta_state_code: 24, city: "Cairo", district_id: "d-2", receiver_phone: "0100", ...extra });
+
+const open_edit = (shipment, server) =>
+	open_bosta_dialog({}, server, (m, frm) => m.show_bosta_edit_dialog(frm, shipment));
+
+test("Edit is offered only to creators, for an active shipment in a documented editable state", async () => {
+	for (const code of [10, 11, 20, 21, 22, 24, 30, 41, 47]) {
+		const { frm } = await tab_for({ bosta_state_code: code });
+		assert.ok(labels(frm).includes("edit"), `state ${code}`);
+	}
+	for (const code of [0, 40, 45, 46, 48, 49, 60, 100, undefined]) {
+		const { frm } = await tab_for({ bosta_state_code: code });
+		assert.ok(!labels(frm).includes("edit"), `state ${code}`);
+	}
+	const reader = await tab_for({ bosta_state_code: 24 }, { bosta_creator: false });
+	assert.ok(!labels(reader.frm).includes("edit"));
+	const canceled = await tab_for({ bosta_state_code: 24, status: "Canceled", active: false });
+	assert.ok(!labels(canceled.frm).includes("edit"));
+	const untracked = await tab_for({ bosta_state_code: 24, tracking_number: "", status: "Pending Bosta" });
+	assert.ok(!labels(untracked.frm).includes("edit"));
+});
+
+test("the Edit button opens the edit dialog", async () => {
+	const { frm } = await tab_for({ bosta_state_code: 24 });
+	const dialogs = [];
+	global.frappe.ui.Dialog = class {
+		constructor(config) {
+			this.config = config;
+			dialogs.push(this);
+		}
+		show() {}
+		get_primary_btn() {
+			return { prop() {} };
+		}
+		set_df_property() {}
+		get_value() {}
+		set_value() {}
+	};
+	global.frappe.call = () => new Promise(() => {});
+	click(frm, "edit");
+	assert.equal(dialogs[0].config.title, "Edit Bosta Shipment");
+});
+
+test("the edit dialog has only the receiver phone, the pickers and the address, prefilled from the shipment", async () => {
+	const { dialog } = await open_edit(editable());
+	assert.deepEqual(
+		dialog.config.fields.map((f) => f.fieldname),
+		["edit_note", "lists_error", "retry_lists", "receiver_phone", "city", "district", "address_first_line"]
+	);
+	assert.equal(dialog.values.receiver_phone, "0100");
+	assert.equal(dialog.values.address_first_line, "12 Example Street");
+	assert.match(dialog.config.fields[0].options, /updates Bosta and the Bosta Shipment only/);
+	assert.match(dialog.config.fields[0].options, /Sales Order address and Shopify are not changed/);
+});
+
+test("the edit dialog preselects the shipment's city and district, and clearing is left to a city change", async () => {
+	const { dialog } = await open_edit(editable({ city: "Cairo", district_id: "d-2" }));
+	assert.equal(dialog.values.city, "c-cairo");
+	assert.equal(dialog.values.district, "d-2");
+	// A district that is not in the city is not guessed.
+	const other = await open_edit(editable({ city: "Cairo", district_id: "unknown" }));
+	assert.equal(other.dialog.values.district, "");
+});
+
+test("the edit dialog sends nothing until the confirm is accepted, then sends only phone and address", async () => {
+	const { dialog, calls, frm } = await open_edit(editable(), { edit_shipment: () => ({}) });
+	const confirms = with_confirm();
+	global.frappe.show_alert = () => {};
+	const before = calls.length;
+	dialog.config.primary_action({
+		receiver_phone: "0111",
+		city: "c-alex",
+		district: "d-9",
+		address_first_line: "7 New Street",
+	});
+	assert.equal(calls.length, before);
+	assert.equal(confirms.length, 1);
+	assert.match(confirms[0].message, /Sales Order address and Shopify are not changed/);
+	assert.equal(dialog.hidden, undefined);
+
+	confirms[0].on_yes();
+	await settle();
+	const request = calls.at(-1);
+	assert.equal(request.method, "marketplace_integrations.api.bosta_shipments.edit_shipment");
+	assert.deepEqual(request.args, {
+		shipment: "BOSTA-SHP-00001",
+		receiver_phone: "0111",
+		city: "Alexandria",
+		district_id: "d-9",
+		address_first_line: "7 New Street",
+	});
+	assert.equal(dialog.hidden, true);
+	assert.equal(frm.reloads, 1);
+});
+
+test("a server error on edit does not reload the form", async () => {
+	const { dialog, frm } = await open_edit(editable(), {
+		edit_shipment: () => {
+			throw new Error("Bosta refused");
+		},
+	});
+	const confirms = with_confirm();
+	dialog.config.primary_action({ receiver_phone: "0111", city: "c-cairo", district: "d-1", address_first_line: "7 New Street" });
+	confirms[0].on_yes();
+	await settle();
+	assert.equal(frm.reloads, 0);
+});
+
+test("the confirm text escapes the tracking number and the dialog never renders stored text as HTML", async () => {
+	const evil = "<img src=x onerror=alert(1)>";
+	const shipment = editable({ tracking_number: evil, receiver_phone: evil, address_first_line: evil });
+	const { dialog } = await open_edit(shipment);
+	const confirms = with_confirm();
+	dialog.config.primary_action({ receiver_phone: "0111", city: "c-cairo", district: "d-1", address_first_line: "7 New Street" });
+	assert.doesNotMatch(confirms[0].message, /<img/);
+	assert.match(confirms[0].message, /&lt;img/);
+	// Stored text is only ever a field default, never an HTML option.
+	assert.doesNotMatch(dialog.config.fields[0].options, /<img/);
+});
+
+test("the create dialog is unchanged: it keeps the receiver name, the COD note and no district default", async () => {
+	const { dialog } = await open_bosta_dialog({ cod_amount: 100, receiver_name: "Mona", receiver_phone: "010" });
+	assert.deepEqual(
+		dialog.config.fields.map((f) => f.fieldname),
+		["cod_note", "lists_error", "retry_lists", "receiver_name", "receiver_phone", "city", "district", "address_first_line"]
+	);
+	assert.equal(dialog.values.district, "");
+	assert.equal(dialog.config.primary_action_label, "Create Shipment");
 });
