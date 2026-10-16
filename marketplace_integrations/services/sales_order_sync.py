@@ -232,6 +232,7 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 				_create_sync_log(order, trigger_source, "Success", snapshot, result)
 				return result
 			_apply_snapshot(sales_order, snapshot, order.name, account.erpnext_shipping_account)
+			_fill_buyer_phone(sales_order, order)
 			_verify_line_amounts(sales_order, snapshot, account)
 			_verify_grand_total(sales_order, snapshot, order, account)
 			sales_order.save()
@@ -241,6 +242,7 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 
 		sales_order = frappe.new_doc("Sales Order")
 		_apply_snapshot(sales_order, snapshot, order.name, account.erpnext_shipping_account)
+		_fill_buyer_phone(sales_order, order)
 		_verify_line_amounts(sales_order, snapshot, account)
 		_verify_grand_total(sales_order, snapshot, order, account)
 		# Verify the snapshot pairs with the inserted rows BEFORE submitting; on a
@@ -1169,6 +1171,8 @@ def _resolve_shopify_address(order, customer, create=True):
 		}
 		if not any(values.values()):
 			return None
+		# Shopify province -> ERPNext state; city stays in city (#156).
+		values["state"] = cstr(source.get("province") or "").strip()
 		values["email_id"] = cstr(order.customer_email).strip()
 		values["phone"] = cstr(order.customer_phone_number or "").strip()
 		if values["country"] and not frappe.db.exists("Country", values["country"]):
@@ -1374,6 +1378,25 @@ def _apply_snapshot(sales_order, snapshot, marketplace_order_name, shipping_acco
 	if "shipping_address_name" in snapshot:
 		sales_order.shipping_address_name = snapshot["shipping_address_name"]
 		sales_order.customer_address = snapshot["customer_address"]
+
+
+def buyer_phone_for_sales_order(order):
+	"""The phone to store on a Shopify Sales Order's ``contact_mobile`` (#277), or ``""``."""
+	if order.platform != "Shopify":
+		return ""
+	return cstr(order.customer_phone_number).strip()
+
+
+def _fill_buyer_phone(sales_order, order):
+	"""Copy the Shopify buyer phone into ``contact_mobile`` only while it is empty.
+
+	``contact_mobile`` is staff-editable (Property Setter), so a typed value is never overwritten
+	by a later sync.  The phone is deliberately not in the snapshot, so it never feeds the hash or
+	"Modified After Sync".
+	"""
+	phone = buyer_phone_for_sales_order(order)
+	if phone and not cstr(sales_order.contact_mobile).strip():
+		sales_order.contact_mobile = phone
 
 
 def _verify_line_amounts(sales_order, snapshot, account):

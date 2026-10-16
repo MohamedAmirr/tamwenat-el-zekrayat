@@ -136,6 +136,27 @@ class IntegrationTestImportOrderNoSideEffects(IntegrationTestCase):
 		for doctype in NO_SIDE_EFFECT_DOCTYPES:
 			self.assertEqual(frappe.db.count(doctype), before[doctype], f"{doctype} row count changed")
 
+	def test_shipping_lines_are_persisted_and_query_asks_for_them(self):
+		order_gid = _order_gid(frappe.generate_hash(length=8))
+		payload = make_order_payload(order_gid)
+		payload["requiresShipping"] = True
+		payload["shippingLines"] = {
+			"pageInfo": {"hasNextPage": False},
+			"nodes": [{"title": "Express", "code": "express", "carrierIdentifier": "gid://x/1"}],
+		}
+
+		with patch(EXECUTE_TARGET, return_value={"order": payload}) as execute:
+			result = orders.import_order(self.account.name, order_gid)
+
+		query, variables = execute.call_args.args[:2]
+		for needle in ("shippingLines(first: $shippingLinesFirst)", "provinceCode", "countryCodeV2"):
+			self.assertIn(needle, query)
+		self.assertEqual(variables["shippingLinesFirst"], 10)
+		result.reload()
+		stored = frappe.parse_json(result.shipping_lines)
+		self.assertTrue(stored["requiresShipping"])
+		self.assertEqual(stored["shippingLines"][0]["code"], "express")
+
 	def test_refund_evidence_is_persisted_without_interpretation(self):
 		order_gid = _order_gid(frappe.generate_hash(length=8))
 		payload = make_order_payload(order_gid)

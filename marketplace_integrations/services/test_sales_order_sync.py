@@ -24,6 +24,7 @@ from marketplace_integrations.services.sales_order_reconciliation import (
 from marketplace_integrations.services.sales_order_sync import (
 	SyncBlocker,
 	_build_sales_order_lines,
+	_fill_buyer_phone,
 	_validate_platform_supported,
 	build_sales_order_snapshot,
 	get_current_sync_status,
@@ -3137,6 +3138,9 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 				"city": "Cairo",
 				"country": "Egypt",
 				"zip": "11511",
+				"province": "Cairo Governorate",
+				"provinceCode": "C",
+				"phone": "+20111111111",
 			},
 			billing_address={"address1": "Billing must not win", "country": "Egypt"},
 		)
@@ -3153,7 +3157,9 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(address.city, "Cairo")
 		self.assertEqual(address.country, "Egypt")
 		self.assertEqual(address.pincode, "11511")
+		self.assertEqual(address.state, "Cairo Governorate")
 		self.assertEqual(address.email_id, email)
+		# The address phone stays the buyer phone, not shippingAddress.phone (#156).
 		self.assertEqual(address.phone, "+20123456789")
 		self.assertTrue(
 			any(
@@ -3820,6 +3826,56 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		result = sync_sales_order(order.name)
 		self.assertFalse(result["ok"])
 		self.assertIn("No eligible Noon order lines", result["error"])
+
+	# --- Shopify buyer phone on the Sales Order (#277) -----------------------------------
+
+	def test_shopify_sync_stores_the_buyer_phone_on_the_submitted_sales_order(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, customer_phone_number="+201001234567")
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+		self.assertEqual(sales_order.docstatus, 1)
+		self.assertEqual(sales_order.contact_mobile, "+201001234567")
+		self.assertEqual(get_current_sync_status(order.name), "Synced")
+
+	def test_contact_mobile_is_editable_after_submit_and_survives_a_later_sync(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, customer_phone_number="+201001234567")
+		result = sync_sales_order(order.name)
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+
+		sales_order.contact_mobile = "01112223334"
+		sales_order.save()  # update-after-submit: needs the Property Setters
+		sales_order.reload()
+		self.assertEqual(sales_order.contact_mobile, "01112223334")
+
+		self.assertTrue(sync_sales_order(order.name)["ok"])
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order.name, "contact_mobile"), "01112223334")
+		self.assertEqual(get_current_sync_status(order.name), "Synced")
+
+	def test_a_staff_typed_phone_on_a_draft_is_not_overwritten_and_an_empty_one_is_filled(self):
+		order = SimpleNamespace(platform="Shopify", customer_phone_number=" +201001234567 ")
+		draft = SimpleNamespace(contact_mobile="01112223334")
+		_fill_buyer_phone(draft, order)
+		self.assertEqual(draft.contact_mobile, "01112223334")
+
+		empty = SimpleNamespace(contact_mobile=None)
+		_fill_buyer_phone(empty, order)
+		self.assertEqual(empty.contact_mobile, "+201001234567")
+
+		other = SimpleNamespace(contact_mobile=None)
+		_fill_buyer_phone(other, SimpleNamespace(platform="Talabat", customer_phone_number="masked"))
+		self.assertIsNone(other.contact_mobile)
+
+	def test_the_buyer_phone_is_not_part_of_the_snapshot_hash(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, customer_phone_number="+201001234567")
+		sync_sales_order(order.name)
+		order.reload()
+		self.assertNotIn("+201001234567", order.last_synced_snapshot)
 
 	# --- Shopify shipping charge -------------------------------------------------------
 

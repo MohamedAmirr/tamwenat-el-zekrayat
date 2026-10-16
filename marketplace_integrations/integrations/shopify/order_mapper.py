@@ -66,8 +66,25 @@ def normalize_order(order):
 		"customer_longitude": address.get("longitude"),
 		"billing_address": billing_address,
 		"shipping_address": shipping_address,
+		"shipping_lines": _shipping_lines(order),
 		"items": [_normalize_item(item) for item in _nodes(order, "lineItems")],
 		"latest_payload": order,
+	}
+
+
+def _shipping_lines(order):
+	"""Raw shipping evidence (#156): the shipping lines plus
+	``requiresShipping``/``retailLocation``, or ``None`` (field left empty)
+	when the order has no shipping lines, does not require shipping and has no
+	retail location - also the case for payloads stored before the query
+	asked for them."""
+	lines = _nodes(order, "shippingLines")
+	if not lines and not order.get("requiresShipping") and not order.get("retailLocation"):
+		return None
+	return {
+		"requiresShipping": order.get("requiresShipping"),
+		"retailLocation": order.get("retailLocation"),
+		"shippingLines": lines,
 	}
 
 
@@ -133,6 +150,11 @@ def _validate_evidence_pages(order):
 	if (connection.get("pageInfo") or {}).get("hasNextPage"):
 		frappe.throw(
 			_("Shopify order {0} exceeds the supported lineItems page size.").format(order.get("id"))
+		)
+	connection = order.get("shippingLines") or {}
+	if (connection.get("pageInfo") or {}).get("hasNextPage"):
+		frappe.throw(
+			_("Shopify order {0} exceeds the supported shippingLines page size.").format(order.get("id"))
 		)
 	for refund in order.get("refunds") or []:
 		connection = refund.get("refundLineItems") or {}
