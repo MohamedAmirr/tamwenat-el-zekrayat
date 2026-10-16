@@ -248,6 +248,22 @@ class IntegrationTestBostaAddressPrefill(BostaFixtureMixin, IntegrationTestCase)
 		self.assertEqual(defaults["address_first_line"], "123 Main St, Cairo")
 		self.assertEqual(defaults["address_city"], "")
 
+	def test_receiver_phone_falls_back_to_the_marketplace_order_buyer_phone(self):
+		order = self.make_order()
+		self.assertEqual(self._defaults(order)["receiver_phone"], "")
+		frappe.db.set_value("Sales Order", order.name, "custom_marketplace_order", "MKTORD-FAKE")
+		real_get_value = frappe.db.get_value
+
+		def get_value(doctype, *args, **kwargs):
+			if doctype == "Marketplace Order":  # building a real one needs a Marketplace Account
+				return " +201013271104 "
+			return real_get_value(doctype, *args, **kwargs)
+
+		with patch.object(frappe.db, "get_value", side_effect=get_value):
+			self.assertEqual(self._defaults(order)["receiver_phone"], "+201013271104")
+			frappe.db.set_value("Sales Order", order.name, "contact_mobile", "01000000000")
+			self.assertEqual(self._defaults(order)["receiver_phone"], "01000000000")
+
 	def test_shipping_address_wins_over_the_marketplace_order(self):
 		order = self.make_order()
 		address = self._address()

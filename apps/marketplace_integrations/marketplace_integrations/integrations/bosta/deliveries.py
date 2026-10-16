@@ -43,12 +43,26 @@ def get_sales_order_defaults(sales_order_name):
 	return {
 		**_address_prefill(order),
 		"receiver_name": cstr(order.customer_name).strip(),
-		"receiver_phone": cstr(order.contact_mobile or order.contact_phone).strip(),
+		"receiver_phone": _receiver_phone_prefill(order),
 		"cod_amount": cod["cod"],
 		"order_total": cod["total"],
 		"advance_paid": cod["advance_paid"],
 		"cod_limit": BOSTA_COD_LIMIT,
 	}
+
+
+def _receiver_phone_prefill(order):
+	"""The Sales Order's contact phone, else the marketplace buyer's phone.
+
+	Marketplace syncs (Shopify) do not set the Sales Order contact fields; the buyer's phone
+	is only on the Marketplace Order. Read without per-user permissions for the same reason
+	as ``_address_prefill``.
+	"""
+	phone = cstr(order.contact_mobile or order.contact_phone).strip()
+	marketplace_order = order.get("custom_marketplace_order")
+	if phone or not marketplace_order:
+		return phone
+	return cstr(frappe.db.get_value("Marketplace Order", marketplace_order, "customer_phone_number")).strip()
 
 
 def get_sales_order_shipment(sales_order_name):
