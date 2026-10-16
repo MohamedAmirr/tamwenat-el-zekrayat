@@ -80,7 +80,21 @@ def get_sales_order_shipment(sales_order_name):
 	frappe.has_permission("Sales Order", "read", doc=sales_order_name, throw=True)
 	if not frappe.has_permission("Bosta Shipment", "read"):
 		return None
-	fields = ["name", "status", "tracking_number", "bosta_state_value"]
+	fields = [
+		"name",
+		"status",
+		"tracking_number",
+		"bosta_state_value",
+		"bosta_state_code",
+		"last_bosta_status_on",
+		"receiver_name",
+		"receiver_phone",
+		"city",
+		"district_id",
+		"address_first_line",
+		"cod_amount",
+		"delivery_note",
+	]
 	for active, status_filter in ((True, ["!=", "Canceled"]), (False, "Canceled")):
 		rows = frappe.get_list(
 			"Bosta Shipment",
@@ -96,9 +110,26 @@ def get_sales_order_shipment(sales_order_name):
 				"status": row.status,
 				"tracking_number": row.tracking_number or "",
 				"bosta_state": row.bosta_state_value or "",
+				"bosta_state_code": row.bosta_state_code or 0,
 				"active": active,
+				"last_update": cstr(row.last_bosta_status_on) if row.last_bosta_status_on else "",
+				"receiver_name": row.receiver_name or "",
+				"receiver_phone": row.receiver_phone or "",
+				"city": row.city or "",
+				"district_id": row.district_id or "",
+				"address_first_line": row.address_first_line or "",
+				"cod_amount": flt(row.cod_amount),
+				"delivery_note": row.delivery_note or "",
+				"delivery_note_status": _readable_delivery_note_status(row.delivery_note),
 			}
 	return None
+
+
+def _readable_delivery_note_status(delivery_note):
+	"""The Delivery Note's status, only when the caller may read that Delivery Note."""
+	if not delivery_note or not frappe.has_permission("Delivery Note", "read", doc=delivery_note):
+		return ""
+	return frappe.db.get_value("Delivery Note", delivery_note, "status") or ""
 
 
 def _address_prefill(order):
@@ -183,6 +214,7 @@ def create_bosta_shipment(
 			"city": city,
 			"district_id": district_id,
 			"address_first_line": address_first_line,
+			"cod_amount": cod,
 			"bosta_requested_on": now_datetime(),
 		}
 	)
@@ -318,6 +350,7 @@ def _resume_existing(shipment, order, expected_cod=None, details=None):
 		# Nothing reached Bosta, so the operator may correct the receiver or address.
 		shipment.update(details or {})
 		shipment.status = "Pending Bosta"
+		shipment.cod_amount = cod
 		shipment.bosta_requested_on = now_datetime()
 		save_as_system(shipment)
 		frappe.db.commit()
@@ -375,6 +408,7 @@ def _send_to_bosta(shipment, sales_order, cod):
 		frappe.db.commit()
 		frappe.throw(shipment.last_error)
 
+	shipment.cod_amount = flt(cod, 2)
 	_link_bosta_delivery(shipment, data)
 	frappe.db.commit()
 	return _create_delivery_note(shipment, sales_order)
