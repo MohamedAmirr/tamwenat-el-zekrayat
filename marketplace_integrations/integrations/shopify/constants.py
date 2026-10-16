@@ -127,6 +127,9 @@ SHOPIFY_ORDERS_PAGE_SIZE = 100
 SHOPIFY_ORDER_LINE_ITEMS_PAGE_SIZE = 100
 SHOPIFY_ORDER_TRANSACTIONS_PAGE_SIZE = 50
 SHOPIFY_ORDER_REFUNDS_PAGE_SIZE = 50
+# An order normally has one shipping line (one per fulfilment origin at most);
+# 10 is generous headroom, and a larger order is marked Error by the mapper (#156).
+SHOPIFY_ORDER_SHIPPING_LINES_PAGE_SIZE = 10
 
 # The 5 order/refund webhook topics that trigger a canonical refetch
 # (#109 decision 4) - a subset of SHOPIFY_WEBHOOK_TOPICS above. Single source

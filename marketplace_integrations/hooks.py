@@ -290,6 +290,8 @@ fixtures = [
 				[
 					"Sales Order Item-rate-precision",
 					"Sales Order Item-price_list_rate-precision",
+					"Sales Order-contact_mobile-read_only",
+					"Sales Order-contact_mobile-allow_on_submit",
 				],
 			]
 		],
@@ -307,6 +309,8 @@ fixtures = [
 				[
 					"Sales Order-custom_marketplace_order",
 					"Sales Order-custom_marketplace_platform",
+					"Sales Order-custom_bosta_delivery_tab",
+					"Sales Order-custom_bosta_delivery_html",
 					"Payment Entry-custom_marketplace_order",
 					"Payment Entry-custom_marketplace_transaction_id",
 				],

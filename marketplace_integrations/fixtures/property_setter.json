@@ -30,5 +30,37 @@
   "property_type": "Int",
   "row_name": null,
   "value": "6"
+ },
+ {
+  "default_value": null,
+  "doc_type": "Sales Order",
+  "docstatus": 0,
+  "doctype": "Property Setter",
+  "doctype_or_field": "DocField",
+  "field_name": "contact_mobile",
+  "is_system_generated": 0,
+  "modified": "2026-10-16 12:00:00.000000",
+  "module": "Marketplace Integrations",
+  "name": "Sales Order-contact_mobile-read_only",
+  "property": "read_only",
+  "property_type": "Check",
+  "row_name": null,
+  "value": "0"
+ },
+ {
+  "default_value": null,
+  "doc_type": "Sales Order",
+  "docstatus": 0,
+  "doctype": "Property Setter",
+  "doctype_or_field": "DocField",
+  "field_name": "contact_mobile",
+  "is_system_generated": 0,
+  "modified": "2026-10-16 12:00:00.000000",
+  "module": "Marketplace Integrations",
+  "name": "Sales Order-contact_mobile-allow_on_submit",
+  "property": "allow_on_submit",
+  "property_type": "Check",
+  "row_name": null,
+  "value": "1"
  }
 ]

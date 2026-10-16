@@ -14,6 +14,7 @@ from marketplace_integrations.integrations.shopify.constants import (
 	SHOPIFY_ORDER_LINE_ITEMS_PAGE_SIZE,
 	SHOPIFY_ORDER_RECONCILE_OVERLAP_MINUTES,
 	SHOPIFY_ORDER_REFUNDS_PAGE_SIZE,
+	SHOPIFY_ORDER_SHIPPING_LINES_PAGE_SIZE,
 	SHOPIFY_ORDER_TRANSACTIONS_PAGE_SIZE,
 	SHOPIFY_ORDERS_PAGE_SIZE,
 )
@@ -29,7 +30,7 @@ MAX_ORDER_IMPORT_DAYS = 60
 _ORDER_IMPORT_RQ_JOB_PREFIX = "marketplace-shopify-order-import"
 
 _ORDER_QUERY = """
-query ShopifyOrder($id: ID!, $lineItemsFirst: Int!, $transactionsFirst: Int!, $refundsFirst: Int!, $refundLineItemsFirst: Int!) {
+query ShopifyOrder($id: ID!, $lineItemsFirst: Int!, $transactionsFirst: Int!, $refundsFirst: Int!, $refundLineItemsFirst: Int!, $shippingLinesFirst: Int!) {
   order(id: $id) {
     id
     name
@@ -40,6 +41,15 @@ query ShopifyOrder($id: ID!, $lineItemsFirst: Int!, $transactionsFirst: Int!, $r
     cancelReason
     closed
     closedAt
+    requiresShipping
+    retailLocation { id name }
+    shippingLines(first: $shippingLinesFirst) {
+      pageInfo { hasNextPage }
+      nodes {
+        title code source carrierIdentifier deliveryCategory phone
+        originalPriceSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }
+      }
+    }
     displayFinancialStatus
     displayFulfillmentStatus
     currencyCode
@@ -56,6 +66,9 @@ query ShopifyOrder($id: ID!, $lineItemsFirst: Int!, $transactionsFirst: Int!, $r
       address2
       city
       province
+      provinceCode
+      countryCodeV2
+      phone
       country
       zip
       latitude
@@ -67,6 +80,9 @@ query ShopifyOrder($id: ID!, $lineItemsFirst: Int!, $transactionsFirst: Int!, $r
       address2
       city
       province
+      provinceCode
+      countryCodeV2
+      phone
       country
       zip
       latitude
@@ -151,6 +167,7 @@ def import_order(account, order_gid):
 			"transactionsFirst": SHOPIFY_ORDER_TRANSACTIONS_PAGE_SIZE,
 			"refundsFirst": SHOPIFY_ORDER_REFUNDS_PAGE_SIZE,
 			"refundLineItemsFirst": SHOPIFY_ORDER_LINE_ITEMS_PAGE_SIZE,
+			"shippingLinesFirst": SHOPIFY_ORDER_SHIPPING_LINES_PAGE_SIZE,
 		},
 	)
 	order = data.get("order")

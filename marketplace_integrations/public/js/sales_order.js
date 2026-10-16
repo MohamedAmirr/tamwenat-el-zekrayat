@@ -24,6 +24,13 @@
 
 	const BOSTA_SHIPMENT_METHOD = "marketplace_integrations.api.bosta_shipments.get_sales_order_shipment";
 	const BOSTA_LABEL_METHOD = "marketplace_integrations.api.bosta_shipments.print_a4_arabic_label";
+	const BOSTA_REFRESH_METHOD = "marketplace_integrations.api.bosta_shipments.refresh_shipment";
+	const BOSTA_EDIT_METHOD = "marketplace_integrations.api.bosta_shipments.edit_shipment";
+	// Bosta's documented states in which a delivery may be edited (OpenAPI, "Business update delivery").
+	const BOSTA_EDITABLE_STATES = [10, 11, 20, 21, 22, 24, 30, 41, 47];
+	const BOSTA_CANCEL_METHOD = "marketplace_integrations.api.bosta_shipments.cancel_shipment";
+	const BOSTA_DELIVERED_STATE = 45;
+	const BOSTA_TAB_FIELD = "custom_bosta_delivery_html";
 
 	// Colours for the Bosta Shipment doctype's own statuses; the status text is the doctype's value.
 	const BOSTA_STATUS_COLORS = {
@@ -45,11 +52,9 @@
 		);
 	}
 
-	function add_create_bosta_button(frm) {
-		frm.add_custom_button(__("Create Bosta Shipment"), () => {
-			frappe.call({ method: BOSTA_DEFAULTS_METHOD, type: "POST", args: { sales_order: frm.doc.name } }).then((r) => {
-				show_bosta_dialog(frm, r.message || {});
-			});
+	function start_create_bosta_shipment(frm) {
+		frappe.call({ method: BOSTA_DEFAULTS_METHOD, type: "POST", args: { sales_order: frm.doc.name } }).then((r) => {
+			show_bosta_dialog(frm, r.message || {});
 		});
 	}
 
@@ -70,38 +75,174 @@
 	// the file when the server answers. window.open with "noopener" returns null, so the
 	// opener is cut by hand instead. If the browser blocks the window, the URL is offered as
 	// a link; if the call fails or returns no file, the blank window is closed.
-	function add_bosta_label_button(frm, shipment) {
-		frm.add_custom_button(__("Print Bosta A4 Label"), () => {
-			const label_window = window.open("", "_blank");
-			if (label_window) label_window.opener = null;
-			const close = () => {
-				if (label_window) label_window.close();
-			};
+	function print_bosta_label(shipment) {
+		const label_window = window.open("", "_blank");
+		if (label_window) label_window.opener = null;
+		const close = () => {
+			if (label_window) label_window.close();
+		};
+		return frappe
+			.call({
+				method: BOSTA_LABEL_METHOD,
+				type: "POST",
+				args: { shipment: shipment.name },
+				freeze: true,
+				freeze_message: __("Preparing Bosta label..."),
+			})
+			.then((r) => {
+				const label = r.message || {};
+				if (!label.file_url) return close();
+				if (label_window) {
+					label_window.location.href = label.file_url;
+					return;
+				}
+				const escape = frappe.utils.escape_html;
+				frappe.msgprint({
+					title: __("Bosta A4 Label"),
+					message: `<a href="${escape(label.file_url)}" target="_blank" rel="noopener">${escape(
+						__("Open the label")
+					)}</a>`,
+					indicator: "green",
+				});
+			})
+			.catch(close);
+	}
+
+	// Refresh from Bosta (#271): the server reads the delivery and applies its state. A Bosta
+	// error is thrown by the server (already escaped), shown by Frappe, and nothing is stored.
+	function refresh_bosta_shipment(frm, shipment) {
+		return frappe
+			.call({
+				method: BOSTA_REFRESH_METHOD,
+				type: "POST",
+				args: { shipment: shipment.name },
+				freeze: true,
+				freeze_message: __("Reading the delivery from Bosta..."),
+			})
+			.then(() => {
+				frappe.show_alert({ message: __("Bosta state refreshed."), indicator: "green" });
+				return frm.reload_doc();
+			})
+			.catch(() => {});
+	}
+
+	// Cancel Bosta Shipment (#272). Nothing is sent before the confirm is accepted; the confirm
+	// text is HTML, so the tracking number and Delivery Note name are escaped into it.
+	function cancel_bosta_shipment(frm, shipment) {
+		const escape = frappe.utils.escape_html;
+		const message = escape(
+			__("Cancel Bosta delivery {0}? Bosta will terminate it and Delivery Note {1} will be cancelled. This cannot be undone.", [
+				shipment.tracking_number,
+				shipment.delivery_note || "-",
+			])
+		);
+		frappe.confirm(message, () => {
 			frappe
 				.call({
-					method: BOSTA_LABEL_METHOD,
+					method: BOSTA_CANCEL_METHOD,
 					type: "POST",
 					args: { shipment: shipment.name },
 					freeze: true,
-					freeze_message: __("Preparing Bosta label..."),
+					freeze_message: __("Cancelling the Bosta delivery..."),
 				})
 				.then((r) => {
-					const label = r.message || {};
-					if (!label.file_url) return close();
-					if (label_window) {
-						label_window.location.href = label.file_url;
-						return;
+					const result = r.message || {};
+					if (result.canceled) {
+						frappe.show_alert({ message: __("Bosta delivery cancelled."), indicator: "green" });
+					} else {
+						frappe.msgprint({
+							title: __("Bosta Cancel"),
+							message: escape(
+								__("Bosta terminated the delivery, but ERPNext could not cancel the Delivery Note. The shipment stays active and is listed in Needs Attention; the cancellation is retried automatically.")
+							),
+							indicator: "orange",
+						});
 					}
-					const escape = frappe.utils.escape_html;
-					frappe.msgprint({
-						title: __("Bosta A4 Label"),
-						message: `<a href="${escape(label.file_url)}" target="_blank" rel="noopener">${escape(
-							__("Open the label")
-						)}</a>`,
-						indicator: "green",
-					});
+					return frm.reload_doc();
 				})
-				.catch(close);
+				// A server error already showed Frappe's message; nothing changed.
+				.catch(() => {});
+		});
+	}
+
+	function bosta_row(label, value_html) {
+		const escape = frappe.utils.escape_html;
+		return `<tr><th style="width: 30%">${escape(label)}</th><td>${value_html}</td></tr>`;
+	}
+
+	function bosta_button(action, label) {
+		const escape = frappe.utils.escape_html;
+		return `<button class="btn btn-default btn-sm" style="margin-right: 8px" data-bosta-action="${escape(action)}">${escape(label)}</button>`;
+	}
+
+	// The Bosta Delivery tab. Every stored or remote value is escaped. `options` is
+	// { create, failed }: create = the user is a creator and may start a shipment; failed =
+	// the shipment read failed (so "No Bosta shipment" would be a guess).
+	function bosta_tab_html(shipment, options) {
+		const escape = frappe.utils.escape_html;
+		const { create, failed } = options || {};
+		const buttons = [];
+		let html = "";
+		if (!shipment) {
+			html += `<p class="text-muted">${escape(
+				failed ? __("Could not load the Bosta shipment.") : __("No Bosta shipment")
+			)}</p>`;
+			if (create) buttons.push(bosta_button("create", __("Create Bosta Shipment")));
+		} else {
+			const text = (value) => (value ? escape(value) : "");
+			const address = [shipment.address_first_line, shipment.city].filter(Boolean).join(", ");
+			const district = shipment.district_id
+				? `${escape(__("District ID"))}: ${escape(shipment.district_id)}`
+				: "";
+			let delivery_note = "";
+			if (shipment.delivery_note) {
+				const href = `/app/delivery-note/${encodeURIComponent(shipment.delivery_note)}`;
+				delivery_note = `<a href="${escape(href)}">${escape(shipment.delivery_note)}</a>`;
+				if (shipment.delivery_note_status) delivery_note += ` (${escape(__(shipment.delivery_note_status))})`;
+			}
+			const cod = escape(format_currency(shipment.cod_amount || 0));
+			const last_update = shipment.last_update ? escape(frappe.datetime.str_to_user(shipment.last_update)) : "";
+			html += `<table class="table table-bordered"><tbody>`;
+			html += bosta_row(__("Status"), text(__(shipment.status)));
+			html += bosta_row(__("Tracking Number"), text(shipment.tracking_number));
+			html += bosta_row(__("Bosta State"), text(shipment.bosta_state));
+			html += bosta_row(__("Last Bosta Update"), last_update);
+			html += bosta_row(__("COD Sent"), cod);
+			html += bosta_row(__("Receiver"), [text(shipment.receiver_name), text(shipment.receiver_phone)].filter(Boolean).join(" - "));
+			html += bosta_row(__("Address"), [text(address), district].filter(Boolean).join("<br>"));
+			html += bosta_row(__("Delivery Note"), delivery_note);
+			html += `</tbody></table>`;
+			if (shipment.active && shipment.tracking_number) {
+				buttons.push(bosta_button("print", __("Print A4 Label")));
+				if (create) buttons.push(bosta_button("refresh", __("Refresh from Bosta")));
+				if (create && BOSTA_EDITABLE_STATES.includes(shipment.bosta_state_code)) {
+					buttons.push(bosta_button("edit", __("Edit Bosta Shipment")));
+				}
+				if (create && shipment.bosta_state_code !== BOSTA_DELIVERED_STATE) {
+					buttons.push(bosta_button("cancel", __("Cancel Bosta Shipment")));
+				}
+			}
+			// A Bosta Failed shipment without a tracking number keeps Create: that retry
+			// (search Bosta, then send) is what the server resumes on the same row.
+			if (create && (!shipment.active || (shipment.status === "Bosta Failed" && !shipment.tracking_number))) {
+				buttons.push(bosta_button("create", __("Create Bosta Shipment")));
+			}
+		}
+		return html + (buttons.length ? `<p>${buttons.join("")}</p>` : "");
+	}
+
+	// Draws the tab and wires its buttons (delegated, so a redraw never stacks handlers).
+	function render_bosta_tab(frm, shipment, options) {
+		const field = frm.get_field && frm.get_field(BOSTA_TAB_FIELD);
+		if (!field || !field.$wrapper) return;
+		field.$wrapper.html(bosta_tab_html(shipment, options));
+		field.$wrapper.off("click.mi_bosta").on("click.mi_bosta", "[data-bosta-action]", (event) => {
+			const action = event.currentTarget.getAttribute("data-bosta-action");
+			if (action === "create") start_create_bosta_shipment(frm);
+			else if (action === "print") print_bosta_label(shipment);
+			else if (action === "refresh") refresh_bosta_shipment(frm, shipment);
+			else if (action === "cancel") cancel_bosta_shipment(frm, shipment);
+			else if (action === "edit") show_bosta_edit_dialog(frm, shipment);
 		});
 	}
 
@@ -109,41 +250,38 @@
 	// (Form.refresh), so nothing here is remembered: it is all added again each time. The
 	// current shipment is read from the server; a reply that arrives after a newer refresh
 	// (or for another document) is dropped, so the indicator is never added twice. A user
-	// who cannot read Bosta Shipment never asks and sees no shipment details. If the read
-	// fails, Create stays available to creators (the server still allows one active
-	// shipment per order). A Bosta Failed shipment without a tracking number keeps Create:
-	// that retry (search Bosta, then send) is what the server resumes on the same row.
+	// who cannot read Bosta Shipment never asks and sees nothing in the tab. If the read
+	// fails, Create stays available to creators in the tab (the server still allows one
+	// active shipment per order).
 	function add_bosta_shipment_ux(frm) {
 		if (!frm.doc || !frm.doc.name || frm.doc.docstatus < 1) return Promise.resolve();
 		const request = (frm.__mi_bosta_request = (frm.__mi_bosta_request || 0) + 1);
 		const sales_order = frm.doc.name;
 		const create = can_create_bosta_shipment(frm);
 		if (!(frappe.model && frappe.model.can_read("Bosta Shipment"))) {
-			if (create) add_create_bosta_button(frm);
+			const field = frm.get_field && frm.get_field(BOSTA_TAB_FIELD);
+			if (field && field.$wrapper) field.$wrapper.html("");
 			return Promise.resolve();
 		}
+		let failed = false;
 		return frappe
 			.call({ method: BOSTA_SHIPMENT_METHOD, type: "POST", args: { sales_order }, silent: true })
 			.then(
 				(r) => r.message || null,
-				() => null
+				() => {
+					failed = true;
+					return null;
+				}
 			)
 			.then((shipment) => {
 				if (request !== frm.__mi_bosta_request || frm.doc.name !== sales_order) return;
-				if (shipment && shipment.active) {
-					if (frm.dashboard) {
-						frm.dashboard.add_indicator(
-							bosta_indicator_html(shipment),
-							BOSTA_STATUS_COLORS[shipment.status] || "gray"
-						);
-					}
-					if (shipment.tracking_number) add_bosta_label_button(frm, shipment);
-					if (create && shipment.status === "Bosta Failed" && !shipment.tracking_number) {
-						add_create_bosta_button(frm);
-					}
-				} else if (create) {
-					add_create_bosta_button(frm);
+				if (shipment && shipment.active && frm.dashboard) {
+					frm.dashboard.add_indicator(
+						bosta_indicator_html(shipment),
+						BOSTA_STATUS_COLORS[shipment.status] || "gray"
+					);
 				}
+				render_bosta_tab(frm, shipment, { create, failed });
 			});
 	}
 
@@ -180,24 +318,16 @@
 	}
 
 	function show_bosta_dialog(frm, defaults) {
-		const state = { cities: [], error: false, loading_districts: 0 };
-		const dialog = new frappe.ui.Dialog({
+		return open_bosta_location_dialog({
 			title: __("Create Bosta Shipment"),
-			fields: [
-				{ fieldtype: "HTML", fieldname: "cod_note", options: bosta_cod_note_html(defaults) },
-				{ fieldtype: "HTML", fieldname: "lists_error", options: "", hidden: 1 },
-				{ fieldtype: "Button", fieldname: "retry_lists", label: __("Retry"), hidden: 1, click: () => load_cities(false) },
+			primary_action_label: __("Create Shipment"),
+			defaults,
+			intro_fields: [{ fieldtype: "HTML", fieldname: "cod_note", options: bosta_cod_note_html(defaults) }],
+			receiver_fields: [
 				{ fieldname: "receiver_name", fieldtype: "Data", label: __("Receiver Name"), reqd: 1, default: defaults.receiver_name },
 				{ fieldname: "receiver_phone", fieldtype: "Data", label: __("Receiver Phone"), reqd: 1, default: defaults.receiver_phone },
-				// Autocomplete: searchable (hundreds of districts), shows the name label and stores the Bosta ID.
-				{ fieldname: "city", fieldtype: "Autocomplete", label: __("City"), reqd: 1, max_items: 1000, options: [], change: on_city_change },
-				{ fieldname: "district", fieldtype: "Autocomplete", label: __("District"), reqd: 1, max_items: 1000, options: [] },
-				{ fieldname: "address_first_line", fieldtype: "Small Text", label: __("Address First Line"), reqd: 1, default: defaults.address_first_line },
 			],
-			primary_action_label: __("Create Shipment"),
-			primary_action(values) {
-				const city = state.cities.find((c) => c.id === values.city);
-				if (!city || !values.district) return;
+			submit(dialog, values, city) {
 				dialog.hide();
 				frappe.call({
 					method: BOSTA_CREATE_METHOD,
@@ -214,6 +344,85 @@
 					freeze: true,
 					freeze_message: __("Creating Bosta shipment..."),
 				}).then(() => frm.reload_doc());
+			},
+		});
+	}
+
+	// Edit Bosta Shipment (#273): the same city / district pickers as the create dialog, with
+	// only the receiver phone and address. The values shown are stored text, so they only
+	// ever go into field defaults (never HTML). Nothing is sent until the confirm is accepted.
+	function show_bosta_edit_dialog(frm, shipment) {
+		const defaults = {
+			address_city: shipment.city,
+			district_id: shipment.district_id,
+			address_first_line: shipment.address_first_line,
+		};
+		const note = __(
+			"This updates Bosta and the Bosta Shipment only. The Sales Order address and Shopify are not changed; update them by hand if needed."
+		);
+		return open_bosta_location_dialog({
+			title: __("Edit Bosta Shipment"),
+			primary_action_label: __("Update Shipment"),
+			defaults,
+			intro_fields: [
+				{ fieldtype: "HTML", fieldname: "edit_note", options: `<p>${frappe.utils.escape_html(note)}</p>` },
+			],
+			receiver_fields: [
+				{ fieldname: "receiver_phone", fieldtype: "Data", label: __("Receiver Phone"), reqd: 1, default: shipment.receiver_phone },
+			],
+			submit(dialog, values, city) {
+				const message = frappe.utils.escape_html(
+					__("Update Bosta delivery {0}? {1}", [shipment.tracking_number, note])
+				);
+				frappe.confirm(message, () => {
+					dialog.hide();
+					frappe
+						.call({
+							method: BOSTA_EDIT_METHOD,
+							type: "POST",
+							args: {
+								shipment: shipment.name,
+								receiver_phone: values.receiver_phone,
+								city: city.name,
+								district_id: values.district,
+								address_first_line: values.address_first_line,
+							},
+							freeze: true,
+							freeze_message: __("Updating the Bosta delivery..."),
+						})
+						.then(() => {
+							frappe.show_alert({ message: __("Bosta delivery updated."), indicator: "green" });
+							return frm.reload_doc();
+						})
+						// A server error already showed Frappe's message; nothing changed.
+						.catch(() => {});
+				});
+			},
+		});
+	}
+
+	// The dialog shell shared by Create and Edit: leading fields, receiver fields, then the
+	// Bosta city / district pickers and the address first line. `submit(dialog, values, city)`
+	// runs once a city and district are chosen.
+	function open_bosta_location_dialog({ title, primary_action_label, defaults, intro_fields, receiver_fields, submit }) {
+		const state = { cities: [], error: false, loading_districts: 0 };
+		const dialog = new frappe.ui.Dialog({
+			title,
+			fields: [
+				...intro_fields,
+				{ fieldtype: "HTML", fieldname: "lists_error", options: "", hidden: 1 },
+				{ fieldtype: "Button", fieldname: "retry_lists", label: __("Retry"), hidden: 1, click: () => load_cities(false) },
+				...receiver_fields,
+				// Autocomplete: searchable (hundreds of districts), shows the name label and stores the Bosta ID.
+				{ fieldname: "city", fieldtype: "Autocomplete", label: __("City"), reqd: 1, max_items: 1000, options: [], change: on_city_change },
+				{ fieldname: "district", fieldtype: "Autocomplete", label: __("District"), reqd: 1, max_items: 1000, options: [] },
+				{ fieldname: "address_first_line", fieldtype: "Small Text", label: __("Address First Line"), reqd: 1, default: defaults.address_first_line },
+			],
+			primary_action_label,
+			primary_action(values) {
+				const city = state.cities.find((c) => c.id === values.city);
+				if (!city || !values.district) return;
+				submit(dialog, values, city);
 			},
 			secondary_action_label: __("Refresh Bosta Lists"),
 			secondary_action() {
@@ -261,6 +470,11 @@
 					if (request !== state.loading_districts) return;
 					dialog.fields_dict.district.set_data(location_options(r.message || []));
 					set_ready(true);
+					// Edit starts from the shipment's current district when it is in this city.
+					const current = defaults.district_id;
+					if (current && !dialog.get_value("district") && (r.message || []).some((d) => d.id === current)) {
+						return dialog.set_value("district", current);
+					}
 				})
 				.catch(() => {
 					if (request === state.loading_districts) fail(__("districts"));
@@ -539,9 +753,11 @@
 			add_bosta_shipment_ux,
 			bosta_cod_note_html,
 			bosta_indicator_html,
+			bosta_tab_html,
 			location_options,
 			match_city,
 			show_bosta_dialog,
+			show_bosta_edit_dialog,
 			blocked_message,
 			can_offer_cancel,
 			consume_close_request,

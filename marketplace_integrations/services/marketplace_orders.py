@@ -65,6 +65,7 @@ JSON_ORDER_FIELDS = (
 	"latest_payload",
 	"billing_address",
 	"shipping_address",
+	"shipping_lines",
 	"payment_transactions",
 	"refunds",
 )
