@@ -178,6 +178,10 @@ def cancel_bosta_shipment(shipment_name):
 	lock_and_load_sales_order(shipment.sales_order)
 	shipment.reload()
 	_refuse_cancel_locally(shipment)
+	if shipment.bosta_terminated_on or shipment.bosta_state_code in (48, 49):
+		# Bosta already terminated it (an earlier click or a reported state): do not send
+		# the DELETE again, only finish the local side.
+		return _finish_cancel_safely(shipment)
 	client = BostaClient()
 	client.ensure_ready()
 	# Release the Sales Order lock before the HTTP call.
@@ -186,10 +190,12 @@ def cancel_bosta_shipment(shipment_name):
 	try:
 		response = client.terminate_delivery(shipment.tracking_number)
 	except Exception:
+		# The recovery below reports the outcome; drop the client's own error popup.
+		frappe.clear_messages()
 		return _finish_after_unknown_outcome(shipment)
 	if not is_success_response(response):
 		frappe.throw(escape_html(client.error_message(response)))
-	return _finish_cancel(shipment)
+	return _finish_cancel_safely(shipment)
 
 
 def _refuse_cancel_locally(shipment):
@@ -218,16 +224,53 @@ def _finish_after_unknown_outcome(shipment):
 	except Exception:
 		frappe.db.rollback()
 		shipment = None
+	# Drop the client's own "Failed to reach Bosta" popups; the outcome is reported below.
+	frappe.clear_messages()
 	if shipment and shipment.status == CANCELED:
 		return {"canceled": True, "delivery_note_error": ""}
 	if shipment and shipment.bosta_state_code in (48, 49):
-		return _finish_cancel(shipment)
+		return _finish_cancel_safely(shipment)
 	frappe.throw(
 		_(
 			"Could not confirm that Bosta terminated the delivery. Nothing was changed here. "
 			"Check the delivery in Bosta before trying again."
 		)
 	)
+
+
+def _finish_cancel_safely(shipment):
+	"""``_finish_cancel``, but Bosta has already terminated the delivery, so a failure here
+	must not be lost: record it on the shipment so the poll's retry picks it up."""
+	try:
+		return _finish_cancel(shipment)
+	except Exception as exc:
+		frappe.db.rollback()
+		frappe.log_error(
+			frappe.get_traceback(with_context=False),
+			f"Bosta cancellation could not be finished for {shipment.name}",
+		)
+		error = _(
+			"Bosta terminated the delivery, but the cancellation could not be finished here: {0}"
+		).format(frappe.utils.strip_html(cstr(exc))[:300])
+		try:
+			frappe.db.set_value(
+				"Bosta Shipment",
+				shipment.name,
+				{"bosta_terminated_on": now_datetime(), "delivery_note_error": error},
+			)
+			frappe.db.commit()
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(
+				frappe.get_traceback(with_context=False),
+				f"Bosta cancellation failure could not be recorded for {shipment.name}",
+			)
+		frappe.throw(
+			_(
+				"Bosta terminated the delivery, but ERPNext could not finish the cancellation. "
+				"The Delivery Note cancel will be retried automatically."
+			)
+		)
 
 
 def _finish_cancel(shipment):

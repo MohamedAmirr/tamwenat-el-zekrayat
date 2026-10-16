@@ -275,7 +275,12 @@ with `delivery_note_error` (Needs Attention) and `retry_failed_cancellations` re
 the poll when the state is 49 **or** `bosta_terminated_on` is set. A network error has an
 unknown outcome: nothing is changed, then `refresh_shipment_state` reads the delivery back; a
 reported 48 (Terminated) or 49 finishes the local cancel, anything else (or a failed read)
-tells the user to verify in Bosta. The tab hides the button for non-creators, `Canceled`
+tells the user to verify in Bosta. When `bosta_terminated_on` is already set or the stored
+state is 48/49, a Cancel click skips the DELETE and only finishes locally. If that local finish
+itself fails after Bosta accepted, the failure is rolled back and logged, `bosta_terminated_on`
+and `delivery_note_error` are written best-effort so the poll retries it, and the user is told
+the cancel will be retried. The client's own "Failed to reach Bosta" popup is cleared on these
+recovery paths. The tab hides the button for non-creators, `Canceled`
 shipments, shipments without a tracking number and state 45 (the summary carries
 `bosta_state_code` for this). Not built: side effects for a webhook state 48, cancelling
 Sales Invoices, bulk cancel.
@@ -294,7 +299,8 @@ unverified). On success, under the Sales Order lock, only the Bosta Shipment fie
 updated (the legacy City ID / District Name are cleared). The Sales Order and its address,
 Addresses, any Marketplace Order and the Delivery Note are **not** changed, and nothing is pushed
 to Shopify: those must be updated by hand if needed. If recording fails after Bosta accepted,
-the local change is rolled back and the user is told Bosta has the change.
+the local change is rolled back and the user is told Bosta has the change. The same message is
+shown (and nothing written) when a webhook canceled the shipment while Bosta was updating.
 Once a shipment has a tracking number its receiver and address fields are locked for everyone
 (server `validate`, plus `read_only_depends_on` in the form) except the system write flag, so
 Edit is the only path; shipments without a tracking number stay editable and retryable.

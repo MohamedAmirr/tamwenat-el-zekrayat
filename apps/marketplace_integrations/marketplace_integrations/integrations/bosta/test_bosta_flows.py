@@ -120,6 +120,24 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		)
 		self.assertEqual(retried.status, "Completed")
 
+	def test_a_failed_shipment_shows_the_cod_that_was_sent_including_on_a_resend(self):
+		order = self.make_order(rate=500)
+		self.http.queue["create"].append(FakeResponse(400, {"success": False, "message": "bad"}))
+		with self.assertRaises(frappe.ValidationError):
+			self.create(order)
+		self.assertEqual(self.shipment_for(order).cod_amount, 500)
+
+		# An advance payment arrives; the re-send carries and records the new COD.
+		frappe.db.set_value("Sales Order", order.name, "advance_paid", 200)
+		frappe.db.commit()
+		self.http.queue["search"].append(FakeResponse(200, {"success": True, "data": []}))
+		self.http.queue["create"].append(FakeResponse(400, {"success": False, "message": "bad again"}))
+		with self.assertRaises(frappe.ValidationError):
+			self.create(order)
+
+		self.assertEqual(self.http.calls_of("create")[-1]["cod"], 300)
+		self.assertEqual(self.shipment_for(order).cod_amount, 300)
+
 	def test_network_exception_does_not_leave_the_shipment_pending(self):
 		order = self.make_order()
 		self.http.queue["create"].append(frappe.ValidationError("Failed to reach Bosta."))

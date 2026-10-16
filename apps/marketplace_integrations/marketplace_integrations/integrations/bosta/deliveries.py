@@ -196,6 +196,7 @@ def create_bosta_shipment(
 			"city": city,
 			"district_id": district_id,
 			"address_first_line": address_first_line,
+			"cod_amount": cod,
 			"bosta_requested_on": now_datetime(),
 		}
 	)
@@ -331,6 +332,7 @@ def _resume_existing(shipment, order, expected_cod=None, details=None):
 		# Nothing reached Bosta, so the operator may correct the receiver or address.
 		shipment.update(details or {})
 		shipment.status = "Pending Bosta"
+		shipment.cod_amount = cod
 		shipment.bosta_requested_on = now_datetime()
 		save_as_system(shipment)
 		frappe.db.commit()

@@ -171,6 +171,29 @@ class IntegrationTestBostaEdit(BostaFixtureMixin, IntegrationTestCase):
 		self.assertIn("Bosta accepted the change", str(caught.exception))
 		self._unchanged(order, shipment)
 
+	def test_a_shipment_canceled_while_bosta_was_updating_is_not_written(self):
+		order, shipment = self._live()
+		self.http.queue["update"].append(self._ok())
+		real_put = self.http.__call__
+
+		def cancel_meanwhile(method, url, **kwargs):
+			response = real_put(method, url, **kwargs)
+			frappe.db.set_value("Bosta Shipment", shipment.name, "status", "Canceled")
+			frappe.db.commit()
+			return response
+
+		with (
+			patch(
+				"marketplace_integrations.integrations.bosta.client.http_request",
+				side_effect=cancel_meanwhile,
+			),
+			self.assertRaises(frappe.ValidationError) as caught,
+		):
+			self._edit(shipment)
+
+		self.assertIn("canceled in the meantime", str(caught.exception))
+		self._unchanged(order, shipment)
+
 	# -- success ----------------------------------------------------------------------------
 
 	def test_success_updates_only_the_bosta_shipment(self):

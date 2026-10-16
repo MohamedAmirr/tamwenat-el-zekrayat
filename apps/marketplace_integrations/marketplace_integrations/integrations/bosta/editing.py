@@ -59,6 +59,8 @@ def edit_bosta_shipment(shipment_name, receiver_phone, city, district_id, addres
 		response = client.update_delivery(shipment.tracking_number, payload)
 	except Exception:
 		frappe.db.rollback()
+		# Replace the client's own "Failed to reach Bosta" popup with the clearer message.
+		frappe.clear_messages()
 		frappe.throw(_("Could not confirm that Bosta updated the delivery. {0}").format(_verify_hint()))
 	if not is_success_response(response):
 		frappe.throw(f"{escape_html(client.error_message(response))} {_verify_hint()}")
@@ -101,14 +103,9 @@ def _record_on_shipment(shipment, phone, city, district_id, first_line):
 	lock_and_load_sales_order(shipment.sales_order)
 	try:
 		shipment.reload()
-		shipment.receiver_phone = phone
-		shipment.city = city
-		shipment.district_id = district_id
-		# The legacy City ID / District Name pair must not coexist with a district ID.
-		shipment.city_id = ""
-		shipment.district_name = ""
-		shipment.address_first_line = first_line
-		save_as_system(shipment)
+		canceled = shipment.status == CANCELED
+		if not canceled:
+			_write_edit(shipment, phone, city, district_id, first_line)
 		frappe.db.commit()
 	except Exception:
 		frappe.db.rollback()
@@ -121,3 +118,21 @@ def _record_on_shipment(shipment, phone, city, district_id, first_line):
 				"ERPNext; enter the same receiver phone and address again or fix it by hand. See Error Log."
 			)
 		)
+	if canceled:
+		frappe.throw(
+			_(
+				"Bosta accepted the change, but this shipment was canceled in the meantime, "
+				"so ERPNext did not record it."
+			)
+		)
+
+
+def _write_edit(shipment, phone, city, district_id, first_line):
+	shipment.receiver_phone = phone
+	shipment.city = city
+	shipment.district_id = district_id
+	# The legacy City ID / District Name pair must not coexist with a district ID.
+	shipment.city_id = ""
+	shipment.district_name = ""
+	shipment.address_first_line = first_line
+	save_as_system(shipment)
