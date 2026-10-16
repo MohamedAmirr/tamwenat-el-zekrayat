@@ -7,6 +7,7 @@ import frappe
 from frappe.tests import IntegrationTestCase, UnitTestCase
 
 from marketplace_integrations.api import bosta_shipments
+from marketplace_integrations.integrations.bosta import deliveries
 from marketplace_integrations.marketplace_integrations.doctype.bosta_shipment.bosta_shipment import (
 	save_as_system,
 )
@@ -67,6 +68,15 @@ class IntegrationTestBostaShipmentSummary(BostaFixtureMixin, IntegrationTestCase
 				"tracking_number": "TRK-9",
 				"bosta_state": "Picked up",
 				"active": True,
+				"last_update": "",
+				"receiver_name": self._receiver(),
+				"receiver_phone": "01000000000",
+				"city": "Cairo",
+				"district_id": "district-id",
+				"address_first_line": "12 Example Street",
+				"cod_amount": 0,
+				"delivery_note": "",
+				"delivery_note_status": "",
 			},
 		)
 
@@ -75,7 +85,22 @@ class IntegrationTestBostaShipmentSummary(BostaFixtureMixin, IntegrationTestCase
 		self._shipment(order, "Pending Bosta")
 		self.assertEqual(
 			set(bosta_shipments.get_sales_order_shipment(order.name)),
-			{"name", "status", "tracking_number", "bosta_state", "active"},
+			{
+				"name",
+				"status",
+				"tracking_number",
+				"bosta_state",
+				"active",
+				"last_update",
+				"receiver_name",
+				"receiver_phone",
+				"city",
+				"district_id",
+				"address_first_line",
+				"cod_amount",
+				"delivery_note",
+				"delivery_note_status",
+			},
 		)
 
 	def test_only_canceled_returns_the_latest_canceled_as_inactive(self):
@@ -118,6 +143,41 @@ class IntegrationTestBostaShipmentSummary(BostaFixtureMixin, IntegrationTestCase
 			)
 			self.assertFalse(frappe.has_permission("Bosta Shipment", "read", user=users["Accounts User"]))
 			self.assertIsNone(self._as(users["Accounts User"], order))
+
+	def test_summary_carries_the_cod_update_time_and_delivery_note(self):
+		order = self.make_order(rate=150)
+		self.http.queue["create"].append(created())
+		self.create(order)
+		summary = bosta_shipments.get_sales_order_shipment(order.name)
+		shipment = self.shipment_for(order)
+		self.assertEqual(summary["cod_amount"], 150)
+		self.assertEqual(shipment.cod_amount, 150)
+		self.assertEqual(summary["delivery_note"], shipment.delivery_note)
+		self.assertEqual(summary["delivery_note_status"], "To Bill")
+		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "status"), "To Bill")
+
+		frappe.db.set_value("Bosta Shipment", shipment.name, "last_bosta_status_on", "2026-10-16 10:30:00")
+		self.assertTrue(
+			bosta_shipments.get_sales_order_shipment(order.name)["last_update"].startswith("2026-10-16 10:30")
+		)
+
+	def test_delivery_note_status_is_only_returned_to_users_who_can_read_it(self):
+		order = self.make_order()
+		self.http.queue["create"].append(created())
+		self.create(order)
+		reader = self.make_user("Stock User")
+		self.assertTrue(frappe.has_permission("Delivery Note", "read", user=reader))
+		self.assertEqual(self._as(reader, order)["delivery_note_status"], "To Bill")
+
+		real = frappe.has_permission
+
+		def deny_delivery_notes(doctype, *args, **kwargs):
+			return False if doctype == "Delivery Note" else real(doctype, *args, **kwargs)
+
+		with patch.object(deliveries.frappe, "has_permission", side_effect=deny_delivery_notes):
+			hidden = self._as(reader, order)
+		self.assertTrue(hidden["delivery_note"])
+		self.assertEqual(hidden["delivery_note_status"], "")
 
 	def test_a_user_who_cannot_read_the_sales_order_is_refused(self):
 		order = self.make_order()

@@ -33,6 +33,7 @@
   "delivery_note_error",
   "delivery_note_error_at",
   "bosta_requested_on",
+  "cod_amount",
   "active_sales_order"
  ],
  "fields": [
@@ -235,6 +236,13 @@
    "fieldname": "bosta_requested_on",
    "fieldtype": "Datetime",
    "label": "Bosta Requested On",
+   "read_only": 1
+  },
+  {
+   "description": "The COD sent to Bosta when the delivery was created.",
+   "fieldname": "cod_amount",
+   "fieldtype": "Currency",
+   "label": "COD Amount",
    "read_only": 1
   }
  ],

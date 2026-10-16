@@ -21,6 +21,9 @@ from marketplace_integrations.integrations.bosta.deliveries import (
 	get_sales_order_shipment as _get_sales_order_shipment,
 )
 from marketplace_integrations.integrations.bosta.labels import create_a4_arabic_label
+from marketplace_integrations.integrations.bosta.statuses import (
+	refresh_shipment_state as _refresh_shipment_state,
+)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -73,6 +76,12 @@ def create_shipment(
 def check_shipment(shipment: str):
 	"""Resolve a stuck Bosta Shipment by searching Bosta for its business reference."""
 	return _check_bosta_shipment(shipment)
+
+
+@frappe.whitelist(methods=["POST"])
+def refresh_shipment(shipment: str):
+	"""Read the shipment's current state from Bosta and apply it (creator roles only)."""
+	return _refresh_shipment_state(shipment)
 
 
 @frappe.whitelist(methods=["POST"])

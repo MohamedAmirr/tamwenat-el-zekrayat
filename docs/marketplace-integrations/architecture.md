@@ -222,31 +222,43 @@ Prefill reads Address / Marketplace Order values without permission checks, afte
 The API key is sent to the public `/cities` endpoints too (unverified whether Bosta needs it).
 The legacy City ID / District Name validation path is kept only for old `Bosta Failed` rows.
 
-**Shipment status on the Sales Order (#246).** `api.bosta_shipments.get_sales_order_shipment`
-(POST) returns the order's current shipment summary: `name`, `status`, `tracking_number`,
-`bosta_state` and `active`. It needs read on the Sales Order (else a
-permission error) and on Bosta Shipment (else it returns nothing, so the form shows no
-shipment details); it reads with the caller's permissions. The active shipment (status not
-`Canceled`; the unique `active_sales_order` allows at most one) wins; if there is none, the
-latest `Canceled` one is returned with `active` false; otherwise nothing. `sales_order.js`
-asks on every refresh (the form clears its buttons and dashboard indicators each time, and a
-reply that arrives after a newer refresh is dropped). An active shipment shows a dashboard
-indicator (status, tracking number, Bosta state, with a link to the shipment; the colour is
-chosen from the doctype's status) and, once it has a tracking number, a **Print Bosta A4
-Label** button (opened in a window created inside the click so popup blockers allow it; if the
-browser blocks it the URL is offered as a link); the **Create Bosta Shipment** button is then
-not offered, except for a `Bosta Failed` shipment without a tracking number (see below). With no active
-shipment (none, or the latest Canceled) Create is offered again. Create stays creator-only
-(Sales Manager, Stock User, System Manager); the indicator and label button follow read
-permission. A user who cannot read Bosta Shipment triggers no request. If the read fails,
-creators still get Create (the server still enforces one active shipment). A `Bosta Failed`
-shipment without a tracking number keeps **Create** for creators: it resumes that same row
-(search Bosta, then send). If Bosta has no delivery for it, the receiver and address typed in
-the dialog replace the row's stored values, so an operator can fix a bad address. `Pending Bosta` (after 5 minutes), `Bosta Created` and
+**Bosta Delivery tab on the Sales Order (#246, #271).** Two fixture Custom Fields on Sales
+Order (`custom_bosta_delivery_tab`, shown when `docstatus >= 1`, and the HTML field
+`custom_bosta_delivery_html`) hold the tab; a draft does not show it.
+`api.bosta_shipments.get_sales_order_shipment` (POST) returns the order's current shipment
+summary: `name`, `status`, `tracking_number`, `bosta_state`, `active`, `last_update`
+(`last_bosta_status_on`), `receiver_name`, `receiver_phone`, `city`, `district_id`,
+`address_first_line`, `cod_amount`, `delivery_note` and `delivery_note_status` (the Delivery
+Note's status only when the caller can read that Delivery Note, else empty). It needs read on
+the Sales Order (else a permission error) and on Bosta Shipment (else it returns nothing); it
+reads with the caller's permissions. The active shipment (status not `Canceled`; the unique
+`active_sales_order` allows at most one) wins; if there is none, the latest `Canceled` one is
+returned with `active` false; otherwise nothing. `Bosta Shipment.cod_amount` is the COD sent
+when the delivery was created; it is a read-only Currency system field.
+`sales_order.js` asks on every refresh (a reply that arrives after a newer refresh is
+dropped) and draws the tab: status, tracking number, Bosta state, last update, COD,
+receiver, address (the district shown as its ID) and Delivery Note, all escaped. Buttons live
+in the tab (delegated click handler): **Create Bosta Shipment** (creators; with no shipment, a
+Canceled latest one, or a `Bosta Failed` one without a tracking number - that retry resumes the
+same row: search Bosta, then send, and the receiver and address typed in the dialog replace the
+row's stored values), **Print A4 Label** (active shipment with a tracking number; follows Bosta
+Shipment read; the window is opened inside the click so popup blockers allow it, and if the
+browser blocks it the URL is offered as a link) and **Refresh from Bosta** (creators, active
+shipment with a tracking number). The dashboard indicator (status, tracking number, Bosta
+state, link to the shipment) stays. No shipment shows "No Bosta shipment"; a failed read says
+it could not load (creators still get Create); a user without Bosta Shipment read sends no
+request and sees an empty tab. `Pending Bosta` (after 5 minutes), `Bosta Created` and
 `Delivery Note Failed` are recovered with **Check Bosta** on the shipment form, reached through
-the link. Status, tracking number and
-Bosta state are escaped before they reach the dashboard HTML. Not built: Sales Order list
-column, filter or bulk actions.
+the indicator link. Not built: Sales Order list column, filter or bulk actions.
+
+**Refresh from Bosta (#271).** `statuses.refresh_shipment_state(shipment)` (creator roles
+only; whitelisted as `api.bosta_shipments.refresh_shipment`, POST) does one
+`GET /deliveries/business/{trackingNumber}` and feeds the documented `data.state` to the same
+`apply_state` as the poll and the webhook (timestamp = the instant the read started), so state
+`49` cancels the Delivery Note through the existing path and a stale read cannot overwrite a
+newer webhook. Unlike the poll it does not skip an unchanged state, so the last-update time
+moves. A Bosta error (escaped), a network failure, a body without a readable state or an
+unrecognised state code raises and stores nothing.
 
 **Recovery.** A retry of a `Bosta Failed` shipment, and the **Check Bosta**
 action (shipments that are Pending for more than 5 minutes, Bosta Failed, Delivery

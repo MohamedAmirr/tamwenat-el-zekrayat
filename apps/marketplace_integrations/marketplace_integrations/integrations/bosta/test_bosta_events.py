@@ -10,7 +10,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, now_datetime
 
-from marketplace_integrations.api import bosta_webhooks
+from marketplace_integrations.api import bosta_shipments, bosta_webhooks
 from marketplace_integrations.integrations.bosta import statuses
 from marketplace_integrations.marketplace_integrations.doctype.bosta_shipment.bosta_shipment import (
 	save_as_system,
@@ -389,3 +389,103 @@ class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
 			if i["reference_name"] == shipment.name
 		)
 		self.assertEqual(item["detected_at"], first_seen)
+
+
+class IntegrationTestBostaRefresh(BostaFixtureMixin, IntegrationTestCase):
+	"""refresh_shipment_state (#271): one GET delivery, then the shared apply_state."""
+
+	def _live(self, tracking="TRK-R"):
+		order = self.make_order()
+		self.http.queue["create"].append(created(tracking, f"D-{tracking}"))
+		self.create(order)
+		return order, self.shipment_for(order)
+
+	def _state(self, code):
+		return FakeResponse(200, {"success": True, "data": {"state": {"code": code, "value": "x"}}})
+
+	def test_refresh_applies_the_state_and_updates_the_last_update_time(self):
+		_, shipment = self._live()
+		self.http.queue["get"].append(self._state(24))
+
+		result = bosta_shipments.refresh_shipment(shipment.name)
+
+		self.assertEqual(result, {"result": statuses.APPLIED})
+		self.assertEqual(len(self.http.calls_of("get")), 1)
+		shipment.reload()
+		self.assertEqual(
+			(shipment.bosta_state_code, shipment.bosta_state_value), (24, "Received at warehouse")
+		)
+		self.assertTrue(shipment.last_bosta_status_on)
+		self.assertEqual(shipment.status, "Completed")
+
+	def test_state_49_cancels_the_delivery_note_through_the_existing_path(self):
+		_, shipment = self._live()
+		self.http.queue["get"].append(self._state(49))
+
+		bosta_shipments.refresh_shipment(shipment.name)
+
+		shipment.reload()
+		self.assertEqual(shipment.status, "Canceled")
+		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 2)
+		self.assertIsNone(shipment.active_sales_order)
+
+	def test_a_bosta_error_or_network_failure_stores_nothing_and_is_escaped(self):
+		_, shipment = self._live()
+		before = shipment.modified
+		for queued in (
+			FakeResponse(400, {"success": False, "message": "<img src=x onerror=1>"}),
+			frappe.ValidationError("Failed to reach Bosta."),
+			self._state(999),
+			FakeResponse(200, {"success": True, "data": {}}),
+		):
+			with self.subTest(queued=str(queued)):
+				self.http.queue["get"].append(queued)
+				with self.assertRaises(frappe.ValidationError) as caught:
+					bosta_shipments.refresh_shipment(shipment.name)
+				self.assertNotIn("<img", str(caught.exception))
+				shipment.reload()
+				self.assertEqual((shipment.bosta_state_code, shipment.modified), (0, before))
+
+	def test_a_shipment_without_a_tracking_number_makes_no_request(self):
+		order = self.make_order(submit=False)
+		shipment = save_as_system(
+			frappe.get_doc(
+				{
+					"doctype": "Bosta Shipment",
+					"sales_order": order.name,
+					"receiver_name": self._receiver(),
+					"receiver_phone": "0100",
+					"city": "Cairo",
+					"district_id": "d",
+					"address_first_line": "12 Example Street",
+					"status": "Bosta Failed",
+				}
+			),
+			insert=True,
+		)
+		frappe.db.commit()
+		with self.assertRaises(frappe.ValidationError):
+			bosta_shipments.refresh_shipment(shipment.name)
+		self.assertEqual(self.http.calls, [])
+
+	def test_refresh_is_creator_only_and_post_only(self):
+		_, shipment = self._live()
+		for role, allowed in (("Sales Manager", True), ("Stock User", True), ("Sales User", False)):
+			with self.subTest(role=role):
+				user = self.make_user(role)
+				if allowed:
+					self.http.queue["get"].append(self._state(24))
+				frappe.set_user(user)
+				try:
+					if allowed:
+						bosta_shipments.refresh_shipment(shipment.name)
+					else:
+						with self.assertRaises(frappe.PermissionError):
+							bosta_shipments.refresh_shipment(shipment.name)
+				finally:
+					frappe.set_user("Administrator")
+		self.assertEqual(len(self.http.calls_of("get")), 2)
+		self.assertIn(bosta_shipments.refresh_shipment, frappe.whitelisted)
+		self.assertEqual(
+			frappe.allowed_http_methods_for_whitelisted_func[bosta_shipments.refresh_shipment], ["POST"]
+		)

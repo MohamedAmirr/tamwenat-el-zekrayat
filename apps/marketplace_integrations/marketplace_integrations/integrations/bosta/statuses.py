@@ -7,7 +7,7 @@ import time
 
 import frappe
 from frappe import _
-from frappe.utils import add_to_date, cstr, now_datetime
+from frappe.utils import add_to_date, cstr, escape_html, now_datetime
 
 from marketplace_integrations.integrations.bosta.client import (
 	BostaClient,
@@ -15,6 +15,7 @@ from marketplace_integrations.integrations.bosta.client import (
 	response_body,
 )
 from marketplace_integrations.integrations.bosta.deliveries import (
+	CREATOR_ROLES,
 	lock_and_load_sales_order,
 	rollback_to_savepoint,
 )
@@ -121,6 +122,39 @@ def poll_incomplete_shipments():
 				f"Bosta status polling failed for {shipment.name}",
 			)
 	return updated
+
+
+def refresh_shipment_state(shipment_name):
+	"""Read one shipment's delivery from Bosta and apply its state (a manual poll, #271).
+
+	Creator roles only. One ``GET`` delivery, then the same ``apply_state`` as the poll and
+	the webhook (so state 49 cancels the Delivery Note through the existing path). A Bosta
+	error, an unreadable state or a network failure raises without storing anything.
+	Returns ``{"result": APPLIED | STALE}``.
+	"""
+	frappe.only_for(CREATOR_ROLES)
+	shipment = frappe.get_doc("Bosta Shipment", shipment_name)
+	shipment.check_permission("read")
+	if not shipment.tracking_number:
+		frappe.throw(_("This Bosta Shipment has no tracking number yet."))
+	client = BostaClient()
+	# Taken before the request: the snapshot is no newer than this instant.
+	fetched_at = int(time.time() * 1000)
+	response = client.get_delivery(shipment.tracking_number)
+	if not is_success_response(response):
+		frappe.throw(escape_html(client.error_message(response)))
+	state = _polled_state(response_body(response))
+	if not state:
+		frappe.throw(_("Bosta returned no readable state for this delivery."))
+	result = apply_state(
+		shipment.tracking_number,
+		state_code=state["code"],
+		timestamp=fetched_at,
+		snapshot=state["snapshot"],
+	)
+	if result == SKIPPED:
+		frappe.throw(_("Bosta returned a state this app does not recognise. Nothing was changed."))
+	return {"result": result}
 
 
 def retry_failed_cancellations():

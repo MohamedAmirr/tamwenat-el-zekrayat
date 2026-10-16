@@ -31,6 +31,7 @@ function load({
 	global.frappe = {
 		user: { has_role: () => bosta_creator },
 		utils: { escape_html },
+		datetime: { str_to_user: (value) => `user:${value}` },
 		model: {
 			can_read: (doctype) =>
 				doctype === "Bosta Shipment" ? bosta_read : can_read && doctype === "Marketplace Order",
@@ -105,7 +106,27 @@ const eligible = (extra = {}) => ({
 function make_frm(doc, { close_sales_order } = {}) {
 	const buttons = [];
 	const indicators = [];
+	const tab = { html: "", handler: null };
 	const frm = {
+		tab,
+		get_field: (name) =>
+			name === "custom_bosta_delivery_html"
+				? {
+						$wrapper: {
+							html(value) {
+								tab.html = value;
+								return this;
+							},
+							off() {
+								return this;
+							},
+							on(_event, _selector, handler) {
+								tab.handler = handler;
+								return this;
+							},
+						},
+				  }
+				: null,
 		doc: {
 			name: "SAL-ORD-1",
 			custom_marketplace_order: "MO-1",
@@ -198,11 +219,7 @@ test("opening or reloading an already Closed order never prompts", async () => {
 	assert.equal(msgprints.length, 0);
 	// One fetch, only to decide on the button.
 	assert.equal(calls.length, 1);
-	// Button order is intentionally unspecified: Create is added after an async reply.
-	assert.deepEqual(
-		frm.buttons.map((b) => b.label).sort(),
-		["Cancel on Talabat", "Create Bosta Shipment"]
-	);
+	assert.deepEqual(frm.buttons.map((b) => b.label), ["Cancel on Talabat"]);
 });
 
 test("closing via the wrapped method opens the dialog on the next Closed refresh", async () => {
@@ -215,7 +232,7 @@ test("closing via the wrapped method opens the dialog on the next Closed refresh
 	await settle();
 	assert.equal(dialogs.length, 1);
 	assert.equal(dialogs[0].shown, true);
-	assert.equal(frm.buttons.length, 2);
+	assert.equal(frm.buttons.length, 1);
 });
 
 test("open orders and orders without a marketplace order make no call", async () => {
@@ -290,7 +307,7 @@ test("a blocked order gets no Cancel button", async () => {
 	const frm = make_frm({ status: "Closed" });
 	handlers["Sales Order"].refresh(frm);
 	await settle();
-	assert.equal(frm.buttons.length, 1);
+	assert.equal(frm.buttons.length, 0);
 });
 
 test("the dialog requires a reason built from the server list", async () => {
@@ -410,7 +427,7 @@ test("without read permission on Marketplace Order nothing is fetched or shown",
 	await settle();
 	assert.equal(calls.length, 0);
 	assert.equal(dialogs.length + msgprints.length, 0);
-	assert.equal(closed.buttons.length + cancelled.buttons.length, 1);
+	assert.equal(closed.buttons.length + cancelled.buttons.length, 0);
 });
 
 test("the platform name is escaped in titles and the button label", async () => {
@@ -446,14 +463,14 @@ test("the Bosta button is creator-only and survives a reload refresh", async () 
 	const denied = make_frm({});
 	handlers["Sales Order"].refresh(denied);
 	await settle();
-	assert.ok(!denied.buttons.some((b) => b.label === "Create Bosta Shipment"));
+	assert.deepEqual(labels(denied), []);
 
 	const { handlers: allowed_handlers } = load({ option: eligible({ state: "not_applicable" }) });
 	const frm = make_frm({});
 	allowed_handlers["Sales Order"].refresh(frm);
 	allowed_handlers["Sales Order"].refresh(frm);
 	await settle();
-	assert.deepEqual(frm.buttons.map((b) => b.label), ["Create Bosta Shipment"]);
+	assert.deepEqual(labels(frm), ["create"]);
 });
 
 // ---- Bosta shipment status, tracking and label on the Sales Order (#246) ----
@@ -467,7 +484,10 @@ const shipment_summary = (extra = {}) => ({
 	...extra,
 });
 const NO_PLATFORM = eligible({ state: "not_applicable" });
-const labels = (frm) => frm.buttons.map((b) => b.label);
+// The Bosta tab's buttons, as their data-bosta-action names.
+const labels = (frm) => [...frm.tab.html.matchAll(/data-bosta-action="([^"]+)"/g)].map((m) => m[1]);
+const click = (frm, action) =>
+	frm.tab.handler({ currentTarget: { getAttribute: () => action } });
 
 test("an active shipment shows status, tracking and a link, with a label button and no Create", async () => {
 	const { handlers, bosta_calls } = load({ option: NO_PLATFORM, shipment: shipment_summary() });
@@ -479,7 +499,7 @@ test("an active shipment shows status, tracking and a link, with a label button 
 	assert.equal(frm.indicators[0].color, "green");
 	assert.match(frm.indicators[0].label, /<a href="\/app\/bosta-shipment\/BOSTA-SHP-00001">Bosta Shipment: Completed<\/a>/);
 	assert.match(frm.indicators[0].label, /Tracking: 77873113 \(Delivered\)/);
-	assert.deepEqual(labels(frm), ["Print Bosta A4 Label"]);
+	assert.deepEqual(labels(frm), ["print", "refresh"]);
 });
 
 test("indicator colour follows the shipment status", async () => {
@@ -514,7 +534,7 @@ test("a shipment without a tracking number shows the status but no label button"
 });
 
 function click_label(frm) {
-	frm.buttons.find((b) => b.label === "Print Bosta A4 Label").action();
+	click(frm, "print");
 }
 
 // Loads a form with an active shipment, a window stub that records what happens to it, and a
@@ -592,7 +612,7 @@ test("a Bosta Failed shipment without tracking keeps Create next to the indicato
 	await settle();
 	assert.equal(frm.indicators.length, 1);
 	assert.equal(frm.indicators[0].color, "red");
-	assert.deepEqual(labels(frm), ["Create Bosta Shipment"]);
+	assert.deepEqual(labels(frm), ["create"]);
 
 	// A read-only user gets the indicator but no Create.
 	const { handlers: h2 } = load({
@@ -621,7 +641,7 @@ test("no other active status offers Create", async () => {
 		handlers["Sales Order"].refresh(frm);
 		await settle();
 		assert.equal(frm.indicators.length, 1, extra.status);
-		assert.ok(!labels(frm).includes("Create Bosta Shipment"), `${extra.status} ${extra.tracking_number}`);
+		assert.ok(!labels(frm).includes("create"), `${extra.status} ${extra.tracking_number}`);
 	}
 });
 
@@ -631,7 +651,7 @@ test("a Canceled latest shipment (or none) shows Create again, with no indicator
 		const frm = make_frm({});
 		handlers["Sales Order"].refresh(frm);
 		await settle();
-		assert.deepEqual(labels(frm), ["Create Bosta Shipment"]);
+		assert.deepEqual(labels(frm), ["create"]);
 		assert.equal(frm.indicators.length, 0);
 	}
 });
@@ -642,7 +662,7 @@ test("a read-only user sees the status and label but never Create", async () => 
 	handlers["Sales Order"].refresh(frm);
 	await settle();
 	assert.equal(frm.indicators.length, 1);
-	assert.deepEqual(labels(frm), ["Print Bosta A4 Label"]);
+	assert.deepEqual(labels(frm), ["print"]);
 
 	const { handlers: h2 } = load({
 		option: NO_PLATFORM,
@@ -699,6 +719,153 @@ test("remote text in the shipment is escaped in the indicator", async () => {
 	assert.match(html, /href="\/app\/bosta-shipment\/BOSTA-SHP-%221"/);
 });
 
+// ---- Bosta Delivery tab (#271) ----
+
+const detailed = (extra = {}) =>
+	shipment_summary({
+		last_update: "2026-10-16 10:30:00.000000",
+		receiver_name: "Mona",
+		receiver_phone: "0100",
+		city: "Cairo",
+		district_id: "d-1",
+		address_first_line: "12 Example Street",
+		cod_amount: 250,
+		delivery_note: "MAT-DN-1",
+		delivery_note_status: "To Bill",
+		...extra,
+	});
+
+async function tab_for(shipment_extra, options = {}) {
+	global.format_currency = (value) => `EGP ${value}`;
+	const { handlers, calls } = load({ option: NO_PLATFORM, shipment: detailed(shipment_extra), ...options });
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	return { frm, calls, html: frm.tab.html };
+}
+
+test("the tab shows every listed value, with the district as its ID", async () => {
+	const { html } = await tab_for();
+	for (const expected of [
+		"Completed",
+		"77873113",
+		"Delivered",
+		"user:2026-10-16 10:30:00.000000",
+		"EGP 250",
+		"Mona - 0100",
+		"12 Example Street, Cairo",
+		"District ID: d-1",
+		'href="/app/delivery-note/MAT-DN-1"',
+		"MAT-DN-1</a> (To Bill)",
+	]) {
+		assert.ok(html.includes(expected), expected);
+	}
+});
+
+test("a zero COD is shown as 0, and the Delivery Note status is only shown when given", async () => {
+	const { html } = await tab_for({ cod_amount: 0, delivery_note_status: "" });
+	assert.match(html, /COD Sent<\/th><td>EGP 0<\/td>/);
+	assert.doesNotMatch(html, /\(To Bill\)/);
+	assert.match(html, /MAT-DN-1<\/a><\/td>/);
+});
+
+test("stored values render as text in the tab", async () => {
+	const evil = "<img src=x onerror=alert(1)>";
+	const { html } = await tab_for({
+		receiver_name: evil,
+		receiver_phone: evil,
+		city: evil,
+		district_id: evil,
+		address_first_line: evil,
+		tracking_number: evil,
+		bosta_state: evil,
+		delivery_note: evil,
+		delivery_note_status: evil,
+	});
+	assert.doesNotMatch(html, /<img/);
+	assert.match(html, /&lt;img src&#x3D;x onerror&#x3D;alert\(1\)&gt;/);
+});
+
+test("with no shipment the tab says so and offers Create to creators only", async () => {
+	const { handlers } = load({ option: NO_PLATFORM, shipment: null });
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.match(frm.tab.html, /No Bosta shipment/);
+	assert.deepEqual(labels(frm), ["create"]);
+
+	const { handlers: h2 } = load({ option: NO_PLATFORM, shipment: null, bosta_creator: false });
+	const reader = make_frm({});
+	h2["Sales Order"].refresh(reader);
+	await settle();
+	assert.match(reader.tab.html, /No Bosta shipment/);
+	assert.deepEqual(labels(reader), []);
+});
+
+test("without read permission the tab stays empty and nothing is requested", async () => {
+	const { handlers, bosta_calls } = load({ option: NO_PLATFORM, bosta_read: false, shipment: detailed() });
+	const frm = make_frm({});
+	frm.tab.html = "stale";
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.equal(bosta_calls.length, 0);
+	assert.equal(frm.tab.html, "");
+});
+
+test("a failed read says so instead of 'No Bosta shipment'", async () => {
+	const { handlers } = load({ option: NO_PLATFORM, shipment_fails: true });
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.match(frm.tab.html, /Could not load the Bosta shipment/);
+	assert.doesNotMatch(frm.tab.html, /No Bosta shipment/);
+});
+
+test("Refresh from Bosta is creator-only, needs a tracking number and calls the server then reloads", async () => {
+	const { frm } = await tab_for();
+	assert.deepEqual(labels(frm), ["print", "refresh"]);
+	const refreshes = [];
+	global.frappe.call = (opts) => {
+		refreshes.push(opts);
+		return Promise.resolve({ message: { result: "applied" } });
+	};
+	global.frappe.show_alert = () => {};
+	click(frm, "refresh");
+	await settle();
+	assert.equal(refreshes.length, 1);
+	assert.equal(refreshes[0].method, "marketplace_integrations.api.bosta_shipments.refresh_shipment");
+	assert.deepEqual(refreshes[0].args, { shipment: "BOSTA-SHP-00001" });
+	assert.equal(frm.reloads, 1);
+
+	const pending = await tab_for({ status: "Pending Bosta", tracking_number: "" });
+	assert.deepEqual(labels(pending.frm), []);
+	const reader = await tab_for({}, { bosta_creator: false });
+	assert.deepEqual(labels(reader.frm), ["print"]);
+});
+
+test("a Bosta error on refresh does not reload the form", async () => {
+	const { frm } = await tab_for();
+	global.frappe.call = () => Promise.reject(new Error("Bosta request failed"));
+	click(frm, "refresh");
+	await settle();
+	assert.equal(frm.reloads, 0);
+});
+
+test("Create in the tab fetches the defaults and opens the dialog", async () => {
+	const { handlers } = load({ option: NO_PLATFORM, shipment: null });
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	const seen = [];
+	global.frappe.call = (opts) => {
+		seen.push(opts.method.split(".").pop());
+		return new Promise(() => {});
+	};
+	click(frm, "create");
+	await settle();
+	assert.equal(seen[0], "get_create_defaults");
+});
+
 test("a reload refresh re-adds the indicator and buttons once, not twice", async () => {
 	const { handlers } = load({ option: NO_PLATFORM, shipment: shipment_summary() });
 	const frm = make_frm({});
@@ -707,7 +874,7 @@ test("a reload refresh re-adds the indicator and buttons once, not twice", async
 	handlers["Sales Order"].refresh(frm); // like frm.reload_doc(): everything is cleared first
 	await settle();
 	assert.equal(frm.indicators.length, 1);
-	assert.deepEqual(labels(frm), ["Print Bosta A4 Label"]);
+	assert.deepEqual(labels(frm), ["print", "refresh"]);
 });
 
 test("a slow reply that lands after a newer refresh is dropped", async () => {
@@ -723,7 +890,7 @@ test("a slow reply that lands after a newer refresh is dropped", async () => {
 	replies.forEach((resolve) => resolve({ message: shipment_summary() }));
 	await settle();
 	assert.equal(frm.indicators.length, 1);
-	assert.deepEqual(labels(frm), ["Print Bosta A4 Label"]);
+	assert.deepEqual(labels(frm), ["print", "refresh"]);
 });
 
 test("a failed shipment read leaves Create available to creators and shows no indicator", async () => {
@@ -732,7 +899,7 @@ test("a failed shipment read leaves Create available to creators and shows no in
 	handlers["Sales Order"].refresh(frm);
 	await settle();
 	assert.equal(frm.indicators.length, 0);
-	assert.deepEqual(labels(frm), ["Create Bosta Shipment"]);
+	assert.deepEqual(labels(frm), ["create"]);
 });
 
 test("Draft and Cancelled-status orders get no Create button; drafts are not asked about shipments", async () => {
