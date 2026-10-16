@@ -297,9 +297,11 @@ is rendered escaped, and remote error text is escaped before `frappe.throw`.
 row in Marketplace Channel Status; it clears when a later attempt succeeds.
 
 The Bosta AWB documentation confirms that `POST /deliveries/mass-awb` returns
-a base64-encoded PDF for a request of 50 or fewer AWBs. The MVP requests only
-A4/Arabic labels, enforces that 50-label ceiling locally, decodes only a bare
-base64 PDF response, and saves each requested label as a private `File`
+a base64-encoded PDF for a request of 50 or fewer AWBs. The live endpoint answers
+`{"success": true, "data": "<base64 PDF>"}` (verified 2026-10-16). The MVP requests only
+A4/Arabic labels, enforces that 50-label ceiling locally, decodes that JSON
+shape and a bare base64 body (any other shape is rejected, not guessed), shows Bosta's
+escaped error message for a non-success reply (including `success: false` on HTTP 200), and saves each requested label as a private `File`
 attached to its `Bosta Shipment`; a shipment reader may request it on demand.
 The different response shape above 50 labels is intentionally unsupported.
 The product intent to create a Sales Return from a carrier event remains

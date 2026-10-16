@@ -57,6 +57,30 @@ class UnitTestBostaLabels(UnitTestCase):
 		)
 		self.assertEqual(result, {"file_url": "/private/files/bosta-awb.pdf", "file_name": "bosta-awb.pdf"})
 
+	def test_create_label_shows_the_escaped_error_when_bosta_says_success_false_on_http_200(self):
+		shipment = MagicMock()
+		shipment.name = "BOSTA-SHP-00001"
+		shipment.tracking_number = "77873113"
+		response = MagicMock(status_code=200)
+		response.json.return_value = {"success": False, "message": "<img src=x onerror=1> no such AWB"}
+		client = MagicMock()
+		client.get_a4_arabic_awb.return_value = response
+		client.error_message.return_value = (
+			"Bosta request failed (HTTP 200): <img src=x onerror=1> no such AWB"
+		)
+
+		with (
+			patch.object(labels.frappe, "get_doc", return_value=shipment),
+			patch.object(labels, "BostaClient", return_value=client),
+			patch.object(labels, "save_file") as save,
+			self.assertRaises(frappe.ValidationError) as raised,
+		):
+			labels.create_a4_arabic_label("BOSTA-SHP-00001")
+
+		self.assertNotIn("<img", str(raised.exception))
+		self.assertIn("&lt;img", str(raised.exception))
+		save.assert_not_called()
+
 	def test_create_label_requires_a_tracking_number(self):
 		shipment = MagicMock()
 		shipment.name = "BOSTA-SHP-00001"

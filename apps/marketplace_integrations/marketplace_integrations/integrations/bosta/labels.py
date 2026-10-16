@@ -12,11 +12,16 @@ from frappe import _
 from frappe.utils import escape_html
 from frappe.utils.file_manager import save_file
 
-from marketplace_integrations.integrations.bosta.client import BostaClient
+from marketplace_integrations.integrations.bosta.client import BostaClient, is_success_response
 
 
 def create_a4_arabic_label(shipment_name):
-	"""Fetch one shipment's documented base64-PDF AWB and attach it privately."""
+	"""Fetch one shipment's A4/Arabic AWB and attach it privately.
+
+	Live ``POST /deliveries/mass-awb`` answers ``{"success": true, "data": "<base64 PDF>"}``
+	(verified 2026-10-16); ``_decode_base64_pdf`` accepts that and a bare base64 body, and
+	rejects any other shape. A non-success reply (including ``success: false`` on HTTP 200)
+	is shown as Bosta's escaped error message."""
 	shipment = frappe.get_doc("Bosta Shipment", shipment_name)
 	shipment.check_permission("read")
 	tracking_number = str(shipment.tracking_number or "").strip()
@@ -25,7 +30,7 @@ def create_a4_arabic_label(shipment_name):
 
 	client = BostaClient()
 	response = client.get_a4_arabic_awb([tracking_number])
-	if not 200 <= response.status_code < 300:
+	if not is_success_response(response):
 		frappe.throw(escape_html(client.error_message(response)))
 
 	pdf_content = _decode_base64_pdf(response.content)
