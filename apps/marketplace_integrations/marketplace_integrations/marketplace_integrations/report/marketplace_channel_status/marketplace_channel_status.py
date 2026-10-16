@@ -11,6 +11,8 @@ source of truth for every status field and the placeholder attention
 counts, so this report has no query logic of its own.
 """
 
+from frappe import _
+
 from marketplace_integrations.services.marketplace_channels import get_channel_status
 
 
@@ -23,56 +25,56 @@ def execute(filters=None):
 def get_columns():
 	return [
 		{
-			"label": "Account",
+			"label": _("Account"),
 			"fieldname": "account",
 			"fieldtype": "Link",
 			"options": "Marketplace Account",
 			"width": 180,
 		},
 		{
-			"label": "Platform",
+			"label": _("Platform"),
 			"fieldname": "platform",
 			"fieldtype": "Data",
 			"width": 90,
 		},
 		{
-			"label": "Enabled",
+			"label": _("Enabled"),
 			"fieldname": "enabled",
 			"fieldtype": "Check",
 			"width": 80,
 		},
 		{
-			"label": "Channel Status",
+			"label": _("Channel Status"),
 			"fieldname": "level",
 			"fieldtype": "Data",
 			"width": 120,
 		},
 		{
-			"label": "Orders Needing Attention",
+			"label": _("Orders Needing Attention"),
 			"fieldname": "orders_needing_attention",
 			"fieldtype": "Int",
 			"width": 160,
 		},
 		{
-			"label": "Product Sync Errors",
+			"label": _("Product Sync Errors"),
 			"fieldname": "product_sync_errors",
 			"fieldtype": "Int",
 			"width": 150,
 		},
 		{
-			"label": "Import Errors",
+			"label": _("Import Errors"),
 			"fieldname": "import_errors",
 			"fieldtype": "Int",
 			"width": 120,
 		},
 		{
-			"label": "Fulfillment Errors",
+			"label": _("Fulfillment Errors"),
 			"fieldname": "fulfillment_errors",
 			"fieldtype": "Int",
 			"width": 130,
 		},
 		{
-			"label": "Last Checked",
+			"label": _("Last Checked"),
 			"fieldname": "last_checked",
 			"fieldtype": "Datetime",
 			"width": 160,

@@ -28,6 +28,8 @@ they replace) and ignore this filter; metrics 6-10 respect it. Each row's
 misleading in the rendered report.
 """
 
+from frappe import _
+
 from marketplace_integrations.services.shopify_reconciliation import (
 	get_reconciliation_summary,
 )
@@ -46,19 +48,19 @@ def execute(filters=None):
 def get_columns():
 	return [
 		{
-			"label": "Metric",
+			"label": _("Metric"),
 			"fieldname": "metric",
 			"fieldtype": "Data",
 			"width": 340,
 		},
 		{
-			"label": "Value",
+			"label": _("Value"),
 			"fieldname": "value",
 			"fieldtype": "Data",
 			"width": 140,
 		},
 		{
-			"label": "Detail",
+			"label": _("Detail"),
 			"fieldname": "detail",
 			"fieldtype": "Data",
 			"width": 280,

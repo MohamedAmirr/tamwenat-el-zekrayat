@@ -172,7 +172,7 @@
 
 	function bosta_button(action, label) {
 		const escape = frappe.utils.escape_html;
-		return `<button class="btn btn-default btn-sm" style="margin-right: 8px" data-bosta-action="${escape(action)}">${escape(label)}</button>`;
+		return `<button class="btn btn-default btn-sm" style="margin-inline-end: 8px" data-bosta-action="${escape(action)}">${escape(label)}</button>`;
 	}
 
 	// The Bosta Delivery tab. Every stored or remote value is escaped. `options` is
