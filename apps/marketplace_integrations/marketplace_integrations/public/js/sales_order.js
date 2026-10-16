@@ -25,6 +25,9 @@
 	const BOSTA_SHIPMENT_METHOD = "marketplace_integrations.api.bosta_shipments.get_sales_order_shipment";
 	const BOSTA_LABEL_METHOD = "marketplace_integrations.api.bosta_shipments.print_a4_arabic_label";
 	const BOSTA_REFRESH_METHOD = "marketplace_integrations.api.bosta_shipments.refresh_shipment";
+	const BOSTA_EDIT_METHOD = "marketplace_integrations.api.bosta_shipments.edit_shipment";
+	// Bosta's documented states in which a delivery may be edited (OpenAPI, "Business update delivery").
+	const BOSTA_EDITABLE_STATES = [10, 11, 20, 21, 22, 24, 30, 41, 47];
 	const BOSTA_CANCEL_METHOD = "marketplace_integrations.api.bosta_shipments.cancel_shipment";
 	const BOSTA_DELIVERED_STATE = 45;
 	const BOSTA_TAB_FIELD = "custom_bosta_delivery_html";
@@ -212,6 +215,9 @@
 			if (shipment.active && shipment.tracking_number) {
 				buttons.push(bosta_button("print", __("Print A4 Label")));
 				if (create) buttons.push(bosta_button("refresh", __("Refresh from Bosta")));
+				if (create && BOSTA_EDITABLE_STATES.includes(shipment.bosta_state_code)) {
+					buttons.push(bosta_button("edit", __("Edit Bosta Shipment")));
+				}
 				if (create && shipment.bosta_state_code !== BOSTA_DELIVERED_STATE) {
 					buttons.push(bosta_button("cancel", __("Cancel Bosta Shipment")));
 				}
@@ -236,6 +242,7 @@
 			else if (action === "print") print_bosta_label(shipment);
 			else if (action === "refresh") refresh_bosta_shipment(frm, shipment);
 			else if (action === "cancel") cancel_bosta_shipment(frm, shipment);
+			else if (action === "edit") show_bosta_edit_dialog(frm, shipment);
 		});
 	}
 
@@ -311,24 +318,16 @@
 	}
 
 	function show_bosta_dialog(frm, defaults) {
-		const state = { cities: [], error: false, loading_districts: 0 };
-		const dialog = new frappe.ui.Dialog({
+		return open_bosta_location_dialog({
 			title: __("Create Bosta Shipment"),
-			fields: [
-				{ fieldtype: "HTML", fieldname: "cod_note", options: bosta_cod_note_html(defaults) },
-				{ fieldtype: "HTML", fieldname: "lists_error", options: "", hidden: 1 },
-				{ fieldtype: "Button", fieldname: "retry_lists", label: __("Retry"), hidden: 1, click: () => load_cities(false) },
+			primary_action_label: __("Create Shipment"),
+			defaults,
+			intro_fields: [{ fieldtype: "HTML", fieldname: "cod_note", options: bosta_cod_note_html(defaults) }],
+			receiver_fields: [
 				{ fieldname: "receiver_name", fieldtype: "Data", label: __("Receiver Name"), reqd: 1, default: defaults.receiver_name },
 				{ fieldname: "receiver_phone", fieldtype: "Data", label: __("Receiver Phone"), reqd: 1, default: defaults.receiver_phone },
-				// Autocomplete: searchable (hundreds of districts), shows the name label and stores the Bosta ID.
-				{ fieldname: "city", fieldtype: "Autocomplete", label: __("City"), reqd: 1, max_items: 1000, options: [], change: on_city_change },
-				{ fieldname: "district", fieldtype: "Autocomplete", label: __("District"), reqd: 1, max_items: 1000, options: [] },
-				{ fieldname: "address_first_line", fieldtype: "Small Text", label: __("Address First Line"), reqd: 1, default: defaults.address_first_line },
 			],
-			primary_action_label: __("Create Shipment"),
-			primary_action(values) {
-				const city = state.cities.find((c) => c.id === values.city);
-				if (!city || !values.district) return;
+			submit(dialog, values, city) {
 				dialog.hide();
 				frappe.call({
 					method: BOSTA_CREATE_METHOD,
@@ -345,6 +344,85 @@
 					freeze: true,
 					freeze_message: __("Creating Bosta shipment..."),
 				}).then(() => frm.reload_doc());
+			},
+		});
+	}
+
+	// Edit Bosta Shipment (#273): the same city / district pickers as the create dialog, with
+	// only the receiver phone and address. The values shown are stored text, so they only
+	// ever go into field defaults (never HTML). Nothing is sent until the confirm is accepted.
+	function show_bosta_edit_dialog(frm, shipment) {
+		const defaults = {
+			address_city: shipment.city,
+			district_id: shipment.district_id,
+			address_first_line: shipment.address_first_line,
+		};
+		const note = __(
+			"This updates Bosta and the Bosta Shipment only. The Sales Order address and Shopify are not changed; update them by hand if needed."
+		);
+		return open_bosta_location_dialog({
+			title: __("Edit Bosta Shipment"),
+			primary_action_label: __("Update Shipment"),
+			defaults,
+			intro_fields: [
+				{ fieldtype: "HTML", fieldname: "edit_note", options: `<p>${frappe.utils.escape_html(note)}</p>` },
+			],
+			receiver_fields: [
+				{ fieldname: "receiver_phone", fieldtype: "Data", label: __("Receiver Phone"), reqd: 1, default: shipment.receiver_phone },
+			],
+			submit(dialog, values, city) {
+				const message = frappe.utils.escape_html(
+					__("Update Bosta delivery {0}? {1}", [shipment.tracking_number, note])
+				);
+				frappe.confirm(message, () => {
+					dialog.hide();
+					frappe
+						.call({
+							method: BOSTA_EDIT_METHOD,
+							type: "POST",
+							args: {
+								shipment: shipment.name,
+								receiver_phone: values.receiver_phone,
+								city: city.name,
+								district_id: values.district,
+								address_first_line: values.address_first_line,
+							},
+							freeze: true,
+							freeze_message: __("Updating the Bosta delivery..."),
+						})
+						.then(() => {
+							frappe.show_alert({ message: __("Bosta delivery updated."), indicator: "green" });
+							return frm.reload_doc();
+						})
+						// A server error already showed Frappe's message; nothing changed.
+						.catch(() => {});
+				});
+			},
+		});
+	}
+
+	// The dialog shell shared by Create and Edit: leading fields, receiver fields, then the
+	// Bosta city / district pickers and the address first line. `submit(dialog, values, city)`
+	// runs once a city and district are chosen.
+	function open_bosta_location_dialog({ title, primary_action_label, defaults, intro_fields, receiver_fields, submit }) {
+		const state = { cities: [], error: false, loading_districts: 0 };
+		const dialog = new frappe.ui.Dialog({
+			title,
+			fields: [
+				...intro_fields,
+				{ fieldtype: "HTML", fieldname: "lists_error", options: "", hidden: 1 },
+				{ fieldtype: "Button", fieldname: "retry_lists", label: __("Retry"), hidden: 1, click: () => load_cities(false) },
+				...receiver_fields,
+				// Autocomplete: searchable (hundreds of districts), shows the name label and stores the Bosta ID.
+				{ fieldname: "city", fieldtype: "Autocomplete", label: __("City"), reqd: 1, max_items: 1000, options: [], change: on_city_change },
+				{ fieldname: "district", fieldtype: "Autocomplete", label: __("District"), reqd: 1, max_items: 1000, options: [] },
+				{ fieldname: "address_first_line", fieldtype: "Small Text", label: __("Address First Line"), reqd: 1, default: defaults.address_first_line },
+			],
+			primary_action_label,
+			primary_action(values) {
+				const city = state.cities.find((c) => c.id === values.city);
+				if (!city || !values.district) return;
+				submit(dialog, values, city);
 			},
 			secondary_action_label: __("Refresh Bosta Lists"),
 			secondary_action() {
@@ -392,6 +470,11 @@
 					if (request !== state.loading_districts) return;
 					dialog.fields_dict.district.set_data(location_options(r.message || []));
 					set_ready(true);
+					// Edit starts from the shipment's current district when it is in this city.
+					const current = defaults.district_id;
+					if (current && !dialog.get_value("district") && (r.message || []).some((d) => d.id === current)) {
+						return dialog.set_value("district", current);
+					}
 				})
 				.catch(() => {
 					if (request === state.loading_districts) fail(__("districts"));
@@ -674,6 +757,7 @@
 			location_options,
 			match_city,
 			show_bosta_dialog,
+			show_bosta_edit_dialog,
 			blocked_message,
 			can_offer_cancel,
 			consume_close_request,

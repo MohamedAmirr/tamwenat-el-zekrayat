@@ -74,14 +74,16 @@
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
    "label": "Receiver Name",
-   "reqd": 1
+   "reqd": 1,
+   "read_only_depends_on": "eval:doc.tracking_number"
   },
   {
    "fieldname": "receiver_phone",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
    "label": "Receiver Phone",
-   "reqd": 1
+   "reqd": 1,
+   "read_only_depends_on": "eval:doc.tracking_number"
   },
   {
    "fieldname": "address_section",
@@ -93,33 +95,38 @@
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
    "label": "City",
-   "reqd": 1
+   "reqd": 1,
+   "read_only_depends_on": "eval:doc.tracking_number"
   },
   {
    "description": "Use this, or enter both City ID and District Name.",
    "fieldname": "district_id",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
-   "label": "District ID"
+   "label": "District ID",
+   "read_only_depends_on": "eval:doc.tracking_number"
   },
   {
    "fieldname": "city_id",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
-   "label": "City ID"
+   "label": "City ID",
+   "read_only_depends_on": "eval:doc.tracking_number"
   },
   {
    "fieldname": "district_name",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
-   "label": "District Name"
+   "label": "District Name",
+   "read_only_depends_on": "eval:doc.tracking_number"
   },
   {
    "fieldname": "address_first_line",
    "fieldtype": "Small Text",
    "ignore_xss_filter": 1,
    "label": "Address First Line",
-   "reqd": 1
+   "reqd": 1,
+   "read_only_depends_on": "eval:doc.tracking_number"
   },
   {
    "fieldname": "bosta_section",

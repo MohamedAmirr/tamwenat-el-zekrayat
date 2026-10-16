@@ -378,9 +378,11 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 				setattr(shipment, fieldname, value)
 				with self.subTest(field=fieldname), self.assertRaises(frappe.ValidationError):
 					shipment.save()
+			# The receiver and address are locked once Bosta has the delivery (#273).
 			shipment.reload()
 			shipment.receiver_phone = "01111111111"
-			shipment.save()
+			with self.assertRaises(frappe.ValidationError):
+				shipment.save()
 			with self.assertRaises(frappe.ValidationError):
 				frappe.get_doc(
 					{

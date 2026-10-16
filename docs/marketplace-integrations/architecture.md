@@ -280,6 +280,25 @@ shipments, shipments without a tracking number and state 45 (the summary carries
 `bosta_state_code` for this). Not built: side effects for a webhook state 48, cancelling
 Sales Invoices, bulk cancel.
 
+**Editing (#273).** `editing.edit_bosta_shipment` (creator roles; whitelisted as
+`api.bosta_shipments.edit_shipment`, POST; the tab's **Edit Bosta Shipment** dialog shares the
+city / district pickers with the create dialog and asks for confirmation before anything is
+sent) calls `BostaClient.update_delivery` (`PUT /deliveries/business/{trackingNumber}`). The body is
+exactly `receiver.phone` and `dropOffAddress` (`city` name, `districtId`, `firstLine`); never
+COD, open-package, images or the receiver name. It refuses locally, without calling Bosta,
+unless the shipment has a tracking number, is not `Canceled`, and its stored state is one of
+Bosta's documented editable states `{10, 11, 20, 21, 22, 24, 30, 41, 47}` (no stored state yet:
+"Refresh from Bosta first"). A Bosta refusal or a network error changes nothing locally and
+tells the user to verify in Bosta (no auto-reconcile: the shape of the GET address is
+unverified). On success, under the Sales Order lock, only the Bosta Shipment fields are
+updated (the legacy City ID / District Name are cleared). The Sales Order and its address,
+Addresses, any Marketplace Order and the Delivery Note are **not** changed, and nothing is pushed
+to Shopify: those must be updated by hand if needed. If recording fails after Bosta accepted,
+the local change is rolled back and the user is told Bosta has the change.
+Once a shipment has a tracking number its receiver and address fields are locked for everyone
+(server `validate`, plus `read_only_depends_on` in the form) except the system write flag, so
+Edit is the only path; shipments without a tracking number stay editable and retryable.
+
 **Recovery.** A retry of a `Bosta Failed` shipment, and the **Check Bosta**
 action (shipments that are Pending for more than 5 minutes, Bosta Failed, Delivery
 Note Failed, or Bosta Created without a Delivery Note), first search Bosta by

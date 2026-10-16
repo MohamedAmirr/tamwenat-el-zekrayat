@@ -1004,7 +1004,7 @@ const DISTRICTS = {
 
 // Opens the Bosta dialog against scripted server answers. `server` maps a method suffix to
 // a function(args) returning the answer or throwing to simulate a failing call.
-async function open_bosta_dialog(defaults, server = {}) {
+async function open_bosta_dialog(defaults, server = {}, open = (m, frm) => m.show_bosta_dialog(frm, defaults)) {
 	const { module_exports } = load({ option: eligible({ state: "not_applicable" }) });
 	const calls = [];
 	const dialogs = [];
@@ -1059,7 +1059,7 @@ async function open_bosta_dialog(defaults, server = {}) {
 		}
 	};
 	const frm = make_frm({});
-	await module_exports.show_bosta_dialog(frm, defaults);
+	await open(module_exports, frm);
 	await settle();
 	return { dialog: dialogs[0], calls, frm, module_exports };
 }
@@ -1236,4 +1236,137 @@ test("without any address source the address fields stay blank and editable", as
 	assert.equal(dialog.values.address_first_line, "");
 	assert.equal(dialog.df.address_first_line.read_only, undefined);
 	assert.equal(dialog.values.receiver_name, "Ahmed");
+});
+
+// ---- Edit Bosta Shipment (#273) ----
+
+const editable = (extra = {}) =>
+	detailed({ bosta_state_code: 24, city: "Cairo", district_id: "d-2", receiver_phone: "0100", ...extra });
+
+const open_edit = (shipment, server) =>
+	open_bosta_dialog({}, server, (m, frm) => m.show_bosta_edit_dialog(frm, shipment));
+
+test("Edit is offered only to creators, for an active shipment in a documented editable state", async () => {
+	for (const code of [10, 11, 20, 21, 22, 24, 30, 41, 47]) {
+		const { frm } = await tab_for({ bosta_state_code: code });
+		assert.ok(labels(frm).includes("edit"), `state ${code}`);
+	}
+	for (const code of [0, 40, 45, 46, 48, 49, 60, 100, undefined]) {
+		const { frm } = await tab_for({ bosta_state_code: code });
+		assert.ok(!labels(frm).includes("edit"), `state ${code}`);
+	}
+	const reader = await tab_for({ bosta_state_code: 24 }, { bosta_creator: false });
+	assert.ok(!labels(reader.frm).includes("edit"));
+	const canceled = await tab_for({ bosta_state_code: 24, status: "Canceled", active: false });
+	assert.ok(!labels(canceled.frm).includes("edit"));
+	const untracked = await tab_for({ bosta_state_code: 24, tracking_number: "", status: "Pending Bosta" });
+	assert.ok(!labels(untracked.frm).includes("edit"));
+});
+
+test("the Edit button opens the edit dialog", async () => {
+	const { frm } = await tab_for({ bosta_state_code: 24 });
+	const dialogs = [];
+	global.frappe.ui.Dialog = class {
+		constructor(config) {
+			this.config = config;
+			dialogs.push(this);
+		}
+		show() {}
+		get_primary_btn() {
+			return { prop() {} };
+		}
+		set_df_property() {}
+		get_value() {}
+		set_value() {}
+	};
+	global.frappe.call = () => new Promise(() => {});
+	click(frm, "edit");
+	assert.equal(dialogs[0].config.title, "Edit Bosta Shipment");
+});
+
+test("the edit dialog has only the receiver phone, the pickers and the address, prefilled from the shipment", async () => {
+	const { dialog } = await open_edit(editable());
+	assert.deepEqual(
+		dialog.config.fields.map((f) => f.fieldname),
+		["edit_note", "lists_error", "retry_lists", "receiver_phone", "city", "district", "address_first_line"]
+	);
+	assert.equal(dialog.values.receiver_phone, "0100");
+	assert.equal(dialog.values.address_first_line, "12 Example Street");
+	assert.match(dialog.config.fields[0].options, /updates Bosta and the Bosta Shipment only/);
+	assert.match(dialog.config.fields[0].options, /Sales Order address and Shopify are not changed/);
+});
+
+test("the edit dialog preselects the shipment's city and district, and clearing is left to a city change", async () => {
+	const { dialog } = await open_edit(editable({ city: "Cairo", district_id: "d-2" }));
+	assert.equal(dialog.values.city, "c-cairo");
+	assert.equal(dialog.values.district, "d-2");
+	// A district that is not in the city is not guessed.
+	const other = await open_edit(editable({ city: "Cairo", district_id: "unknown" }));
+	assert.equal(other.dialog.values.district, "");
+});
+
+test("the edit dialog sends nothing until the confirm is accepted, then sends only phone and address", async () => {
+	const { dialog, calls, frm } = await open_edit(editable(), { edit_shipment: () => ({}) });
+	const confirms = with_confirm();
+	global.frappe.show_alert = () => {};
+	const before = calls.length;
+	dialog.config.primary_action({
+		receiver_phone: "0111",
+		city: "c-alex",
+		district: "d-9",
+		address_first_line: "7 New Street",
+	});
+	assert.equal(calls.length, before);
+	assert.equal(confirms.length, 1);
+	assert.match(confirms[0].message, /Sales Order address and Shopify are not changed/);
+	assert.equal(dialog.hidden, undefined);
+
+	confirms[0].on_yes();
+	await settle();
+	const request = calls.at(-1);
+	assert.equal(request.method, "marketplace_integrations.api.bosta_shipments.edit_shipment");
+	assert.deepEqual(request.args, {
+		shipment: "BOSTA-SHP-00001",
+		receiver_phone: "0111",
+		city: "Alexandria",
+		district_id: "d-9",
+		address_first_line: "7 New Street",
+	});
+	assert.equal(dialog.hidden, true);
+	assert.equal(frm.reloads, 1);
+});
+
+test("a server error on edit does not reload the form", async () => {
+	const { dialog, frm } = await open_edit(editable(), {
+		edit_shipment: () => {
+			throw new Error("Bosta refused");
+		},
+	});
+	const confirms = with_confirm();
+	dialog.config.primary_action({ receiver_phone: "0111", city: "c-cairo", district: "d-1", address_first_line: "7 New Street" });
+	confirms[0].on_yes();
+	await settle();
+	assert.equal(frm.reloads, 0);
+});
+
+test("the confirm text escapes the tracking number and the dialog never renders stored text as HTML", async () => {
+	const evil = "<img src=x onerror=alert(1)>";
+	const shipment = editable({ tracking_number: evil, receiver_phone: evil, address_first_line: evil });
+	const { dialog } = await open_edit(shipment);
+	const confirms = with_confirm();
+	dialog.config.primary_action({ receiver_phone: "0111", city: "c-cairo", district: "d-1", address_first_line: "7 New Street" });
+	assert.doesNotMatch(confirms[0].message, /<img/);
+	assert.match(confirms[0].message, /&lt;img/);
+	// Stored text is only ever a field default, never an HTML option.
+	assert.doesNotMatch(dialog.config.fields[0].options, /<img/);
+});
+
+test("the create dialog is unchanged: it keeps the receiver name, the COD note and no district default", async () => {
+	const { dialog } = await open_bosta_dialog({ cod_amount: 100, receiver_name: "Mona", receiver_phone: "010" });
+	assert.deepEqual(
+		dialog.config.fields.map((f) => f.fieldname),
+		["cod_note", "lists_error", "retry_lists", "receiver_name", "receiver_phone", "city", "district", "address_first_line"]
+	);
+	assert.equal(dialog.values.district, "");
+	assert.equal(dialog.config.primary_action_label, "Create Shipment");
 });

@@ -23,6 +23,7 @@ from marketplace_integrations.integrations.bosta.constants import (
 	BOSTA_MASS_AWB_PATH,
 	BOSTA_SEARCH_DELIVERIES_PATH,
 	BOSTA_TERMINATE_DELIVERY_PATH,
+	BOSTA_UPDATE_DELIVERY_PATH,
 )
 from marketplace_integrations.integrations.http import error_message_from_response, http_request
 
@@ -111,6 +112,19 @@ class BostaClient:
 			frappe.throw(_("A Bosta tracking number is required."))
 		return self.request(
 			"GET", BOSTA_GET_DELIVERY_PATH.format(tracking_number=quote(tracking_number, safe=""))
+		)
+
+	def update_delivery(self, tracking_number, payload):
+		"""Bosta's documented ``PUT /deliveries/business/{trackingNumber}`` with an opaque body."""
+		tracking_number = str(tracking_number or "").strip()
+		if not tracking_number:
+			frappe.throw(_("A Bosta tracking number is required."))
+		if not isinstance(payload, dict):
+			frappe.throw(_("Bosta delivery update payload must be an object."))
+		return self.request(
+			"PUT",
+			BOSTA_UPDATE_DELIVERY_PATH.format(tracking_number=quote(tracking_number, safe="")),
+			json=payload,
 		)
 
 	def terminate_delivery(self, tracking_number):
