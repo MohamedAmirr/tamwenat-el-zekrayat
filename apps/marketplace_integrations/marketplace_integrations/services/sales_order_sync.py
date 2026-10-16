@@ -1171,6 +1171,8 @@ def _resolve_shopify_address(order, customer, create=True):
 		}
 		if not any(values.values()):
 			return None
+		# Shopify province -> ERPNext state; city stays in city (#156).
+		values["state"] = cstr(source.get("province") or "").strip()
 		values["email_id"] = cstr(order.customer_email).strip()
 		values["phone"] = cstr(order.customer_phone_number or "").strip()
 		if values["country"] and not frappe.db.exists("Country", values["country"]):

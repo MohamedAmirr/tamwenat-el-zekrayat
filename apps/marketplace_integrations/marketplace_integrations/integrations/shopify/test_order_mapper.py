@@ -196,3 +196,27 @@ class UnitTestShopifyOrderMapper(UnitTestCase):
 		order["lineItems"]["pageInfo"]["hasNextPage"] = True
 		with self.assertRaisesRegex(Exception, "exceeds the supported lineItems"):
 			normalize_order(order)
+
+	def test_shipping_lines_keep_raw_shipping_evidence(self):
+		line = {"title": "Standard", "code": "std", "source": "shopify", "carrierIdentifier": None}
+		order = self.order(
+			requiresShipping=True,
+			retailLocation=None,
+			shippingLines={"pageInfo": {"hasNextPage": False}, "nodes": [line]},
+		)
+		self.assertEqual(
+			normalize_order(order)["shipping_lines"],
+			{"requiresShipping": True, "retailLocation": None, "shippingLines": [line]},
+		)
+
+	def test_shipping_lines_empty_without_shipping(self):
+		self.assertIsNone(normalize_order(self.order())["shipping_lines"])
+		order = self.order(
+			requiresShipping=False, shippingLines={"pageInfo": {"hasNextPage": False}, "nodes": []}
+		)
+		self.assertIsNone(normalize_order(order)["shipping_lines"])
+
+	def test_rejects_unbounded_shipping_lines(self):
+		order = self.order(shippingLines={"pageInfo": {"hasNextPage": True}, "nodes": []})
+		with self.assertRaisesRegex(Exception, "exceeds the supported shippingLines"):
+			normalize_order(order)

@@ -468,6 +468,7 @@ class IntegrationTestMarketplaceOrder(IntegrationTestCase):
             "presentment_currency": "USD",
             "billing_address": {"name": "<script>alert(1)</script>", "city": "Cairo"},
             "shipping_address": {"name": "Same <Person>", "city": "Cairo"},
+            "shipping_lines": {"requiresShipping": True, "shippingLines": [{"title": "Standard"}]},
             "payment_transactions": [{"id": "gid://shopify/OrderTransaction/1", "amount": "10.00"}],
             "refunds": [],
             "latest_payload": {"id": external_order_id, "note": "Handle <carefully>"},
@@ -491,6 +492,7 @@ class IntegrationTestMarketplaceOrder(IntegrationTestCase):
         self.assertEqual(order.presentment_currency, "USD")
         self.assertEqual(frappe.parse_json(order.billing_address)["name"], "<script>alert(1)</script>")
         self.assertEqual(frappe.parse_json(order.shipping_address)["city"], "Cairo")
+        self.assertEqual(frappe.parse_json(order.shipping_lines)["shippingLines"][0]["title"], "Standard")
         self.assertEqual(
             frappe.parse_json(order.payment_transactions)[0]["id"], "gid://shopify/OrderTransaction/1"
         )
