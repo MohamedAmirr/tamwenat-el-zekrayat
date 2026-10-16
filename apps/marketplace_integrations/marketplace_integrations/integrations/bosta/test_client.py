@@ -54,6 +54,45 @@ class UnitTestBostaClient(UnitTestCase):
 		)
 		self.assertFalse(kwargs["include_exception_details"])
 
+	def test_terminate_delivery_sends_a_bodyless_delete_to_the_documented_path(self):
+		response = FakeResponse(200, {"success": True})
+		with patch(
+			"marketplace_integrations.integrations.bosta.client.http_request", return_value=response
+		) as request:
+			self.assertIs(self.client.terminate_delivery(" 5108002 "), response)
+
+		args, kwargs = request.call_args
+		self.assertEqual(
+			args[:2], ("DELETE", "https://app.bosta.co/api/v2/deliveries/business/5108002/terminate")
+		)
+		self.assertNotIn("json", kwargs)
+		self.assertNotIn("data", kwargs)
+
+	def test_update_delivery_puts_the_payload_unchanged_to_the_tracking_number(self):
+		payload = {"receiver": {"phone": "010"}}
+		response = FakeResponse(200, {"success": True})
+		with patch(
+			"marketplace_integrations.integrations.bosta.client.http_request", return_value=response
+		) as request:
+			self.assertIs(self.client.update_delivery(" 5108002 ", payload), response)
+			with self.assertRaises(frappe.ValidationError):
+				self.client.update_delivery("", payload)
+			with self.assertRaises(frappe.ValidationError):
+				self.client.update_delivery("1", "not a dict")
+
+		request.assert_called_once()
+		args, kwargs = request.call_args
+		self.assertEqual(args[:2], ("PUT", "https://app.bosta.co/api/v2/deliveries/business/5108002"))
+		self.assertEqual(kwargs["json"], payload)
+
+	def test_terminate_delivery_requires_a_tracking_number_and_quotes_it(self):
+		with patch("marketplace_integrations.integrations.bosta.client.http_request") as request:
+			with self.assertRaises(frappe.ValidationError):
+				self.client.terminate_delivery("  ")
+			request.assert_not_called()
+			self.client.terminate_delivery("a/b")
+		self.assertTrue(request.call_args.args[1].endswith("/business/a%2Fb/terminate"))
+
 	def test_create_delivery_returns_failed_response_for_caller_to_handle(self):
 		response = FakeResponse(400, {"message": "invalid receiver"})
 		with patch("marketplace_integrations.integrations.bosta.client.http_request", return_value=response):

@@ -7,7 +7,7 @@ import time
 
 import frappe
 from frappe import _
-from frappe.utils import add_to_date, cstr, now_datetime
+from frappe.utils import add_to_date, cstr, escape_html, now_datetime
 
 from marketplace_integrations.integrations.bosta.client import (
 	BostaClient,
@@ -15,6 +15,7 @@ from marketplace_integrations.integrations.bosta.client import (
 	response_body,
 )
 from marketplace_integrations.integrations.bosta.deliveries import (
+	CREATOR_ROLES,
 	lock_and_load_sales_order,
 	rollback_to_savepoint,
 )
@@ -31,6 +32,9 @@ TERMINAL_STATE_CODES = (45, 49)
 # Polling only covers shipments created within this many days, so a shipment whose
 # terminal state we never observe cannot be polled forever.
 POLL_MAX_AGE_DAYS = 60
+
+# Bosta state code for Delivered; a delivered shipment cannot be cancelled from here.
+DELIVERED_STATE_CODE = 45
 
 CANCEL_SAVEPOINT = "bosta_cancel_delivery_note"
 
@@ -123,16 +127,174 @@ def poll_incomplete_shipments():
 	return updated
 
 
+def refresh_shipment_state(shipment_name):
+	"""Read one shipment's delivery from Bosta and apply its state (a manual poll, #271).
+
+	Creator roles only. One ``GET`` delivery, then the same ``apply_state`` as the poll and
+	the webhook (so state 49 cancels the Delivery Note through the existing path). A Bosta
+	error, an unreadable state or a network failure raises without storing anything.
+	Returns ``{"result": APPLIED | STALE}``.
+	"""
+	frappe.only_for(CREATOR_ROLES)
+	shipment = frappe.get_doc("Bosta Shipment", shipment_name)
+	shipment.check_permission("read")
+	if not shipment.tracking_number:
+		frappe.throw(_("This Bosta Shipment has no tracking number yet."))
+	client = BostaClient()
+	# Taken before the request: the snapshot is no newer than this instant.
+	fetched_at = int(time.time() * 1000)
+	response = client.get_delivery(shipment.tracking_number)
+	if not is_success_response(response):
+		frappe.throw(escape_html(client.error_message(response)))
+	state = _polled_state(response_body(response))
+	if not state:
+		frappe.throw(_("Bosta returned no readable state for this delivery."))
+	result = apply_state(
+		shipment.tracking_number,
+		state_code=state["code"],
+		timestamp=fetched_at,
+		snapshot=state["snapshot"],
+	)
+	if result == SKIPPED:
+		frappe.throw(_("Bosta returned a state this app does not recognise. Nothing was changed."))
+	return {"result": result}
+
+
+def cancel_bosta_shipment(shipment_name):
+	"""Terminate the delivery in Bosta, then cancel the Delivery Note and the shipment (#272).
+
+	Creator roles only. Refused locally, without calling Bosta, only when there is no tracking
+	number, the shipment is already Canceled, the stored state is Delivered (45), or the
+	Delivery Note is on a submitted Sales Invoice; every other state goes to Bosta and its
+	error is shown escaped. A failed request leaves everything unchanged. A network error
+	has an unknown outcome: nothing is changed, the delivery is read back, and only a
+	reported 48/49 finishes the local cancel. Returns ``{"canceled": bool, "delivery_note_error"}``;
+	``canceled`` is False when Bosta terminated the delivery but the Delivery Note could not
+	be cancelled (the shipment then stays active, listed in Needs Attention, retried by the poll).
+	"""
+	frappe.only_for(CREATOR_ROLES)
+	shipment = frappe.get_doc("Bosta Shipment", shipment_name)
+	shipment.check_permission("read")
+	lock_and_load_sales_order(shipment.sales_order)
+	shipment.reload()
+	_refuse_cancel_locally(shipment)
+	if shipment.bosta_terminated_on or shipment.bosta_state_code in (48, 49):
+		# Bosta already terminated it (an earlier click or a reported state): do not send
+		# the DELETE again, only finish the local side.
+		return _finish_cancel_safely(shipment)
+	client = BostaClient()
+	client.ensure_ready()
+	# Release the Sales Order lock before the HTTP call.
+	frappe.db.commit()
+
+	try:
+		response = client.terminate_delivery(shipment.tracking_number)
+	except Exception:
+		# The recovery below reports the outcome; drop the client's own error popup.
+		frappe.clear_messages()
+		return _finish_after_unknown_outcome(shipment)
+	if not is_success_response(response):
+		frappe.throw(escape_html(client.error_message(response)))
+	return _finish_cancel_safely(shipment)
+
+
+def _refuse_cancel_locally(shipment):
+	if not shipment.tracking_number:
+		frappe.throw(_("This Bosta Shipment has no tracking number, so there is nothing to cancel in Bosta."))
+	if shipment.status == CANCELED:
+		frappe.throw(_("This Bosta Shipment is already canceled."))
+	if shipment.bosta_state_code == DELIVERED_STATE_CODE:
+		frappe.throw(_("Bosta reports this delivery as Delivered; it cannot be cancelled."))
+	if shipment.delivery_note and frappe.db.exists(
+		"Sales Invoice Item", {"delivery_note": shipment.delivery_note, "docstatus": 1}
+	):
+		frappe.throw(
+			_("Delivery Note {0} is on a submitted Sales Invoice; cancel the invoice first.").format(
+				shipment.delivery_note
+			)
+		)
+
+
+def _finish_after_unknown_outcome(shipment):
+	"""The terminate request failed without an answer: it may or may not have been applied."""
+	frappe.db.rollback()
+	try:
+		refresh_shipment_state(shipment.name)
+		shipment.reload()
+	except Exception:
+		frappe.db.rollback()
+		shipment = None
+	# Drop the client's own "Failed to reach Bosta" popups; the outcome is reported below.
+	frappe.clear_messages()
+	if shipment and shipment.status == CANCELED:
+		return {"canceled": True, "delivery_note_error": ""}
+	if shipment and shipment.bosta_state_code in (48, 49):
+		return _finish_cancel_safely(shipment)
+	frappe.throw(
+		_(
+			"Could not confirm that Bosta terminated the delivery. Nothing was changed here. "
+			"Check the delivery in Bosta before trying again."
+		)
+	)
+
+
+def _finish_cancel_safely(shipment):
+	"""``_finish_cancel``, but Bosta has already terminated the delivery, so a failure here
+	must not be lost: record it on the shipment so the poll's retry picks it up."""
+	try:
+		return _finish_cancel(shipment)
+	except Exception as exc:
+		frappe.db.rollback()
+		frappe.log_error(
+			frappe.get_traceback(with_context=False),
+			f"Bosta cancellation could not be finished for {shipment.name}",
+		)
+		error = _(
+			"Bosta terminated the delivery, but the cancellation could not be finished here: {0}"
+		).format(frappe.utils.strip_html(cstr(exc))[:300])
+		try:
+			frappe.db.set_value(
+				"Bosta Shipment",
+				shipment.name,
+				{"bosta_terminated_on": now_datetime(), "delivery_note_error": error},
+			)
+			frappe.db.commit()
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(
+				frappe.get_traceback(with_context=False),
+				f"Bosta cancellation failure could not be recorded for {shipment.name}",
+			)
+		frappe.throw(
+			_(
+				"Bosta terminated the delivery, but ERPNext could not finish the cancellation. "
+				"The Delivery Note cancel will be retried automatically."
+			)
+		)
+
+
+def _finish_cancel(shipment):
+	lock_and_load_sales_order(shipment.sales_order)
+	shipment.reload()
+	if not shipment.bosta_terminated_on:
+		shipment.bosta_terminated_on = now_datetime()
+		save_as_system(shipment)
+	canceled = shipment.status == CANCELED or _cancel_linked_delivery_note(shipment)
+	frappe.db.commit()
+	return {"canceled": bool(canceled), "delivery_note_error": shipment.delivery_note_error or ""}
+
+
 def retry_failed_cancellations():
-	"""Bosta cancelled the shipment but ERPNext could not cancel the Delivery Note:
-	try again (local only; no Bosta call)."""
+	"""Bosta cancelled or terminated the shipment but ERPNext could not cancel the Delivery
+	Note: try again (local only; no Bosta call)."""
 	for row in frappe.get_all(
 		"Bosta Shipment",
 		filters={
-			"bosta_state_code": 49,
 			"status": ["!=", CANCELED],
 			"delivery_note_error": ["!=", ""],
 		},
+		# Bosta cancelled it (state 49) or accepted our terminate request.
+		or_filters=[["bosta_state_code", "=", 49], ["bosta_terminated_on", "is", "set"]],
 		fields=["name", "sales_order"],
 	):
 		try:
