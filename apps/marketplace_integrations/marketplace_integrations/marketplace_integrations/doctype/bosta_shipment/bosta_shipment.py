@@ -8,6 +8,17 @@ from frappe.utils import cstr, now_datetime
 
 CANCELED = "Canceled"
 PENDING = "Pending Bosta"
+# Fields of the Bosta delivery that the Bosta Edit action owns: locked for everyone once the
+# shipment has a tracking number (except the system write flag).
+DELIVERY_DETAIL_FIELDS = (
+	"receiver_name",
+	"receiver_phone",
+	"city",
+	"district_id",
+	"city_id",
+	"district_name",
+	"address_first_line",
+)
 SYSTEM_FIELDS = (
 	"sales_order",
 	"delivery_note",
@@ -26,6 +37,8 @@ SYSTEM_FIELDS = (
 	"delivery_note_error",
 	"delivery_note_error_at",
 	"bosta_requested_on",
+	"cod_amount",
+	"bosta_terminated_on",
 )
 
 
@@ -48,6 +61,7 @@ class BostaShipment(Document):
 
 	def validate(self):
 		self._block_system_field_writes()
+		self._lock_delivery_details_after_tracking()
 		self._validate_required_delivery_details()
 		self._validate_single_active_shipment()
 		if self.has_value_changed("delivery_note_error"):
@@ -84,6 +98,21 @@ class BostaShipment(Document):
 			old = before.get(fieldname) if before else (PENDING if fieldname == "status" else None)
 			if cstr(self.get(fieldname) or "") != cstr(old or ""):
 				frappe.throw(_("{0} is set by the system and cannot be edited.").format(_(fieldname)))
+
+	def _lock_delivery_details_after_tracking(self):
+		"""Once Bosta has the delivery, the receiver and address here must keep matching it, so
+		they change only through Bosta Edit (which sets ``flags.bosta_system_write``), for
+		every user including System Manager."""
+		before = self.get_doc_before_save()
+		if self.flags.bosta_system_write or not before or not before.tracking_number:
+			return
+		for fieldname in DELIVERY_DETAIL_FIELDS:
+			if cstr(self.get(fieldname) or "") != cstr(before.get(fieldname) or ""):
+				frappe.throw(
+					_(
+						"{0} cannot be edited once Bosta has the delivery; use Edit Bosta Shipment on the Sales Order."
+					).format(_(self.meta.get_label(fieldname)))
+				)
 
 	def _validate_required_delivery_details(self):
 		for fieldname, label in (

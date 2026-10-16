@@ -41,7 +41,15 @@ class FakeBosta:
 	"""Queue of responses (or exceptions to raise) per endpoint; records every call."""
 
 	def __init__(self):
-		self.queue = {"create": [], "search": [], "get": [], "cities": [], "districts": []}
+		self.queue = {
+			"create": [],
+			"search": [],
+			"get": [],
+			"cities": [],
+			"districts": [],
+			"terminate": [],
+			"update": [],
+		}
 		self.calls = []
 
 	def __call__(self, method, url, **kwargs):
@@ -49,9 +57,15 @@ class FakeBosta:
 			kind = "cities"
 		elif url.endswith("/districts"):
 			kind = "districts"
+		elif method == "DELETE":
+			kind = "terminate"
+		elif method == "PUT":
+			kind = "update"
 		else:
 			kind = "search" if url.endswith("/deliveries/search") else "create" if method == "POST" else "get"
-		self.calls.append((kind, kwargs.get("json") if kind not in ("cities", "districts") else url))
+		self.calls.append(
+			(kind, kwargs.get("json") if kind not in ("cities", "districts", "terminate") else url)
+		)
 		item = self.queue[kind].pop(0)
 		if isinstance(item, Exception):
 			raise item

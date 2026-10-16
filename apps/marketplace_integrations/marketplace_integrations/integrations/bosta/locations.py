@@ -117,3 +117,38 @@ def _parse_districts(data):
 				}
 			)
 	return districts
+
+
+def get_pickup_locations():
+	"""The business's Bosta pickup locations as ``[{id, name, address, city, is_default}]``
+	for the Bosta Settings picker (#276). Uses the saved API key, works while Bosta is
+	still disabled, and caches/stores nothing.
+
+	``GET /pickup-locations`` is documented as ``data.list[]`` of ``{_id, locationName,
+	address: {firstLine, city: {_id, name}}, isDefault}`` (field shapes from the docs.yaml
+	example; ``_id``, ``locationName``, ``address.firstLine``, ``address.city.name`` and
+	``isDefault`` were seen in a live response on 2026-10-16). The ``page`` query parameter
+	is honored and the default page size is 200 (verified live 2026-10-16). A location
+	repeated across pages is returned once."""
+	client = BostaClient(allow_disabled=True)
+	locations = []
+	seen = set()
+	for item in client.get_pickup_locations():
+		if not isinstance(item, dict):
+			continue
+		location_id = cstr(item.get("_id")).strip()
+		if not location_id or location_id in seen:
+			continue
+		seen.add(location_id)
+		address = item.get("address") if isinstance(item.get("address"), dict) else {}
+		city = address.get("city") if isinstance(address.get("city"), dict) else {}
+		locations.append(
+			{
+				"id": location_id,
+				"name": cstr(item.get("locationName")).strip(),
+				"address": cstr(address.get("firstLine")).strip(),
+				"city": cstr(city.get("name")).strip(),
+				"is_default": bool(item.get("isDefault")),
+			}
+		)
+	return locations
