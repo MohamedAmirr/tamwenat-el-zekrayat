@@ -4,45 +4,25 @@
 import frappe
 from frappe.tests import IntegrationTestCase
 
-from marketplace_integrations.integrations.shopify.test_products import make_shopify_account
 from marketplace_integrations.patches.v0_0.backfill_shopify_sales_order_contact_mobile import execute
 from marketplace_integrations.services import test_sales_order_sync as sync_tests
-from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 from marketplace_integrations.services.sales_order_sync import sync_sales_order
 
 
 class IntegrationTestBackfillShopifySalesOrderContactMobile(IntegrationTestCase):
 	def setUp(self):
-		self.account = make_shopify_account(f"Backfill Phone {frappe.generate_hash(length=8)}")
-		self.sales_orders = []
+		# One set of sync fixtures (item, price list, Shopify account) shared by every order.
+		self.sync = sync_tests.IntegrationTestSalesOrderSync()
+		self.sync.setUp()
+		self.account = self.sync._make_shopify_account()
 
 	def make_order(self, so_phone, buyer_phone="+201001234567", platform="Shopify"):
-		# A Sales Order is not needed for the patch's SQL-level write; use a real submitted one.
-		so = self._sales_order()
+		# Uses a real submitted Sales Order so the patch's write on a submitted order is exercised.
+		order, _mapping = self.sync._make_shopify_order(self.account, customer_phone_number=buyer_phone)
+		so = sync_sales_order(order.name)["sales_order"]
 		frappe.db.set_value("Sales Order", so, "contact_mobile", so_phone, update_modified=False)
-		order = upsert_marketplace_order(
-			self.account.name,
-			{
-				"external_order_id": f"backfill-phone-{frappe.generate_hash(length=8)}",
-				"latest_payload": {"id": "1"},
-				"customer_phone_number": buyer_phone,
-				"items": [],
-			},
-		)
-		frappe.db.set_value(
-			"Marketplace Order",
-			order.name,
-			{"erpnext_sales_order": so, "platform": platform},
-			update_modified=False,
-		)
+		frappe.db.set_value("Marketplace Order", order.name, "platform", platform, update_modified=False)
 		return so
-
-	def _sales_order(self):
-		helper = sync_tests.IntegrationTestSalesOrderSync()
-		helper.setUp()
-		account = helper._make_shopify_account()
-		order, _mapping = helper._make_shopify_order(account)
-		return sync_sales_order(order.name)["sales_order"]
 
 	def test_fills_only_empty_phones_and_is_idempotent(self):
 		empty = self.make_order(None)

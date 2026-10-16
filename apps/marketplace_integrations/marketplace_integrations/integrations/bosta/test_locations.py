@@ -239,6 +239,8 @@ class IntegrationTestBostaAddressPrefill(BostaFixtureMixin, IntegrationTestCase)
 
 		def get_value(doctype, *args, **kwargs):
 			if doctype == "Marketplace Order":  # building a real one needs a Marketplace Account
+				if isinstance(args[1], list):  # the buyer phone lookup
+					return frappe._dict(platform="Shopify", customer_phone_number="")
 				return " 123 Main St, Cairo "
 			return real_get_value(doctype, *args, **kwargs)
 
@@ -248,21 +250,26 @@ class IntegrationTestBostaAddressPrefill(BostaFixtureMixin, IntegrationTestCase)
 		self.assertEqual(defaults["address_first_line"], "123 Main St, Cairo")
 		self.assertEqual(defaults["address_city"], "")
 
-	def test_receiver_phone_falls_back_to_the_marketplace_order_buyer_phone(self):
+	def test_receiver_phone_falls_back_to_the_shopify_buyer_phone_only(self):
 		order = self.make_order()
 		self.assertEqual(self._defaults(order)["receiver_phone"], "")
 		frappe.db.set_value("Sales Order", order.name, "custom_marketplace_order", "MKTORD-FAKE")
 		real_get_value = frappe.db.get_value
+		platform = ["Shopify"]
 
 		def get_value(doctype, *args, **kwargs):
 			if doctype == "Marketplace Order":  # building a real one needs a Marketplace Account
-				return " +201013271104 "
+				return frappe._dict(platform=platform[0], customer_phone_number=" +201013271104 ")
 			return real_get_value(doctype, *args, **kwargs)
 
 		with patch.object(frappe.db, "get_value", side_effect=get_value):
 			self.assertEqual(self._defaults(order)["receiver_phone"], "+201013271104")
 			frappe.db.set_value("Sales Order", order.name, "contact_mobile", "01000000000")
 			self.assertEqual(self._defaults(order)["receiver_phone"], "01000000000")
+			# Another platform's buyer phone is not used.
+			frappe.db.set_value("Sales Order", order.name, "contact_mobile", "")
+			platform[0] = "Talabat"
+			self.assertEqual(self._defaults(order)["receiver_phone"], "")
 
 	def test_shipping_address_wins_over_the_marketplace_order(self):
 		order = self.make_order()
