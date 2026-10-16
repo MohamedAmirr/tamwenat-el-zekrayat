@@ -168,6 +168,23 @@ Arabic AWB endpoints. It deliberately receives an opaque delivery payload: the
 Sales Order workflow owns the Bosta-required payload mapping, rather than the
 settings/client foundation.
 
+**Picking the business location (#276).** `Business Location ID` is read-only on
+the form; the **Fetch Locations** button on `Bosta Settings` calls
+`api.bosta_settings.get_pickup_locations` (System Manager only), which uses the
+*saved* API key (no key: rejected before any request; unsaved edits: the form asks
+to save first) and returns `[{id, name, address, city, is_default}]` via
+`integrations/bosta/locations.get_pickup_locations()` ->
+`BostaClient.get_pickup_locations()` (`GET /pickup-locations`, every page, capped at
+20). It works while Bosta is still disabled (`BostaClient(allow_disabled=True)`,
+since enabling requires the location); every other client call still requires
+enabled. Nothing is cached or stored. A dialog Select (labels escaped, value =
+Bosta `_id`) sets the field; the default location is preselected only when no ID is
+set yet; a Bosta error shows escaped with Retry, and an error or empty list never
+changes the saved ID. Shapes (`data.list[]` of `_id`, `locationName`,
+`address.firstLine`, `address.city.name`, `isDefault`; `data.pages`) come from the
+docs.yaml example and are unverified against live Bosta, as is the `page` query
+parameter used to walk further pages (the spec lists no parameters).
+
 The `Bosta Shipment` operational record links an ERPNext Sales Order and
 Delivery Note; it is not a marketplace shipment or a generic carrier
 framework.

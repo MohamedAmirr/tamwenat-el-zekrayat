@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 import frappe
 from frappe import _
+from frappe.utils import cint, escape_html
 
 from marketplace_integrations.integrations.bosta.constants import (
 	BOSTA_API_BASE_URL,
@@ -21,18 +22,24 @@ from marketplace_integrations.integrations.bosta.constants import (
 	BOSTA_DISTRICTS_PATH,
 	BOSTA_GET_DELIVERY_PATH,
 	BOSTA_MASS_AWB_PATH,
+	BOSTA_PICKUP_LOCATIONS_PATH,
 	BOSTA_SEARCH_DELIVERIES_PATH,
 )
 from marketplace_integrations.integrations.http import error_message_from_response, http_request
 
 SERVICE_NAME = "Bosta"
+# Safety bound on pickup-location paging; a business has a handful of locations.
+MAX_PICKUP_LOCATION_PAGES = 20
 
 
 class BostaClient:
 	"""Authenticated transport for the site's single Bosta carrier setup."""
 
-	def __init__(self, settings=None):
+	def __init__(self, settings=None, allow_disabled=False):
 		self._settings = settings
+		# Picking the business location happens before Bosta can be enabled (enabling
+		# requires that location), so that one call may run while disabled.
+		self._allow_disabled = allow_disabled
 
 	def get_settings(self):
 		return self._settings or frappe.get_single("Bosta Settings")
@@ -43,7 +50,7 @@ class BostaClient:
 		Callers use this to fail on configuration problems before they persist any state
 		that would otherwise look like an ambiguous (maybe-sent) request."""
 		settings = self.get_settings()
-		if not settings.enabled:
+		if not settings.enabled and not self._allow_disabled:
 			frappe.throw(_("Bosta Settings is disabled."))
 		api_key = settings.get_password("api_key", raise_exception=False)
 		if not api_key:
@@ -132,6 +139,28 @@ class BostaClient:
 		if not city_id:
 			frappe.throw(_("A Bosta city ID is required."))
 		return self.request("GET", BOSTA_DISTRICTS_PATH.format(city_id=quote(city_id, safe="")))
+
+	def get_pickup_locations(self):
+		"""Every raw pickup location of the business from ``GET /pickup-locations``.
+
+		The documented response is ``data: {list, page, pages, ...}``. The OpenAPI lists
+		no query parameters for this endpoint, so the ``page`` parameter used to walk
+		further pages is unverified. A Bosta failure is raised escaped."""
+		locations = []
+		page = 1
+		while True:
+			response = self.request("GET", BOSTA_PICKUP_LOCATIONS_PATH, params={"page": page})
+			if not is_success_response(response):
+				frappe.throw(escape_html(self.error_message(response)))
+			data = response_body(response).get("data")
+			items = data.get("list") if isinstance(data, dict) else None
+			if not isinstance(items, list):
+				frappe.throw(_("Bosta returned the pickup locations in an unrecognised format."))
+			locations.extend(items)
+			pages = min(cint(data.get("pages")), MAX_PICKUP_LOCATION_PAGES)
+			if page >= pages:
+				return locations
+			page += 1
 
 	def error_message(self, response):
 		"""Return a bounded Bosta error suitable for an operator-facing message."""
