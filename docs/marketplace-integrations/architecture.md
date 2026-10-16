@@ -504,3 +504,4 @@ The following must be designed in their own issues using authoritative platform/
 - #36 — Marketplace Product Management imports
 - #8 — Talabat migration
 - #167 — Marketplace Workspace & Channel Management (implemented)
+- **Shopify buyer phone on the Sales Order** (#277) — `services/sales_order_sync.py::_fill_buyer_phone()` writes `Marketplace Order.customer_phone_number` into `Sales Order.contact_mobile` for Shopify orders only when it is empty (new orders and draft re-syncs; submitted orders are never touched by sync). Not part of the snapshot or hash. `fixtures/property_setter.json` (`Sales Order-contact_mobile-read_only`, `-allow_on_submit`, listed in `hooks.py` fixtures) makes the field staff-editable, also after submit. `patches/v0_0/backfill_shopify_sales_order_contact_mobile.py` backfills existing orders. See `docs/shopify/README.md`.
