@@ -86,6 +86,11 @@ Where work happens (no ambiguity about the Desk request path):
   request): permission checks, ``_validate_inventory_account_local()`` (platform,
   connection, enabled flags, Location set, Warehouse - all local DB reads), and
   the enqueue. **No Shopify HTTP call is made in the request.**
+- "Push Inventory to Shopify" switch (``Marketplace Account.shopify_inventory_push_enabled``,
+  default on): when off, the sweep / daily reconcile skip the account,
+  ``_validate_inventory_account_local()`` and ``enqueue_account_sync()`` refuse
+  with "Inventory push is paused for this account.", and a job queued earlier
+  returns from ``sync_account_inventory()`` before any Shopify call.
 - ``sync_account_inventory()`` (background worker): the Location use-time
   re-check (a live read), then all reads/mutations against Shopify.
 
@@ -280,6 +285,17 @@ class _EntryFailed(Exception):
 	"""One mapping could not be prepared; carries the message to persist."""
 
 
+def _push_paused_message():
+	return _("Inventory push is paused for this account.")
+
+
+def _is_push_paused(account_name):
+	"""True when the Marketplace Account's "Push Inventory to Shopify" switch is
+	off. A single indexed read, safe to call from the worker before anything
+	else (and from ``enqueue_account_sync()``)."""
+	return not frappe.db.get_value("Marketplace Account", account_name, "shopify_inventory_push_enabled")
+
+
 def _as_account(value):
 	if getattr(value, "doctype", None) == "Marketplace Account":
 		return value
@@ -310,6 +326,8 @@ def _validate_inventory_account_local(account):
 		frappe.throw(_("Marketplace Account {0} does not use a Shopify Connection.").format(account_doc.name))
 	if not account_doc.enabled:
 		frappe.throw(_("Marketplace Account {0} is disabled.").format(account_doc.name))
+	if not account_doc.shopify_inventory_push_enabled:
+		frappe.throw(_push_paused_message())
 	if not cstr(account_doc.shopify_location_gid).strip():
 		frappe.throw(
 			_("Marketplace Account {0} requires a Shopify Location for inventory sync.").format(
@@ -437,6 +455,11 @@ def enqueue_account_sync(account_name, mapping_names=None, owner=None):
 	(they only enqueue). ``owner`` is the Desk user for owner-scoped status;
 	without one no status entry/realtime event is created.
 	"""
+	if _is_push_paused(account_name):
+		# Defense in depth: every caller already filters/validates, but this is
+		# the single enqueue choke point, so nothing can queue a push for a
+		# paused account.
+		frappe.throw(_push_paused_message())
 	job_id = frappe.generate_hash(length=16) if owner else None
 	if job_id:
 		# Seed the "queued" entry BEFORE enqueueing so a fast worker can't
@@ -477,6 +500,15 @@ def sync_account_inventory(account_name, mapping_names=None, job_id_for_result=N
 	Returns the result payload. Status/progress is written only when a
 	``job_id_for_result`` is given. See the module docstring for the shape.
 	"""
+	if _is_push_paused(account_name):
+		# The switch was turned off after this job was queued. Exit before any
+		# Shopify call and before touching any mapping's status; report it as
+		# a clear one-off result rather than raising (no Error Log, no retry).
+		message = cstr(_push_paused_message())
+		_report(job_id_for_result, owner, status="failed", error=message)
+		payload = _result_payload([])
+		payload["paused"] = True
+		return payload
 	frappe.flags.shopify_inventory_logged_failures = 0
 	frappe.flags.shopify_inventory_suppressed_failures = 0
 	# Flips to True right before the first per-mapping/per-chunk outcome could
@@ -1078,7 +1110,9 @@ def _log_suppressed_failures():
 # sweep-triggered full sync would duplicate that safety net for no benefit.
 
 
-_EXCLUDED_ACCOUNTS_LOG_CACHE_KEY = "marketplace_integrations:shopify:inventory_reconcile_excluded_accounts_logged_date"
+_EXCLUDED_ACCOUNTS_LOG_CACHE_KEY = (
+	"marketplace_integrations:shopify:inventory_reconcile_excluded_accounts_logged_date"
+)
 
 
 def _log_excluded_accounts_once_per_day(excluded):
@@ -1137,7 +1171,8 @@ def _enabled_shopify_accounts():
 def _enabled_shopify_accounts_with_exclusions():
 	"""Return ``(usable_accounts, excluded)`` where ``excluded`` is
 	``[(account_name, reason), ...]`` for every enabled Shopify Marketplace
-	Account that exists but fails a config check: Shopify platform, enabled,
+	Account that exists but fails a config check (accounts with the "Push
+	Inventory to Shopify" switch off are left out of both lists): Shopify platform, enabled,
 	using an enabled Shopify Connection, with both a Warehouse and a Shopify
 	Location configured, AND a Warehouse that would actually pass
 	``validate_account_warehouse()`` (not a group / disabled Warehouse, and
@@ -1153,7 +1188,14 @@ def _enabled_shopify_accounts_with_exclusions():
 	here would starve accounts rather than bound a backlog."""
 	accounts = frappe.get_all(
 		"Marketplace Account",
-		filters={"platform": "Shopify", "enabled": 1, "connection_doctype": "Shopify Connection"},
+		filters={
+			"platform": "Shopify",
+			"enabled": 1,
+			"connection_doctype": "Shopify Connection",
+			# Paused accounts are skipped silently (not "excluded"): pausing is
+			# a deliberate choice, not a misconfiguration to log daily.
+			"shopify_inventory_push_enabled": 1,
+		},
 		fields=["name", "warehouse", "shopify_location_gid", "connection"],
 	)
 	if not accounts:
@@ -1241,9 +1283,7 @@ def sweep_changed_bins():
 		try:
 			_sweep_account(account, tick_time)
 		except Exception:
-			frappe.log_error(
-				title="Shopify inventory sweep: account failed", message=frappe.get_traceback()
-			)
+			frappe.log_error(title="Shopify inventory sweep: account failed", message=frappe.get_traceback())
 
 
 def _sweep_account(account, tick_time):

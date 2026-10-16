@@ -870,7 +870,9 @@ class IntegrationTestJobResilience(InventoryFixtureMixin, IntegrationTestCase):
 		self.shopify.add(disabled_item_mapping.external_reference)
 
 		with patch.object(
-			inventory_sync, "validate_inventory_account", side_effect=frappe.ValidationError("Location deactivated")
+			inventory_sync,
+			"validate_inventory_account",
+			side_effect=frappe.ValidationError("Location deactivated"),
 		):
 			with self.assertRaises(frappe.ValidationError):
 				inventory_sync.sync_account_inventory(
@@ -962,7 +964,10 @@ class IntegrationTestJobResilience(InventoryFixtureMixin, IntegrationTestCase):
 
 			with (
 				patch(EXECUTE_TARGET, side_effect=self.shopify),
-				patch(FETCH_LOCATIONS_TARGET, return_value={"shop_id": "s", "active_locations": [{"id": LOCATION, "name": "Main"}]}),
+				patch(
+					FETCH_LOCATIONS_TARGET,
+					return_value={"shop_id": "s", "active_locations": [{"id": LOCATION, "name": "Main"}]},
+				),
 				patch.object(inventory_sync, "_sync_chunk", side_effect=flaky_sync_chunk),
 			):
 				with self.assertRaises(RuntimeError):
@@ -1461,9 +1466,16 @@ class IntegrationTestScheduledTriggers(InventoryFixtureMixin, IntegrationTestCas
 			frappe.get_doc(
 				{"doctype": "Bin", "item_code": item, "warehouse": other_warehouse[0], "actual_qty": 1}
 			).insert()
-			bin_name = frappe.db.get_value("Bin", {"item_code": item, "warehouse": other_warehouse[0]}, "name")
+			bin_name = frappe.db.get_value(
+				"Bin", {"item_code": item, "warehouse": other_warehouse[0]}, "name"
+			)
 		frappe.db.set_value(
-			"Bin", bin_name, "actual_qty", 2, modified=add_to_date(tick_time, minutes=-1), update_modified=True
+			"Bin",
+			bin_name,
+			"actual_qty",
+			2,
+			modified=add_to_date(tick_time, minutes=-1),
+			update_modified=True,
 		)
 
 		with patch(EXECUTE_TARGET) as mocked_execute, patch("frappe.enqueue") as mocked_enqueue:
@@ -1495,7 +1507,9 @@ class IntegrationTestScheduledTriggers(InventoryFixtureMixin, IntegrationTestCas
 
 		with (
 			patch(EXECUTE_TARGET) as mocked_execute,
-			patch.object(inventory_sync, "enqueue_account_sync", return_value=(False, None)) as mocked_enqueue,
+			patch.object(
+				inventory_sync, "enqueue_account_sync", return_value=(False, None)
+			) as mocked_enqueue,
 			patch.object(inventory_sync, "now_datetime", return_value=tick_time),
 		):
 			inventory_sync.sweep_changed_bins()
@@ -1727,3 +1741,137 @@ class IntegrationTestScheduledTriggers(InventoryFixtureMixin, IntegrationTestCas
 		enqueued_accounts = {call.kwargs["account_name"] for call in mocked_enqueue.call_args_list}
 		self.assertIn(other_account.name, enqueued_accounts)
 		self.assertNotIn(self.account.name, enqueued_accounts)
+
+
+class IntegrationTestPushSwitch(InventoryFixtureMixin, IntegrationTestCase):
+	"""#285: the per-account "Push Inventory to Shopify" switch
+	(``Marketplace Account.shopify_inventory_push_enabled``)."""
+
+	PAUSED = "Inventory push is paused for this account"
+
+	def _pause(self, account=None):
+		(account or self.account).db_set("shopify_inventory_push_enabled", 0, update_modified=False)
+
+	@staticmethod
+	def _enqueued_accounts(mocked_enqueue):
+		return {call.kwargs["account_name"] for call in mocked_enqueue.call_args_list}
+
+	def test_switch_defaults_on_for_new_accounts_and_in_the_database_column(self):
+		self.assertEqual(self.account.shopify_inventory_push_enabled, 1)
+		self.assertEqual(
+			frappe.get_meta("Marketplace Account").get_field("shopify_inventory_push_enabled").default, "1"
+		)
+		# Rows that existed before the field was added read as on because the
+		# column itself carries the default (no backfill patch needed).
+		column = frappe.db.sql(
+			"SHOW COLUMNS FROM `tabMarketplace Account` LIKE 'shopify_inventory_push_enabled'", as_dict=True
+		)
+		self.assertEqual(str(column[0]["Default"]), "1")
+
+	def test_sweep_skips_a_paused_account_but_still_syncs_an_active_one(self):
+		other_account = self._make_account("SwitchOn")
+		for marker, account in (("SwitchPaused", self.account), ("SwitchOn", other_account)):
+			item = self._make_item(marker, qty=1)
+			self._make_mapping(item, account=account)
+		self._pause()
+
+		with patch(EXECUTE_TARGET) as mocked_execute, patch("frappe.enqueue") as mocked_enqueue:
+			inventory_sync.sweep_changed_bins()
+
+		mocked_execute.assert_not_called()
+		enqueued = self._enqueued_accounts(mocked_enqueue)
+		self.assertIn(other_account.name, enqueued)
+		self.assertNotIn(self.account.name, enqueued)
+
+	def test_reconcile_skips_a_paused_account_without_logging_it_as_excluded(self):
+		other_account = self._make_account("ReconOn")
+		self._pause()
+
+		with (
+			patch(EXECUTE_TARGET) as mocked_execute,
+			patch("frappe.enqueue") as mocked_enqueue,
+			patch("frappe.log_error") as mocked_log_error,
+		):
+			usable, excluded = inventory_sync._enabled_shopify_accounts_with_exclusions()
+			inventory_sync.reconcile_all_accounts()
+
+		mocked_execute.assert_not_called()
+		enqueued = self._enqueued_accounts(mocked_enqueue)
+		self.assertIn(other_account.name, enqueued)
+		self.assertNotIn(self.account.name, enqueued)
+		self.assertNotIn(self.account.name, {account.name for account in usable})
+		self.assertNotIn(self.account.name, {name for name, _reason in excluded})
+		for call in mocked_log_error.call_args_list:
+			self.assertNotIn(self.account.name, call.kwargs.get("message", ""))
+
+	def test_manual_actions_are_refused_with_the_paused_message_and_no_shopify_call(self):
+		mapping = self._one(5)
+		self._pause()
+
+		with (
+			patch(EXECUTE_TARGET) as mocked_execute,
+			patch(FETCH_LOCATIONS_TARGET) as mocked_fetch,
+			patch("frappe.enqueue") as mocked_enqueue,
+		):
+			selected = inventory_sync.queue_inventory_sync([mapping.name])
+			reconciled = inventory_sync.queue_account_reconciliation(self.account.name)
+
+		for result in (selected, reconciled):
+			self.assertEqual(result["jobs"], [])
+			self.assertEqual(result["skipped_accounts"][0]["account"], self.account.name)
+			self.assertIn(self.PAUSED, result["skipped_accounts"][0]["reason"])
+		mocked_execute.assert_not_called()
+		mocked_fetch.assert_not_called()
+		mocked_enqueue.assert_not_called()
+
+	def test_enqueue_account_sync_refuses_a_paused_account(self):
+		self._pause()
+
+		with patch("frappe.enqueue") as mocked_enqueue:
+			with self.assertRaises(frappe.ValidationError) as caught:
+				inventory_sync.enqueue_account_sync(self.account.name, None, "Administrator")
+
+		self.assertIn(self.PAUSED, str(caught.exception))
+		mocked_enqueue.assert_not_called()
+
+	def test_a_job_queued_before_the_switch_was_turned_off_makes_no_shopify_call(self):
+		mapping = self._one(5, shopify_on_hand=0)
+		self._pause()
+		job_id = frappe.generate_hash(length=16)
+		inventory_sync._set_status(job_id, {"owner": "Administrator", "status": "queued", "processed": 0})
+
+		payload = self._sync([mapping.name], job_id_for_result=job_id, owner="Administrator")
+
+		self.assertEqual(self.shopify.calls, [])
+		self.assertTrue(payload["paused"])
+		self.assertEqual(payload["total"], 0)
+		state = frappe.cache().get_value(inventory_sync._status_cache_key(job_id))
+		self.assertEqual(state["status"], "failed")
+		self.assertIn(self.PAUSED, state["error"])
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Not Synced")
+		frappe.cache().delete_value(inventory_sync._status_cache_key(job_id))
+
+	def test_turning_the_switch_back_on_resumes_syncing_without_an_automatic_push(self):
+		mapping = self._one(5, shopify_on_hand=0)
+		self._pause()
+
+		with patch("frappe.enqueue") as mocked_enqueue:
+			self.account.db_set("shopify_inventory_push_enabled", 1, update_modified=False)
+		mocked_enqueue.assert_not_called()
+
+		self._sync([mapping.name])
+		self.assertEqual(self.shopify.variants[mapping.external_reference]["on_hand"], 5)
+
+	def test_order_import_still_works_for_a_paused_account(self):
+		from marketplace_integrations.integrations.shopify import orders
+		from marketplace_integrations.integrations.shopify.test_orders import _order_gid, make_order_payload
+
+		self._pause()
+		order_gid = _order_gid(frappe.generate_hash(length=8))
+		with patch(EXECUTE_TARGET, return_value={"order": make_order_payload(order_gid)}):
+			result = orders.import_order(self.account.name, order_gid)
+
+		self.assertEqual(result.doctype, "Marketplace Order")
+		self.assertEqual(result.marketplace_account, self.account.name)
+		frappe.delete_doc("Marketplace Order", result.name, force=True, ignore_permissions=True)

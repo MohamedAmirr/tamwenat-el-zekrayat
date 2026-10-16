@@ -19,6 +19,7 @@
   "shopify_location_section",
   "shopify_location_gid",
   "shopify_location_name",
+  "shopify_inventory_push_enabled",
   "shopify_orders_reconciled_through",
   "outlet_status_section",
   "external_status",
@@ -126,6 +127,14 @@
    "ignore_xss_filter": 1,
    "label": "Shopify Location Name",
    "read_only": 1
+  },
+  {
+   "default": "1",
+   "depends_on": "eval:doc.platform==\"Shopify\"",
+   "description": "Turn off to keep importing Shopify orders while ERPNext stops writing inventory to this store. Turning it back on does not trigger a full push.",
+   "fieldname": "shopify_inventory_push_enabled",
+   "fieldtype": "Check",
+   "label": "Push Inventory to Shopify"
   },
   {
    "fieldname": "shopify_orders_reconciled_through",
