@@ -180,10 +180,12 @@ since enabling requires the location); every other client call still requires
 enabled. Nothing is cached or stored. A dialog Select (labels escaped, value =
 Bosta `_id`) sets the field; the default location is preselected only when no ID is
 set yet; a Bosta error shows escaped with Retry, and an error or empty list never
-changes the saved ID. Shapes (`data.list[]` of `_id`, `locationName`,
-`address.firstLine`, `address.city.name`, `isDefault`; `data.pages`) come from the
-docs.yaml example and are unverified against live Bosta, as is the `page` query
-parameter used to walk further pages (the spec lists no parameters).
+changes the saved ID. Field shapes come from the docs.yaml example; `data.list[]`
+`_id`, `locationName`, `address.firstLine`, `address.city.name`, `isDefault` and
+`pages`/`page`/`limit`/`total` were seen in a live response on 2026-10-16. The `page`
+query parameter is honored and the default page size is 200 (verified live
+2026-10-16). An empty page ends the walk, and a location repeated across pages is
+returned once.
 
 The `Bosta Shipment` operational record links an ERPNext Sales Order and
 Delivery Note; it is not a marketplace shipment or a generic carrier

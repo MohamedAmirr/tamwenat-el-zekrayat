@@ -143,9 +143,11 @@ class BostaClient:
 	def get_pickup_locations(self):
 		"""Every raw pickup location of the business from ``GET /pickup-locations``.
 
-		The documented response is ``data: {list, page, pages, ...}``. The OpenAPI lists
-		no query parameters for this endpoint, so the ``page`` parameter used to walk
-		further pages is unverified. A Bosta failure is raised escaped."""
+		The documented response is ``data: {list, page, pages, ...}`` (field shapes from
+		the OpenAPI example; ``data.list[]._id/locationName/address.firstLine/address.city.name/
+		isDefault`` and ``pages/page/limit/total`` were seen in a live response on
+		2026-10-16). The ``page`` query parameter is honored and the default page size is
+		200 (verified live 2026-10-16). A Bosta failure is raised escaped."""
 		locations = []
 		page = 1
 		while True:
@@ -156,6 +158,8 @@ class BostaClient:
 			items = data.get("list") if isinstance(data, dict) else None
 			if not isinstance(items, list):
 				frappe.throw(_("Bosta returned the pickup locations in an unrecognised format."))
+			if not items:
+				return locations
 			locations.extend(items)
 			pages = min(cint(data.get("pages")), MAX_PICKUP_LOCATION_PAGES)
 			if page >= pages:

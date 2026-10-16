@@ -66,9 +66,7 @@ class IntegrationTestBostaPickupLocations(IntegrationTestCase):
 				raise item
 			return item
 
-		stub = SimpleNamespace(
-			enabled=self.enabled, get_password=lambda *args, **kwargs: self.api_key
-		)
+		stub = SimpleNamespace(enabled=self.enabled, get_password=lambda *args, **kwargs: self.api_key)
 		for patcher in (
 			patch("marketplace_integrations.integrations.bosta.client.http_request", side_effect=fake_http),
 			patch(
@@ -137,14 +135,34 @@ class IntegrationTestBostaPickupLocations(IntegrationTestCase):
 		self.responses.append(FakeResponse(200, {"success": True, "data": {"list": [], "pages": 0}}))
 		self.assertEqual(locations.get_pickup_locations(), [])
 
+	def test_the_page_walk_is_capped_at_twenty_requests(self):
+		endless = {"success": True, "data": {"pages": 999, "page": 1, "list": [{"_id": "a"}]}}
+		self.responses += [FakeResponse(200, endless) for _ in range(30)]
+
+		locations.get_pickup_locations()
+
+		self.assertEqual(len(self.requests), 20)
+
+	def test_a_location_repeated_across_pages_is_returned_once(self):
+		page = {"success": True, "data": {"pages": 2, "list": [{"_id": "dup", "locationName": "A"}]}}
+		self.responses += [FakeResponse(200, page), FakeResponse(200, page)]
+
+		self.assertEqual([item["id"] for item in locations.get_pickup_locations()], ["dup"])
+
 	def test_the_endpoint_is_for_system_managers_only(self):
 		self.responses.append(FakeResponse(200, PAGE_2 | {"data": {**PAGE_2["data"], "pages": 1}}))
 		self.assertEqual(len(bosta_settings.get_pickup_locations()), 1)
 
-		user = "bosta-picker-test@example.com"
+		user = f"bosta-picker-{frappe.generate_hash(length=8)}@example.com"
 		self.assertFalse(frappe.db.exists("User", user))
 		doc = frappe.get_doc(
-			{"doctype": "User", "email": user, "first_name": "Picker", "roles": [{"role": "Sales User"}]}
+			{
+				"doctype": "User",
+				"email": user,
+				"first_name": "Picker",
+				"send_welcome_email": 0,
+				"roles": [{"role": "Sales User"}],
+			}
 		).insert(ignore_permissions=True)
 		self.addCleanup(self._delete_user, doc.name)
 		frappe.set_user(user)
