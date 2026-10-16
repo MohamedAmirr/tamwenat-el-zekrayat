@@ -3138,6 +3138,9 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 				"city": "Cairo",
 				"country": "Egypt",
 				"zip": "11511",
+				"province": "Cairo Governorate",
+				"provinceCode": "C",
+				"phone": "+20111111111",
 			},
 			billing_address={"address1": "Billing must not win", "country": "Egypt"},
 		)
@@ -3154,7 +3157,9 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(address.city, "Cairo")
 		self.assertEqual(address.country, "Egypt")
 		self.assertEqual(address.pincode, "11511")
+		self.assertEqual(address.state, "Cairo Governorate")
 		self.assertEqual(address.email_id, email)
+		# The address phone stays the buyer phone, not shippingAddress.phone (#156).
 		self.assertEqual(address.phone, "+20123456789")
 		self.assertTrue(
 			any(
