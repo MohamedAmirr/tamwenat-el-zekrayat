@@ -4903,3 +4903,34 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self._assert_shopify_line(first["sales_order"], 20)
 		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "grand_total"), 40)
 		frappe.db.set_value("Sales Order", first["sales_order"], "docstatus", 1, update_modified=False)
+
+
+class IntegrationTestShopifyDeliveryLeadDays(IntegrationTestCase):
+	def _date(self, lead_days):
+		from marketplace_integrations.services.sales_order_sync import _delivery_date
+
+		order = frappe._dict(platform="Shopify", processed_on="2026-10-17 15:50:16")
+		account = frappe._dict(shopify_delivery_lead_days=lead_days)
+		return str(_delivery_date(order, account))
+
+	def test_adds_the_account_lead_days_to_the_order_date(self):
+		self.assertEqual(self._date(3), "2026-10-20")
+
+	def test_zero_or_blank_keeps_the_order_date(self):
+		self.assertEqual(self._date(0), "2026-10-17")
+		self.assertEqual(self._date(None), "2026-10-17")
+
+	def test_linked_order_keeps_the_delivery_date_it_was_synced_with(self):
+		from marketplace_integrations.services.sales_order_sync import _delivery_date
+
+		order = frappe._dict(
+			platform="Shopify",
+			processed_on="2026-10-17 15:50:16",
+			erpnext_sales_order="SO-1",
+			last_synced_snapshot='{"delivery_date": "2026-10-17"}',
+		)
+		account = frappe._dict(shopify_delivery_lead_days=3)
+		self.assertEqual(str(_delivery_date(order, account)), "2026-10-17")
+
+	def test_negative_lead_days_are_ignored(self):
+		self.assertEqual(self._date(-2), "2026-10-17")

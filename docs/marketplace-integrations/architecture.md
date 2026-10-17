@@ -584,3 +584,6 @@ The following must be designed in their own issues using authoritative platform/
 - #8 — Talabat migration
 - #167 — Marketplace Workspace & Channel Management (implemented)
 - #277 — Shopify buyer phone on the Sales Order (implemented; see the Shopify buyer phone bullet in "What actually exists")
+
+
+- **Sales Order sync reliability + Shopify delivery date** (post-#286 fixes): the hourly stuck-order sweep (`_stuck_reconciliation_candidates()`) also bumps unlinked, non-cancelled Shopify orders that are `Not Synced`/`Sync Error` and not checked in the last 24h, so an order whose webhook sync never ran or was lost is retried; the manual "Retrieve from Shopify" import (`run_order_import()`, `bump_unlinked=True`) schedules the first sync of each new unlinked, non-cancelled order (it has no webhook behind it); `_run_debounced_sync()` re-bumps the order if `sync_sales_order()` raises, so a crashed job (deadlock/lock wait) is not lost. `Marketplace Account.shopify_delivery_lead_days` (Int, default 0, Shopify only) is added to the order date to set the Sales Order Delivery Date; 0 keeps the previous behavior. Needs `bench migrate`.
