@@ -246,6 +246,30 @@ class UnitTestShopifyOrderMapper(UnitTestCase):
 
 		self.assertEqual(result["customer_phone_number"], "+201000000002")
 
+	def test_customer_phone_number_prefers_default_phone_over_address_phones(self):
+		"""defaultPhoneNumber wins even when both addresses also have a phone (precedence)."""
+		order = self.order(
+			customer={"id": "customer-1", "defaultPhoneNumber": {"phoneNumber": "+201000000000"}},
+			shippingAddress={"phone": "+201000000001", "formatted": ["Cairo"]},
+			billingAddress={"phone": "+201000000002", "formatted": ["Alexandria"]},
+		)
+
+		result = normalize_order(order)
+
+		self.assertEqual(result["customer_phone_number"], "+201000000000")
+
+	def test_customer_phone_number_skips_whitespace_only_shipping_phone(self):
+		"""A whitespace-only shipping phone (buyer free text) does not shadow a real billing phone."""
+		order = self.order(
+			customer={"id": "customer-1"},  # No defaultPhoneNumber
+			shippingAddress={"phone": "   ", "formatted": ["Cairo"]},
+			billingAddress={"phone": "+201000000002", "formatted": ["Alexandria"]},
+		)
+
+		result = normalize_order(order)
+
+		self.assertEqual(result["customer_phone_number"], "+201000000002")
+
 	def test_customer_phone_number_is_none_when_none_provided(self):
 		"""No phone in any of the three sources."""
 		order = self.order(

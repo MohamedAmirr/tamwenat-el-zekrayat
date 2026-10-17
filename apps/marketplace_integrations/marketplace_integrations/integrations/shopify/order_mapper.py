@@ -90,12 +90,29 @@ def _shipping_lines(order):
 
 def _customer_phone_number(default_phone, shipping_address, billing_address):
 	"""Guest checkouts (and some account orders) leave customer.defaultPhoneNumber
-	null, so fall back to the address phones Shopify always collects at checkout."""
-	return (
-		default_phone.get("phoneNumber")
-		or (shipping_address or {}).get("phone")
-		or (billing_address or {}).get("phone")
-	)
+	null, so fall back to the address phones Shopify always collects at checkout.
+
+	Falls back shipping phone then billing phone independently of which address
+	``_resolve_shopify_address()`` (services/sales_order_sync.py) picks for the
+	Shopify Address record - that function prefers shipping whenever it is
+	present, even sparse, while this helper only moves past shipping when
+	shipping's own phone is blank. A rare order can end up with a
+	Shipping-typed Address stamped with the billing phone; intentional (any
+	phone beats none), not a bug.
+
+	Each candidate is stripped before being accepted, so a buyer-typed
+	whitespace-only phone (free text, not validated by Shopify) does not
+	shadow a real phone on a later-checked address.
+	"""
+	for candidate in (
+		default_phone.get("phoneNumber"),
+		(shipping_address or {}).get("phone"),
+		(billing_address or {}).get("phone"),
+	):
+		cleaned = cstr(candidate).strip()
+		if cleaned:
+			return cleaned
+	return None
 
 
 def _normalize_item(item):
