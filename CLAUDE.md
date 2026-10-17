@@ -59,4 +59,5 @@ Typical flow per sub-issue: `feature-planner` (plan it) → `frappe-dev` (build 
 - **It is a snapshot and can be stale** — Codex and other agents edit files here too.
 - **Never Read `graph.json`, `graph.html` or `cache/` raw** (see `.claudeignore`); query through the CLI. `GRAPH_REPORT.md` is fine to read for broad architecture review.
 - **Full query/update rules and per-agent expectations:** `docs/graphify-usage.md`. When spawning subagents for code work, tell them to use the graph first.
-- **Refresh:** git hooks rebuild the code graph (AST only, no LLM) after commits and branch switches. After code edits you can run `graphify update .` by hand. Doc or semantic changes need a manual `/graphify . --update`.
+- **Refresh:** git hooks rebuild the code graph (AST only, no LLM) after commits and branch switches. After code edits you can run `graphify update .` by hand. Doc or semantic changes need `/graphify . --update`.
+- **Working order:** before opening a PR, update every affected doc, then refresh graphify (code and semantic), then review and open the PR. Not a follow-up. See `docs/graphify-usage.md`, "Working order".
