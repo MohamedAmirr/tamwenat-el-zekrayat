@@ -28,12 +28,23 @@ Rules:
 | Commit or branch switch | Automatic: git hooks (`post-commit`, `post-checkout`) rebuild the code graph (AST only) | hooks |
 | Code edited (py/js) and you will query or hand off for review/test afterwards | `graphify update .` | agent that edited (`frappe-dev`, `frappe-test`) |
 | A query returns stale/missing results | `graphify update .`, re-query | any agent |
-| `docs/` changed materially, or new doc added | `graphify update .` (code part only), then tell the user to run `/graphify . --update` (semantic re-extract; LLM cost, user-triggered) | agent that edited docs |
+| `docs/` changed materially, or new doc added | `graphify update .` (code part), then the semantic `/graphify . --update` before the PR is opened (see "Working order" below) | main session, before opening the PR |
 | Merge/pull brought in large changes | `graphify update .` | anyone |
+
+## Working order for every change (docs and graphify before the PR)
+
+Before opening a PR, in this order:
+
+1. Build and test the change.
+2. Update every doc the change affects in the same branch: the relevant `docs/` pages (for example `docs/marketplace-integrations/architecture.md`, `docs/shopify/README.md`), `docs/user-actions.md` rows (migrate, backfill, manual steps) and any issue or convention text that is now wrong.
+3. Refresh the graph: `graphify update .` (code), then the semantic `/graphify . --update` when docs changed. For a long doc such as `architecture.md`, extract it in several line-range chunks so the whole file is read, not just the top.
+4. Review (`frappe-review`), fix findings, then open the PR with `gh pr create --base dev`.
+
+The graph is local and git-ignored, so the refresh is not part of the diff; it is a checklist step so the next session's queries match the merged code and docs. Do not leave the docs or graph refresh as a follow-up the user has to ask for.
 
 Optional while editing heavily: `graphify watch .` rebuilds on file changes (long-running; user starts it, agents never do). The `graph.json` git merge driver (`graphify merge-driver`) is not registered and not needed: `graphify-out/` is git-ignored here, so each machine rebuilds locally.
 
-`graphify update .` is cheap (AST only, no LLM). Skip silently if `graphify` is not installed or `graphify-out/graph.json` is missing. Never run `/graphify . --update` unprompted.
+`graphify update .` is cheap (AST only, no LLM). Skip silently if `graphify` is not installed or `graphify-out/graph.json` is missing. The semantic `/graphify . --update` costs LLM tokens, so run it once per change, at the step above, not after every edit.
 
 ## Per-agent expectations
 
