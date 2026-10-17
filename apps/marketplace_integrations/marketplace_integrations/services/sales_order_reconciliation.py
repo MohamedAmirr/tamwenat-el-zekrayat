@@ -12,6 +12,7 @@ persistence of the Marketplace Order, savepoints and audit logging to the caller
 from copy import deepcopy
 
 import frappe
+from frappe import _
 from frappe.utils import cstr, flt
 
 NO_ACTION = "NO_ACTION"
@@ -126,9 +127,11 @@ def hold_cancel_for_draft_documents(reconciliation_plan, sales_order_name):
 	if not listed:
 		return reconciliation_plan
 	return _attention(
-		"The marketplace cancelled or refunded this order, but ERPNext has draft documents for it "
-		f"({listed}). The Sales Order was not cancelled. Submit, cancel or delete those documents, "
-		"then run the update again.",
+		_(
+			"The marketplace cancelled or refunded this order, but ERPNext has draft documents for it "
+			"({0}). The Sales Order was not cancelled. Submit, cancel or delete those documents, "
+			"then run the update again."
+		).format(listed),
 		reconciliation_plan["changes"],
 	)
 
@@ -253,7 +256,7 @@ def plan(previous, current, evidence, erp_state):
 	"""
 	evidence = evidence or {}
 	if not previous:
-		return _attention("No reconciled snapshot baseline is available for this Sales Order.")
+		return _attention(_("No reconciled snapshot baseline is available for this Sales Order."))
 	# A refund needs a compensating ERP transaction only once the ERP order has
 	# delivery or billing; an untouched order falls through (e.g. CANCEL_ORDER).
 	# Return evidence always needs one.
@@ -261,13 +264,13 @@ def plan(previous, current, evidence, erp_state):
 		return _result(
 			UNSUPPORTED_COMPENSATING_TRANSACTION,
 			_refund_message(evidence, erp_state)
-			or "Marketplace return or refund evidence needs a compensating ERP transaction.",
+			or _("Marketplace return or refund evidence needs a compensating ERP transaction."),
 		)
 
 	previous_items = _items_by_external_id(previous)
 	current_items = _items_by_external_id(current)
 	if previous_items is None or current_items is None:
-		return _attention("The marketplace snapshot has duplicate or missing line identities.")
+		return _attention(_("The marketplace snapshot has duplicate or missing line identities."))
 	# Every line gone or at zero quantity is the same decision as a full cancellation.
 	# An absent "items" key means "no current snapshot" (not "no lines").
 	all_zero = "items" in current and not any(flt(line.get("qty")) > 0 for line in current["items"] or [])
@@ -277,7 +280,7 @@ def plan(previous, current, evidence, erp_state):
 		if external_item_id in previous_items
 	):
 		return _attention(
-			"A marketplace line returned to a positive quantity; this needs a structural change."
+			_("A marketplace line returned to a positive quantity; this needs a structural change.")
 		)
 	if erp_state.get("docstatus") != 1 or erp_state.get("status") in INACTIVE_ERP_ORDER_STATUSES:
 		if (
@@ -290,7 +293,7 @@ def plan(previous, current, evidence, erp_state):
 			# agree; the order stays Closed (it must not be reopened just to be cancelled).
 			return _result(
 				NO_ACTION,
-				"The marketplace order was cancelled at ERPNext's request; the Sales Order stays Closed.",
+				_("The marketplace order was cancelled at ERPNext's request; the Sales Order stays Closed."),
 			)
 		if _is_reopenable_closed_order(erp_state):
 			# Closed with no delivery or billing: judge it as the open order it would be after
@@ -298,24 +301,26 @@ def plan(previous, current, evidence, erp_state):
 			reopened = plan(previous, current, evidence, {**erp_state, "status": "To Deliver and Bill"})
 			if reopened["outcome"] in (CANCEL_ORDER, UPDATE_SUBMITTED_ORDER):
 				reopened["reopen"] = True
-				reopened["message"] = (
-					f"{reopened['message']} The Sales Order is Closed; it will be reopened first."
+				reopened["message"] = _("{0} The Sales Order is Closed; it will be reopened first.").format(
+					reopened["message"]
 				)
 			elif reopened["outcome"] == NO_ACTION:
 				# Equivalent to the marketplace while it still expects fulfillment (a cancelling
 				# intent never yields NO_ACTION): a manual close is divergence. Advisory only.
 				return _attention(
-					"The Sales Order is Closed in ERPNext but the marketplace still expects fulfillment; "
-					"reopen it or review the order."
+					_(
+						"The Sales Order is Closed in ERPNext but the marketplace still expects fulfillment; "
+						"reopen it or review the order."
+					)
 				)
 			return reopened
 		if (evidence.get("cancellation") == "full" or all_zero) and _inactive_order_converged(erp_state):
 			# The marketplace cancelled the order and ERPNext is already cancelled (or
 			# closed with nothing left to deliver): both sides agree, nothing to do.
 			return _result(
-				NO_ACTION, "The cancelled marketplace order is already cancelled or closed in ERPNext."
+				NO_ACTION, _("The cancelled marketplace order is already cancelled or closed in ERPNext.")
 			)
-		message = "The linked ERPNext Sales Order is no longer an active submitted document."
+		message = _("The linked ERPNext Sales Order is no longer an active submitted document.")
 		# Platform-specific wording is built by the integration side (#181), never here.
 		instruction = cstr(evidence.get("inactive_order_instruction")).strip()
 		return _attention(f"{message} {instruction}" if instruction else message)
@@ -328,13 +333,17 @@ def plan(previous, current, evidence, erp_state):
 		if _has_delivery(erp_state):
 			return _result(
 				UNSUPPORTED_COMPENSATING_TRANSACTION,
-				"The marketplace order was cancelled after fulfillment and ERPNext already has delivery; "
-				"a return or other compensating transaction is needed.",
+				_(
+					"The marketplace order was cancelled after fulfillment and ERPNext already has delivery; "
+					"a return or other compensating transaction is needed."
+				),
 			)
 		if _has_execution(erp_state):
 			return _attention(
-				"The marketplace order was cancelled after fulfillment, but ERPNext has billing without "
-				"delivery; review what happened to the goods."
+				_(
+					"The marketplace order was cancelled after fulfillment, but ERPNext has billing without "
+					"delivery; review what happened to the goods."
+				)
 			)
 		# No delivery and no billing: ERPNext never recorded the goods leaving, so the Sales Order
 		# is cancelled like any other cancellation (below); what happened to the parcel is physical.
@@ -345,36 +354,38 @@ def plan(previous, current, evidence, erp_state):
 		shipping_change = next((change for change in header_changes if change["field"] == "shipping"), None)
 		if shipping_change:
 			return _attention(
-				"The shipping charge differs from the submitted Sales Order "
-				f"(Sales Order {shipping_change['previous'] or 0}, marketplace {shipping_change['current'] or 0}). "
-				"A submitted Sales Order's charges are not edited automatically; cancel and amend it.",
+				_(
+					"The shipping charge differs from the submitted Sales Order "
+					"(Sales Order {0}, marketplace {1}). "
+					"A submitted Sales Order's charges are not edited automatically; cancel and amend it."
+				).format(shipping_change["previous"] or 0, shipping_change["current"] or 0),
 				header_changes + changes,
 			)
 		return _attention(
-			"A submitted Sales Order has structural commercial changes.", header_changes + changes
+			_("A submitted Sales Order has structural commercial changes."), header_changes + changes
 		)
 	structural_kinds = {"item_added"} if all_zero else {"item_added", "item_removed"}
 	if any(change["kind"] in structural_kinds for change in changes):
-		return _attention("A submitted Sales Order has structural line changes.", changes)
+		return _attention(_("A submitted Sales Order has structural line changes."), changes)
 
 	erp_lines = {line["sales_order_item"]: line for line in erp_state.get("lines") or []}
 	equivalent = _effectively_equivalent(
 		previous_items, current_items, erp_lines, erp_state.get("precision") or {}
 	)
 	if not equivalent and not changes:
-		return _attention("The ERPNext Sales Order no longer represents the reconciled marketplace state.")
+		return _attention(_("The ERPNext Sales Order no longer represents the reconciled marketplace state."))
 
 	explicit_cancellation = evidence.get("cancellation") == "full"
 	if all_zero and not explicit_cancellation and _has_delivery(erp_state):
 		return _attention(
-			"All lines are zero but the order was already delivered; explicit cancellation is required.",
+			_("All lines are zero but the order was already delivered; explicit cancellation is required."),
 			changes,
 		)
 	cancelling = explicit_cancellation or all_zero
 	if equivalent and not cancelling:
 		# ERPNext already holds the current marketplace state (including after a
 		# manual ERP-side edit): nothing to do, whatever its billing/delivery.
-		return _result(NO_ACTION, "Marketplace and ERPNext commercial state are effectively equivalent.")
+		return _result(NO_ACTION, _("Marketplace and ERPNext commercial state are effectively equivalent."))
 	if not cancelling:
 		blocked_reason = _lifecycle_block_reason(evidence, changes)
 		if blocked_reason:
@@ -384,8 +395,10 @@ def plan(previous, current, evidence, erp_state):
 			for change in changes
 		):
 			return _attention(
-				"The item, unit of measure or warehouse of a line changed (mapping or account change); "
-				"this cannot be applied automatically.",
+				_(
+					"The item, unit of measure or warehouse of a line changed (mapping or account change); "
+					"this cannot be applied automatically."
+				),
 				changes,
 			)
 	if cancelling and _has_execution(erp_state) and not _has_outstanding_remainder(erp_state):
@@ -395,12 +408,16 @@ def plan(previous, current, evidence, erp_state):
 		return _result(
 			UNSUPPORTED_COMPENSATING_TRANSACTION,
 			(
-				f"The marketplace cancelled this order, but {delivery_notes} already delivered all of it. "
-				f"Create a Sales Return against {delivery_notes} for the goods that came back, "
-				"or review the order manually."
+				_(
+					"The marketplace cancelled this order, but {0} already delivered all of it. "
+					"Create a Sales Return against {0} for the goods that came back, "
+					"or review the order manually."
+				).format(delivery_notes)
 				if delivery_notes
-				else "The cancelled marketplace order is already fully delivered in ERPNext; "
-				"a return or other compensating transaction is needed."
+				else _(
+					"The cancelled marketplace order is already fully delivered in ERPNext; "
+					"a return or other compensating transaction is needed."
+				)
 			),
 			changes,
 		)
@@ -413,52 +430,56 @@ def plan(previous, current, evidence, erp_state):
 			current_line = current_items.get(external_item_id) or {}
 			erp_line = erp_lines.get(previous_line.get("sales_order_item"))
 			if not erp_line:
-				return _attention("The reconciled Sales Order line is missing from ERPNext.", changes)
+				return _attention(_("The reconciled Sales Order line is missing from ERPNext."), changes)
 			# An all-zero order closes whatever remains after delivery; only an
 			# individual line reduction must stay above what was delivered.
 			if not all_zero and flt(current_line.get("qty")) < flt(erp_line.get("delivered_qty")):
 				return _attention(
-					"Requested quantity is below the quantity already delivered in ERPNext.", changes
+					_("Requested quantity is below the quantity already delivered in ERPNext."), changes
 				)
 			if flt(erp_line.get("billed_amt")):
 				invoices = _documents(erp_state, "Sales Invoice")
 				if cancelling and invoices:
 					return _attention(
-						f"The marketplace cancelled this order, but {invoices} already bills it in ERPNext, "
-						"so the Sales Order cannot be cancelled automatically. Cancel the Sales Invoice "
-						"(or issue a Credit Note if it is submitted and paid), then run the update again.",
+						_(
+							"The marketplace cancelled this order, but {0} already bills it in ERPNext, "
+							"so the Sales Order cannot be cancelled automatically. Cancel the Sales Invoice "
+							"(or issue a Credit Note if it is submitted and paid), then run the update again."
+						).format(invoices),
 						changes,
 					)
-				return _attention("A submitted Sales Order line is already billed in ERPNext.", changes)
+				return _attention(_("A submitted Sales Order line is already billed in ERPNext."), changes)
 
 	if cancelling:
 		if not _has_execution(erp_state):
 			if flt(erp_state.get("advance_paid")) > 0:
 				return _attention(
-					"An advance payment exists on the Sales Order; reallocate or cancel it "
-					"before the order can be cancelled.",
+					_(
+						"An advance payment exists on the Sales Order; reallocate or cancel it "
+						"before the order can be cancelled."
+					),
 					changes,
 				)
-			message = "The marketplace order is fully cancelled before ERP execution."
+			message = _("The marketplace order is fully cancelled before ERP execution.")
 			if evidence.get("cancelled_after_fulfillment"):
-				message = (
+				message = _(
 					"The marketplace order was cancelled after fulfillment; ERPNext has no delivery or "
 					"billing, so the Sales Order is cancelled. Check what happened to the parcel."
 				)
 			return _result(CANCEL_ORDER, message, changes)
 		if _has_outstanding_remainder(erp_state):
 			return _result(
-				CLOSE_REMAINDER, "Only the outstanding Sales Order remainder can be closed.", changes
+				CLOSE_REMAINDER, _("Only the outstanding Sales Order remainder can be closed."), changes
 			)
 
 	if _has_execution(erp_state):
-		message = "ERPNext delivery or billing execution blocks an automatic submitted-order update"
+		message = _("ERPNext delivery or billing execution blocks an automatic submitted-order update")
 		named = [_documents(erp_state, "Delivery Note"), _documents(erp_state, "Sales Invoice")]
 		named = "; ".join(documents for documents in named if documents)
 		return _attention(f"{message} ({named})." if named else f"{message}.", changes)
 	return _result(
 		UPDATE_SUBMITTED_ORDER,
-		"The submitted Sales Order changes are eligible for ERPNext validation.",
+		_("The submitted Sales Order changes are eligible for ERPNext validation."),
 		changes,
 	)
 
@@ -474,7 +495,7 @@ def _documents(erp_state, doctype):
 		return ""
 	listed = ", ".join(names[:_MAX_LINKED_DOCUMENTS])
 	if len(names) > _MAX_LINKED_DOCUMENTS:
-		listed += ", and more"
+		listed += _(", and more")
 	return f"{doctype}{'s' if len(names) > 1 else ''} {listed}"
 
 
@@ -487,28 +508,28 @@ def _refund_message(evidence, erp_state):
 	invoices = _documents(erp_state, "Sales Invoice")
 	if not (delivery_notes or invoices):
 		return ""
-	lead = "The marketplace refunded this order"
+	lead = _("The marketplace refunded this order")
 	if evidence.get("return"):
-		lead = "The marketplace reported a return for this order"
+		lead = _("The marketplace reported a return for this order")
 	if delivery_notes and invoices:
 		# Kept short on purpose: with the longest listing (3 + 3 names of 30 characters, each
 		# ", and more") this is 482 characters, under the 500 the stored sync message allows.
-		return (
-			f"{lead}, but ERPNext already delivered ({delivery_notes}) and invoiced ({invoices}) it. "
+		return _(
+			"{0}, but ERPNext already delivered ({1}) and invoiced ({2}) it. "
 			"The Sales Order was not changed. Create a Sales Return and a Credit Note "
 			"(compensating transactions) as needed, or review the order manually."
-		)
+		).format(lead, delivery_notes, invoices)
 	if delivery_notes:
-		return (
-			f"{lead}, but it was already delivered in ERPNext ({delivery_notes}). "
+		return _(
+			"{0}, but it was already delivered in ERPNext ({1}). "
 			"The Sales Order was not changed. If the goods came back, create a Sales Return "
-			f"against {delivery_notes} (a compensating transaction), otherwise review the order manually."
-		)
-	return (
-		f"{lead}, but it was already invoiced in ERPNext ({invoices}). "
-		f"The Sales Order was not changed. Create a Credit Note against {invoices} for the refunded "
+			"against {1} (a compensating transaction), otherwise review the order manually."
+		).format(lead, delivery_notes)
+	return _(
+		"{0}, but it was already invoiced in ERPNext ({1}). "
+		"The Sales Order was not changed. Create a Credit Note against {1} for the refunded "
 		"amount (a compensating transaction), or review the order manually."
-	)
+	).format(lead, invoices)
 
 
 def _items_by_external_id(snapshot):
@@ -620,7 +641,7 @@ def _lifecycle_block_reason(evidence, changes):
 	permits = evidence.get("lifecycle_permits_change", True)
 	reason = cstr(evidence.get("lifecycle_reason")).strip()
 	if permits is False:
-		return reason or "The marketplace order can no longer change, so the change was not applied."
+		return reason or _("The marketplace order can no longer change, so the change was not applied.")
 	started = evidence.get("fulfillment_started")
 	for change in changes:
 		line_started = (
@@ -629,13 +650,11 @@ def _lifecycle_block_reason(evidence, changes):
 			else bool(started)
 		)
 		if line_started:
-			return (
-				reason
-				or f"Marketplace line {change['external_item_id']} already started fulfillment, "
-				"so its change was not applied."
-			)
+			return reason or _(
+				"Marketplace line {0} already started fulfillment, so its change was not applied."
+			).format(change["external_item_id"])
 	if permits is None:
-		return reason or "The marketplace order stage is unknown, so the change was not applied."
+		return reason or _("The marketplace order stage is unknown, so the change was not applied.")
 	return None
 
 

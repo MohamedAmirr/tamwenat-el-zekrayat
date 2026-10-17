@@ -1,0 +1,249 @@
+Tamwenat Marketplaces,أسواق تموينات الذكريات
+Overview,نظرة عامة
+Operations,العمليات
+Advanced,متقدم
+Marketplace Channel Status,حالة قنوات السوق
+Marketplace Account,حساب السوق
+Marketplace Needs Attention,عناصر السوق التي تحتاج إلى انتباه
+Talabat Connection,اتصال Talabat
+Marketplace Talabat Catalog Mapping,ربط كتالوج Talabat
+Talabat Orders,طلبات Talabat
+Shopify Connection,اتصال Shopify
+Marketplace Shopify Catalog Mapping,ربط كتالوج Shopify
+Shopify Orders,طلبات Shopify
+Noon Connection,اتصال Noon
+Noon Orders,طلبات Noon
+All Marketplace Orders,جميع طلبات السوق
+Marketplace Product Mapping,ربط منتجات السوق
+Marketplace Products,منتجات السوق
+Marketplace Product Management,إدارة منتجات السوق
+Marketplace Sync Log,سجل مزامنة السوق
+Shopify Webhook Delivery,تسليم Webhook لـ Shopify
+Noon Return,مرتجع Noon
+Shopify Reconciliation Summary,ملخص تسوية Shopify
+Shopify Order Import Failures,أخطاء استيراد طلبات Shopify
+Bosta Settings,إعدادات Bosta
+Bosta Shipments,شحنات Bosta
+Bosta Shipment,شحنة Bosta
+Marketplace Order,طلب السوق
+Talabat Catalog Mapping,ربط كتالوج Talabat
+Shopify Catalog Mapping,ربط كتالوج Shopify
+Account,الحساب
+Platform,المنصة
+Enabled,مفعّل
+Channel Status,حالة القناة
+Orders Needing Attention,طلبات تحتاج إلى انتباه
+Product Sync Errors,أخطاء مزامنة المنتجات
+Import Errors,أخطاء الاستيراد
+Fulfillment Errors,أخطاء التنفيذ
+Last Checked,آخر فحص
+OK,جيد
+Warning,تحذير
+Error,خطأ
+Disabled,معطّل
+Cancel Pending,إلغاء معلّق
+Synced,تمت المزامنة
+Not Synced,لم تتم المزامنة
+Modified After Sync,تم التعديل بعد المزامنة
+Sync Error,خطأ مزامنة
+Queued,في قائمة الانتظار
+Inventory Error,خطأ في المخزون
+Problem,المشكلة
+Reference Type,نوع المرجع
+Reference,المرجع
+What Happened,ما حدث
+Detected,تاريخ الاكتشاف
+Next Action,الإجراء التالي
+Unmapped Items,عناصر غير مرتبطة
+Order Import Error,خطأ استيراد الطلب
+Fulfillment Error,خطأ تنفيذ
+Webhook Retries Exhausted,استُنفدت محاولات إعادة إرسال Webhook
+Noon Fulfillment,تنفيذ Noon
+Noon Return Unlinked,مرتجع Noon غير مرتبط
+Bosta Delivery Note,مذكرة تسليم Bosta
+Open Shipment,فتح الشحنة
+Map Item,ربط العنصر
+Retry,إعادة المحاولة
+Open Order,فتح الطلب
+Open Return,فتح المرتجع
+View Error,عرض الخطأ
+Retrying ERPNext sync...,إعادة محاولة المزامنة مع ERPNext...
+ERPNext Sync Failed,فشلت المزامنة مع ERPNext
+ERPNext sync succeeded.,تمت المزامنة مع ERPNext بنجاح.
+(blank),(فارغ)
+(unknown),(غير معروف)
+unknown,غير معروف
+", and more",، والمزيد
+ (worst: {0}), (الأسوأ: {0})
+ERPNext Sales Order sync failed.,فشلت مزامنة أمر البيع في ERPNext.
+Fulfillment action,إجراء التنفيذ
+Noon fulfillment {0} failed - open the order.,فشل إجراء تنفيذ Noon {0} - افتح الطلب.
+Noon return {0} (order {1}) matches no Marketplace Order.,مرتجع Noon {0} (الطلب {1}) لا يطابق أي طلب سوق.
+Order {0} could not be imported: {1},تعذّر استيراد الطلب {0}: {1}
+Webhook {0} failed after {1} attempts and will not be retried: {2},فشل Webhook {0} بعد {1} محاولة ولن تتم إعادة المحاولة: {2}
+{0} failed on order {1}: {2},فشل {0} في الطلب {1}: {2}
+{0} invoice upload(s) failed,فشل رفع {0} فاتورة
+{0} item(s) have no enabled product mapping: {1},{0} عنصر بلا ربط منتج مفعّل: {1}
+{0} shipment(s) need attention,{0} شحنة تحتاج إلى انتباه
+{0} shipment(s) stuck in Pending for over {1} hour(s),{0} شحنة عالقة في حالة معلّق لأكثر من {1} ساعة
+{0} unit(s) pending Out of Stock,{0} وحدة في انتظار نفاد المخزون
+A marketplace line returned to a positive quantity; this needs a structural change.,رجع بند من السوق إلى كمية موجبة؛ هذا يحتاج إلى تغيير بنيوي.
+A submitted Sales Order has structural commercial changes.,يحتوي أمر البيع المقدَّم على تغييرات تجارية بنيوية.
+A submitted Sales Order has structural line changes.,يحتوي أمر البيع المقدَّم على تغييرات بنيوية في البنود.
+A submitted Sales Order line is already billed in ERPNext.,تمت فوترة بند أمر البيع المقدَّم مسبقًا في ERPNext.
+All lines are zero but the order was already delivered; explicit cancellation is required.,جميع البنود صفرية لكن الطلب تم تسليمه مسبقًا؛ يلزم إلغاء صريح.
+An advance payment exists on the Sales Order; reallocate or cancel it before the order can be cancelled.,توجد دفعة مقدّمة على أمر البيع؛ أعد تخصيصها أو ألغِها قبل إلغاء الطلب.
+ERPNext delivery or billing execution blocks an automatic submitted-order update,تنفيذ التسليم أو الفوترة في ERPNext يمنع التحديث التلقائي للطلب المقدَّم
+Marketplace and ERPNext commercial state are effectively equivalent.,الحالة التجارية في السوق وERPNext متكافئة فعليًا.
+"Marketplace line {0} already started fulfillment, so its change was not applied.",بدأ تنفيذ بند السوق {0} مسبقًا، لذلك لم يُطبَّق تغييره.
+Marketplace return or refund evidence needs a compensating ERP transaction.,دليل المرتجع أو الاسترداد من السوق يحتاج إلى معاملة تعويضية في ERP.
+No reconciled snapshot baseline is available for this Sales Order.,لا توجد لقطة أساس متوافقة متاحة لهذا أمر البيع.
+Only the outstanding Sales Order remainder can be closed.,يمكن إغلاق المتبقي من أمر البيع فقط.
+Requested quantity is below the quantity already delivered in ERPNext.,الكمية المطلوبة أقل من الكمية التي تم تسليمها مسبقًا في ERPNext.
+The ERPNext Sales Order no longer represents the reconciled marketplace state.,لا يعود أمر البيع في ERPNext يعكس حالة السوق المتوافقة.
+The Sales Order is Closed in ERPNext but the marketplace still expects fulfillment; reopen it or review the order.,أمر البيع مغلق في ERPNext لكن السوق لا يزال يتوقع التنفيذ؛ أعد فتحه أو راجع الطلب.
+The cancelled marketplace order is already cancelled or closed in ERPNext.,طلب السوق الملغى ملغى أو مغلق مسبقًا في ERPNext.
+The cancelled marketplace order is already fully delivered in ERPNext; a return or other compensating transaction is needed.,طلب السوق الملغى تم تسليمه بالكامل مسبقًا في ERPNext؛ يلزم مرتجع أو معاملة تعويضية أخرى.
+"The item, unit of measure or warehouse of a line changed (mapping or account change); this cannot be applied automatically.",تغيّر العنصر أو وحدة القياس أو المستودع لبند (تغيير في الربط أو الحساب)؛ لا يمكن تطبيق ذلك تلقائيًا.
+The linked ERPNext Sales Order is no longer an active submitted document.,أمر البيع المرتبط في ERPNext لم يعد مستندًا مقدَّمًا نشطًا.
+"The marketplace cancelled or refunded this order, but ERPNext has draft documents for it ({0}). The Sales Order was not cancelled. Submit, cancel or delete those documents, then run the update again.",ألغى السوق هذا الطلب أو استرده، لكن توجد مستندات مسودة له في ERPNext ({0}). لم يُلغَ أمر البيع. قدّم هذه المستندات أو ألغِها أو احذفها، ثم أعد تشغيل التحديث.
+"The marketplace cancelled this order, but {0} already bills it in ERPNext, so the Sales Order cannot be cancelled automatically. Cancel the Sales Invoice (or issue a Credit Note if it is submitted and paid), then run the update again.",ألغى السوق هذا الطلب، لكن {0} يفوّتره مسبقًا في ERPNext، لذلك لا يمكن إلغاء أمر البيع تلقائيًا. ألغِ فاتورة البيع (أو أصدر إشعار دائن إذا كانت مقدَّمة ومدفوعة)، ثم أعد تشغيل التحديث.
+"The marketplace cancelled this order, but {0} already delivered all of it. Create a Sales Return against {0} for the goods that came back, or review the order manually.",ألغى السوق هذا الطلب، لكن {0} سلّمه بالكامل مسبقًا. أنشئ مرتجع بيع على {0} للبضائع التي رجعت، أو راجع الطلب يدويًا.
+"The marketplace order can no longer change, so the change was not applied.",لا يمكن لطلب السوق أن يتغيّر بعد الآن، لذلك لم يُطبَّق التغيير.
+The marketplace order is fully cancelled before ERP execution.,طلب السوق مُلغى بالكامل قبل تنفيذه في ERP.
+"The marketplace order stage is unknown, so the change was not applied.",مرحلة طلب السوق غير معروفة، لذلك لم يُطبَّق التغيير.
+The marketplace order was cancelled after fulfillment and ERPNext already has delivery; a return or other compensating transaction is needed.,أُلغي طلب السوق بعد تنفيذه ويحتوي ERPNext على تسليم مسبق؛ يلزم مرتجع أو معاملة تعويضية أخرى.
+"The marketplace order was cancelled after fulfillment, but ERPNext has billing without delivery; review what happened to the goods.",أُلغي طلب السوق بعد تنفيذه، لكن ERPNext يحتوي على فوترة بلا تسليم؛ راجع ما حدث للبضائع.
+"The marketplace order was cancelled after fulfillment; ERPNext has no delivery or billing, so the Sales Order is cancelled. Check what happened to the parcel.",أُلغي طلب السوق بعد تنفيذه؛ لا يحتوي ERPNext على تسليم أو فوترة، لذلك أُلغي أمر البيع. تحقق من ما حدث للطرد.
+The marketplace order was cancelled at ERPNext's request; the Sales Order stays Closed.,أُلغي طلب السوق بطلب من ERPNext؛ يبقى أمر البيع مغلقًا.
+The marketplace refunded this order,استرد السوق هذا الطلب
+The marketplace reported a return for this order,أفاد السوق بوجود مرتجع لهذا الطلب
+The marketplace snapshot has duplicate or missing line identities.,تحتوي لقطة السوق على هويات بنود مكرّرة أو مفقودة.
+The reconciled Sales Order line is missing from ERPNext.,بند أمر البيع المتوافق مفقود من ERPNext.
+"The shipping charge differs from the submitted Sales Order (Sales Order {0}, marketplace {1}). A submitted Sales Order's charges are not edited automatically; cancel and amend it.",تختلف رسوم الشحن عن أمر البيع المقدَّم (أمر البيع {0}، السوق {1}). لا تُعدَّل رسوم أمر البيع المقدَّم تلقائيًا؛ ألغِه وعدّله.
+The submitted Sales Order changes are eligible for ERPNext validation.,تغييرات أمر البيع المقدَّم مؤهّلة للتحقق في ERPNext.
+{0} The Sales Order is Closed; it will be reopened first.,{0} أمر البيع مغلق؛ سيُعاد فتحه أولًا.
+"{0}, but ERPNext already delivered ({1}) and invoiced ({2}) it. The Sales Order was not changed. Create a Sales Return and a Credit Note (compensating transactions) as needed, or review the order manually.",{0}، لكن ERPNext سلّمه ({1}) وفوّتره ({2}) مسبقًا. لم يُغيَّر أمر البيع. أنشئ مرتجع بيع وإشعار دائن (معاملتين تعويضيتين) حسب الحاجة، أو راجع الطلب يدويًا.
+"{0}, but it was already delivered in ERPNext ({1}). The Sales Order was not changed. If the goods came back, create a Sales Return against {1} (a compensating transaction), otherwise review the order manually.",{0}، لكنه تم تسليمه مسبقًا في ERPNext ({1}). لم يُغيَّر أمر البيع. إذا رجعت البضائع، أنشئ مرتجع بيع على {1} (معاملة تعويضية)، وإلا راجع الطلب يدويًا.
+"{0}, but it was already invoiced in ERPNext ({1}). The Sales Order was not changed. Create a Credit Note against {1} for the refunded amount (a compensating transaction), or review the order manually.",{0}، لكنه تمت فوترته مسبقًا في ERPNext ({1}). لم يُغيَّر أمر البيع. أنشئ إشعار دائن على {1} بالمبلغ المسترد (معاملة تعويضية)، أو راجع الطلب يدويًا.
+Needs Mapping lists marketplace products that have no ERPNext Item yet. Choose an Item to map it. Mapped products drop out of this list; the Marketplace Product Mapping list keeps every saved mapping for diagnostics.,تسرد (العناصر التي تحتاج إلى ربط) منتجات السوق التي لا تملك عنصر ERPNext بعد. اختر عنصرًا لربطه. تخرج المنتجات المرتبطة من هذه القائمة؛ تحتفظ قائمة ربط منتجات السوق بكل ربط محفوظ لأغراض التشخيص.
+This platform has no Needs Mapping source.,لا يملك هذا المنصة مصدرًا لعناصر تحتاج إلى ربط.
+Mapping saved: {0} → {1},تم حفظ الربط: {0} → {1}
+Rows that already have an Item are hidden on each page.,تُخفى الصفوف التي تملك عنصرًا مسبقًا في كل صفحة.
+Talabat SKU,رمز Talabat (SKU)
+Title,العنوان
+Price,السعر
+Item,العنصر
+Partner SKUs seen on this account's order imports that have no Item mapping yet.,رموز الشريك (SKU) التي ظهرت في استيراد طلبات هذا الحساب ولا تملك ربط عنصر بعد.
+Noon Partner SKU,رمز شريك Noon (SKU)
+No unmapped Noon partner SKUs were found on order imports.,لم يُعثر على رموز شريك Noon غير مرتبطة في استيراد الطلبات.
+Run a catalog sweep to find Shopify variants that have no Item mapping.,شغّل مسح الكتالوج للعثور على متغيرات Shopify التي لا تملك ربط عنصر.
+Run Catalog Sweep,تشغيل مسح الكتالوج
+Queuing catalog sweep...,جارٍ إضافة مسح الكتالوج إلى قائمة الانتظار...
+Could not start the catalog sweep.,تعذّر بدء مسح الكتالوج.
+Catalog sweep running: {0} processed so far.,مسح الكتالوج قيد التشغيل: تمت معالجة {0} حتى الآن.
+The catalog sweep failed.,فشل مسح الكتالوج.
+Could not retrieve the catalog sweep status.,تعذّر استرجاع حالة مسح الكتالوج.
+Catalog sweep complete: {0} variant(s) need a mapping.,اكتمل مسح الكتالوج: {0} متغيّر يحتاج إلى ربط.
+Catalog sweep complete: no unmapped variants found.,اكتمل مسح الكتالوج: لم يُعثر على متغيرات غير مرتبطة.
+Showing first {0} of {1} exceptions.,عرض أول {0} من {1} استثناء.
+Variant GID,معرّف المتغيّر (GID)
+SKU,رمز المنتج (SKU)
+Shopify Product,منتج Shopify
+Talabat Connection stores API credentials. Marketplace Account identifies the Talabat store. A saved mapping links one Talabat SKU to one ERPNext Item.,يخزّن اتصال Talabat بيانات اعتماد الواجهة البرمجية (API). يحدد حساب السوق متجر Talabat. يربط الربط المحفوظ رمز Talabat واحد بعنصر ERPNext واحد.
+Add manual mapping,إضافة ربط يدوي
+Disable the saved mapping for Talabat SKU {0}? It will remain in history and the SKU will become unmapped.,هل تريد تعطيل الربط المحفوظ لرمز Talabat {0}؟ سيبقى في السجل ويصبح الرمز غير مرتبط.
+Disabling mapping...,جارٍ تعطيل الربط...
+Mapping disabled: {0},تم تعطيل الربط: {0}
+Select a marketplace account before adding a mapping.,اختر حساب سوق قبل إضافة ربط.
+ERPNext Item,عنصر ERPNext
+Save mapping,حفظ الربط
+Saving mapping...,جارٍ حفظ الربط...
+Status,الحالة
+Actions,الإجراءات
+Disable mapping,تعطيل الربط
+Failed to fetch Talabat's catalog for this marketplace account.,تعذّر جلب كتالوج Talabat لهذا حساب السوق.
+Use Disable mapping to unmap this SKU.,استخدم (تعطيل الربط) لفك ربط هذا الرمز.
+Mapped,مرتبط
+Not Mapped,غير مرتبط
+"Shopify Connection stores API credentials. Marketplace Account identifies the Shopify store. Running a catalog sweep walks the full live Shopify variant catalog plus this account's saved mappings, and reports unmapped, deleted, and variant-less exceptions - it never changes anything on Shopify itself.",يخزّن اتصال Shopify بيانات اعتماد الواجهة البرمجية (API). يحدد حساب السوق متجر Shopify. يمر تشغيل مسح الكتالوج على كتالوج متغيرات Shopify الفعلي الكامل بالإضافة إلى ربط هذا الحساب المحفوظ، ويُقرّر الاستثناءات غير المرتبطة والمحذوفة وعديمة المتغيّر - ولا يغيّر أي شيء على Shopify نفسه أبدًا.
+Export Products to Excel,تصدير المنتجات إلى Excel
+Select a marketplace account first.,اختر حساب سوق أولًا.
+"Preparing export, this may take a while...",جارٍ تحضير التصدير، قد يستغرق هذا بعض الوقت...
+Catalog sweep complete: {0} exception(s) found.,اكتمل مسح الكتالوج: تم العثور على {0} استثناء.
+Catalog sweep complete: no exceptions found.,اكتمل مسح الكتالوج: لم يُعثر على استثناءات.
+Showing first {0} of {1}.,عرض أول {0} من {1}.
+"{0} row(s) failed to refresh, see Error Log.",فشل تحديث {0} صف؛ راجع سجل الأخطاء.
+Exception,الاستثناء
+Barcode,الباركود
+Open mapping,فتح الربط
+Rows per page,الصفوف في الصفحة
+Prev,السابق
+Next,التالي
+Loading...,جارٍ التحميل...
+Page {0},صفحة {0}
+No Data,لا توجد بيانات
+Unable to load,تعذّر التحميل
+Unable to load data,تعذّر تحميل البيانات
+Save,حفظ
+Needs Attention,يحتاج إلى انتباه
+Retrieve from Talabat,استرجاع من Talabat
+Retrieve from Shopify,استرجاع من Shopify
+Retrieve from Noon,استرجاع من Noon
+Show Refunded Orders,عرض الطلبات المستردة
+Retry ERPNext Sync,إعادة محاولة المزامنة مع ERPNext
+Succeeded: {0},تم بنجاح: {0}
+Failed: {0},فشل: {0}
+The sync was not completed.,لم تكتمل المزامنة.
+The request failed.,فشل الطلب.
+Retrieve Noon Orders,استرجاع طلبات Noon
+Retrieve,استرجاع
+Queuing Noon order import...,جارٍ إضافة استيراد طلبات Noon إلى قائمة الانتظار...
+Noon Retrieval,استرجاع Noon
+Noon order import queued. Refresh Marketplace Orders to see the results once it finishes.,تمت إضافة استيراد طلبات Noon إلى قائمة الانتظار. حدّث طلبات السوق لرؤية النتائج عند الانتهاء.
+A Noon order import is already queued or running for this account.,استيراد طلبات Noon موجود مسبقًا في قائمة الانتظار أو قيد التشغيل لهذا الحساب.
+Retrieve Shopify Orders,استرجاع طلبات Shopify
+Start Date,تاريخ البدء
+End Date,تاريخ الانتهاء
+Shopify order import queued: {0},تمت إضافة استيراد طلبات Shopify إلى قائمة الانتظار: {0}
+Retrieve Talabat Orders,استرجاع طلبات Talabat
+Retrieved from the beginning of this UTC date.,يسترجع من بداية هذا التاريخ بتوقيت UTC.
+Retrieved through the end of this UTC date.,يسترجع حتى نهاية هذا التاريخ بتوقيت UTC.
+Retrieving orders from Talabat...,جارٍ استرجاع الطلبات من Talabat...
+Start Date and End Date must be valid dates.,يجب أن يكون تاريخ البدء وتاريخ الانتهاء تاريخين صالحين.
+Start Date must be before or equal to End Date.,يجب أن يكون تاريخ البدء قبل تاريخ الانتهاء أو يساويه.
+Talabat Retrieval Complete,اكتمل استرجاع Talabat
+Retrieved {0} orders.,تم استرجاع {0} طلب.
+Retrieved {0} orders. {1} could not be imported.,تم استرجاع {0} طلب. تعذّر استيراد {1}.
+Sync Errors,أخطاء المزامنة
+Inventory Errors,أخطاء المخزون
+Push selected,إرسال المحدد
+Sync Inventory,مزامنة المخزون
+Sync All,مزامنة الكل
+"{0} selected Marketplace Product Mapping(s) could not be included: you may not have permission to read them, or they may have been deleted.",تعذّر تضمين {0} من روابط منتجات السوق المحددة: قد لا تملك صلاحية قراءتها، أو قد تم حذفها.
+{0} mapping(s) skipped: inventory sync does not apply to Talabat.,تم تجاوز {0} ربط: مزامنة المخزون لا تنطبق على Talabat.
+Unknown,غير معروف
+{0} mapping(s) skipped: their Marketplace Account's platform does not support this action.,تم تجاوز {0} ربط: منصة حساب السوق الخاص بها لا تدعم هذا الإجراء.
+Skipped,تم التجاوز
+Failed,فشل
+Marketplace Sync Summary,ملخص مزامنة السوق
+Queuing Talabat catalog updates...,جارٍ إضافة تحديثات كتالوج Talabat إلى قائمة الانتظار...
+Queued {0} mapping(s) in {1} job(s).,تمت إضافة {0} ربط في {1} مهمة إلى قائمة الانتظار.
+Queuing Shopify price pushes...,جارٍ إضافة إرسال أسعار Shopify إلى قائمة الانتظار...
+Queued {0} job(s).,تمت إضافة {0} مهمة إلى قائمة الانتظار.
+Queuing Noon updates...,جارٍ إضافة تحديثات Noon إلى قائمة الانتظار...
+Queuing Noon stock updates...,جارٍ إضافة تحديثات مخزون Noon إلى قائمة الانتظار...
+stock queued.,تمت إضافة المخزون إلى قائمة الانتظار.
+stock already queued.,المخزون موجود مسبقًا في قائمة الانتظار.
+pricing,التسعير
+stock,المخزون
+queued.,تمت الإضافة إلى قائمة الانتظار.
+already queued.,موجود مسبقًا في قائمة الانتظار.
+Queuing Shopify inventory syncs...,جارٍ إضافة مزامنة مخزون Shopify إلى قائمة الانتظار...
+Sync All for Marketplace Account,مزامنة الكل لحساب السوق
+No sync is available for this platform.,لا تتوفر مزامنة لهذا المنصة.
+Queuing Talabat catalog sync...,جارٍ إضافة مزامنة كتالوج Talabat إلى قائمة الانتظار...
+Catalog sync queued.,تمت إضافة مزامنة الكتالوج إلى قائمة الانتظار.
+No enabled mappings.,لا توجد روابط مفعّلة.
+Queuing Shopify inventory reconciliation...,جارٍ إضافة تسوية مخزون Shopify إلى قائمة الانتظار...
+Refresh,تحديث

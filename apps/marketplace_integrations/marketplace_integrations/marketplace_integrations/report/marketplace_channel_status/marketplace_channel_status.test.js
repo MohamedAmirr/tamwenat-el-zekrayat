@@ -1,6 +1,8 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
+global.__ = (message) => message;
+
 global.frappe = {
 	query_reports: {},
 	utils: {
