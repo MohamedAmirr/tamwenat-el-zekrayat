@@ -47,11 +47,16 @@ jobs:
       - name: Python compile check
         # ruff's parser silently accepts Python 2's tuple-less `except A, B:`
         # (a SyntaxError under Python 3) - verified locally with this exact
-        # pinned ruff version, which exits 0 on it. This caught 7 files with
-        # that exact bug reintroduced across 5 separate commits over several
+        # pinned ruff version, which exits 0 on it. This caught the same bug
+        # reintroduced across 8 files over 5 separate commits over several
         # weeks, each time un-parenthesizing an exception tuple ruff never
-        # flagged. compileall catches any SyntaxError ruff's checks miss.
-        run: python -m compileall -q marketplace_integrations
+        # flagged - see docs/frappe-conventions.md's "Linting" section.
+        # `test -d` first: compileall exits 0 (not an error) on a missing or
+        # empty directory, which would otherwise let this step pass green
+        # while silently compiling nothing.
+        run: |
+          test -d marketplace_integrations
+          python -m compileall -q marketplace_integrations
 
       - name: Set up Node
         uses: actions/setup-node@v6
