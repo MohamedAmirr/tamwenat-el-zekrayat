@@ -44,6 +44,15 @@ jobs:
           pip install ruff==0.14.10
           ruff check .
 
+      - name: Python compile check
+        # ruff's parser silently accepts Python 2's tuple-less `except A, B:`
+        # (a SyntaxError under Python 3) - verified locally with this exact
+        # pinned ruff version, which exits 0 on it. This caught 7 files with
+        # that exact bug reintroduced across 5 separate commits over several
+        # weeks, each time un-parenthesizing an exception tuple ruff never
+        # flagged. compileall catches any SyntaxError ruff's checks miss.
+        run: python -m compileall -q marketplace_integrations
+
       - name: Set up Node
         uses: actions/setup-node@v6
         with:

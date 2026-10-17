@@ -10,8 +10,12 @@ What it checks (all in `apps/marketplace_integrations`):
 
 1. No git merge-conflict markers (`<<<<<<< ` / `>>>>>>> `) in tracked files.
 2. `ruff check .` (ruff 0.14.10, the same pin as `.pre-commit-config.yaml`; config in `pyproject.toml`).
-3. `npm ci`, then `eslint --quiet` over the app's JS with the same exclusions as the pre-commit eslint hook (`public/dist`, `cypress`, `boilerplate`, `templates/includes`, `public/js/lib`, `node_modules`).
-4. Every `*.test.js` with `node --test`. The `sales_order.test.js` case that needs `ERPNEXT_SALES_ORDER_JS` stays skipped here (last local run: 13 files, 178 tests, 177 pass, 1 skipped).
+3. `python -m compileall -q marketplace_integrations` - a plain Python syntax/import-compile check, independent of ruff (see "ruff does not catch every SyntaxError" below).
+4. `npm ci`, then `eslint --quiet` over the app's JS with the same exclusions as the pre-commit eslint hook (`public/dist`, `cypress`, `boilerplate`, `templates/includes`, `public/js/lib`, `node_modules`).
+5. Every `*.test.js` with `node --test`. The `sales_order.test.js` case that needs `ERPNEXT_SALES_ORDER_JS` stays skipped here (last local run: 13 files, 178 tests, 177 pass, 1 skipped).
+
+### Ruff does not catch every SyntaxError
+`ruff check` (pinned 0.14.10) parses Python 2's tuple-less `except A, B:` without complaint and reports "All checks passed!" even though it is a `SyntaxError` under every Python 3 interpreter - verified locally: `ruff check` exits 0 on a file containing only that line, `python -m py_compile` on the same file exits 1. This is exactly why step 3 above (`compileall`) is a separate, mandatory step rather than something ruff already covers: the identical `except A, B:` corruption was reintroduced across 5 separate commits over several weeks (each time un-parenthesizing a previously-correct exception tuple) and reached `dev` undetected until a manual `py_compile` sweep found it across 7 files, breaking module import for `services/sales_order_sync.py`, `services/marketplace_attention.py`, `integrations/bosta/{labels,statuses}.py`, `integrations/shopify/{orders,order_reconciliation}.py` and `integrations/noon/fulfillment.py`. If this class of bug recurs, suspect whatever authoring/editing step keeps stripping the parentheses, not the CI gate - the gate now catches it.
 
 ### Why no path filter
 The job is meant to be a required status check. A required check that is skipped by a path filter never reports, and the PR cannot merge. So it runs on every PR into `dev`.
@@ -26,6 +30,7 @@ From the repo root:
 git grep -n -E '^(<<<<<<<|>>>>>>>) ' -- apps/marketplace_integrations   # must print nothing
 cd apps/marketplace_integrations
 uvx ruff@0.14.10 check .
+python -m compileall -q marketplace_integrations
 npm ci
 npx eslint --quiet --ext .js --ignore-pattern 'marketplace_integrations/public/dist/**' --ignore-pattern 'cypress/**' --ignore-pattern '**/boilerplate/**' --ignore-pattern 'marketplace_integrations/templates/includes/**' --ignore-pattern 'marketplace_integrations/public/js/lib/**' marketplace_integrations
 node --test $(find marketplace_integrations -name '*.test.js' -not -path '*/node_modules/*' | sort)
