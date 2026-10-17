@@ -22,6 +22,7 @@ from marketplace_integrations.integrations.shopify.order_mapper import normalize
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 from marketplace_integrations.services.sales_order_sync_debounce import (
 	bump_if_linked_order_changed,
+	bump_sync_debounce,
 	linked_order_fingerprint,
 )
 
@@ -222,7 +223,9 @@ def list_order_ids_updated_since(client, since, until=None):
 			return
 
 
-def _import_order_isolated(account, order_gid, bump_linked_changes=False, trigger_source="Manual"):
+def _import_order_isolated(
+	account, order_gid, bump_linked_changes=False, trigger_source="Manual", bump_unlinked=False
+):
 	"""Import one order under its own DB savepoint, isolating its failure
 	from every other order in the same range-import/reconciliation run (#109
 	decision 6/review finding #2) - the same per-order isolation
@@ -243,6 +246,10 @@ def _import_order_isolated(account, order_gid, bump_linked_changes=False, trigge
 		order = import_order(account, order_gid)
 		if bump_linked_changes and order:
 			bump_if_linked_order_changed(order.name, fingerprint_before, trigger_source)
+		# A manual import has no webhook behind it, so a new order would otherwise
+		# never be synced to ERPNext automatically.
+		if bump_unlinked and order and not order.erpnext_sales_order and not order.cancelled_at:
+			bump_sync_debounce(order.name, trigger_source)
 	except Exception as exc:
 		frappe.db.rollback(save_point=savepoint)
 		return None, str(exc)
@@ -252,7 +259,14 @@ def _import_order_isolated(account, order_gid, bump_linked_changes=False, trigge
 
 
 def import_orders_updated_between(
-	account, client, start, end=None, on_progress=None, trigger_source="Manual", bump_linked_changes=False
+	account,
+	client,
+	start,
+	end=None,
+	on_progress=None,
+	trigger_source="Manual",
+	bump_linked_changes=False,
+	bump_unlinked=False,
 ):
 	"""List order ids updated in ``[start, end]`` (``end`` defaults to no
 	upper bound) via ``list_order_ids_updated_since()`` and ``import_order()``
@@ -284,7 +298,9 @@ def import_orders_updated_between(
 	#178: ``bump_linked_changes`` (default False) is passed True ONLY by the scheduled
 	sweep, reconcile_all_accounts_orders(): it then bumps the sales-order sync
 	debounce for an already-linked order whose evidence fingerprint changed. A manual
-	range import (run_order_import()) never bumps, regardless of ``trigger_source``.
+	range import (run_order_import()) never bumps linked orders, regardless of ``trigger_source``.
+	``bump_unlinked`` (manual import only) schedules the first Sales Order sync for each
+	imported order that has no Sales Order yet and is not cancelled.
 	"""
 	imported = []
 	errors = []
@@ -297,7 +313,11 @@ def import_orders_updated_between(
 		# The webhook path imports through import_order() directly and already bumps
 		# unconditionally, so it is deliberately not touched here (no double bump).
 		order, error = _import_order_isolated(
-			account, order_gid, bump_linked_changes=bump_linked_changes, trigger_source=trigger_source
+			account,
+			order_gid,
+			bump_linked_changes=bump_linked_changes,
+			trigger_source=trigger_source,
+			bump_unlinked=bump_unlinked,
 		)
 		if error:
 			errors.append({"order_gid": order_gid, "error": error})
@@ -483,7 +503,9 @@ def run_order_import(job_id_for_result, owner, account_name, start, end):
 		# (#109 decision 6) - the manual range job and the scheduled
 		# reconciliation must never reimplement the "list then import" loop
 		# independently.
-		imported, errors = import_orders_updated_between(account, client, start, end=end, on_progress=report)
+		imported, errors = import_orders_updated_between(
+			account, client, start, end=end, on_progress=report, bump_unlinked=True
+		)
 		_set_import_status(
 			job_id_for_result,
 			{
