@@ -437,7 +437,7 @@ def _collect_bosta_delivery_note_items():
 def _parse_request_data(value):
 	try:
 		data = json.loads(value) if value else {}
-	except TypeError, ValueError:
+	except (TypeError, ValueError):
 		return {}
 	return data if isinstance(data, dict) else {}
 
@@ -550,7 +550,7 @@ def _fulfillment_message(log):
 	(as a JSON string) in response_data - never the raw traceback."""
 	try:
 		message = json.loads(log.response_data) if log.response_data else ""
-	except TypeError, ValueError:
+	except (TypeError, ValueError):
 		message = ""
 	message = cstr(message).strip() if isinstance(message, str) else ""
 	if not message or "Traceback" in message:
@@ -699,7 +699,7 @@ def _collect_exhausted_webhooks(accounts):
 def _pending_oos_count(value):
 	try:
 		units = json.loads(value) if isinstance(value, str) else value
-	except TypeError, ValueError:
+	except (TypeError, ValueError):
 		return 0
 	return len(units) if isinstance(units, list) else 0
 

@@ -459,7 +459,7 @@ def _as_documented_integer(value):
 		return None
 	try:
 		integer_value = int(value)
-	except TypeError, ValueError:
+	except (TypeError, ValueError):
 		return None
 	return integer_value if cstr(value).strip() == cstr(integer_value) else None
 
