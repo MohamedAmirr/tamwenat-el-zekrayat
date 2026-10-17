@@ -1230,7 +1230,7 @@ def _as_address_dict(value):
 		try:
 			parsed = json.loads(value)
 			return parsed if isinstance(parsed, dict) else {}
-		except TypeError, ValueError:
+		except (TypeError, ValueError):
 			return {}
 	return {}
 
@@ -1791,7 +1791,7 @@ def _parse_last_synced_snapshot(order):
 	try:
 		parsed = frappe.parse_json(order.last_synced_snapshot)
 		return parsed if isinstance(parsed, dict) else None
-	except TypeError, ValueError:
+	except (TypeError, ValueError):
 		return None
 
 

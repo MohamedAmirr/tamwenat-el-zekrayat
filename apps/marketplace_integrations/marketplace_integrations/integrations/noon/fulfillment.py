@@ -140,7 +140,7 @@ def _latest_payload_items(order):
 			if isinstance(order.latest_payload, str)
 			else order.latest_payload
 		)
-	except TypeError, ValueError:
+	except (TypeError, ValueError):
 		return []
 	if not isinstance(payload, dict):
 		return []
@@ -172,7 +172,7 @@ def _pending_oos_units(order):
 		return set()
 	try:
 		units = json.loads(raw) if isinstance(raw, str) else raw
-	except TypeError, ValueError:
+	except (TypeError, ValueError):
 		frappe.throw(_("Pending Noon Out of Stock Units is invalid."))
 	if not isinstance(units, list) or any(not isinstance(unit, str) or not unit for unit in units):
 		frappe.throw(_("Pending Noon Out of Stock Units is invalid."))

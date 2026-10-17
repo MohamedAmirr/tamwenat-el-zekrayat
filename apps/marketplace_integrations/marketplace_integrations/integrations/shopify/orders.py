@@ -181,7 +181,7 @@ def import_order(account, order_gid):
 		if isinstance(stored_payload, str):
 			try:
 				stored_payload = frappe.parse_json(stored_payload)
-			except TypeError, ValueError:
+			except (TypeError, ValueError):
 				return False
 		stored_updated_at = (
 			(stored_payload or {}).get("updatedAt") if isinstance(stored_payload, dict) else None
@@ -191,7 +191,7 @@ def import_order(account, order_gid):
 			return False
 		try:
 			return get_datetime(incoming_updated_at) < get_datetime(stored_updated_at)
-		except TypeError, ValueError:
+		except (TypeError, ValueError):
 			return False
 
 	return upsert_marketplace_order(account.name, normalized, is_stale=is_stale)
