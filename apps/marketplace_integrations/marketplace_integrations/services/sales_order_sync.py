@@ -1828,6 +1828,11 @@ def _delivery_date(order, account):
 			raise SyncBlocker(
 				_("Shopify Processed On is required to set the ERPNext Sales Order Delivery Date.")
 			)
+		# A linked order keeps the delivery date it was synced with, so changing the
+		# account's lead days never makes already-synced orders look modified.
+		stored = (_parse_last_synced_snapshot(order) or {}).get("delivery_date") if order.get("erpnext_sales_order") else None
+		if stored:
+			return getdate(stored)
 		# Shopify sends no promised date; the account's lead days stand in for it.
 		return add_days(getdate(order.processed_on), max(cint(account.shopify_delivery_lead_days), 0))
 	if order.platform == "Noon":
