@@ -402,6 +402,7 @@ class IntegrationTestImportOrdersUpdatedBetween(IntegrationTestCase):
 		trigger_source="Scheduled Reconciliation",
 		bump_linked_changes=True,
 		extra_nodes=None,
+		bump_unlinked=False,
 	):
 		nodes = {
 			"orders": {
@@ -424,6 +425,7 @@ class IntegrationTestImportOrdersUpdatedBetween(IntegrationTestCase):
 				"2026-09-01T00:00:00Z",
 				trigger_source=trigger_source,
 				bump_linked_changes=bump_linked_changes,
+				bump_unlinked=bump_unlinked,
 			)
 
 	def _linked_order(self, gid):
@@ -466,6 +468,28 @@ class IntegrationTestImportOrdersUpdatedBetween(IntegrationTestCase):
 		)
 
 		self.assertIsNone(self._debounce(name).sync_debounce_until)
+
+	def test_manual_import_schedules_the_first_sync_of_a_new_order_but_not_a_cancelled_one(self):
+		new_gid = _order_gid(frappe.generate_hash(length=8))
+		cancelled_gid = _order_gid(frappe.generate_hash(length=8))
+
+		self._import_range(
+			new_gid, trigger_source="Manual", bump_linked_changes=False, bump_unlinked=True
+		)
+		self._import_range(
+			cancelled_gid,
+			{"cancelledAt": "2026-09-27T10:02:00Z"},
+			trigger_source="Manual",
+			bump_linked_changes=False,
+			bump_unlinked=True,
+		)
+
+		new_name = frappe.db.get_value("Marketplace Order", {"external_order_id": new_gid}, "name")
+		cancelled_name = frappe.db.get_value("Marketplace Order", {"external_order_id": cancelled_gid}, "name")
+		state = self._debounce(new_name)
+		self.assertIsNotNone(state.sync_debounce_until)
+		self.assertEqual(state.pending_sync_trigger_source, "Manual")
+		self.assertIsNone(self._debounce(cancelled_name).sync_debounce_until)
 
 	def test_unchanged_linked_order_does_not_bump(self):
 		gid = _order_gid(frappe.generate_hash(length=8))

@@ -33,6 +33,7 @@
   "erpnext_selling_price_list",
   "erpnext_customer",
   "erpnext_shipping_account",
+  "shopify_delivery_lead_days",
   "enabled",
   "shopify_payments_section",
   "shopify_payment_gateways"
@@ -216,6 +217,14 @@
    "fieldtype": "Link",
    "label": "ERPNext Shipping Income Account",
    "options": "Account"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.platform==\"Shopify\"",
+   "description": "Days added to the Shopify order date to set the ERPNext Sales Order Delivery Date. 0 keeps the order date.",
+   "fieldname": "shopify_delivery_lead_days",
+   "fieldtype": "Int",
+   "label": "Delivery Lead Days"
   },
   {
    "depends_on": "eval:doc.platform==\"Shopify\"",
