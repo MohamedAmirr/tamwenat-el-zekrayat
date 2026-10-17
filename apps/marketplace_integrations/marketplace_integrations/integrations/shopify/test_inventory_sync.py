@@ -8,7 +8,7 @@ commits per chunk (class-scoped rollback does not cover committed rows)."""
 
 import random
 import uuid
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
@@ -1875,3 +1875,95 @@ class IntegrationTestPushSwitch(InventoryFixtureMixin, IntegrationTestCase):
 		self.assertEqual(result.doctype, "Marketplace Order")
 		self.assertEqual(result.marketplace_account, self.account.name)
 		frappe.delete_doc("Marketplace Order", result.name, force=True, ignore_permissions=True)
+
+	def test_switch_turned_off_between_chunks_stops_before_the_next_shopify_write(self):
+		with patch.object(inventory_sync, "SHOPIFY_INVENTORY_SYNC_CHUNK_SIZE", 1):
+			first = self._one(3)
+			second = self._one(4)
+			third = self._one(5)
+			# Runs inside chunk 1's inventorySetQuantities call (before it is
+			# evaluated): chunk 1 is already in flight and finishes, chunk 2
+			# must never start.
+			self.shopify.before_set.append(self._pause)
+			job_id = frappe.generate_hash(length=16)
+			inventory_sync._set_status(job_id, {"owner": "Administrator", "status": "queued", "processed": 0})
+
+			payload = self._sync(
+				[first.name, second.name, third.name], job_id_for_result=job_id, owner="Administrator"
+			)
+
+		self.assertEqual(self.shopify.kinds().count("set"), 1)
+		self.assertEqual(self.shopify.kinds().count("read"), 1)
+		self.assertEqual(self.shopify.variants[first.external_reference]["on_hand"], 3)
+		self.assertEqual(self.shopify.variants[second.external_reference]["on_hand"], 0)
+		self.assertEqual(self.shopify.variants[third.external_reference]["on_hand"], 0)
+		self.assertTrue(payload["paused"])
+		self.assertEqual((payload["total"], payload["succeeded"], payload["failed"]), (1, 1, 0))
+		for mapping, status in ((first, "Synced"), (second, "Not Synced"), (third, "Not Synced")):
+			mapping.reload()
+			self.assertEqual(mapping.inventory_sync_status, status)
+		state = frappe.cache().get_value(inventory_sync._status_cache_key(job_id))
+		self.assertEqual(state["status"], "failed")  # terminal, never stuck on "running"
+		self.assertIn(self.PAUSED, state["error"])
+		self.assertEqual(state["result"]["succeeded"], 1)
+		frappe.cache().delete_value(inventory_sync._status_cache_key(job_id))
+
+	def test_scheduled_entry_points_make_no_shopify_call_for_a_paused_account(self):
+		item = self._make_item("SchedPaused", qty=1)
+		self._make_mapping(item)
+		self._pause()
+		ran_inline = []
+
+		def enqueue_inline(fn, **kwargs):
+			# Run the worker for OUR account as if RQ had picked it up; leave
+			# other (leftover) accounts of the test site alone.
+			if kwargs.get("account_name") != self.account.name:
+				return MagicMock()
+			ran_inline.append(kwargs)
+			fn(
+				**{
+					key: value
+					for key, value in kwargs.items()
+					if key not in ("queue", "timeout", "job_id", "deduplicate")
+				}
+			)
+			return MagicMock()
+
+		def fail_on_any_call(query, variables=None):
+			raise AssertionError(f"Shopify was called for a paused account: {query[:80]}")
+
+		with (
+			patch(EXECUTE_TARGET, side_effect=fail_on_any_call) as mocked_execute,
+			patch(FETCH_LOCATIONS_TARGET, side_effect=fail_on_any_call),
+			patch("frappe.enqueue", side_effect=enqueue_inline),
+		):
+			inventory_sync.sweep_changed_bins()
+			inventory_sync.reconcile_all_accounts()
+
+		self.assertEqual(ran_inline, [])
+		mocked_execute.assert_not_called()
+
+	def test_a_sweep_or_reconcile_racing_the_switch_is_a_quiet_skip(self):
+		item = self._make_item("RaceItem", qty=1)
+		mapping = self._make_mapping(item)
+		self._pause()
+		# The account query ran just before the switch was turned off.
+		stale = frappe._dict(name=self.account.name, warehouse=self.warehouse)
+
+		with (
+			patch.object(inventory_sync, "_enabled_shopify_accounts", return_value=[stale]),
+			patch.object(
+				inventory_sync, "_enabled_shopify_accounts_with_exclusions", return_value=([stale], [])
+			),
+			patch("frappe.enqueue") as mocked_enqueue,
+			patch("frappe.log_error") as mocked_log_error,
+			patch(EXECUTE_TARGET) as mocked_execute,
+		):
+			inventory_sync.sweep_changed_bins()
+			inventory_sync.reconcile_all_accounts()
+
+		mocked_enqueue.assert_not_called()
+		mocked_execute.assert_not_called()
+		mocked_log_error.assert_not_called()
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Not Synced")

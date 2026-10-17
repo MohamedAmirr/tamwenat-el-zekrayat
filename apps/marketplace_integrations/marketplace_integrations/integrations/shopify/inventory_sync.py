@@ -90,7 +90,12 @@ Where work happens (no ambiguity about the Desk request path):
   default on): when off, the sweep / daily reconcile skip the account,
   ``_validate_inventory_account_local()`` and ``enqueue_account_sync()`` refuse
   with "Inventory push is paused for this account.", and a job queued earlier
-  returns from ``sync_account_inventory()`` before any Shopify call.
+  returns from ``sync_account_inventory()`` before any Shopify call. A job
+  already running re-reads the switch (fresh DB read) before every chunk and
+  stops before the next Shopify write if it was turned off: result ``paused``
+  True, status ``failed`` with the paused message (no Error Log), chunks already
+  applied recorded, mappings of unpushed chunks left untouched. Scheduled
+  entry points treat the paused refusal as a quiet skip.
 - ``sync_account_inventory()`` (background worker): the Location use-time
   re-check (a live read), then all reads/mutations against Shopify.
 
@@ -285,6 +290,11 @@ class _EntryFailed(Exception):
 	"""One mapping could not be prepared; carries the message to persist."""
 
 
+class _PushPaused(frappe.ValidationError):
+	"""The account's push switch is off. A ValidationError so manual callers
+	still show the message; scheduled callers catch it as a quiet skip."""
+
+
 def _push_paused_message():
 	return _("Inventory push is paused for this account.")
 
@@ -459,7 +469,7 @@ def enqueue_account_sync(account_name, mapping_names=None, owner=None):
 		# Defense in depth: every caller already filters/validates, but this is
 		# the single enqueue choke point, so nothing can queue a push for a
 		# paused account.
-		frappe.throw(_push_paused_message())
+		raise _PushPaused(_push_paused_message())
 	job_id = frappe.generate_hash(length=16) if owner else None
 	if job_id:
 		# Seed the "queued" entry BEFORE enqueueing so a fast worker can't
@@ -565,7 +575,15 @@ def sync_account_inventory(account_name, mapping_names=None, job_id_for_result=N
 		)
 
 		chunk_size = SHOPIFY_INVENTORY_SYNC_CHUNK_SIZE
+		stopped_by_switch = False
 		for chunk_index, chunk_start in enumerate(range(0, len(syncable), chunk_size), start=1):
+			# Fresh DB read before every chunk (the previous chunk's commit ended
+			# the transaction snapshot): a job already running when the switch is
+			# turned off must make no further Shopify write. Mappings in the
+			# chunks not yet pushed keep their current status untouched.
+			if _is_push_paused(account_doc.name):
+				stopped_by_switch = True
+				break
 			chunk = syncable[chunk_start : chunk_start + chunk_size]
 			results.extend(_sync_chunk(client, account_doc, location_id, chunk, item_by_name))
 			if chunk_index % INVENTORY_PROGRESS_UPDATE_INTERVAL == 0:
@@ -578,6 +596,20 @@ def sync_account_inventory(account_name, mapping_names=None, job_id_for_result=N
 				)
 
 		payload = _result_payload(results)
+		if stopped_by_switch:
+			# Terminal "failed" status (+ ``paused``) like the queued-then-paused
+			# case above, so the polling dialog stops; chunks already applied are
+			# in ``results``. A quiet result, not an exception / Error Log entry.
+			payload["paused"] = True
+			_report(
+				job_id_for_result,
+				owner,
+				status="failed",
+				processed=len(results),
+				result=payload,
+				error=cstr(_push_paused_message()),
+			)
+			return payload
 		_report(job_id_for_result, owner, status="completed", processed=len(results), result=payload)
 		return payload
 	except Exception as exc:
@@ -1282,6 +1314,10 @@ def sweep_changed_bins():
 	for account in _enabled_shopify_accounts():
 		try:
 			_sweep_account(account, tick_time)
+		except _PushPaused:
+			# Switch turned off between the account query and the enqueue: a
+			# quiet skip (watermark untouched, no Error Log).
+			continue
 		except Exception:
 			frappe.log_error(title="Shopify inventory sweep: account failed", message=frappe.get_traceback())
 
@@ -1370,6 +1406,8 @@ def reconcile_all_accounts():
 						"(RQ dedup). Not retried by this reconciliation run."
 					),
 				)
+		except _PushPaused:
+			continue  # switch turned off after the account query: quiet skip
 		except Exception:
 			frappe.log_error(
 				title="Shopify inventory reconciliation: account failed",
