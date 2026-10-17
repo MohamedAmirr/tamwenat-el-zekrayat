@@ -69,7 +69,7 @@ def _decode_base64_pdf(encoded_content):
 
 	try:
 		pdf_content = base64.b64decode(b"".join(encoded_content.split()), validate=True)
-	except ValueError, binascii.Error:
+	except (ValueError, binascii.Error):
 		frappe.throw(_("Bosta returned a label that is not a valid base64 PDF."))
 
 	if not pdf_content.startswith(b"%PDF-"):
