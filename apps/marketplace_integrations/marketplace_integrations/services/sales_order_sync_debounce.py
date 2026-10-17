@@ -270,13 +270,21 @@ def _run_debounced_sync(marketplace_order, expected_debounce_until):
 		{"sync_debounce_until": None, "pending_sync_trigger_source": None},
 		update_modified=False,
 	)
-	if current.pending_sync_trigger_source:
-		sync_sales_order(marketplace_order, trigger_source=current.pending_sync_trigger_source)
-	else:
-		# Shouldn't happen given bump_sync_debounce() always sets both fields
-		# together - defensive fallback to sync_sales_order()'s own "Manual"
-		# default rather than crashing.
-		sync_sales_order(marketplace_order)
+	try:
+		if current.pending_sync_trigger_source:
+			sync_sales_order(marketplace_order, trigger_source=current.pending_sync_trigger_source)
+		else:
+			# Shouldn't happen given bump_sync_debounce() always sets both fields
+			# together - defensive fallback to sync_sales_order()'s own "Manual"
+			# default rather than crashing.
+			sync_sales_order(marketplace_order)
+	except Exception:
+		# An escaped failure (deadlock / lock wait under a burst, ...) must not drop
+		# the order: the window was consumed above, so put it back for the next sweep.
+		frappe.db.rollback()
+		bump_sync_debounce(marketplace_order, current.pending_sync_trigger_source or "Scheduled Sweep")
+		frappe.db.commit()
+		raise
 
 
 # #180 scheduled reconciliation sweep (platform-neutral).
@@ -323,16 +331,25 @@ def _stuck_reconciliation_candidates(limit):
 		(so.docstatus == 2)
 		| ((so.docstatus == 1) & (so.status == "Closed") & ((so.per_delivered > 0) | (so.per_billed > 0)))
 	) & (not_attention & backed_off & ~converged)
+	linked = order.erpnext_sales_order.isnotnull() & (order.erpnext_sales_order != "")
+	# A Shopify order with no Sales Order yet whose webhook-triggered sync never ran or was
+	# lost: the reconcile import only bumps linked orders, so nothing else would ever
+	# sync it.  Never checked, or an old failure, qualifies; cancelled orders are skipped.
+	unlinked_due = (
+		(order.platform == "Shopify")
+		& order.erpnext_sync_status.isin(("Not Synced", "Sync Error"))
+		& order.cancelled_at.isnull()
+		& (checked.isnull() | (checked <= add_to_date(now, hours=-ATTENTION_RECHECK_HOURS)))
+	)
 	rows = (
 		frappe.qb.from_(order)
 		.left_join(so)
 		.on(so.name == order.erpnext_sales_order)
 		.select(order.name)
-		.where(order.erpnext_sales_order.isnotnull() & (order.erpnext_sales_order != ""))
 		.where(order.sync_debounce_until.isnull())
 		# An order whose platform cancel ERPNext requested (#181) is the echo; never re-bumped.
 		.where(order.outbound_cancelled_on.isnull())
-		.where(attention_due | closed_due | inactive_due)
+		.where((linked & (attention_due | closed_due | inactive_due)) | (~linked & unlinked_due))
 		.orderby(order.last_reconciliation_check_on)
 		.orderby(order.name)
 		.limit(limit)

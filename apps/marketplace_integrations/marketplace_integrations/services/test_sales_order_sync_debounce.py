@@ -176,6 +176,24 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 		self.assertIsNone(frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until"))
 		self.assertIsNone(frappe.db.get_value("Marketplace Order", order.name, "pending_sync_trigger_source"))
 
+	def test_run_debounced_sync_restores_the_window_when_the_sync_crashes(self):
+		order = self._make_order()
+		debounce.bump_sync_debounce(order.name, trigger_source="Shopify Webhook", delay_seconds=45)
+		expected = frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until")
+
+		# The test runs in one transaction: neutralise the rollback/commit the crash path does.
+		with patch(SYNC_TARGET, side_effect=RuntimeError("deadlock")), patch("frappe.db.rollback"), patch(
+			"frappe.db.commit"
+		):
+			with self.assertRaises(RuntimeError):
+				debounce._run_debounced_sync(order.name, expected)
+
+		self.assertIsNotNone(frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until"))
+		self.assertEqual(
+			frappe.db.get_value("Marketplace Order", order.name, "pending_sync_trigger_source"),
+			"Shopify Webhook",
+		)
+
 	def test_run_debounced_sync_passes_through_shopify_webhook_trigger_source(self):
 		order = self._make_order()
 		debounce.bump_sync_debounce(order.name, trigger_source="Shopify Webhook", delay_seconds=45)
@@ -474,6 +492,36 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 			self.assertIn(order.name, names)
 		self.assertNotIn(ignored.name, names)
 		self.assertNotIn(unlinked.name, names)
+
+	def test_stuck_sweep_picks_unlinked_shopify_orders_that_never_synced(self):
+		def unlinked(platform, status, **extra):
+			order = self._make_order()
+			frappe.db.set_value(
+				"Marketplace Order",
+				order.name,
+				{"platform": platform, "erpnext_sync_status": status, **extra},
+				update_modified=False,
+			)
+			return order.name
+
+		lost = unlinked("Shopify", "Not Synced")
+		failed_long_ago = unlinked(
+			"Shopify",
+			"Sync Error",
+			last_reconciliation_check_on=add_to_date(now_datetime(), hours=-30),
+		)
+		recently_checked = unlinked(
+			"Shopify",
+			"Sync Error",
+			last_reconciliation_check_on=add_to_date(now_datetime(), hours=-2),
+		)
+		cancelled = unlinked("Shopify", "Not Synced", cancelled_at=now_datetime())
+		other_platform = unlinked("Talabat", "Not Synced")
+		names = self._candidates()
+		self.assertIn(lost, names)
+		self.assertIn(failed_long_ago, names)
+		for skipped in (recently_checked, cancelled, other_platform):
+			self.assertNotIn(skipped, names)
 
 	def test_cancelled_and_closed_with_delivery_orders_are_candidates(self):
 		"""#181: the platform order may still be active behind an ERPNext cancel/close."""

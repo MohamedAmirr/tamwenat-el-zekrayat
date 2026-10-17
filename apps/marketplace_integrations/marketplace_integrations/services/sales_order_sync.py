@@ -45,7 +45,7 @@ from copy import deepcopy
 
 import frappe
 from frappe import _
-from frappe.utils import cint, cstr, flt, getdate, now_datetime, strip_html
+from frappe.utils import add_days, cint, cstr, flt, getdate, now_datetime, strip_html
 
 from marketplace_integrations.integrations.shopify.order_reconciliation import refund_ids as _refund_ids
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_account.marketplace_account import (
@@ -220,7 +220,7 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 				return _reconcile_submitted_order(order, sales_order, None, evidence, trigger_source)
 			raise
 		snapshot = _make_snapshot(
-			account, customer, lines, _transaction_date(order), _delivery_date(order), address, shipping
+			account, customer, lines, _transaction_date(order), _delivery_date(order, account), address, shipping
 		)
 		current_hash = snapshot_hash(snapshot)
 
@@ -372,7 +372,7 @@ def build_sales_order_snapshot(order, account=None, customer=None, for_submitted
 		customer,
 		lines,
 		_transaction_date(order),
-		_delivery_date(order),
+		_delivery_date(order, account),
 		address,
 		_shopify_shipping_amount(order, account, block_taxes=not for_submitted_order),
 	)
@@ -1822,13 +1822,14 @@ def _line_identifier(row):
 	return cstr(row.external_sku).strip() or _("no SKU")
 
 
-def _delivery_date(order):
+def _delivery_date(order, account):
 	if order.platform == "Shopify":
 		if not order.processed_on:
 			raise SyncBlocker(
 				_("Shopify Processed On is required to set the ERPNext Sales Order Delivery Date.")
 			)
-		return getdate(order.processed_on)
+		# Shopify sends no promised date; the account's lead days stand in for it.
+		return add_days(getdate(order.processed_on), max(cint(account.shopify_delivery_lead_days), 0))
 	if order.platform == "Noon":
 		# #146 decision 5: Noon documents no promised/delivery date, and
 		# ERPNext requires delivery_date >= transaction_date, so both are set
