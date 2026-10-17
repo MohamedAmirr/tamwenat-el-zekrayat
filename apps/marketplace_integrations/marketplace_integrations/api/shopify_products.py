@@ -28,6 +28,12 @@ def queue_catalog_sweep(account: str):
 
 
 @frappe.whitelist()
+def export_catalog(account: str):
+	"""Download the full live Shopify variant catalog as an XLSX file."""
+	return products.export_catalog(account)
+
+
+@frappe.whitelist()
 def get_catalog_sweep_status(job_id: str):
 	"""Poll a previously queued catalog sweep job's status/progress/result.
 	Owner-scoped, same as services/item_import_jobs.py::get_status()."""

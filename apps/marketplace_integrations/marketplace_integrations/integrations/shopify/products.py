@@ -76,6 +76,7 @@ import re
 
 import frappe
 from frappe.utils import cstr
+from frappe.utils.xlsxutils import make_xlsx
 
 from marketplace_integrations.integrations.shopify.client import ShopifyClient
 from marketplace_integrations.integrations.shopify.constants import (
@@ -85,6 +86,7 @@ from marketplace_integrations.integrations.shopify.constants import (
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_product_mapping.marketplace_product_mapping import (
 	compute_mapping_identity_key,
 )
+from marketplace_integrations.services import mapping_import
 
 MAPPING_DOCTYPE = "Marketplace Product Mapping"
 
@@ -315,6 +317,71 @@ def queue_catalog_sweep(account_name):
 			)
 		)
 	return {"job_id": job_id, "status": "queued"}
+
+
+def export_catalog(account_name):
+	"""Build an XLSX of the full live Shopify variant catalog for one
+	Marketplace Account, independent of any sweep (so not subject to
+	MAX_EXCEPTIONS_RETURNED). Streams the file as a browser download.
+
+	The columns are exactly the mapping importer's (services/mapping_import.py
+	HEADER_ROW) so the sheet can be filled in (``item`` column) and uploaded
+	straight back; variants already mapped carry their saved values (including
+	``__modified``, needed by the importer's stale check). ``product_title``
+	is an extra reference column the importer ignores.
+
+	Read-only: ``read`` on the account (get_account()) plus ``read`` on
+	Marketplace Product Mapping."""
+	account, connection = get_account(account_name)
+	_require_mapping_permission("read")
+
+	mapping_by_reference = {
+		row.external_reference: row
+		for row in frappe.get_all(
+			MAPPING_DOCTYPE,
+			filters={"marketplace_account": account.name},
+			fields=["external_reference", "item", "sales_uom", "enabled", "modified"],
+		)
+	}
+
+	client = ShopifyClient(connection.name)
+	rows = [[*mapping_import.HEADER_ROW, "product_title"]]
+	cursor = None
+	while True:
+		data = client.execute(_VARIANTS_QUERY, {"first": SHOPIFY_VARIANTS_PAGE_SIZE, "after": cursor})
+		connection_data = data.get("productVariants") or {}
+		for node in connection_data.get("nodes") or []:
+			gid = node.get("id") if isinstance(node, dict) else None
+			if not gid:
+				continue
+			product = node.get("product") or {}
+			mapping = mapping_by_reference.get(gid)
+			rows.append(
+				[
+					account.name,
+					(mapping.item if mapping else "") or "",
+					gid,
+					product.get("id") or "",
+					node.get("sku") or "",
+					node.get("barcode") or "",
+					gid,
+					(mapping.sales_uom if mapping else "") or "",
+					mapping.enabled if mapping else 1,
+					cstr(mapping.modified) if mapping else "",
+					product.get("title") or "",
+				]
+			)
+		page_info = connection_data.get("pageInfo") or {}
+		cursor = page_info.get("endCursor")
+		if not page_info.get("hasNextPage") or not cursor:
+			break
+
+	# "Data Export" sheet name: Frappe's xlsxutils exemption that keeps opaque
+	# IDs intact (same choice as mapping_import.export_mappings_xlsx()).
+	xlsx_file = make_xlsx(rows, mapping_import.XLSX_SHEET_NAME)
+	frappe.response["filename"] = f"shopify-catalog-{account.name}.xlsx"
+	frappe.response["filecontent"] = xlsx_file.getvalue()
+	frappe.response["type"] = "binary"
 
 
 def get_sweep_status(job_id):

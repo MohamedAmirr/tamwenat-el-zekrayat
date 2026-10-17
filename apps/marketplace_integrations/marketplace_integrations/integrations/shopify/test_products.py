@@ -542,3 +542,49 @@ class IntegrationTestGetSweepStatusOwnerScoping(IntegrationTestCase):
 		self.assertEqual(status["processed"], 5)
 		self.assertNotIn("owner", status)
 
+
+
+class IntegrationTestExportCatalog(IntegrationTestCase):
+	def setUp(self):
+		self.account = make_shopify_account(f"Test Export Account {frappe.generate_hash(length=8)}")
+		self.item = make_item("Test Shopify Export Item")
+
+	def tearDown(self):
+		frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": self.account.name})
+		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
+		frappe.delete_doc(
+			"Shopify Connection", self.account.connection, ignore_permissions=True, force=True
+		)
+
+	def test_exports_all_pages_with_importer_columns(self):
+		from io import BytesIO
+
+		from openpyxl import load_workbook
+
+		from marketplace_integrations.services import mapping_import
+
+		upsert_mapping(self.account.name, "gid://shopify/ProductVariant/1", self.item)
+
+		def variant(n):
+			return {
+				"id": f"gid://shopify/ProductVariant/{n}",
+				"sku": f"SKU-{n}",
+				"barcode": None,
+				"product": {"id": f"gid://shopify/Product/{n}", "title": f"Product {n}"},
+			}
+
+		pages = [
+			{"productVariants": {"pageInfo": {"hasNextPage": True, "endCursor": "c1"}, "nodes": [variant(1)]}},
+			{"productVariants": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [variant(2)]}},
+		]
+		with patch(EXECUTE_TARGET, side_effect=pages):
+			products.export_catalog(self.account.name)
+
+		sheet = load_workbook(BytesIO(frappe.response["filecontent"])).active
+		rows = list(sheet.iter_rows(values_only=True))
+		self.assertEqual(list(rows[0][: len(mapping_import.HEADER_ROW)]), mapping_import.HEADER_ROW)
+		by_ref = {row[2]: row for row in rows[1:]}
+		self.assertEqual(set(by_ref), {"gid://shopify/ProductVariant/1", "gid://shopify/ProductVariant/2"})
+		self.assertEqual(by_ref["gid://shopify/ProductVariant/1"][1], self.item)
+		self.assertIn(by_ref["gid://shopify/ProductVariant/2"][1], (None, ""))
+		self.assertEqual(by_ref["gid://shopify/ProductVariant/2"][6], "gid://shopify/ProductVariant/2")
