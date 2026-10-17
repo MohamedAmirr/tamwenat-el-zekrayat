@@ -84,7 +84,7 @@ def _has_returned_refund_line(order):
 		return False
 	try:
 		refunds = frappe.parse_json(refunds) if isinstance(refunds, str) else refunds
-	except TypeError, ValueError:
+	except (TypeError, ValueError):
 		return True
 	if not isinstance(refunds, list):
 		return True
@@ -151,7 +151,7 @@ def refund_ids(order):
 		return []
 	try:
 		refunds = frappe.parse_json(refunds) if isinstance(refunds, str) else refunds
-	except TypeError, ValueError:
+	except (TypeError, ValueError):
 		return []
 	if not isinstance(refunds, list):
 		return []
@@ -181,6 +181,6 @@ def _baseline_refund_ids(order):
 		return None
 	try:
 		baseline = frappe.parse_json(order.last_synced_snapshot)
-	except TypeError, ValueError:
+	except (TypeError, ValueError):
 		return None
 	return baseline.get("refund_ids") if isinstance(baseline, dict) else None
