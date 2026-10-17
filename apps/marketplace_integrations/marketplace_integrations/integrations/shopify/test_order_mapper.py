@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from frappe.tests import UnitTestCase
 
-from marketplace_integrations.integrations.shopify.order_mapper import normalize_order
+from marketplace_integrations.integrations.shopify.order_mapper import _decimal, normalize_order
 
 
 class UnitTestShopifyOrderMapper(UnitTestCase):
@@ -220,3 +220,56 @@ class UnitTestShopifyOrderMapper(UnitTestCase):
 		order = self.order(shippingLines={"pageInfo": {"hasNextPage": True}, "nodes": []})
 		with self.assertRaisesRegex(Exception, "exceeds the supported shippingLines"):
 			normalize_order(order)
+
+	def test_customer_phone_number_falls_back_to_shipping_address_when_no_default_phone(self):
+		"""Guest checkouts: no defaultPhoneNumber but shippingAddress has phone."""
+		shipping = {"phone": "+201000000001", "formatted": ["Cairo"]}
+		order = self.order(
+			customer={"id": "customer-1"},  # No defaultPhoneNumber
+			shippingAddress=shipping,
+		)
+
+		result = normalize_order(order)
+
+		self.assertEqual(result["customer_phone_number"], "+201000000001")
+
+	def test_customer_phone_number_falls_back_to_billing_address_when_no_shipping_phone(self):
+		"""No defaultPhoneNumber, no shippingAddress phone, but billingAddress has phone."""
+		billing = {"phone": "+201000000002", "formatted": ["Alexandria"]}
+		order = self.order(
+			customer={"id": "customer-1"},  # No defaultPhoneNumber
+			shippingAddress={"formatted": ["Cairo"]},  # No phone
+			billingAddress=billing,
+		)
+
+		result = normalize_order(order)
+
+		self.assertEqual(result["customer_phone_number"], "+201000000002")
+
+	def test_customer_phone_number_is_none_when_none_provided(self):
+		"""No phone in any of the three sources."""
+		order = self.order(
+			customer={"id": "customer-1"},  # No defaultPhoneNumber
+			shippingAddress={"formatted": ["Cairo"]},  # No phone
+			billingAddress={"formatted": ["Alexandria"]},  # No phone
+		)
+
+		result = normalize_order(order)
+
+		self.assertIsNone(result["customer_phone_number"])
+
+	def test_decimal_handles_invalid_input_gracefully(self):
+		"""_decimal() catches InvalidOperation and ValueError without raising."""
+		# Cases that should return Decimal(0)
+		invalid_cases = [
+			"not-a-number",
+			"123abc",
+		]
+		for invalid_input in invalid_cases:
+			with self.subTest(invalid_input=invalid_input):
+				result = _decimal(invalid_input)
+				self.assertEqual(result, Decimal(0), f"Expected Decimal(0) for input {invalid_input!r}")
+
+		# Empty string and None convert to 0 without exception
+		self.assertEqual(_decimal(""), Decimal(0))
+		self.assertEqual(_decimal(None), Decimal(0))

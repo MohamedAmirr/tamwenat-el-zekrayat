@@ -58,7 +58,7 @@ def normalize_order(order):
 		"customer_external_id": customer.get("id"),
 		"customer_first_name": customer.get("firstName"),
 		"customer_last_name": customer.get("lastName"),
-		"customer_phone_number": default_phone.get("phoneNumber"),
+		"customer_phone_number": _customer_phone_number(default_phone, shipping_address, billing_address),
 		"customer_email": default_email.get("emailAddress"),
 		"customer_formatted_address": ", ".join(address.get("formatted") or []),
 		"customer_city": address.get("city"),
@@ -86,6 +86,16 @@ def _shipping_lines(order):
 		"retailLocation": order.get("retailLocation"),
 		"shippingLines": lines,
 	}
+
+
+def _customer_phone_number(default_phone, shipping_address, billing_address):
+	"""Guest checkouts (and some account orders) leave customer.defaultPhoneNumber
+	null, so fall back to the address phones Shopify always collects at checkout."""
+	return (
+		default_phone.get("phoneNumber")
+		or (shipping_address or {}).get("phone")
+		or (billing_address or {}).get("phone")
+	)
 
 
 def _normalize_item(item):
@@ -176,7 +186,7 @@ def _money(value):
 def _decimal(value):
 	try:
 		return Decimal(str(value or 0))
-	except InvalidOperation, ValueError:
+	except (InvalidOperation, ValueError):
 		return Decimal(0)
 
 
