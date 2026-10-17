@@ -122,3 +122,13 @@ class IntegrationTestShopifyProductsApiPermissions(IntegrationTestCase):
 		with self.set_user(user.name):
 			with self.assertRaises(frappe.PermissionError):
 				queue_catalog_sweep(self.account.name)
+
+
+class IntegrationTestExportCatalogApi(IntegrationTestCase):
+	def test_export_catalog_delegates(self):
+		from marketplace_integrations.api.shopify_products import export_catalog
+
+		with patch("marketplace_integrations.integrations.shopify.products.export_catalog") as mocked:
+			export_catalog("Some Account")
+
+		mocked.assert_called_once_with("Some Account")

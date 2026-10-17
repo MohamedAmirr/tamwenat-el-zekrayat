@@ -47,6 +47,7 @@ frappe.pages["marketplace-shopify-catalog-mapping"].on_page_load = function (wra
 	let current_job_id = null;
 
 	page.set_primary_action(__("Run Catalog Sweep"), run_sweep, "refresh");
+	page.add_button(__("Export Products to Excel"), export_products);
 
 	function reset_for_account(marketplace_account) {
 		if (marketplace_account === current_account) return;
@@ -56,6 +57,23 @@ frappe.pages["marketplace-shopify-catalog-mapping"].on_page_load = function (wra
 		$status.text("");
 		$grid_wrapper.empty();
 		grid = null;
+	}
+
+	// Full-catalog download, independent of the sweep (the sweep's result list
+	// is capped at 500 rows). Plain GET navigation so the browser saves the
+	// streamed XLSX; the request can take a while on a large catalog.
+	function export_products() {
+		const marketplace_account = account_field.get_value();
+		if (!marketplace_account) {
+			frappe.toast({ message: __("Select a marketplace account first."), indicator: "orange" });
+			return;
+		}
+		frappe.show_alert({ message: __("Preparing export, this may take a while..."), indicator: "blue" });
+		window.open(
+			`/api/method/marketplace_integrations.api.shopify_products.export_catalog?account=${encodeURIComponent(
+				marketplace_account
+			)}`
+		);
 	}
 
 	function run_sweep() {
