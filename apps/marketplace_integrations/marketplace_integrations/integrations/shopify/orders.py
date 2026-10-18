@@ -55,6 +55,7 @@ query ShopifyOrder($id: ID!, $lineItemsFirst: Int!, $transactionsFirst: Int!, $r
     displayFulfillmentStatus
     sourceName
     app { name }
+    paymentTerms { paymentTermsType paymentTermsName dueInDays }
     paymentGatewayNames
     currencyCode
     presentmentCurrencyCode
