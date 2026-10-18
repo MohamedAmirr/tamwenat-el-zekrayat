@@ -660,13 +660,24 @@ def _build_shopify_sales_order_lines(order, account, tolerate_zero_quantity=Fals
 		if zero_quantity and not tolerate_zero_quantity:
 			raise SyncBlocker(
 				_("Shopify line {0} is fully refunded or has no current quantity.").format(
-					row.external_item_id
+					row.product_name or row.external_item_id
 				)
+			)
+		if not cstr(row.external_variant_id).strip():
+			raise SyncBlocker(
+				_(
+					"Shopify line {0} has no product variant (the product may have been deleted in Shopify), "
+					"so it cannot be mapped."
+				).format(row.product_name or row.external_item_id)
 			)
 		resolved = resolve_mapping_and_item(account.name, row.external_variant_id)
 		if not resolved:
 			raise SyncBlocker(
-				_("No enabled Shopify variant mapping exists for line {0}.").format(row.external_item_id)
+				_("No enabled Shopify variant mapping exists for {0} (variant {1}, SKU {2}).").format(
+					row.product_name or row.external_item_id,
+					row.external_variant_id,
+					cstr(row.external_sku).strip() or _("blank"),
+				)
 			)
 		if zero_quantity:
 			lines.append(
