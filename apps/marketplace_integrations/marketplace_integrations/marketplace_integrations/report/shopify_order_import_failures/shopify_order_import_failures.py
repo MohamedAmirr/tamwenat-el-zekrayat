@@ -9,6 +9,8 @@ this native Frappe Script Report - so there is a single source of truth for
 the underlying query instead of two implementations that could drift.
 """
 
+from frappe import _
+
 from marketplace_integrations.services.shopify_reconciliation import (
 	get_order_import_failures,
 )
@@ -23,39 +25,39 @@ def execute(filters=None):
 def get_columns():
 	return [
 		{
-			"label": "Log",
+			"label": _("Log"),
 			"fieldname": "name",
 			"fieldtype": "Link",
 			"options": "Marketplace Sync Log",
 			"width": 180,
 		},
 		{
-			"label": "Marketplace Account",
+			"label": _("Marketplace Account"),
 			"fieldname": "marketplace_account",
 			"fieldtype": "Link",
 			"options": "Marketplace Account",
 			"width": 180,
 		},
 		{
-			"label": "Trigger Source",
+			"label": _("Trigger Source"),
 			"fieldname": "trigger_source",
 			"fieldtype": "Data",
 			"width": 150,
 		},
 		{
-			"label": "Attempted At",
+			"label": _("Attempted At"),
 			"fieldname": "attempted_at",
 			"fieldtype": "Datetime",
 			"width": 160,
 		},
 		{
-			"label": "Request Data",
+			"label": _("Request Data"),
 			"fieldname": "request_data",
 			"fieldtype": "Small Text",
 			"width": 220,
 		},
 		{
-			"label": "Error",
+			"label": _("Error"),
 			"fieldname": "traceback",
 			"fieldtype": "Small Text",
 			"width": 320,

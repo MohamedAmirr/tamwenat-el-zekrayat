@@ -24,6 +24,7 @@ solely on ``frappe.get_all()``'s own permission enforcement.
 """
 
 import frappe
+from frappe import _
 from frappe.utils import flt, get_datetime, getdate
 
 from marketplace_integrations.integrations.shopify.webhooks import (
@@ -304,48 +305,48 @@ def get_reconciliation_summary(from_date=None, to_date=None):
 
 	rows = [
 		{
-			"metric": "Shopify Catalog Push Errors (current)",
+			"metric": _("Shopify Catalog Push Errors (current)"),
 			"value": get_catalog_push_error_count(),
 			"detail": "",
 		},
 		{
-			"metric": "Shopify Inventory Sync Errors (current)",
+			"metric": _("Shopify Inventory Sync Errors (current)"),
 			"value": get_inventory_sync_error_count(),
 			"detail": "",
 		},
 		{
-			"metric": "Marketplace Orders: Sync Error (current)",
+			"metric": _("Marketplace Orders: Sync Error (current)"),
 			"value": get_order_sync_error_count(),
 			"detail": "",
 		},
 		{
-			"metric": "Shopify Webhook Deliveries: Error (current)",
+			"metric": _("Shopify Webhook Deliveries: Error (current)"),
 			"value": get_webhook_delivery_error_count(),
 			"detail": "",
 		},
 		{
-			"metric": "Shopify Webhook Deliveries: Exhausted Retries (current)",
+			"metric": _("Shopify Webhook Deliveries: Exhausted Retries (current)"),
 			"value": get_webhook_delivery_exhausted_retry_count(),
 			"detail": f"attempt_count >= {MAX_WEBHOOK_DELIVERY_ATTEMPTS}",
 		},
 		{
-			"metric": "Total Shopify Orders Received (in selected range)",
+			"metric": _("Total Shopify Orders Received (in selected range)"),
 			"value": get_orders_received_count_in_range(from_date, to_date),
 			"detail": "",
 		},
 	]
 
 	order_value = get_total_order_value_in_range(from_date, to_date)
-	rows.append(_money_metric_row("Total Order Value (in selected range)", order_value))
+	rows.append(_money_metric_row(_("Total Order Value (in selected range)"), order_value))
 
 	sync_rate = get_sales_order_sync_success_rate_in_range(from_date, to_date)
-	rows.append(_rate_metric_row("Sales Order Sync Success Rate (in selected range)", sync_rate))
+	rows.append(_rate_metric_row(_("Sales Order Sync Success Rate (in selected range)"), sync_rate))
 
 	refund_total = get_total_refunded_amount_in_range(from_date, to_date)
-	rows.append(_money_metric_row("Total Refunded Amount (in selected range)", refund_total))
+	rows.append(_money_metric_row(_("Total Refunded Amount (in selected range)"), refund_total))
 
 	webhook_rate = get_webhook_processing_success_rate_in_range(from_date, to_date)
-	rows.append(_rate_metric_row("Webhook Processing Success Rate (in selected range)", webhook_rate))
+	rows.append(_rate_metric_row(_("Webhook Processing Success Rate (in selected range)"), webhook_rate))
 
 	return rows
 
@@ -360,7 +361,7 @@ def _money_metric_row(metric, money_result):
 		return {
 			"metric": metric,
 			"value": None,
-			"detail": f"Mixed currencies, not summed: {breakdown}",
+			"detail": _("Mixed currencies, not summed: {0}").format(breakdown),
 		}
 	return {
 		"metric": metric,
@@ -378,7 +379,7 @@ def _rate_metric_row(metric, rate_result):
 		return {
 			"metric": metric,
 			"value": None,
-			"detail": "0/0 - none in selected range",
+			"detail": _("0/0 - none in selected range"),
 		}
 	return {
 		"metric": metric,

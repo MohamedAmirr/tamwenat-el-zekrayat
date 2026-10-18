@@ -774,7 +774,7 @@ def _collect_noon_rollups(accounts):
 		if entry["shipments"]:
 			text = _("{0} shipment(s) need attention").format(entry["shipments"])
 			if entry["worst"]:
-				text += _(" (worst: {0})").format(entry["worst"])
+				text += _(" (worst: {0})").format(_(entry["worst"]))
 			parts.append(text)
 		if entry["invoice_errors"]:
 			parts.append(_("{0} invoice upload(s) failed").format(entry["invoice_errors"]))

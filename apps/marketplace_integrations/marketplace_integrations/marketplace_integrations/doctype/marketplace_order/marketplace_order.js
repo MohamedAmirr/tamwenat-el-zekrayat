@@ -899,7 +899,7 @@ function add_status_indicators(frm) {
 		talabat_status.color
 	);
 	frm.dashboard.add_indicator(
-		__("ERPNext: {0}", [frappe.utils.escape_html(erpnext_sync_status.label)]),
+		__("ERPNext: {0}", [frappe.utils.escape_html(__(erpnext_sync_status.label))]),
 		erpnext_sync_status.color
 	);
 }

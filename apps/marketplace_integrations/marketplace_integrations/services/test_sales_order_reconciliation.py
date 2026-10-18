@@ -3,6 +3,7 @@
 
 from copy import deepcopy
 
+import frappe
 from frappe.tests import UnitTestCase
 
 from marketplace_integrations.services.sales_order_reconciliation import (
@@ -19,6 +20,11 @@ from marketplace_integrations.services.sales_order_reconciliation import (
 
 class UnitTestSalesOrderReconciliation(UnitTestCase):
 	def setUp(self):
+		# plan() returns _()-translated merchant-readable text, and many tests below
+		# assert on literal English substrings of it. Pin the language so those
+		# assertions hold regardless of the site's default language (#172).
+		self._original_lang = frappe.local.lang
+		frappe.local.lang = "en"
 		self.previous = {
 			"company": "Test Company",
 			"customer": "Test Customer",
@@ -56,6 +62,9 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 				}
 			],
 		}
+
+	def tearDown(self):
+		frappe.local.lang = self._original_lang
 
 	def test_unchanged_effectively_equivalent_state_needs_no_action(self):
 		result = plan(self.previous, self._current(), {}, self.erp_state)
