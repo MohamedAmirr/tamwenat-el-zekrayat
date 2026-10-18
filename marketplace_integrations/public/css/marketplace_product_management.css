@@ -80,3 +80,9 @@
 		margin: 0 var(--margin-sm);
 	}
 }
+
+/* The old -> new arrow must point in the reading direction. */
+[dir="rtl"] .marketplace-product-management-arrow {
+	display: inline-block;
+	transform: scaleX(-1);
+}

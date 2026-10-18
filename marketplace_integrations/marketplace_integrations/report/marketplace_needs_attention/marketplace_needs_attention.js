@@ -58,6 +58,10 @@ if (typeof frappe !== "undefined") {
 			if (column.fieldname === "next_action") {
 				return next_action_html(data);
 			}
+			// Problem type and reference type are fixed English vocabularies: translate for display only.
+			if (column.fieldname === "problem_type" || column.fieldname === "reference_doctype") {
+				return default_formatter(__(value || ""), row, column, data);
+			}
 			return default_formatter(value, row, column, data);
 		},
 	};

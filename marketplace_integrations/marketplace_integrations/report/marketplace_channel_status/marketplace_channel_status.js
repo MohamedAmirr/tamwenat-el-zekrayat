@@ -23,7 +23,7 @@ frappe.query_reports["Marketplace Channel Status"] = {
 		if (column.fieldname === "level") {
 			const color = MARKETPLACE_CHANNEL_STATUS_LEVEL_COLORS[data.level] || "grey";
 			return `<span style="color: ${color}; font-weight: bold;">${frappe.utils.escape_html(
-				data.level || ""
+				__(data.level || "")
 			)}</span>`;
 		}
 
