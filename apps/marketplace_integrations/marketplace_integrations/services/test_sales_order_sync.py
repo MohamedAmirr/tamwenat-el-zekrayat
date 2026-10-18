@@ -2868,18 +2868,25 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 	def test_shopify_unmapped_null_variant_and_fully_refunded_lines_block(self):
 		account = self._make_shopify_account()
 		cases = [
-			{"variant_gid": None, "create_mapping": False},
-			{"variant_gid": f"gid://shopify/ProductVariant/unmapped-{self.suffix}", "create_mapping": False},
-			{"current_quantity": 0},
+			({"variant_gid": None, "create_mapping": False}, "has no product variant"),
+			(
+				{"variant_gid": f"gid://shopify/ProductVariant/unmapped-{self.suffix}", "create_mapping": False},
+				f"(variant gid://shopify/ProductVariant/unmapped-{self.suffix}, SKU ",
+			),
+			({"current_quantity": 0}, "fully refunded or has no current quantity"),
 		]
-		for options in cases:
+		for options, expected_error in cases:
 			with self.subTest(options=options):
 				order, _mapping = self._make_shopify_order(account, **options)
 				if options.get("variant_gid") is None:
 					order.items[0].external_variant_id = None
-					order.save()
+				order.items[0].product_name = "Khaltet AlQaseem 125 gm"
+				order.save()
 				result = sync_sales_order(order.name)
 				self.assertFalse(result["ok"])
+				self.assertIn(expected_error, result["error"])
+				self.assertIn("Khaltet AlQaseem 125 gm", result["error"])
+				self.assertNotIn("gid://shopify/LineItem/", result["error"])
 				self.assertFalse(order.erpnext_sales_order)
 
 	def test_missing_transaction_amount_blocks_but_real_zero_is_free(self):
