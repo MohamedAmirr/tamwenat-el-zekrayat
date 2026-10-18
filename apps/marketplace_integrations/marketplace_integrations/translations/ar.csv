@@ -247,3 +247,276 @@ Catalog sync queued.,تمت إضافة مزامنة الكتالوج إلى قا
 No enabled mappings.,لا توجد روابط مفعّلة.
 Queuing Shopify inventory reconciliation...,جارٍ إضافة تسوية مخزون Shopify إلى قائمة الانتظار...
 Refresh,تحديث
+Shopify Catalog Push Errors (current),أخطاء إرسال كتالوج Shopify (الحالي)
+Shopify Inventory Sync Errors (current),أخطاء مزامنة مخزون Shopify (الحالي)
+Marketplace Orders: Sync Error (current),طلبات السوق: خطأ مزامنة (الحالي)
+Shopify Webhook Deliveries: Error (current),تسليمات Webhook لـ Shopify: خطأ (الحالي)
+Shopify Webhook Deliveries: Exhausted Retries (current),تسليمات Webhook لـ Shopify: استُنفدت المحاولات (الحالي)
+Total Shopify Orders Received (in selected range),إجمالي طلبات Shopify المستلَمة (ضمن النطاق المحدد)
+Total Order Value (in selected range),إجمالي قيمة الطلبات (ضمن النطاق المحدد)
+Sales Order Sync Success Rate (in selected range),معدّل نجاح مزامنة أمر البيع (ضمن النطاق المحدد)
+Total Refunded Amount (in selected range),إجمالي المبلغ المسترد (ضمن النطاق المحدد)
+Webhook Processing Success Rate (in selected range),معدّل نجاح معالجة Webhook (ضمن النطاق المحدد)
+"Mixed currencies, not summed: {0}",عملات مختلطة، لم يتم جمعها: {0}
+0/0 - none in selected range,0/0 - لا يوجد ضمن النطاق المحدد
+Metric,المقياس
+Value,القيمة
+Detail,التفصيل
+Log,السجل
+Trigger Source,مصدر التشغيل
+Attempted At,وقت المحاولة
+Request Data,بيانات الطلب
+Bosta Settings requires an API key when enabled.,تتطلب إعدادات Bosta مفتاح API عند التفعيل.
+Bosta Settings requires a business location ID when enabled.,تتطلب إعدادات Bosta معرّف موقع العمل عند التفعيل.
+All Orders,جميع الطلبات
+Platform Orders,طلبات المنصات
+Noon Returns,مرتجعات Noon
+Products & Inventory,المنتجات والمخزون
+Needs Mapping,يحتاج إلى ربط
+Product Mappings,روابط المنتجات
+Import / Export,استيراد / تصدير
+Talabat Catalog,كتالوج Talabat
+Shopify Catalog,كتالوج Shopify
+Accounts & Connections,الحسابات والاتصالات
+Marketplace Accounts,حسابات السوق
+Shopify Reconciliation,تسوية Shopify
+Logs & Webhooks,السجلات و Webhooks
+Sync Log,سجل المزامنة
+Marketplace Order Item,عنصر طلب السوق
+Marketplace Order Shipment,شحنة طلب السوق
+Marketplace Order Shipment AWB,بوليصة شحنة طلب السوق
+Marketplace Order Shipment Unit,وحدة شحنة طلب السوق
+Noon Destination,وجهة Noon
+Shopify Payment Gateway Mapping,ربط بوابة دفع Shopify
+Business Location ID,معرّف موقع العمل في Bosta
+Receiver,المستلم
+Receiver Name,اسم المستلم
+Receiver Phone,هاتف المستلم
+Required Delivery Address,عنوان التسليم المطلوب
+District ID,معرّف المنطقة
+City ID,معرّف المدينة
+District Name,اسم المنطقة
+Address First Line,السطر الأول من العنوان
+Bosta Delivery ID,معرّف التوصيل في Bosta
+Tracking Number,رقم التتبع
+Unique Business Reference,المرجع التجاري الفريد
+Bosta Status,حالة Bosta
+Bosta State Code,رمز حالة Bosta
+Bosta State,حالة Bosta
+Last Bosta Event Timestamp,آخر توقيت حدث من Bosta
+Bosta Exception Reason,سبب الاستثناء من Bosta
+Bosta Exception Code,رمز الاستثناء من Bosta
+Bosta Status Snapshot,لقطة حالة Bosta
+Last Bosta Status Check,آخر فحص لحالة Bosta
+Last Error,آخر خطأ
+Delivery Note Error,خطأ مذكرة التسليم
+Active Sales Order,أمر البيع النشط
+Delivery Note Error Since,خطأ مذكرة التسليم منذ
+Bosta Requested On,تاريخ طلب Bosta
+COD Amount,مبلغ الدفع عند التسليم (COD)
+Bosta Terminated On,تاريخ إنهاء Bosta
+External Account ID,معرّف الحساب الخارجي
+Account Identity Key,مفتاح هوية الحساب
+Connection DocType,نوع مستند الاتصال
+Connection,الاتصال
+Noon Storefront and Warehouse,متجر ومستودع Noon
+Noon Warehouse Code,رمز مستودع Noon
+Noon Country Code,رمز دولة Noon
+Shopify Inventory Location,موقع مخزون Shopify
+Shopify Location GID,معرّف موقع Shopify (GID)
+Shopify Location Name,اسم موقع Shopify
+Push Inventory to Shopify,إرسال المخزون إلى Shopify
+Shopify Orders Reconciled Through,تمت تسوية طلبات Shopify حتى
+Marketplace Availability,توفر السوق
+Last Confirmed External Status,آخر حالة خارجية مؤكدة
+Last Confirmed External Status Reason,سبب آخر حالة خارجية مؤكدة
+Last Confirmed External Status Until,آخر حالة خارجية مؤكدة حتى
+External Status Last Checked On,آخر فحص للحالة الخارجية
+External Status Error,خطأ الحالة الخارجية
+External Status Payload,بيانات الحالة الخارجية
+ERPNext Integration Settings,إعدادات تكامل ERPNext
+ERPNext Company,شركة ERPNext
+ERPNext Selling Price List,قائمة أسعار البيع في ERPNext
+ERPNext Customer,عميل ERPNext
+ERPNext Shipping Income Account,حساب إيراد الشحن في ERPNext
+Delivery Lead Days,أيام مهلة التسليم
+Shopify Payments,مدفوعات Shopify
+Shopify Payment Gateways,بوابات دفع Shopify
+Order Identity and Status,هوية الطلب وحالته
+External Order ID,معرّف الطلب الخارجي
+Order Identity Key,مفتاح هوية الطلب
+Platform Order Reference,مرجع الطلب في المنصة
+Order Code,رمز الطلب
+External Status,الحالة الخارجية
+External Financial Status,الحالة المالية الخارجية
+External Fulfillment Status,حالة التنفيذ الخارجية
+Fulfillment Timing,توقيت التنفيذ
+Transport Type,نوع النقل
+Is Preorder,طلب مسبق
+Accepted For,موعد القبول
+Promised For,موعد الالتزام بالتسليم
+Processed On,تاريخ المعالجة
+Last Platform Update On,آخر تحديث من المنصة
+Cancelled At,تاريخ الإلغاء
+Cancellation,الإلغاء
+Cancelled By,ألغاه
+Cancellation Reason,سبب الإلغاء
+Post Picked Up,بعد الاستلام من المتجر
+Customer and Delivery,العميل والتسليم
+Customer External ID,معرّف العميل الخارجي
+Customer First Name,الاسم الأول للعميل
+Customer Last Name,اسم العائلة للعميل
+Customer Phone Number,رقم هاتف العميل
+Customer Email,البريد الإلكتروني للعميل
+Customer Formatted Address,عنوان العميل المنسّق
+Customer City,مدينة العميل
+Customer Latitude,خط عرض العميل
+Customer Longitude,خط طول العميل
+Shipping Lines,بنود الشحن
+Payment & Promotions,الدفع والعروض
+Talabat Payment Type,نوع الدفع في Talabat
+Promotion Status,حالة العرض
+Sub Total,المجموع الفرعي
+Order Total,إجمالي الطلب
+Total Taxes,إجمالي الضرائب
+Shipping Total,إجمالي الشحن
+Duties Total,إجمالي الرسوم الجمركية
+Delivery Fee,رسوم التسليم
+Service Fee,رسوم الخدمة
+Container Charge,رسوم العبوة
+Difference To Minimum,الفرق عن الحد الأدنى
+Cash Talabat says should be collected at delivery,المبلغ النقدي الذي يذكر Talabat أنه يجب تحصيله عند التسليم
+Shop Currency,عملة المتجر
+Presentment Currency,عملة العرض
+Payment Transactions,معاملات الدفع
+Refunds,المبالغ المستردة
+Additional Fees,رسوم إضافية
+Items & Price Comparison,الأصناف ومقارنة الأسعار
+Live Mapping and Price Comparison,الربط المباشر ومقارنة الأسعار
+Item Presentation,عرض الصنف
+Shipment Units,وحدات الشحنة
+Shipment AWBs,بوالص الشحنة
+Pending Noon Out of Stock Units,وحدات نفاد المخزون المعلّقة في Noon
+ERPNext Sync,مزامنة ERPNext
+ERPNext Synchronization,مزامنة ERPNext
+ERPNext Sales Order,أمر بيع ERPNext
+ERPNext Sync Status,حالة مزامنة ERPNext
+Last ERPNext Sync On,آخر مزامنة مع ERPNext
+Last Synced Hash,آخر بصمة مزامنة
+Last Synced Snapshot,آخر لقطة مزامنة
+Last Sync Error,آخر خطأ مزامنة
+Platform Cancel Requested On,تاريخ طلب الإلغاء من المنصة
+Sync Debounce Until,تأخير المزامنة حتى
+Pending Sync Trigger Source,مصدر تشغيل المزامنة المعلّق
+Last Reconciliation Check On,آخر فحص تسوية
+Latest Platform Payload,أحدث بيانات من المنصة
+External Item ID,معرّف الصنف الخارجي
+External SKU,رمز الصنف الخارجي (SKU)
+External Variant ID,معرّف المتغيّر الخارجي
+Product Name,اسم المنتج
+External Item Status,حالة الصنف الخارجية
+Integration Status,حالة التكامل
+Replaced External Item ID,معرّف الصنف الخارجي المستبدَل
+Pricing Type,نوع التسعير
+Original Quantity,الكمية الأصلية
+Original Weight,الوزن الأصلي
+Original Weighted Pieces,القطع الموزونة الأصلية
+Original Unit Price,سعر الوحدة الأصلي
+Original List Price,سعر القائمة الأصلي
+Original Total Price,السعر الإجمالي الأصلي
+Fulfilled Quantity,الكمية المنفَّذة
+Fulfilled Weight,الوزن المنفَّذ
+Fulfilled Weighted Pieces,القطع الموزونة المنفَّذة
+Fulfilled Unit Price,سعر الوحدة المنفَّذ
+Fulfilled Total Price,السعر الإجمالي المنفَّذ
+Fulfilled Total Price Missing,السعر الإجمالي المنفَّذ غير متوفر
+Current Quantity,الكمية الحالية
+Unfulfilled Quantity,الكمية غير المنفَّذة
+Non-Fulfillable Quantity,الكمية غير القابلة للتنفيذ
+Fulfillment Quantities Known,كميات التنفيذ معروفة
+Transaction Amount,مبلغ المعاملة
+Transaction Amount Missing,مبلغ المعاملة غير متوفر
+Container Deposit,تأمين العبوة
+Promotions,العروض
+Integration Shipment Nr,رقم شحنة التكامل
+AWB Source,مصدر بوليصة الشحن
+Cancelled On,تاريخ الإلغاء
+Shipment Invoice,فاتورة الشحنة
+Invoice File,ملف الفاتورة
+Invoice Nr,رقم الفاتورة
+Invoice Issued At,تاريخ إصدار الفاتورة
+Invoice Idempotency Key,مفتاح التكرار الآمن للفاتورة
+Invoice Uploaded On,تاريخ رفع الفاتورة
+Invoice Last Error,آخر خطأ في الفاتورة
+Courier,شركة الشحن
+AWB Nr,رقم بوليصة الشحن
+MP Item Nr,رقم صنف MP
+Partner SKU,رمز الشريك (SKU)
+External Reference,المرجع الخارجي
+Mapping Identity Key,مفتاح هوية الربط
+External Product ID,معرّف المنتج الخارجي
+External Barcode,الباركود الخارجي
+Sales UOM,وحدة قياس البيع
+Sync Status,حالة المزامنة
+Last Sync Reference,مرجع آخر مزامنة
+Shopify Inventory Sync,مزامنة مخزون Shopify
+Inventory Sync Status,حالة مزامنة المخزون
+Inventory Last Synced On,آخر مزامنة للمخزون
+Inventory Last Error,آخر خطأ في المخزون
+Sync Type,نوع المزامنة
+Completed At,تاريخ الاكتمال
+Response Data,بيانات الاستجابة
+Connection Name,اسم الاتصال
+Project Code,رمز المشروع
+Key ID,معرّف المفتاح
+Private Key,المفتاح الخاص
+Environment,البيئة
+Event Notifications,إشعارات الأحداث
+Noon Destination Code,رمز وجهة Noon
+Webhook Status,حالة Webhook
+Last Event Received,آخر حدث مستلَم
+Other Noon Destinations,وجهات Noon الأخرى
+Noon Destinations,وجهات Noon
+Event Types,أنواع الأحداث
+Destination Code,رمز الوجهة
+Activate / Deactivate,تفعيل / إلغاء التفعيل
+Purchase Item Nr,رقم صنف الشراء
+Return Identity Key,مفتاح هوية المرتجع
+Order Nr,رقم الطلب
+MP Code,رمز MP
+Merchant Code,رمز التاجر
+Found Via,تم العثور عليه عبر
+First Seen On,تاريخ أول ظهور
+Last Seen On,تاريخ آخر ظهور
+Internal Receipt,الاستلام الداخلي
+Receipt Acknowledged On,تاريخ تأكيد الاستلام
+Receipt Acknowledged By,أكّد الاستلام
+Receipt Acknowledgement Note,ملاحظة تأكيد الاستلام
+Inspection,الفحص
+Inspection Outcome,نتيجة الفحص
+Shop Domain,نطاق المتجر
+Previous Client Secret,سر العميل السابق
+Webhook Subscriptions,اشتراكات Webhook
+Registration Status,حالة التسجيل
+Missing Topics,المواضيع المفقودة
+Last Checked On,آخر فحص
+Webhook Delivery Health,سلامة تسليم Webhook
+Last Delivery At,آخر تسليم في
+Last Delivery Topic,موضوع آخر تسليم
+Last Successful Processing At,آخر معالجة ناجحة في
+Last Webhook Error,آخر خطأ Webhook
+Shopify Gateway,بوابة Shopify
+Clearing Account,حساب المقاصة
+Webhook ID,معرّف Webhook
+Order GID,معرّف الطلب (GID)
+Attempt Count,عدد المحاولات
+Received At,تاريخ الاستلام
+Processed At,تاريخ المعالجة
+Chain ID,معرّف السلسلة
+Order Webhook,Webhook الطلبات
+Order Webhook Secret,سر Webhook الطلبات
+Order Webhook URL,رابط Webhook الطلبات
+Catalog Webhook,Webhook الكتالوج
+Catalog Webhook Secret,سر Webhook الكتالوج
+Catalog Webhook URL,رابط Webhook الكتالوج
+Legacy Migration Source,مصدر الترحيل القديم
