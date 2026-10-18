@@ -50,8 +50,15 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 	def setUp(self):
 		self.suffix = frappe.generate_hash(length=8)
 		self._created = []
+		# get_attention_items() returns _()-translated merchant-readable text, and
+		# several tests below assert on literal English substrings of it. Pin the
+		# language so those assertions hold regardless of the site's default
+		# language (#172).
+		self._original_lang = frappe.local.lang
+		frappe.local.lang = "en"
 
 	def tearDown(self):
+		frappe.local.lang = self._original_lang
 		for doctype, name in reversed(self._created):
 			if frappe.db.exists(doctype, name):
 				frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)

@@ -336,7 +336,7 @@ function render_row_details(row) {
 			const definition = document.createElement("dd");
 			definition.append(
 				make_element("span", "text-muted", display_value(values && values.old)),
-				document.createTextNode(" → "),
+				make_element("span", "marketplace-product-management-arrow", " → "),
 				make_element("span", null, display_value(values && values.new))
 			);
 			list.append(term, definition);

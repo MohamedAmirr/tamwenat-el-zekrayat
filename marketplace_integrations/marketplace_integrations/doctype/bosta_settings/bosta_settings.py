@@ -4,6 +4,7 @@
 import secrets
 
 import frappe
+from frappe import _
 from frappe.model.document import Document
 from frappe.utils import get_url
 
@@ -33,9 +34,9 @@ class BostaSettings(Document):
 
 	def _validate_enabled_configuration(self):
 		if not self.get_password("api_key", raise_exception=False):
-			frappe.throw("Bosta Settings requires an API key when enabled.")
+			frappe.throw(_("Bosta Settings requires an API key when enabled."))
 		if not self.business_location_id:
-			frappe.throw("Bosta Settings requires a business location ID when enabled.")
+			frappe.throw(_("Bosta Settings requires a business location ID when enabled."))
 
 	@frappe.whitelist()
 	def refresh_webhook_url(self):
