@@ -53,6 +53,9 @@ query ShopifyOrder($id: ID!, $lineItemsFirst: Int!, $transactionsFirst: Int!, $r
     }
     displayFinancialStatus
     displayFulfillmentStatus
+    sourceName
+    app { name }
+    paymentGatewayNames
     currencyCode
     presentmentCurrencyCode
     customer {
