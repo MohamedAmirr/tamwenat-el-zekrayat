@@ -332,7 +332,9 @@ Note Failed, or Bosta Created without a Delivery Note), first search Bosta by
 `uniqueBusinessReference` is not documented). Found: the delivery ID and
 tracking number are linked and the Delivery Note step continues. Not found:
 `Bosta Failed`, so a retry is allowed. An unrecognised search response is an
-error, never "not found".
+error, never "not found". The live search response (seen 2026-10-19) is
+`data: {count, deliveries, limit, page}`; `deliveries` is read as the result list,
+and a `count` larger than the returned page is treated as ambiguous.
 
 **One active shipment per Sales Order.** `Bosta Shipment.active_sales_order` is a
 unique, hidden field set to the Sales Order while the shipment is not `Canceled`
