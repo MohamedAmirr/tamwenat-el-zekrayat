@@ -48,6 +48,7 @@ class FakeBosta:
 			"cities": [],
 			"districts": [],
 			"all_districts": [],
+			"pin": [],
 			"terminate": [],
 			"update": [],
 		}
@@ -56,6 +57,8 @@ class FakeBosta:
 	def __call__(self, method, url, **kwargs):
 		if url.endswith("/cities"):
 			kind = "cities"
+		elif url.endswith("/cities/pinLocation"):
+			kind = "pin"
 		elif url.endswith("/cities/getAllDistricts"):
 			kind = "all_districts"
 		elif url.endswith("/districts"):
@@ -67,7 +70,14 @@ class FakeBosta:
 		else:
 			kind = "search" if url.endswith("/deliveries/search") else "create" if method == "POST" else "get"
 		self.calls.append(
-			(kind, kwargs.get("json") if kind not in ("cities", "districts", "all_districts", "terminate") else url)
+			(
+				kind,
+				kwargs.get("params")
+				if kind == "pin"
+				else kwargs.get("json")
+				if kind not in ("cities", "districts", "all_districts", "terminate")
+				else url,
+			)
 		)
 		item = self.queue[kind].pop(0)
 		if isinstance(item, Exception):

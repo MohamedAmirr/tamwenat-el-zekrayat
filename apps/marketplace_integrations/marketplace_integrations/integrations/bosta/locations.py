@@ -27,6 +27,7 @@ CACHE_TTL_SECONDS = 24 * 60 * 60
 CITIES_CACHE_KEY = "marketplace_integrations:bosta:cities"
 DISTRICTS_CACHE_KEY = "marketplace_integrations:bosta:districts:{city_id}"
 DIRECTORY_CACHE_KEY = "marketplace_integrations:bosta:directory"
+PIN_CACHE_KEY = "marketplace_integrations:bosta:pin:{lat}:{lng}"
 
 
 def get_cities(refresh=False):
@@ -87,6 +88,47 @@ def get_directory(refresh=False):
 	directory = _parse_directory(_data_or_throw(client, response))
 	cache.set_value(DIRECTORY_CACHE_KEY, directory, expires_in_sec=CACHE_TTL_SECONDS)
 	return directory
+
+
+def get_pin_districts(lat, lng):
+	"""Bosta's districts at a coordinate, as ``[{city_id, district_id, name}]`` (drop-off-capable
+	only), cached 24 hours per coordinate rounded to 4 decimals. Any failure logs a short Error
+	Log entry and returns ``[]``: a pin lookup only ever helps and never blocks (#305)."""
+	try:
+		lat, lng = round(float(lat), 4), round(float(lng), 4)
+	except (TypeError, ValueError):
+		return []
+	cache = frappe.cache()
+	key = PIN_CACHE_KEY.format(lat=lat, lng=lng)
+	cached = cache.get_value(key)
+	if cached is not None:
+		return cached
+	try:
+		client = BostaClient()
+		data = _data_or_throw(client, client.pin_location(lat, lng))
+		items = data.get("list") if isinstance(data, dict) else data
+		if not isinstance(items, list):
+			raise ValueError("unrecognised pinLocation response")
+	except Exception:
+		frappe.clear_last_message()
+		frappe.log_error(frappe.get_traceback(with_context=False)[-500:], "Bosta pin location failed")
+		return []
+	rows = []
+	for item in items:
+		if not isinstance(item, dict) or item.get("dropOffAvailability") is False:
+			continue
+		city_id = cstr(item.get("cityId")).strip()
+		district_id = cstr(item.get("districtId")).strip()
+		if city_id and district_id:
+			rows.append(
+				{
+					"city_id": city_id,
+					"district_id": district_id,
+					"name": cstr(item.get("districtName")).strip(),
+				}
+			)
+	cache.set_value(key, rows, expires_in_sec=CACHE_TTL_SECONDS)
+	return rows
 
 
 def _data_or_throw(client, response):

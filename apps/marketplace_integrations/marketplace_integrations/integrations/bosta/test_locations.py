@@ -77,6 +77,7 @@ class IntegrationTestBostaLocations(BostaFixtureMixin, IntegrationTestCase):
 		cache = frappe.cache()
 		cache.delete_value(locations.CITIES_CACHE_KEY)
 		cache.delete_value(locations.DIRECTORY_CACHE_KEY)
+		cache.delete_value(locations.PIN_CACHE_KEY.format(lat=29.9749, lng=30.94))
 		for city_id in ("city-cairo", "city-alex"):
 			cache.delete_value(locations.DISTRICTS_CACHE_KEY.format(city_id=city_id))
 
@@ -116,6 +117,42 @@ class IntegrationTestBostaLocations(BostaFixtureMixin, IntegrationTestCase):
 		)
 		self.assertEqual(second, first)
 		self.assertEqual(len(self.http.calls_of("all_districts")), 1)
+
+	def test_pin_location_returns_drop_off_districts_and_is_cached_per_rounded_coordinate(self):
+		self.http.queue["pin"].append(
+			FakeResponse(
+				200,
+				{
+					"success": True,
+					"data": [
+						{
+							"cityId": "city-giza",
+							"cityName": "Giza",
+							"districtId": "d-1",
+							"districtName": "District 09 (06 October)",
+							"dropOffAvailability": True,
+						},
+						{"cityId": "city-giza", "districtId": "d-2", "dropOffAvailability": False},
+					],
+				},
+			)
+		)
+
+		first = locations.get_pin_districts(29.9749496, 30.9400196)
+		second = locations.get_pin_districts(29.97494, 30.94002)
+
+		self.assertEqual(
+			first, [{"city_id": "city-giza", "district_id": "d-1", "name": "District 09 (06 October)"}]
+		)
+		self.assertEqual(second, first)
+		self.assertEqual(self.http.calls_of("pin"), [{"lat": 29.9749, "lng": 30.94}])
+
+	def test_a_failing_pin_lookup_returns_nothing_and_never_raises(self):
+		self.http.queue["pin"] += [FakeResponse(500, {"success": False}), RuntimeError("down")]
+		self.assertEqual(locations.get_pin_districts(29.9749, 30.94), [])
+		self.assertEqual(locations.get_pin_districts(29.9749, 30.94), [])
+		self.assertEqual(locations.get_pin_districts("x", None), [])
+		self.assertIsNone(frappe.cache().get_value(locations.PIN_CACHE_KEY.format(lat=29.9749, lng=30.94)))
 
 	def test_a_failed_directory_fetch_caches_nothing(self):
 		self.http.queue["all_districts"].append(FakeResponse(500, {"success": False}))
@@ -297,6 +334,55 @@ class IntegrationTestBostaAddressPrefill(BostaFixtureMixin, IntegrationTestCase)
 		self.assertEqual(
 			(defaults["city_id"], defaults["city_name"], defaults["district_id"]),
 			("city-cairo", "Cairo", "d-5th"),
+		)
+
+	def test_a_shopify_order_resolves_its_city_from_the_province_code_and_the_district_from_the_pin(self):
+		order = self.make_order()
+		frappe.db.set_value("Sales Order", order.name, "custom_marketplace_order", "MKTORD-FAKE")
+		real_get_value = frappe.db.get_value
+		shipping = frappe.as_json(
+			{
+				"countryCodeV2": "EG",
+				"provinceCode": "SU",
+				"city": "اكتوبر",
+				"latitude": 29.97,
+				"longitude": 30.94,
+			}
+		)
+
+		def get_value(doctype, *args, **kwargs):
+			if doctype == "Marketplace Order":  # building a real one needs a Marketplace Account
+				if isinstance(args[1], list):
+					return frappe._dict(
+						platform="Shopify", customer_phone_number="", shipping_address=shipping
+					)
+				return "6اكتوبر الحي الثامن"  # noqa: RUF001
+			return real_get_value(doctype, *args, **kwargs)
+
+		directory = {
+			"success": True,
+			"data": [
+				{
+					"cityId": "city-giza",
+					"cityName": "Giza",
+					"cityCode": "EG-25",
+					"districts": [
+						{"districtId": "d-9", "districtName": "District 09 (06 October)"},
+						{"districtId": "d-x", "districtName": "Dokki"},
+					],
+				}
+			],
+		}
+		self.http.queue["all_districts"].append(FakeResponse(200, directory))
+		self.http.queue["pin"].append(
+			FakeResponse(200, {"success": True, "data": [{"cityId": "city-giza", "districtId": "d-9"}]})
+		)
+		with patch.object(frappe.db, "get_value", side_effect=get_value):
+			defaults = self._defaults(order)
+
+		self.assertEqual(
+			(defaults["city_id"], defaults["city_name"], defaults["district_id"]),
+			("city-giza", "Giza", "d-9"),
 		)
 
 	def test_an_unreachable_district_list_only_loses_the_prefill(self):

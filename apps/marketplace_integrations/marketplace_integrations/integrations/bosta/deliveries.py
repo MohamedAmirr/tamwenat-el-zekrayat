@@ -137,13 +137,15 @@ def _readable_delivery_note_status(delivery_note):
 
 
 def _read_address(order):
-	"""The address for the dialog and for district matching (#245, #305).
+	"""The address for the dialog and for district resolution (#245, #305).
 
 	The Sales Order's shipping Address wins (``text`` is its lines, city and state); the
-	Marketplace Order's formatted address is only a fallback (no structured city or state,
-	so no city hint). Read without per-user permissions: the caller can already read this
-	Sales Order, and Address / Marketplace Order are not readable by every creator role.
+	Marketplace Order's formatted address is only a fallback. For a Shopify order the
+	Marketplace Order's shipping address also supplies the country, province code and
+	coordinates. Read without per-user permissions: the caller can already read this Sales
+	Order, and Address / Marketplace Order are not readable by every creator role.
 	"""
+	geo = _shopify_geo(order)
 	if order.get("shipping_address_name"):
 		address = frappe.db.get_value(
 			"Address",
@@ -160,6 +162,7 @@ def _read_address(order):
 				"city": city,
 				"text": ", ".join(part for part in (*lines, city, state) if part),
 				"hints": [part for part in (city, state) if part],
+				**geo,
 			}
 	marketplace_order = order.get("custom_marketplace_order")
 	formatted = (
@@ -168,18 +171,42 @@ def _read_address(order):
 		else ""
 	)
 	formatted = cstr(formatted).strip()
-	return {"first_line": formatted, "city": "", "text": formatted, "hints": []}
+	return {"first_line": formatted, "city": "", "text": formatted, "hints": [], **geo}
+
+
+def _shopify_geo(order):
+	"""``country_code`` / ``province_code`` / ``lat`` / ``lng`` from a Shopify Marketplace
+	Order's ``shipping_address`` JSON (they are approximate: Shopify geocodes the typed text)."""
+	marketplace_order = order.get("custom_marketplace_order")
+	if not marketplace_order:
+		return {}
+	row = frappe.db.get_value(
+		"Marketplace Order", marketplace_order, ["platform", "shipping_address"], as_dict=True
+	)
+	if not row or row.get("platform") != "Shopify" or not row.get("shipping_address"):
+		return {}
+	try:
+		data = frappe.parse_json(row.get("shipping_address"))
+	except Exception:
+		return {}
+	if not isinstance(data, dict):
+		return {}
+	return {
+		"country_code": cstr(data.get("countryCodeV2")).strip(),
+		"province_code": cstr(data.get("provinceCode")).strip(),
+		"lat": data.get("latitude"),
+		"lng": data.get("longitude"),
+	}
 
 
 def _district_prefill(address):
-	"""``city_id`` / ``city_name`` / ``district_id`` when the address names exactly one Bosta
-	district, else nothing. An unreachable district list only loses the prefill."""
+	"""``city_id`` / ``city_name`` and, when known, ``district_id`` or ``district_candidates``
+	for the dialog. An unreachable district list only loses the prefill."""
 	try:
-		match = district_match.match_district(address["text"], address["hints"])
+		return district_match.resolve_location(address)
 	except Exception:
 		frappe.log_error(frappe.get_traceback(with_context=False), "Bosta district match failed")
 		return {}
-	return match or {}
 
 
 def create_bosta_shipment(

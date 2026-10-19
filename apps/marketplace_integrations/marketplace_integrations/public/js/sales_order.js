@@ -427,7 +427,12 @@
 	// Bosta city / district pickers and the address first line. `submit(dialog, values, city)`
 	// runs once a city and district are chosen.
 	function open_bosta_location_dialog({ title, primary_action_label, defaults, intro_fields, receiver_fields, submit, on_skip, on_hide }) {
-		const state = { cities: [], error: false, loading_districts: 0 };
+		const state = {
+			cities: [],
+			error: false,
+			loading_districts: 0,
+			candidates: defaults.district_candidates || null,
+		};
 		const dialog = new frappe.ui.Dialog({
 			title,
 			fields: [
@@ -495,7 +500,16 @@
 				.then((r) => {
 					// A newer city choice has superseded this answer.
 					if (request !== state.loading_districts) return;
-					dialog.fields_dict.district.set_data(location_options(r.message || []));
+					// The first load for the prefilled city lists only the districts the address
+					// points to; a city change or "Refresh Bosta Lists" loads them all.
+					let districts = r.message || [];
+					const candidates = state.candidates;
+					state.candidates = null;
+					if (candidates && !refresh && city_id === defaults.city_id) {
+						const narrowed = districts.filter((d) => candidates.includes(d.id));
+						if (narrowed.length) districts = narrowed;
+					}
+					dialog.fields_dict.district.set_data(location_options(districts));
 					set_ready(true);
 					// Edit starts from the shipment's current district when it is in this city.
 					const current = defaults.district_id;

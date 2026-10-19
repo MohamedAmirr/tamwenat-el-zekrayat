@@ -1370,3 +1370,22 @@ test("the create dialog is unchanged: it keeps the receiver name, the COD note a
 	assert.equal(dialog.values.district, "");
 	assert.equal(dialog.config.primary_action_label, "Create Shipment");
 });
+
+test("a resolved city and district candidates open the dialog with only those districts", async () => {
+	const { dialog, calls } = await open_bosta_dialog({ city_id: "c-cairo", city_name: "Cairo", district_candidates: ["d-2"] });
+	assert.equal(dialog.values.city, "c-cairo");
+	assert.deepEqual(dialog.data.district, [{ value: "d-2", label: "Maadi - المعادي" }]);
+	// Changing the city (and back) loads the full list.
+	await dialog.set_value("city", "c-alex");
+	await settle();
+	await dialog.set_value("city", "c-cairo");
+	await settle();
+	assert.equal(dialog.data.district.length, 2);
+	assert.equal(calls.filter((c) => c.method.endsWith("get_districts")).length, 3);
+});
+
+test("a matched district is selected in its resolved city", async () => {
+	const { dialog } = await open_bosta_dialog({ city_id: "c-cairo", city_name: "Cairo", district_id: "d-1" });
+	assert.equal(dialog.values.city, "c-cairo");
+	assert.equal(dialog.values.district, "d-1");
+});

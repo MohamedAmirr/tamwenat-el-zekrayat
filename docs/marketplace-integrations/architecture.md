@@ -238,22 +238,45 @@ Address (`address_line1`, `address_line2`), else the Marketplace Order's
 Address city equals a Bosta city name (case-insensitive, trimmed). The district is
 filled in only when the address names exactly one district (next paragraph); otherwise
 the operator picks it.
-**District matching (#305).** `locations.get_directory()` fetches `GET /cities/getAllDistricts`
-(`data[]`: `cityId`, `cityName`, `cityOtherName`, `cityCode`, `districts[]` with
-`districtId`, `districtName`, `districtOtherName`, `dropOffAvailability`) and caches it for
-24 hours (a city-list refresh drops it). Districts with `dropOffAvailability` false are never
-kept, so never matched. `district_match.match_district(text, city_hint)` normalizes the
-address and the district names (lowercase; alef variants, teh marbuta and alef maksura
-folded; diacritics and tatweel removed; Arabic digits to Latin; punctuation to spaces) and
-matches a district when its full English or Arabic name appears as whole words. A district
-whose matched name sits inside another matched district's name loses to the longer one;
-anything but exactly one remaining district returns `None`. When the address city or state
-equals a Bosta city name, Arabic name or code, only that city is searched. The text is the
-shipping Address (lines, city, state), else the Marketplace Order's
-`customer_formatted_address`. `get_create_defaults` adds `city_id`, `city_name` and
-`district_id` on a match (nothing otherwise, and a failed district-list fetch is logged and
-only loses the prefill); the dialog opens with them selected. Bosta's city `alias` is not used:
-it is not in the `getAllDistricts` response.
+**City and district resolution (#305).** `locations.get_directory()` fetches
+`GET /cities/getAllDistricts` (`data[]`: `cityId`, `cityName`, `cityOtherName`, `cityCode`,
+`districts[]` with `districtId`, `districtName`, `districtOtherName`, `dropOffAvailability`),
+cached 24 hours (a city-list refresh drops it); districts with `dropOffAvailability` false are
+never kept. `district_match.resolve_location(address)` then works in this order:
+1. **City.** For an Egypt Shopify order, `provinceCode` from the Marketplace Order's
+   `shipping_address` JSON goes through `SHOPIFY_EG_PROVINCE_TO_BOSTA_CITY_CODE` to a Bosta city
+   code. Only `SU` (the "6th of October" province, filed under Giza) is confirmed from real
+   data; the other codes follow Shopify's ISO 3166-2:EG-style codes and must be checked against
+   production orders. Else the shipping Address city/state text is matched against Bosta city
+   name, Arabic name or code.
+2. **District by text, inside that city.** The address and each district name are normalized
+   (lowercase; alef variants, teh marbuta, alef maksura folded; diacritics, tatweel removed; Arabic
+   digits to Latin), split into words (digits glued to letters are split) and stripped of filler
+   words (building, floor, street, near...). A district is a candidate only when all of its
+   significant words are in the address; names made only of generic words (district, الحي,
+   numbers...) never match. Latin words are spelling-folded on both sides: a leading `al`/`el`
+   (also glued, `ElBurouj`) is dropped and `ou`/`oo`/`o` become `u`, `ee` becomes `i`, so
+   "Al Buroj" matches "ElBurouj (ElShorouk)". The area Bosta puts in parentheses is optional
+   when the rest of the name is unique in the city ("البروج" matches "البروج (الشروق)"), and
+   required when another district shares that rest ("Dar Masr (ElShorouk)" vs
+   "Dar Masr (ElAndalos)"). A candidate whose word set is a strict subset of another's is
+   dropped; exactly one left is the district.
+3. **Otherwise `pinLocation`** with the Shopify latitude/longitude (Egypt only, approximate: Shopify
+   geocodes the typed text). `BostaClient.pin_location` calls `GET /cities/pinLocation?lat=&lng=`,
+   which Bosta does **not** document (it is commented out in `docs/bosta-integration/docs.yaml`);
+   it was seen working on 2026-10-19 and may change. Results are cached 24 hours per
+   coordinate rounded to 4 decimals; any error is logged to the Error Log and treated as no
+   result, so it never blocks. Results are kept when they are in the resolved city and are
+   drop-off districts; one result is used; several are narrowed to those sharing a specific word
+   with the address, and one left is used.
+4. **Otherwise the operator picks.** When steps 2 or 3 leave several candidates in one city,
+   `get_create_defaults` returns them as `district_candidates` and the dialog's first District
+   list shows only those (a city change or Refresh Bosta Lists loads the full list).
+The address text is the shipping Address (lines, city, state), else the Marketplace Order's
+`customer_formatted_address`. `get_create_defaults` adds `city_id`, `city_name` and, when
+known, `district_id` or `district_candidates`; a failed district-list fetch is logged and only
+loses the prefill. Bosta rejects a create without a district (errorCode 777), so there is no
+no-district path.
 
 **Bulk create (#305).** The Sales Order list action **Create Bosta Shipments**
 (`public/js/sales_order_list.js`, registered through `doctype_list_js`; creator roles only; at
@@ -261,7 +284,7 @@ most 50 orders, refused with a message naming 50) calls
 `api.bosta_shipments.get_bulk_create_plan` (`integrations/bosta/bulk.py`). The plan makes no
 Bosta call: an order is Skipped, with a one-line reason, when it is not submitted, Closed or
 On Hold, has nothing left to deliver, is not in the company currency, has COD over 30,000, or
-already has an active Bosta Shipment. Of the rest, an order with a matched district, a
+already has an active Bosta Shipment. Of the rest, an order with a single resolved district (text or pin), a
 receiver phone and an address first line longer than 5 characters is sent without review;
 every other order opens the existing Create dialog (`sales_order.js`, shared through
 `frappe.marketplace_integrations.open_bosta_create_dialog`) one at a time ("Order 2 of 5",
