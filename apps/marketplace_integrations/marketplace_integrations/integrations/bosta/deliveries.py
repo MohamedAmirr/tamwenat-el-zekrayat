@@ -6,7 +6,7 @@
 import frappe
 from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
 from frappe import _
-from frappe.utils import add_to_date, cstr, escape_html, flt, get_datetime, now_datetime
+from frappe.utils import add_to_date, cint, cstr, escape_html, flt, get_datetime, now_datetime
 
 from marketplace_integrations.integrations.bosta.client import (
 	BostaClient,
@@ -443,6 +443,12 @@ def _find_remote_delivery(shipment):
 	data = response_body(response).get("data")
 	if not data:
 		return None
+	# Live shape (seen 2026-10-19): data = {count, deliveries, limit, page}. More matches
+	# than the page holds cannot be checked, so it is treated as ambiguous, never as none.
+	if isinstance(data, dict) and isinstance(data.get("deliveries"), list):
+		if cint(data.get("count")) > len(data["deliveries"]):
+			frappe.throw(_("Bosta returned an ambiguous search result. Check the delivery in Bosta."))
+		data = data["deliveries"]
 	if isinstance(data, dict) and data.get("_id"):
 		data = [data]
 	if not isinstance(data, list):
