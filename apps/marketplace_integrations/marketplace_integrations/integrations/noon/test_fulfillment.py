@@ -854,19 +854,19 @@ class IntegrationTestNoonShipmentInvoice(IntegrationTestNoonFulfillmentBase):
 		return file_doc
 
 	def _patch_get_content(self):
-		"""Patch frappe.get_doc for File to use our test content map"""
-		original_get_doc = frappe.get_doc
+		"""Serve File content from the test content map (patching File.get_content
+		rather than frappe.get_doc, which saving an Attach field also calls)."""
+		from frappe.core.doctype.file.file import File
 
-		def mock_get_doc(doctype, *args, **kwargs):
-			if doctype == "File":
-				file_doc = original_get_doc(doctype, *args, **kwargs)
-				file_url = file_doc.file_url
-				if file_url in self._file_content_map:
-					file_doc.get_content = MagicMock(return_value=self._file_content_map[file_url])
-				return file_doc
-			return original_get_doc(doctype, *args, **kwargs)
+		original_get_content = File.get_content
+		content_map = self._file_content_map
 
-		return patch("frappe.get_doc", side_effect=mock_get_doc)
+		def get_content(file_doc, *args, **kwargs):
+			if file_doc.file_url in content_map:
+				return content_map[file_doc.file_url]
+			return original_get_content(file_doc, *args, **kwargs)
+
+		return patch.object(File, "get_content", autospec=True, side_effect=get_content)
 
 	def tearDown(self):
 		frappe.db.delete("File", filters={"attached_to_name": self.order.name})
