@@ -235,8 +235,49 @@ method (the doctype and payload builder still accept it only for rows created
 earlier). Prefill: the address first line comes from the Sales Order's shipping
 Address (`address_line1`, `address_line2`), else the Marketplace Order's
 `customer_formatted_address`; the City is preselected only when the shipping
-Address city equals a Bosta city name (case-insensitive, trimmed), and the
-district is never guessed.
+Address city equals a Bosta city name (case-insensitive, trimmed). The district is
+filled in only when the address names exactly one district (next paragraph); otherwise
+the operator picks it.
+**District matching (#305).** `locations.get_directory()` fetches `GET /cities/getAllDistricts`
+(`data[]`: `cityId`, `cityName`, `cityOtherName`, `cityCode`, `districts[]` with
+`districtId`, `districtName`, `districtOtherName`, `dropOffAvailability`) and caches it for
+24 hours (a city-list refresh drops it). Districts with `dropOffAvailability` false are never
+kept, so never matched. `district_match.match_district(text, city_hint)` normalizes the
+address and the district names (lowercase; alef variants, teh marbuta and alef maksura
+folded; diacritics and tatweel removed; Arabic digits to Latin; punctuation to spaces) and
+matches a district when its full English or Arabic name appears as whole words. A district
+whose matched name sits inside another matched district's name loses to the longer one;
+anything but exactly one remaining district returns `None`. When the address city or state
+equals a Bosta city name, Arabic name or code, only that city is searched. The text is the
+shipping Address (lines, city, state), else the Marketplace Order's
+`customer_formatted_address`. `get_create_defaults` adds `city_id`, `city_name` and
+`district_id` on a match (nothing otherwise, and a failed district-list fetch is logged and
+only loses the prefill); the dialog opens with them selected. Bosta's city `alias` is not used:
+it is not in the `getAllDistricts` response.
+
+**Bulk create (#305).** The Sales Order list action **Create Bosta Shipments**
+(`public/js/sales_order_list.js`, registered through `doctype_list_js`; creator roles only; at
+most 50 orders, refused with a message naming 50) calls
+`api.bosta_shipments.get_bulk_create_plan` (`integrations/bosta/bulk.py`). The plan makes no
+Bosta call: an order is Skipped, with a one-line reason, when it is not submitted, Closed or
+On Hold, has nothing left to deliver, is not in the company currency, has COD over 30,000, or
+already has an active Bosta Shipment. Of the rest, an order with a matched district, a
+receiver phone and an address first line longer than 5 characters is sent without review;
+every other order opens the existing Create dialog (`sales_order.js`, shared through
+`frappe.marketplace_integrations.open_bosta_create_dialog`) one at a time ("Order 2 of 5",
+with Skip). Closing a dialog cancels the whole run and nothing is sent. The skips are listed
+before anything is sent. `queue_bulk_create` enqueues one `long` job (`bulk.run_bulk_create`)
+that calls `deliveries.create_bosta_shipment` per order, each in its own try/except with a
+rollback, so one failure never stops the rest. Progress and results live in the cache under a
+job id readable only by the requesting user (`get_bulk_create_status`), shown by
+`ShopifyCatalogPushStatus` with the `BOSTA_BULK_OPTIONS` labels (Created / Failed / Skipped,
+one line per order). Bosta `errorCode` 777 shows "Bosta needs a district for this address.";
+other Bosta errors show Bosta's message; Bosta accepted but the Delivery Note failed shows
+Failed with the tracking number. **Retry failed** reopens the dialog for the failed orders
+with the values already used and sends them again; the existing resume path
+(`_resume_existing`) searches Bosta first or creates only the Delivery Note, so a retry never
+creates a second Bosta delivery. Districts are not remembered per Address.
+
 Prefill reads Address / Marketplace Order values without permission checks, after the Sales Order read check and the creator-role check (a conscious decision; `shipping_address_name` is not validated against the order's customer).
 `get_districts` rejects any city id not in the cached/fetched Bosta city list, so no unknown id reaches `/cities/{id}/districts` or the cache.
 The API key is sent to the public `/cities` endpoints too (unverified whether Bosta needs it).

@@ -26,6 +26,7 @@ from marketplace_integrations.integrations.bosta.client import (
 CACHE_TTL_SECONDS = 24 * 60 * 60
 CITIES_CACHE_KEY = "marketplace_integrations:bosta:cities"
 DISTRICTS_CACHE_KEY = "marketplace_integrations:bosta:districts:{city_id}"
+DIRECTORY_CACHE_KEY = "marketplace_integrations:bosta:directory"
 
 
 def get_cities(refresh=False):
@@ -44,6 +45,8 @@ def get_cities(refresh=False):
 		stale_ids = {city["id"] for city in cache.get_value(CITIES_CACHE_KEY) or []}
 		for city_id in stale_ids | {city["id"] for city in cities}:
 			cache.delete_value(DISTRICTS_CACHE_KEY.format(city_id=city_id))
+	if refresh:
+		cache.delete_value(DIRECTORY_CACHE_KEY)
 	cache.set_value(CITIES_CACHE_KEY, cities, expires_in_sec=CACHE_TTL_SECONDS)
 	return cities
 
@@ -68,6 +71,22 @@ def get_districts(city_id, refresh=False):
 	districts = _parse_districts(_data_or_throw(client, response))
 	cache.set_value(key, districts, expires_in_sec=CACHE_TTL_SECONDS)
 	return districts
+
+
+def get_directory(refresh=False):
+	"""Every Bosta city with its drop-off-available districts, for district matching:
+	``[{id, name, name_ar, code, districts: [{id, name, name_ar}]}]``. Cached 24 hours;
+	nothing is cached on failure."""
+	cache = frappe.cache()
+	if not refresh:
+		cached = cache.get_value(DIRECTORY_CACHE_KEY)
+		if cached:
+			return cached
+	client = BostaClient()
+	response = client.get_all_districts()
+	directory = _parse_directory(_data_or_throw(client, response))
+	cache.set_value(DIRECTORY_CACHE_KEY, directory, expires_in_sec=CACHE_TTL_SECONDS)
+	return directory
 
 
 def _data_or_throw(client, response):
@@ -117,6 +136,49 @@ def _parse_districts(data):
 				}
 			)
 	return districts
+
+
+def _parse_directory(data):
+	"""``GET /cities/getAllDistricts``: ``data[]`` of ``{cityId, cityName, cityOtherName,
+	cityCode, districts: [{districtId, districtName, districtOtherName,
+	dropOffAvailability}]}``. Districts that do not accept drop-offs are left out."""
+	items = data.get("list") if isinstance(data, dict) else data
+	if not isinstance(items, list):
+		frappe.throw(_("Bosta returned the district directory in an unrecognised format."))
+	directory = []
+	for item in items:
+		if not isinstance(item, dict):
+			continue
+		city_id = cstr(item.get("cityId")).strip()
+		city_name = cstr(item.get("cityName")).strip()
+		if not city_id or not city_name:
+			continue
+		districts = []
+		for district in item.get("districts") or []:
+			if not isinstance(district, dict) or district.get("dropOffAvailability") is False:
+				continue
+			district_id = cstr(district.get("districtId")).strip()
+			district_name = cstr(district.get("districtName")).strip()
+			if district_id and district_name:
+				districts.append(
+					{
+						"id": district_id,
+						"name": district_name,
+						"name_ar": cstr(district.get("districtOtherName")).strip(),
+					}
+				)
+		directory.append(
+			{
+				"id": city_id,
+				"name": city_name,
+				"name_ar": cstr(item.get("cityOtherName")).strip(),
+				"code": cstr(item.get("cityCode")).strip(),
+				"districts": districts,
+			}
+		)
+	if not directory:
+		frappe.throw(_("Bosta returned no usable cities."))
+	return directory
 
 
 def get_pickup_locations():

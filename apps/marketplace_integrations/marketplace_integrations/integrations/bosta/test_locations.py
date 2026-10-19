@@ -42,6 +42,31 @@ DISTRICTS = {
 }
 
 
+ALL_DISTRICTS = {
+	"success": True,
+	"data": [
+		{
+			"cityId": "city-cairo",
+			"cityName": "Cairo",
+			"cityOtherName": "القاهرة",
+			"cityCode": "EG-01",
+			"districts": [
+				{
+					"zoneId": "z-1",
+					"zoneName": "New Cairo",
+					"districtId": "d-5th",
+					"districtName": "5th Settlement",
+					"districtOtherName": "التجمع الخامس",
+					"dropOffAvailability": True,
+				},
+				{"districtId": "d-no", "districtName": "No Drop Off", "dropOffAvailability": False},
+			],
+		},
+		{"cityName": "No id", "districts": []},
+	],
+}
+
+
 class IntegrationTestBostaLocations(BostaFixtureMixin, IntegrationTestCase):
 	def setUp(self):
 		super().setUp()
@@ -51,6 +76,7 @@ class IntegrationTestBostaLocations(BostaFixtureMixin, IntegrationTestCase):
 	def _clear_cache(self):
 		cache = frappe.cache()
 		cache.delete_value(locations.CITIES_CACHE_KEY)
+		cache.delete_value(locations.DIRECTORY_CACHE_KEY)
 		for city_id in ("city-cairo", "city-alex"):
 			cache.delete_value(locations.DISTRICTS_CACHE_KEY.format(city_id=city_id))
 
@@ -69,6 +95,33 @@ class IntegrationTestBostaLocations(BostaFixtureMixin, IntegrationTestCase):
 		)
 		self.assertEqual(second, first)
 		self.assertEqual(len(self.http.calls_of("cities")), 1)
+
+	def test_directory_keeps_only_drop_off_districts_and_is_cached(self):
+		self.http.queue["all_districts"].append(FakeResponse(200, ALL_DISTRICTS))
+
+		first = locations.get_directory()
+		second = locations.get_directory()
+
+		self.assertEqual(
+			first,
+			[
+				{
+					"id": "city-cairo",
+					"name": "Cairo",
+					"name_ar": "القاهرة",
+					"code": "EG-01",
+					"districts": [{"id": "d-5th", "name": "5th Settlement", "name_ar": "التجمع الخامس"}],
+				}
+			],
+		)
+		self.assertEqual(second, first)
+		self.assertEqual(len(self.http.calls_of("all_districts")), 1)
+
+	def test_a_failed_directory_fetch_caches_nothing(self):
+		self.http.queue["all_districts"].append(FakeResponse(500, {"success": False}))
+		with self.assertRaises(frappe.ValidationError):
+			locations.get_directory()
+		self.assertIsNone(frappe.cache().get_value(locations.DIRECTORY_CACHE_KEY))
 
 	def test_districts_exclude_no_drop_off_and_are_cached_per_city(self):
 		self.http.queue["cities"].append(FakeResponse(200, CITIES))
@@ -197,6 +250,11 @@ class IntegrationTestBostaLocations(BostaFixtureMixin, IntegrationTestCase):
 
 
 class IntegrationTestBostaAddressPrefill(BostaFixtureMixin, IntegrationTestCase):
+	def setUp(self):
+		super().setUp()
+		frappe.cache().delete_value(locations.DIRECTORY_CACHE_KEY)
+		self.addCleanup(frappe.cache().delete_value, locations.DIRECTORY_CACHE_KEY)
+
 	def _address(self, **values):
 		address = frappe.get_doc(
 			{
@@ -226,6 +284,30 @@ class IntegrationTestBostaAddressPrefill(BostaFixtureMixin, IntegrationTestCase)
 		self.assertEqual(defaults["address_first_line"], "12 Example Street, Floor 3")
 		self.assertEqual(defaults["address_city"], "Cairo")
 		self.assertNotIn("district", defaults)
+		self.assertNotIn("district_id", defaults)
+
+	def test_an_address_naming_one_district_prefills_its_city_and_district(self):
+		order = self.make_order()
+		address = self._address(address_line1="Building 4, التجمع الخامس")
+		frappe.db.set_value("Sales Order", order.name, "shipping_address_name", address.name)
+		self.http.queue["all_districts"].append(FakeResponse(200, ALL_DISTRICTS))
+
+		defaults = self._defaults(order)
+
+		self.assertEqual(
+			(defaults["city_id"], defaults["city_name"], defaults["district_id"]),
+			("city-cairo", "Cairo", "d-5th"),
+		)
+
+	def test_an_unreachable_district_list_only_loses_the_prefill(self):
+		order = self.make_order()
+		address = self._address(address_line1="5th Settlement")
+		frappe.db.set_value("Sales Order", order.name, "shipping_address_name", address.name)
+		self.http.queue["all_districts"].append(FakeResponse(500, {"success": False}))
+
+		defaults = self._defaults(order)
+
+		self.assertEqual(defaults["address_first_line"], "5th Settlement")
 		self.assertNotIn("district_id", defaults)
 
 	def test_without_a_shipping_address_the_fields_are_blank(self):

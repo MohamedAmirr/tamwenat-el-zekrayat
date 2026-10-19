@@ -6,7 +6,7 @@
 import frappe
 from frappe.utils import cint
 
-from marketplace_integrations.integrations.bosta import locations
+from marketplace_integrations.integrations.bosta import bulk, locations
 from marketplace_integrations.integrations.bosta.deliveries import (
 	CREATOR_ROLES,
 	get_sales_order_defaults,
@@ -76,6 +76,25 @@ def create_shipment(
 		address_first_line,
 		expected_cod,
 	)
+
+
+@frappe.whitelist(methods=["POST"])
+def get_bulk_create_plan(sales_orders):
+	"""Sort the selected Sales Orders into skipped / ready / needs review, without calling
+	Bosta (creator roles only, at most 50 orders)."""
+	return bulk.get_bulk_create_plan(sales_orders)
+
+
+@frappe.whitelist(methods=["POST"])
+def queue_bulk_create(orders, skipped=None):
+	"""Queue the background job that creates the given orders' Bosta shipments."""
+	return bulk.queue_bulk_create(orders, skipped)
+
+
+@frappe.whitelist()
+def get_bulk_create_status(job_id: str):
+	"""Poll a bulk create job. Only the user who queued it can read it."""
+	return bulk.get_bulk_create_status(job_id)
 
 
 @frappe.whitelist(methods=["POST"])
