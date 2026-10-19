@@ -1471,3 +1471,35 @@ worst,الأسوأ
 {0} is not a valid Shopify product variant GID.,{0} ليس معرّف متغيّر منتج Shopify (GID) صالحًا.
 {0} is set by the system and cannot be edited.,{0} يضبطه النظام ولا يمكن تعديله.
 {0} rounding difference was written off to {1}.,تم شطب فرق التقريب {0} إلى {1}.
+You can create at most {0} Bosta shipments at once. You selected {1}.,يمكنك إنشاء {0} شحنة Bosta كحد أقصى في المرة الواحدة. لقد حددت {1}.
+Sales Order {0} does not exist.,أمر البيع {0} غير موجود.
+You are not allowed to read this Sales Order.,ليس لديك صلاحية قراءة أمر البيع هذا.
+There are no Sales Orders to send to Bosta.,لا توجد أوامر بيع لإرسالها إلى Bosta.
+Each Sales Order to send needs a name.,يجب أن يكون لكل أمر بيع مُرسَل اسم.
+Bulk Bosta job not found.,لم يتم العثور على مهمة Bosta الجماعية.
+Bosta shipment {0} created and Delivery Note {1} submitted.,تم إنشاء شحنة Bosta {0} وتقديم مذكرة التسليم {1}.
+Bosta accepted the delivery (tracking number {0}) but the Delivery Note could not be created. Retry creates only the Delivery Note.,قبلت Bosta التوصيل (رقم التتبع {0}) لكن تعذّر إنشاء مذكرة التسليم. تُنشئ إعادة المحاولة مذكرة التسليم فقط.
+Bosta needs a district for this address.,تحتاج Bosta إلى منطقة لهذا العنوان.
+The shipment could not be created. See Error Log for details.,تعذّر إنشاء الشحنة. راجع سجل الأخطاء للتفاصيل.
+Bosta returned the district directory in an unrecognised format.,أعادت Bosta قائمة المناطق بصيغة غير معروفة.
+Create Bosta Shipments,إنشاء شحنات Bosta
+Checking the selected Sales Orders...,جارٍ فحص أوامر البيع المحددة...
+{0} will be sent without review.,سيتم إرسال {0} دون مراجعة.
+{0} need you to check the details one by one.,يحتاج {0} إلى مراجعة تفاصيلها واحدًا تلو الآخر.
+{0} will be skipped:,سيتم تجاوز {0}:
+Continue,متابعة
+Order {0} of {1},الطلب {0} من {1}
+Skipped by you.,تم التجاوز بواسطتك.
+Skip,تجاوز
+Cancelled. Nothing was sent to Bosta.,تم الإلغاء. لم يُرسل أي شيء إلى Bosta.
+Queuing the Bosta shipments...,جارٍ وضع شحنات Bosta في قائمة الانتظار...
+Retry failed,إعادة محاولة ما فشل
+Created,تم الإنشاء
+Sales Order,أمر البيع
+Details,التفاصيل
+Creating Bosta shipments,جارٍ إنشاء شحنات Bosta
+Nothing to create.,لا يوجد ما يمكن إنشاؤه.
+"Created {0}, failed {1}, skipped {2} so far.",تم إنشاء {0}، وفشل {1}، وتم تجاوز {2} حتى الآن.
+"Created {0}, failed {1}, skipped {2}",تم إنشاء {0}، وفشل {1}، وتم تجاوز {2}
+Bulk create failed: {0},فشل الإنشاء الجماعي: {0}
+Could not retrieve the Bosta bulk create status.,تعذّر استرجاع حالة الإنشاء الجماعي في Bosta.

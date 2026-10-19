@@ -22,13 +22,13 @@
 		return frappe.utils.escape_html(value == null ? "" : String(value));
 	}
 
-	function build_results_table($el, results, truncated, total, result_link_route, result_column_label) {
+	function build_results_table($el, results, truncated, total, result_link_route, result_column_label, status_labels, detail_column_label) {
 		$el.empty();
 		if (!results.length) return;
 
 		const $table = $('<table class="table table-bordered"></table>').appendTo($el);
 		const $thead = $("<thead><tr></tr></thead>").appendTo($table);
-		[result_column_label || __("Mapping"), __("Status"), __("Error")].forEach((label) => {
+		[result_column_label || __("Mapping"), __("Status"), detail_column_label || __("Error")].forEach((label) => {
 			$("<th></th>").text(label).appendTo($thead.find("tr"));
 		});
 		const $tbody = $("<tbody></tbody>").appendTo($table);
@@ -42,14 +42,19 @@
 						.html(escape(row.mapping_name))
 				)
 				.appendTo($tr);
-			let status_label = __("Error");
+			const names = Object.assign(
+				{ ok: __("Synced"), skipped: __("Skipped"), error: __("Error") },
+				status_labels || {}
+			);
+			let status_label = names.error;
 			if (row.ok) {
-				status_label = __("Synced");
+				status_label = names.ok;
 			} else if (row.skipped) {
-				status_label = __("Skipped");
+				status_label = names.skipped;
 			}
 			$("<td></td>").text(status_label).appendTo($tr);
-			$("<td></td>").text(row.error || "").appendTo($tr);
+			// `detail` is the one-line text of a caller whose rows carry one (Bosta bulk create).
+			$("<td></td>").text(row.detail || row.error || "").appendTo($tr);
 		});
 		if (truncated) {
 			$('<p class="text-muted"></p>')
@@ -82,7 +87,7 @@
 	};
 
 	frappe.ui.ShopifyCatalogPushStatus = class ShopifyCatalogPushStatus {
-		constructor({ jobs, on_done, on_close, poll_interval = 1500, status_method, labels, result_link_route, result_column_label }) {
+		constructor({ jobs, on_done, on_close, poll_interval = 1500, status_method, labels, result_link_route, result_column_label, status_labels, detail_column_label }) {
 			this.status_method = status_method || DEFAULT_STATUS_METHOD;
 			this.labels = Object.assign({}, DEFAULT_LABELS, labels || {});
 			// Both default to the original price-push/inventory-sync behavior:
@@ -93,6 +98,10 @@
 			// nonexistent Marketplace Product Mapping document.
 			this.result_link_route = result_link_route;
 			this.result_column_label = result_column_label;
+			// Optional per-caller names for the Status cell ({ok, skipped, error}) and the
+			// last column's heading, for rows that are not "Synced / Skipped / Error".
+			this.status_labels = status_labels;
+			this.detail_column_label = detail_column_label;
 			this.jobs = jobs || [];
 			this.on_done = on_done;
 			this.on_close = on_close;
@@ -227,7 +236,9 @@
 					.appendTo(this.$status);
 			});
 
-			build_results_table(this.$status, results, truncated, total, this.result_link_route, this.result_column_label);
+			// The table gets its own container: build_results_table() empties what it is given, which
+			// would otherwise wipe the totals line and the failed-job lines drawn above.
+			build_results_table($("<div></div>").appendTo(this.$status), results, truncated, total, this.result_link_route, this.result_column_label, this.status_labels, this.detail_column_label);
 		}
 	};
 
@@ -247,6 +258,24 @@
 			account_failed: (account, error) =>
 				__("Sync failed for account {0}: {1}", [account, error]),
 			poll_failed: () => __("Could not retrieve the inventory sync status."),
+		},
+	};
+
+	// Constructor options for the Bosta bulk create (#305). Result rows are Sales Order
+	// names carrying a one-line `detail`; the status names are Created / Failed / Skipped.
+	frappe.ui.ShopifyCatalogPushStatus.BOSTA_BULK_OPTIONS = {
+		status_method: "marketplace_integrations.api.bosta_shipments.get_bulk_create_status",
+		result_link_route: "sales-order",
+		result_column_label: __("Sales Order"),
+		detail_column_label: __("Details"),
+		status_labels: { ok: __("Created"), skipped: __("Skipped"), error: __("Failed") },
+		labels: {
+			title: () => __("Creating Bosta shipments"),
+			nothing: () => __("Nothing to create."),
+			running: (counts) => __("Created {0}, failed {1}, skipped {2} so far.", counts),
+			complete: (counts) => __("Created {0}, failed {1}, skipped {2}", counts),
+			account_failed: (account, error) => __("Bulk create failed: {0}", [error]),
+			poll_failed: () => __("Could not retrieve the Bosta bulk create status."),
 		},
 	};
 

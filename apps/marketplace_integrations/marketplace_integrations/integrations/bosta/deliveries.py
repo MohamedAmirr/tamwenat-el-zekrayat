@@ -8,6 +8,7 @@ from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
 from frappe import _
 from frappe.utils import add_to_date, cint, cstr, escape_html, flt, get_datetime, now_datetime
 
+from marketplace_integrations.integrations.bosta import district_match, locations
 from marketplace_integrations.integrations.bosta.client import (
 	BostaClient,
 	is_success_response,
@@ -41,8 +42,11 @@ def get_sales_order_defaults(sales_order_name):
 	order = _get_sales_order(sales_order_name)
 	_validate_deliverable(order)
 	cod = _cod_breakdown(order)
+	address = _read_address(order)
 	return {
-		**_address_prefill(order),
+		"address_first_line": address["first_line"],
+		"address_city": address["city"],
+		**_district_prefill(address),
 		"receiver_name": cstr(order.customer_name).strip(),
 		"receiver_phone": _receiver_phone_prefill(order),
 		"cod_amount": cod["cod"],
@@ -57,7 +61,7 @@ def _receiver_phone_prefill(order):
 
 	The buyer's phone is only on the Marketplace Order; which platforms may use it is decided
 	in one place, ``sales_order_sync.buyer_phone_for_sales_order``. Read without per-user
-	permissions for the same reason as ``_address_prefill``.
+	permissions for the same reason as ``_read_address``.
 	"""
 	phone = cstr(order.contact_mobile or order.contact_phone).strip()
 	marketplace_order = order.get("custom_marketplace_order")
@@ -132,27 +136,33 @@ def _readable_delivery_note_status(delivery_note):
 	return frappe.db.get_value("Delivery Note", delivery_note, "status") or ""
 
 
-def _address_prefill(order):
-	"""Address first line and source city for the dialog (#245).
+def _read_address(order):
+	"""The address for the dialog and for district resolution (#245, #305).
 
-	The Sales Order's shipping Address wins; the Marketplace Order's formatted address is
-	only a fallback for the first line (it has no structured city, so none is offered).
-	The district is never guessed. Read without per-user permissions: the caller can already
-	read this Sales Order, and Address / Marketplace Order are not readable by every creator
-	role.
+	The Sales Order's shipping Address wins (``text`` is its lines, city and state); the
+	Marketplace Order's formatted address is only a fallback. For a Shopify order the
+	Marketplace Order's shipping address also supplies the country, province code and
+	coordinates. Read without per-user permissions: the caller can already read this Sales
+	Order, and Address / Marketplace Order are not readable by every creator role.
 	"""
+	geo = _shopify_geo(order)
 	if order.get("shipping_address_name"):
 		address = frappe.db.get_value(
 			"Address",
 			order.shipping_address_name,
-			["address_line1", "address_line2", "city"],
+			["address_line1", "address_line2", "city", "state"],
 			as_dict=True,
 		)
 		if address:
 			lines = [cstr(line).strip() for line in (address.address_line1, address.address_line2)]
+			city = cstr(address.city).strip()
+			state = cstr(address.state).strip()
 			return {
-				"address_first_line": ", ".join(line for line in lines if line),
-				"address_city": cstr(address.city).strip(),
+				"first_line": ", ".join(line for line in lines if line),
+				"city": city,
+				"text": ", ".join(part for part in (*lines, city, state) if part),
+				"hints": [part for part in (city, state) if part],
+				**geo,
 			}
 	marketplace_order = order.get("custom_marketplace_order")
 	formatted = (
@@ -160,7 +170,51 @@ def _address_prefill(order):
 		if marketplace_order
 		else ""
 	)
-	return {"address_first_line": cstr(formatted).strip(), "address_city": ""}
+	formatted = cstr(formatted).strip()
+	return {"first_line": formatted, "city": "", "text": formatted, "hints": [], **geo}
+
+
+def _shopify_geo(order):
+	"""``country_code`` / ``province_code`` / ``lat`` / ``lng`` from a Shopify Marketplace
+	Order's ``shipping_address`` JSON (they are approximate: Shopify geocodes the typed text)."""
+	marketplace_order = order.get("custom_marketplace_order")
+	if not marketplace_order:
+		return {}
+	row = frappe.db.get_value(
+		"Marketplace Order", marketplace_order, ["platform", "shipping_address"], as_dict=True
+	)
+	if not row or row.get("platform") != "Shopify" or not row.get("shipping_address"):
+		return {}
+	try:
+		data = frappe.parse_json(row.get("shipping_address"))
+	except Exception:
+		return {}
+	if not isinstance(data, dict):
+		return {}
+	return {
+		"country_code": cstr(data.get("countryCodeV2")).strip(),
+		"province_code": cstr(data.get("provinceCode")).strip(),
+		"lat": data.get("latitude"),
+		"lng": data.get("longitude"),
+	}
+
+
+def _district_prefill(address):
+	"""``city_id`` / ``city_name`` and, when known, ``district_id`` or ``district_candidates``
+	for the dialog. A failed Bosta district lookup (or a recent one, see
+	``locations.lookups_blocked``) only loses the prefill: the operator picks, and no popup shows."""
+	try:
+		result = district_match.resolve_location(address)
+	except locations.BostaLookupUnavailable:
+		return {}
+	except Exception:
+		frappe.clear_last_message()
+		frappe.log_error(frappe.get_traceback(with_context=False), "Bosta district match failed")
+		return {}
+	if result.get("city_id"):
+		# The name the dialog would send for this city (from GET /cities), not the directory's.
+		result["city_name"] = locations.city_name_for(result["city_id"], result["city_name"])
+	return result
 
 
 def create_bosta_shipment(
