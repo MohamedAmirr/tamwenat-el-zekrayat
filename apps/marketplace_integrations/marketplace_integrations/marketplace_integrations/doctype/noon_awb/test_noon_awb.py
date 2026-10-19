@@ -93,7 +93,8 @@ class TestNoonAWB(IntegrationTestCase):
 				patch(CLIENT) as client_class,
 				patch("marketplace_integrations.integrations.noon.awb_pool.frappe.enqueue") as enqueue,
 			):
-				with self.assertRaises(frappe.ValidationError):
+				# The ``qty: int`` hint rejects non-integers before validate_qty runs.
+				with self.assertRaises((frappe.ValidationError, frappe.exceptions.FrappeTypeError)):
 					generate_awbs(self.account.name, bad)
 				with self.assertRaises(frappe.ValidationError):
 					awb_pool.generate(self.account.name, bad)
