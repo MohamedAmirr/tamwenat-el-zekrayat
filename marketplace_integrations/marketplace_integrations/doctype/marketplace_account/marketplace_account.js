@@ -25,6 +25,8 @@ const NOON_FIELDS = ["noon_warehouse_section", "noon_warehouse_code", "noon_coun
 const NOON_SYNC_LABEL = "Sync Noon Pricing and Stock";
 const NOON_IMPORT_ORDERS_LABEL = "Import Noon Orders";
 const NOON_LOOKUP_RETURN_LABEL = "Look Up Noon Return";
+const NOON_GENERATE_AWBS_LABEL = "Generate Noon AWBs";
+const NOON_AWB_MAX_QTY = 1000;
 
 // Every custom button configure_outlet_management() can ever add - needed so
 // a platform change away from Talabat can remove all of them (#103 review
@@ -201,6 +203,8 @@ function configure_noon(frm) {
 	frm.remove_custom_button(__(NOON_SYNC_LABEL));
 	frm.remove_custom_button(__(NOON_IMPORT_ORDERS_LABEL));
 	frm.remove_custom_button(__(NOON_LOOKUP_RETURN_LABEL));
+	frm.remove_custom_button(__(NOON_GENERATE_AWBS_LABEL));
+	frm.set_intro("");
 	if (!is_noon) return;
 	if (frm.doc.connection && frappe.model.can_write("Marketplace Account")) {
 		frm.add_custom_button(__("Load Noon Warehouses"), () => show_noon_warehouse_picker(frm));
@@ -209,7 +213,65 @@ function configure_noon(frm) {
 		frm.add_custom_button(__(NOON_SYNC_LABEL), () => sync_noon(frm));
 		frm.add_custom_button(__(NOON_IMPORT_ORDERS_LABEL), () => import_noon_orders(frm));
 		frm.add_custom_button(__(NOON_LOOKUP_RETURN_LABEL), () => lookup_noon_return(frm));
+		if (frappe.model.can_create("Noon AWB")) {
+			frm.add_custom_button(__(NOON_GENERATE_AWBS_LABEL), () => generate_noon_awbs(frm));
+			show_noon_awb_pool_count(frm);
+		}
 	}
+}
+
+// Pre-generated Noon AWB pool: show how many are still Available.
+function show_noon_awb_pool_count(frm) {
+	frappe
+		.call({
+			method: "marketplace_integrations.api.noon_awbs.get_available_count",
+			args: { account: frm.doc.name },
+		})
+		.then((response) => {
+			if (frm.doc.platform !== "Noon") return;
+			frm.set_intro(__("Available Noon AWBs: {0}", [response.message || 0]), "blue");
+		});
+}
+
+// Bulk AWB generation: the dialog only collects a quantity; the Noon call
+// runs in a queued worker (api/noon_awbs.py::generate_awbs) and the result
+// arrives as a realtime message.
+function generate_noon_awbs(frm) {
+	frappe.prompt(
+		[
+			{
+				fieldname: "qty",
+				fieldtype: "Int",
+				label: __("Quantity"),
+				description: __("Between 1 and {0}.", [NOON_AWB_MAX_QTY]),
+				default: 100,
+				reqd: 1,
+			},
+		],
+		(values) => {
+			const qty = cint(values.qty);
+			if (qty < 1 || qty > NOON_AWB_MAX_QTY) {
+				frappe.msgprint(__("Quantity must be a whole number between 1 and {0}.", [NOON_AWB_MAX_QTY]));
+				return;
+			}
+			frappe.call({
+				method: "marketplace_integrations.api.noon_awbs.generate_awbs",
+				args: { account: frm.doc.name, qty },
+				freeze: true,
+				freeze_message: __("Queuing Noon AWB generation..."),
+			}).then((response) => {
+				const queued = (response.message || {}).queued;
+				frappe.show_alert({
+					message: queued
+						? __("Noon AWB generation queued. You will be notified when it finishes.")
+						: __("Noon AWB generation is already queued or running for this account."),
+					indicator: queued ? "green" : "orange",
+				});
+			});
+		},
+		__(NOON_GENERATE_AWBS_LABEL),
+		__("Generate")
+	);
 }
 
 // Manual barcode lookup (#153) - the manual Desk trigger for

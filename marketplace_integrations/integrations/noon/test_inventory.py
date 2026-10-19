@@ -38,6 +38,59 @@ class UnitTestNoonInventory(UnitTestCase):
 		)
 		connection_check.start()
 		self.addCleanup(connection_check.stop)
+		paused_check = patch(
+			"marketplace_integrations.integrations.noon.inventory.is_push_paused", return_value=False
+		)
+		self.paused = paused_check.start()
+		self.addCleanup(paused_check.stop)
+
+	def _two_rows(self):
+		return [
+			(
+				SimpleNamespace(name=f"M{n}", external_reference=f"SKU-{n}"),
+				{"item": f"ITEM-{n}", "sales_uom": None},
+				SimpleNamespace(name=f"ITEM-{n}", stock_uom="Nos"),
+			)
+			for n in (1, 2)
+		]
+
+	def test_switch_off_before_start_makes_no_noon_call_or_status_write(self):
+		self.paused.return_value = True
+		with patch("marketplace_integrations.integrations.noon.inventory.get_account") as get_account:
+			with patch("marketplace_integrations.integrations.noon.inventory.NoonClient") as client:
+				with patch(
+					"marketplace_integrations.integrations.noon.inventory.persist_outcomes"
+				) as persist:
+					result_ = push_stock("ACC")
+		self.assertEqual(result_, {"synced": 0, "failed": 0, "paused": True})
+		self.paused.assert_called_with("ACC", "stock")
+		get_account.assert_not_called()
+		client.assert_not_called()
+		persist.assert_not_called()
+
+	def test_switch_turned_off_mid_job_stops_before_next_chunk(self):
+		account = SimpleNamespace(
+			name="ACC", connection="CONN", warehouse="ERP-WH", noon_warehouse_code="NOON-WH"
+		)
+		# entry check, chunk 1 check, chunk 2 check (now paused)
+		self.paused.side_effect = [False, False, True]
+		patches = "marketplace_integrations.integrations.noon.inventory"
+		with patch(f"{patches}.get_account", return_value=account):
+			with patch(f"{patches}.selected_mappings", return_value=self._two_rows()):
+				with patch(f"{patches}.validate_account_warehouse"):
+					with patch(f"{patches}.validate_warehouse_code"):
+						with patch(f"{patches}.get_sellable_qty", return_value=5):
+							with patch(f"{patches}.STOCK_CHUNK_SIZE", 1):
+								with patch(f"{patches}.NoonClient") as client_class:
+									with patch(f"{patches}.persist_outcomes") as persist:
+										client = client_class.return_value
+										client.request.return_value = Response([result("SKU-1")])
+										outcome = push_stock("ACC")
+		self.assertEqual(outcome, {"synced": 1, "failed": 0, "paused": True})
+		self.assertEqual(client.request.call_count, 1)
+		persist.assert_called_once()
+		self.assertIn("M1", persist.call_args.args[0])
+		self.assertNotIn("M2", persist.call_args.args[0])
 
 	def test_warehouse_partition_payload_failure_and_retry(self):
 		account = SimpleNamespace(
