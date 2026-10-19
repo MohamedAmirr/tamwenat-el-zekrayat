@@ -13,6 +13,7 @@ from marketplace_integrations.integrations.noon.sync import (
 	authorize_selection,
 	chunks,
 	enqueue_push,
+	is_push_paused,
 	item_status_error,
 	persist_outcomes,
 	require_items_response,
@@ -58,6 +59,9 @@ def validate_price_setup(account):
 
 def push_pricing(account_name, mapping_names=None):
 	"""Set current prices for existing Noon partner SKUs, item by item."""
+	if is_push_paused(account_name, "pricing"):
+		# Switch turned off after this job was queued: no Noon call, no mapping touched.
+		return {"synced": 0, "failed": 0, "paused": True}
 	account = get_account(account_name)
 	selected = selected_mappings(account.name, mapping_names)
 	if not selected:
@@ -99,6 +103,9 @@ def push_pricing(account_name, mapping_names=None):
 	synced = 0
 	failed = len(local_errors)
 	for batch in chunks(prepared, PRICING_CHUNK_SIZE):
+		# Fresh DB read before every chunk: stop before the next Noon write once off.
+		if is_push_paused(account.name, "pricing"):
+			return {"synced": synced, "failed": failed, "paused": True}
 		try:
 			response = client.request("POST", PRICING_PATH, json={"items": [payload for _, payload in batch]})
 			results = response_by_key(

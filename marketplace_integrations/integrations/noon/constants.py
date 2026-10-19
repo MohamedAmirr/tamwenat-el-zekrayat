@@ -88,3 +88,11 @@ MERCHANT_CODES_MAX = 200
 # not yet sent or not yet confirmed) longer than this, measured from the
 # shipment row's creation. 1 hour is a placeholder with no documented basis.
 NOON_PENDING_SHIPMENT_STUCK_HOURS = 1
+
+# Changed-stock sweep (integrations/noon/sweep.py::sweep_changed_bins), registered
+# in hooks.py scheduler_events["cron"]. Frappe has no every-N-minutes bucket.
+NOON_INVENTORY_SWEEP_CRON = "*/2 * * * *"
+
+# Each tick re-reads Bins back to (watermark - this many minutes), so a missed
+# or failed enqueue is recovered on a later tick without a retry mechanism.
+NOON_INVENTORY_SWEEP_OVERLAP_MINUTES = 10

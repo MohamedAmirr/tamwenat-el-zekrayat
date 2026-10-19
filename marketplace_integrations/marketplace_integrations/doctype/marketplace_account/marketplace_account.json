@@ -16,6 +16,8 @@
   "noon_warehouse_section",
   "noon_warehouse_code",
   "noon_country_code",
+  "noon_inventory_push_enabled",
+  "noon_price_push_enabled",
   "shopify_location_section",
   "shopify_location_gid",
   "shopify_location_name",
@@ -110,6 +112,22 @@
    "fieldtype": "Select",
    "label": "Noon Country Code",
    "options": "\nae\nsa\neg"
+  },
+  {
+   "default": "1",
+   "depends_on": "eval:doc.platform==\"Noon\"",
+   "description": "Turn off to keep importing Noon orders while ERPNext stops writing stock to this account. Turning it back on does not trigger a full push.",
+   "fieldname": "noon_inventory_push_enabled",
+   "fieldtype": "Check",
+   "label": "Push Inventory to Noon"
+  },
+  {
+   "default": "1",
+   "depends_on": "eval:doc.platform==\"Noon\"",
+   "description": "Turn off to keep importing Noon orders while ERPNext stops writing prices to this account. Turning it back on does not trigger a full push.",
+   "fieldname": "noon_price_push_enabled",
+   "fieldtype": "Check",
+   "label": "Push Prices to Noon"
   },
   {
    "fieldname": "shopify_location_section",

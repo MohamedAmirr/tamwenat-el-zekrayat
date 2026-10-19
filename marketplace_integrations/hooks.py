@@ -1,3 +1,4 @@
+from marketplace_integrations.integrations.noon.constants import NOON_INVENTORY_SWEEP_CRON
 from marketplace_integrations.integrations.shopify.constants import SHOPIFY_INVENTORY_SWEEP_CRON
 
 app_name = "marketplace_integrations"
@@ -214,6 +215,14 @@ scheduler_events = {
 		"marketplace_integrations.integrations.noon.returns.scan_awbs_all_accounts",
 	],
 }
+
+# Noon changed-stock sweep (integrations/noon/sweep.py::sweep_changed_bins). Appended
+# with setdefault, not a dict literal key, so it merges into the Shopify sweep's
+# cron entry if both constants ever share the same expression (as they do today)
+# instead of silently overwriting it.
+scheduler_events["cron"].setdefault(NOON_INVENTORY_SWEEP_CRON, []).append(
+	"marketplace_integrations.integrations.noon.sweep.sweep_changed_bins"
+)
 
 # Testing
 # -------

@@ -11,6 +11,26 @@ from marketplace_integrations.services.mappings import resolve_mapping_and_item
 
 MAPPING_DOCTYPE = "Marketplace Product Mapping"
 
+# Per-account push switches on Marketplace Account, keyed by enqueue "kind".
+PUSH_SWITCH_FIELDS = {"stock": "noon_inventory_push_enabled", "pricing": "noon_price_push_enabled"}
+
+
+class PushPaused(frappe.ValidationError):
+	"""The account's push switch is off. A ValidationError so manual callers
+	still see the message; scheduled callers catch it as a quiet skip."""
+
+
+def push_paused_message(kind):
+	if kind == "pricing":
+		return _("Price push is paused for this account.")
+	return _("Inventory push is paused for this account.")
+
+
+def is_push_paused(account_name, kind):
+	"""True when the account's "Push Inventory/Prices to Noon" switch is off.
+	A single fresh DB read, safe to call from the worker before anything else."""
+	return not frappe.db.get_value("Marketplace Account", account_name, PUSH_SWITCH_FIELDS[kind])
+
 
 def selected_mappings(account_name, mapping_names=None, stock_only=False):
 	"""Yield only exact, enabled account mappings to active ERPNext Items."""
@@ -74,6 +94,9 @@ def authorize_selection(account_name, mapping_names=None):
 
 
 def enqueue_push(worker, kind, account_name, mapping_names=None):
+	if is_push_paused(account_name, kind):
+		# The single enqueue choke point: nothing can queue a push for a paused account.
+		raise PushPaused(push_paused_message(kind))
 	job = frappe.enqueue(
 		worker,
 		queue="long",
