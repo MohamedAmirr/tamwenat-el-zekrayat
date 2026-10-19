@@ -1000,7 +1000,8 @@ Noon order {0} was not found.,لم يتم العثور على طلب Noon {0}.
 Noon order {0}'s presentment currency ({1}) does not match the resolved ERPNext currency ({2}). Multi-currency Sales Order synchronization is not supported.,عملة عرض طلب Noon {0} ({1}) لا تطابق عملة ERPNext المحددة ({2}). مزامنة أوامر البيع متعددة العملات غير مدعومة.
 Noon orders cannot be cancelled from ERPNext.,لا يمكن إلغاء طلبات Noon من ERPNext.
 Noon partner SKU is required.,رمز منتج الشريك في Noon مطلوب.
-Noon pricing and stock syncs are already queued, running or paused.,مزامنة أسعار ومخزون Noon في قائمة الانتظار أو قيد التشغيل أو متوقفة مؤقتًا.
+"Noon pricing and stock syncs are already queued, running or paused.",مزامنة أسعار ومخزون Noon في قائمة الانتظار أو قيد التشغيل أو متوقفة مؤقتًا.
+Noon pricing and stock syncs are already queued or running.,مزامنة أسعار ومخزون Noon في قائمة الانتظار أو قيد التشغيل بالفعل.
 Noon pricing setup failed; see Error Log.,فشل إعداد أسعار Noon؛ راجع سجل الأخطاء.
 Noon pricing update failed; see Error Log.,فشل تحديث أسعار Noon؛ راجع سجل الأخطاء.
 Noon rejected this item.,رفضت Noon هذا العنصر.
