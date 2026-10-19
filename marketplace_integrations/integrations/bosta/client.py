@@ -15,6 +15,7 @@ from frappe import _
 from frappe.utils import cint, escape_html
 
 from marketplace_integrations.integrations.bosta.constants import (
+	BOSTA_ALL_DISTRICTS_PATH,
 	BOSTA_API_BASE_URL,
 	BOSTA_AWB_MAX_TRACKING_NUMBERS,
 	BOSTA_CITIES_PATH,
@@ -23,6 +24,7 @@ from marketplace_integrations.integrations.bosta.constants import (
 	BOSTA_GET_DELIVERY_PATH,
 	BOSTA_MASS_AWB_PATH,
 	BOSTA_PICKUP_LOCATIONS_PATH,
+	BOSTA_PIN_LOCATION_PATH,
 	BOSTA_SEARCH_DELIVERIES_PATH,
 	BOSTA_TERMINATE_DELIVERY_PATH,
 	BOSTA_UPDATE_DELIVERY_PATH,
@@ -164,6 +166,15 @@ class BostaClient:
 		if not city_id:
 			frappe.throw(_("A Bosta city ID is required."))
 		return self.request("GET", BOSTA_DISTRICTS_PATH.format(city_id=quote(city_id, safe="")))
+
+	def get_all_districts(self):
+		"""Bosta's documented ``GET /cities/getAllDistricts`` (every city with its districts)."""
+		return self.request("GET", BOSTA_ALL_DISTRICTS_PATH)
+
+	def pin_location(self, lat, lng):
+		"""``GET /cities/pinLocation?lat=&lng=``: the Bosta districts at a coordinate. Not
+		documented by Bosta (verified live 2026-10-19, may change)."""
+		return self.request("GET", BOSTA_PIN_LOCATION_PATH, params={"lat": lat, "lng": lng})
 
 	def get_pickup_locations(self):
 		"""Every raw pickup location of the business from ``GET /pickup-locations``.

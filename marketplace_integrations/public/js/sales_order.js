@@ -318,15 +318,8 @@
 	}
 
 	function show_bosta_dialog(frm, defaults) {
-		return open_bosta_location_dialog({
-			title: __("Create Bosta Shipment"),
-			primary_action_label: __("Create Shipment"),
+		return open_create_dialog({
 			defaults,
-			intro_fields: [{ fieldtype: "HTML", fieldname: "cod_note", options: bosta_cod_note_html(defaults) }],
-			receiver_fields: [
-				{ fieldname: "receiver_name", fieldtype: "Data", label: __("Receiver Name"), reqd: 1, default: defaults.receiver_name },
-				{ fieldname: "receiver_phone", fieldtype: "Data", label: __("Receiver Phone"), reqd: 1, default: defaults.receiver_phone },
-			],
 			submit(dialog, values, city) {
 				dialog.hide();
 				frappe.call({
@@ -345,6 +338,35 @@
 					freeze_message: __("Creating Bosta shipment..."),
 				}).then(() => frm.reload_doc());
 			},
+		});
+	}
+
+	// The Create Bosta Shipment dialog, shared with the Sales Order list's bulk create
+	// (#305, sales_order_list.js). `submit(dialog, values, city)` runs once a city and district
+	// are chosen. Bulk also passes `progress` ("Order 2 of 5"), `on_skip` (adds a Skip button)
+	// and `on_hide` (the dialog was closed without submit or skip).
+	function open_create_dialog({ defaults, submit, progress, on_skip, on_hide }) {
+		const intro_fields = [];
+		if (progress) {
+			intro_fields.push({
+				fieldtype: "HTML",
+				fieldname: "progress_note",
+				options: `<p><b>${frappe.utils.escape_html(progress)}</b></p>`,
+			});
+		}
+		intro_fields.push({ fieldtype: "HTML", fieldname: "cod_note", options: bosta_cod_note_html(defaults) });
+		return open_bosta_location_dialog({
+			title: __("Create Bosta Shipment"),
+			primary_action_label: __("Create Shipment"),
+			defaults,
+			intro_fields,
+			receiver_fields: [
+				{ fieldname: "receiver_name", fieldtype: "Data", label: __("Receiver Name"), reqd: 1, default: defaults.receiver_name },
+				{ fieldname: "receiver_phone", fieldtype: "Data", label: __("Receiver Phone"), reqd: 1, default: defaults.receiver_phone },
+			],
+			submit,
+			on_skip,
+			on_hide,
 		});
 	}
 
@@ -404,8 +426,13 @@
 	// The dialog shell shared by Create and Edit: leading fields, receiver fields, then the
 	// Bosta city / district pickers and the address first line. `submit(dialog, values, city)`
 	// runs once a city and district are chosen.
-	function open_bosta_location_dialog({ title, primary_action_label, defaults, intro_fields, receiver_fields, submit }) {
-		const state = { cities: [], error: false, loading_districts: 0 };
+	function open_bosta_location_dialog({ title, primary_action_label, defaults, intro_fields, receiver_fields, submit, on_skip, on_hide }) {
+		const state = {
+			cities: [],
+			error: false,
+			loading_districts: 0,
+			candidates: defaults.district_candidates || null,
+		};
 		const dialog = new frappe.ui.Dialog({
 			title,
 			fields: [
@@ -429,6 +456,11 @@
 				load_cities(true);
 			},
 		});
+
+		if (on_skip && dialog.add_custom_action) {
+			dialog.add_custom_action(__("Skip"), () => on_skip(dialog));
+		}
+		if (on_hide) dialog.onhide = on_hide;
 
 		function set_ready(ready, error_text) {
 			state.error = !ready && Boolean(error_text);
@@ -468,10 +500,22 @@
 				.then((r) => {
 					// A newer city choice has superseded this answer.
 					if (request !== state.loading_districts) return;
-					dialog.fields_dict.district.set_data(location_options(r.message || []));
+					// The first load for the prefilled city lists only the districts the address
+					// points to; a city change or "Refresh Bosta Lists" loads them all.
+					let districts = r.message || [];
+					let only_candidate = null;
+					const candidates = state.candidates;
+					state.candidates = null;
+					if (candidates && !refresh && city_id === defaults.city_id) {
+						const narrowed = districts.filter((d) => candidates.includes(d.id));
+						if (narrowed.length) districts = narrowed;
+						if (narrowed.length === 1) only_candidate = narrowed[0].id;
+					}
+					dialog.fields_dict.district.set_data(location_options(districts));
 					set_ready(true);
-					// Edit starts from the shipment's current district when it is in this city.
-					const current = defaults.district_id;
+					// Edit starts from the shipment's current district when it is in this city; a
+					// single address candidate starts selected.
+					const current = defaults.district_id || only_candidate;
 					if (current && !dialog.get_value("district") && (r.message || []).some((d) => d.id === current)) {
 						return dialog.set_value("district", current);
 					}
@@ -496,7 +540,10 @@
 					dialog.set_value("city", "");
 					dialog.fields_dict.district.set_data([]);
 					dialog.set_value("district", "");
-					const match = match_city(state.cities, defaults.address_city);
+					// The district matched from the address names its own city.
+					const match =
+						state.cities.find((c) => c.id === defaults.city_id) ||
+						match_city(state.cities, defaults.address_city);
 					set_ready(true);
 					if (match) return dialog.set_value("city", match.id);
 				})
@@ -741,11 +788,19 @@
 		load_platform_option(frm, { prompt: true, button: false });
 	}
 
-	if (typeof frappe !== "undefined" && frappe.ui && frappe.ui.form) {
-		frappe.ui.form.on("Sales Order", {
-			refresh: on_refresh,
-			after_cancel: on_after_cancel,
-		});
+	// The Sales Order list loads this file (frappe.require) for the dialog; the flag keeps the
+	// form handlers from being registered twice when both the list and the form load it.
+	if (typeof frappe !== "undefined") {
+		frappe.marketplace_integrations = frappe.marketplace_integrations || {};
+		frappe.marketplace_integrations.open_bosta_create_dialog = open_create_dialog;
+		frappe.marketplace_integrations.BOSTA_CREATOR_ROLES = BOSTA_CREATOR_ROLES;
+		if (frappe.ui && frappe.ui.form && !frappe.ui.form.__mi_sales_order_hooks) {
+			frappe.ui.form.__mi_sales_order_hooks = true;
+			frappe.ui.form.on("Sales Order", {
+				refresh: on_refresh,
+				after_cancel: on_after_cancel,
+			});
+		}
 	}
 
 	if (typeof module !== "undefined") {
@@ -756,6 +811,7 @@
 			bosta_tab_html,
 			location_options,
 			match_city,
+			open_create_dialog,
 			show_bosta_dialog,
 			show_bosta_edit_dialog,
 			blocked_message,
