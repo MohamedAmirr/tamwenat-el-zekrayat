@@ -40,6 +40,49 @@ class UnitTestNoonPricing(UnitTestCase):
 		)
 		connection_check.start()
 		self.addCleanup(connection_check.stop)
+		paused_check = patch(
+			"marketplace_integrations.integrations.noon.pricing.is_push_paused", return_value=False
+		)
+		self.paused = paused_check.start()
+		self.addCleanup(paused_check.stop)
+
+	def test_price_switch_off_before_start_makes_no_noon_call(self):
+		self.paused.return_value = True
+		with patch("marketplace_integrations.integrations.noon.pricing.get_account") as get_account:
+			with patch("marketplace_integrations.integrations.noon.pricing.NoonClient") as client:
+				with patch("marketplace_integrations.integrations.noon.pricing.persist_outcomes") as persist:
+					outcome = push_pricing("ACC")
+		self.assertEqual(outcome, {"synced": 0, "failed": 0, "paused": True})
+		self.paused.assert_called_with("ACC", "pricing")
+		get_account.assert_not_called()
+		client.assert_not_called()
+		persist.assert_not_called()
+
+	def test_price_switch_turned_off_mid_job_stops_before_next_chunk(self):
+		account = SimpleNamespace(name="ACC", connection="CONN", noon_country_code="ae")
+		rows = [
+			(
+				SimpleNamespace(name=f"M{n}", external_reference=f"SKU-{n}"),
+				{"sales_uom": None},
+				SimpleNamespace(name=f"ITEM-{n}", stock_uom="Nos"),
+			)
+			for n in (1, 2)
+		]
+		self.paused.side_effect = [False, False, True]
+		module = "marketplace_integrations.integrations.noon.pricing"
+		with patch(f"{module}.get_account", return_value=account):
+			with patch(f"{module}.selected_mappings", return_value=rows):
+				with patch(f"{module}.validate_price_setup", return_value=SimpleNamespace(name="PL")):
+					with patch(f"{module}.resolve_listing_price", return_value=Decimal("10")):
+						with patch(f"{module}.PRICING_CHUNK_SIZE", 1):
+							with patch(f"{module}.NoonClient") as client_class:
+								with patch(f"{module}.persist_outcomes") as persist:
+									client = client_class.return_value
+									client.request.return_value = Response([result("SKU-1")])
+									outcome = push_pricing("ACC")
+		self.assertEqual(outcome, {"synced": 1, "failed": 0, "paused": True})
+		self.assertEqual(client.request.call_count, 1)
+		persist.assert_called_once()
 
 	def test_price_payload_partial_failure_and_retry(self):
 		account = SimpleNamespace(name="ACC", connection="CONN", noon_country_code="ae")

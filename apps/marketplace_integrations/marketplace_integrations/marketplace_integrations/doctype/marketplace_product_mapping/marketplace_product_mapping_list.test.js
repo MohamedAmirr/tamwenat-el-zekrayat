@@ -357,6 +357,21 @@ test("Noon push reports already-queued pricing or stock as skipped, not as queue
 	]);
 });
 
+test("Noon push reports a paused pricing or stock switch as skipped", async () => {
+	install_frappe({
+		call() {
+			return Promise.resolve({ message: { pricing: { queued: false, paused: true }, stock: { queued: true } } });
+		},
+	});
+
+	const items = await push_selected_to_noon("NOON-A", ["MPM-1"]);
+
+	assert.deepEqual(items, [
+		{ category: "skipped", platform: "Noon", text: "NOON-A: pricing push paused." },
+		{ category: "queued", platform: "Noon", text: "NOON-A: stock queued." },
+	]);
+});
+
 test("the inventory action reads INVENTORY_OPTIONS only after the status-dialog script has loaded", async () => {
 	// Fresh page load: the dialog class and INVENTORY_OPTIONS do not exist until
 	// frappe.require() resolves and the script defines them.

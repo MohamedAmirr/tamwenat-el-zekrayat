@@ -386,6 +386,9 @@ function noon_queue_items(message, account) {
 	return ["pricing", "stock"].map((kind) => {
 		const queued = !!(message[kind] && message[kind].queued);
 		const label = kind === "pricing" ? __("pricing") : __("stock");
+		if (message[kind] && message[kind].paused) {
+			return { category: "skipped", platform: "Noon", text: `${account}: ${label} ${__("push paused.")}` };
+		}
 		return queued
 			? { category: "queued", platform: "Noon", text: `${account}: ${label} ${__("queued.")}` }
 			: { category: "skipped", platform: "Noon", text: `${account}: ${label} ${__("already queued.")}` };

@@ -51,7 +51,7 @@ function sync_noon_mapping(frm) {
 		frappe.msgprint(
 			kinds.length
 				? __("Noon {0} sync queued. Refresh this mapping to see the results.", [kinds.join(" and ")])
-				: __("Noon pricing and stock syncs are already queued or running.")
+				: __("Noon pricing and stock syncs are already queued, running or paused.")
 		);
 	});
 }
