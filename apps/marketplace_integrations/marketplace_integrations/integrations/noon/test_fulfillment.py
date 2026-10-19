@@ -101,6 +101,7 @@ class IntegrationTestNoonFulfillmentBase(IntegrationTestCase):
 		self.fbpi_order_nr = f"ORD-FUL-{suffix}"
 
 	def tearDown(self):
+		frappe.db.delete("Noon AWB", {"marketplace_account": self.account.name})
 		frappe.db.delete("Marketplace Order", filters={"marketplace_account": self.account.name})
 		frappe.db.delete("Marketplace Sync Log", filters={"marketplace_account": self.account.name})
 		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
@@ -512,6 +513,113 @@ class IntegrationTestNoonCreateShipmentWorker(IntegrationTestNoonFulfillmentBase
 		self.order.reload()
 		self.assertEqual(len(self.order.noon_shipment_awbs), 1)
 		self.assertEqual(self.order.noon_shipment_awbs[0].awb_nr, "NOON-AWB-1")
+
+	def _add_pool_awb(self, awb_nr):
+		return frappe.get_doc(
+			{
+				"doctype": "Noon AWB",
+				"marketplace_account": self.account.name,
+				"awb_nr": awb_nr,
+				"country_code": self.account.noon_country_code,
+				"status": "Available",
+			}
+		).insert(ignore_permissions=True)
+
+	def test_pool_awb_is_used_and_marked_used_without_a_noon_awb_call(self):
+		self._add_pool_awb("POOL-AWB-1")
+		import_patch, get_patch = self._patch_refresh()
+		with (
+			import_patch,
+			get_patch,
+			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
+		):
+			client = client_class.return_value
+			client.request.side_effect = [MagicMock(status_code=404), MagicMock(status_code=200)]
+			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
+
+		paths_called = [call.args[1] for call in client.request.call_args_list]
+		self.assertNotIn(fulfillment.NOON_LOGISTICS_AWBS_GET_PATH, paths_called)
+		create_body = client.request.call_args_list[-1].kwargs["json"]
+		self.assertEqual(create_body["awbs"][0]["awb_nr"], "POOL-AWB-1")
+		self.order.reload()
+		self.assertEqual(self.order.noon_shipment_awbs[0].awb_nr, "POOL-AWB-1")
+		self.assertEqual(self.order.noon_shipments[0].status, "Created")
+		pool_row = frappe.get_doc("Noon AWB", {"marketplace_account": self.account.name})
+		self.assertEqual(pool_row.status, "Used")
+		self.assertEqual(pool_row.marketplace_order, self.order.name)
+		self.assertEqual(pool_row.integration_shipment_nr, self.shipment_nr)
+		self.assertIsNotNone(pool_row.used_on)
+
+	def test_empty_pool_falls_back_to_single_awb_call(self):
+		import_patch, get_patch = self._patch_refresh()
+		awb_response = MagicMock(status_code=200)
+		awb_response.json.return_value = {"awb_nrs": ["NOON-AWB-1"]}
+		with (
+			import_patch,
+			get_patch,
+			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
+		):
+			client = client_class.return_value
+			client.request.side_effect = [MagicMock(status_code=404), awb_response, MagicMock(status_code=200)]
+			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
+
+		awb_call = client.request.call_args_list[1]
+		self.assertEqual(awb_call.args[1], fulfillment.NOON_LOGISTICS_AWBS_GET_PATH)
+		self.assertEqual(awb_call.kwargs["json"], {"country_code": "ae", "qty": 1})
+		self.order.reload()
+		self.assertEqual(self.order.noon_shipment_awbs[0].awb_nr, "NOON-AWB-1")
+
+	def test_pool_awb_is_reused_on_retry_not_another_claimed(self):
+		self._add_pool_awb("POOL-AWB-1")
+		self._add_pool_awb("POOL-AWB-2")
+		import_patch, get_patch = self._patch_refresh()
+		with (
+			import_patch,
+			get_patch,
+			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
+		):
+			client = client_class.return_value
+			client.request.side_effect = [MagicMock(status_code=404), MagicMock(status_code=200)]
+			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
+
+		self.order.reload()
+		first_awb = self.order.noon_shipment_awbs[0].awb_nr
+		self.order.noon_shipments[0].status = "Error"
+		self.order.save()
+		import_patch2, get_patch2 = self._patch_refresh()
+		with (
+			import_patch2,
+			get_patch2,
+			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class2,
+		):
+			client2 = client_class2.return_value
+			client2.request.side_effect = [MagicMock(status_code=404), MagicMock(status_code=200)]
+			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
+
+		self.order.reload()
+		self.assertEqual(len(self.order.noon_shipment_awbs), 1)
+		self.assertEqual(self.order.noon_shipment_awbs[0].awb_nr, first_awb)
+		statuses = frappe.get_all(
+			"Noon AWB", filters={"marketplace_account": self.account.name}, pluck="status"
+		)
+		self.assertCountEqual(statuses, ["Used", "Available"])
+
+	def test_failed_shipment_keeps_its_claimed_awb_used(self):
+		self._add_pool_awb("POOL-AWB-1")
+		import_patch, get_patch = self._patch_refresh()
+		with (
+			import_patch,
+			get_patch,
+			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
+		):
+			client = client_class.return_value
+			client.error_message.return_value = "bad"
+			client.request.side_effect = [MagicMock(status_code=404), MagicMock(status_code=400)]
+			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
+
+		self.order.reload()
+		self.assertEqual(self.order.noon_shipments[0].status, "Error")
+		self.assertEqual(frappe.db.get_value("Noon AWB", {"awb_nr": "POOL-AWB-1"}, "status"), "Used")
 
 
 class IntegrationTestNoonCancelShipment(IntegrationTestNoonFulfillmentBase):

@@ -49,6 +49,13 @@ held across its internal ``_maybe_fetch_customer_data()`` HTTP call as a side
 effect of that module's own lock-first fix - worst case ~30s, under the 50s
 ``innodb_lock_wait_timeout``, and not worth the extra release/reacquire
 complexity for a one-off customer-data backfill.
+
+**AWB pool:** for AWB source Noon, ``run_create_shipment()`` first claims one
+pre-generated ``Noon AWB`` (``integrations/noon/awb_pool.py``) in its own short
+transaction, with the order lock released, and only falls back to the qty-1
+``GetNoonLogisticsAWBs`` call when the pool is empty. The AWB is still chosen
+once per shipment (the claim records order + shipment, so a repeat returns the
+same row) and a claimed AWB never returns to the pool.
 """
 
 import base64
@@ -58,6 +65,7 @@ import frappe
 from frappe import _
 from frappe.utils import cstr, get_datetime, now_datetime
 
+from marketplace_integrations.integrations.noon.awb_pool import claim_pool_awb
 from marketplace_integrations.integrations.noon.catalog import get_account, validate_connection_enabled
 from marketplace_integrations.integrations.noon.client import NoonClient
 from marketplace_integrations.integrations.noon.constants import (
@@ -574,26 +582,35 @@ def run_create_shipment(marketplace_order_name, integration_shipment_nr):
 		if row.integration_shipment_nr == integration_shipment_nr
 	]
 	if shipment.awb_source == "Noon" and not awb_rows:
-		frappe.db.commit()  # release the lock before the AWB-fetch HTTP call
+		frappe.db.commit()  # release the lock before the AWB claim / fetch
 
-		try:
-			awb_response = client.request(
-				"POST",
-				NOON_LOGISTICS_AWBS_GET_PATH,
-				json={"country_code": account.noon_country_code, "qty": 1},
-			)
-		except Exception:
-			order = _fail_shipment_by_name(
-				marketplace_order_name, integration_shipment_nr, _("Failed to fetch a Noon AWB.")
-			)
-			_log_fulfillment(
-				order,
-				"CreateShipment",
-				"Error",
-				{"integration_shipment_nr": integration_shipment_nr},
-				traceback_text=frappe.get_traceback(),
-			)
-			return
+		# A pre-generated pool AWB (integrations/noon/awb_pool.py) is claimed
+		# in its own short transaction; with an empty pool, fetch one AWB
+		# from Noon exactly as before. A claimed AWB never returns to the
+		# pool, even if this shipment is later discarded.
+		pool_awb = claim_pool_awb(
+			account.name, account.noon_country_code, marketplace_order_name, integration_shipment_nr
+		)
+		awb_response = None
+		if not pool_awb:
+			try:
+				awb_response = client.request(
+					"POST",
+					NOON_LOGISTICS_AWBS_GET_PATH,
+					json={"country_code": account.noon_country_code, "qty": 1},
+				)
+			except Exception:
+				order = _fail_shipment_by_name(
+					marketplace_order_name, integration_shipment_nr, _("Failed to fetch a Noon AWB.")
+				)
+				_log_fulfillment(
+					order,
+					"CreateShipment",
+					"Error",
+					{"integration_shipment_nr": integration_shipment_nr},
+					traceback_text=frappe.get_traceback(),
+				)
+				return
 
 		order, shipment = _reload_shipment(marketplace_order_name, integration_shipment_nr)
 		if not shipment:
@@ -610,20 +627,23 @@ def run_create_shipment(marketplace_order_name, integration_shipment_nr):
 			)
 			return
 
-		if awb_response.status_code != 200:
-			_fail_shipment(order, shipment, client.error_message(awb_response))
-			_log_fulfillment(
-				order,
-				"CreateShipment",
-				"Error",
-				{"integration_shipment_nr": integration_shipment_nr},
-				client.error_message(awb_response),
-			)
-			return
-		try:
-			awb_nrs = (awb_response.json() or {}).get("awb_nrs") or []
-		except ValueError:
-			awb_nrs = []
+		if pool_awb:
+			awb_nrs = [pool_awb]
+		else:
+			if awb_response.status_code != 200:
+				_fail_shipment(order, shipment, client.error_message(awb_response))
+				_log_fulfillment(
+					order,
+					"CreateShipment",
+					"Error",
+					{"integration_shipment_nr": integration_shipment_nr},
+					client.error_message(awb_response),
+				)
+				return
+			try:
+				awb_nrs = (awb_response.json() or {}).get("awb_nrs") or []
+			except ValueError:
+				awb_nrs = []
 		if not awb_nrs:
 			_fail_shipment(order, shipment, _("Noon returned no AWB number."))
 			_log_fulfillment(

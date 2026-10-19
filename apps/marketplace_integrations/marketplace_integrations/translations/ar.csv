@@ -1503,3 +1503,27 @@ Nothing to create.,لا يوجد ما يمكن إنشاؤه.
 "Created {0}, failed {1}, skipped {2}",تم إنشاء {0}، وفشل {1}، وتم تجاوز {2}
 Bulk create failed: {0},فشل الإنشاء الجماعي: {0}
 Could not retrieve the Bosta bulk create status.,تعذّر استرجاع حالة الإنشاء الجماعي في Bosta.
+Noon AWB,بوليصة شحن Noon
+Noon AWBs,بوالص شحن Noon
+AWB Identity Key,مفتاح هوية بوليصة الشحن
+Country Code,رمز الدولة
+Generated On,تاريخ الإنشاء
+Usage,الاستخدام
+Used On,تاريخ الاستخدام
+Available,متاحة
+Used,مستخدمة
+Quantity,الكمية
+Generate,إنشاء
+Generate Noon AWBs,إنشاء بوالص شحن Noon
+Available Noon AWBs: {0},بوالص شحن Noon المتاحة: {0}
+Between 1 and {0}.,بين 1 و {0}.
+Quantity must be a whole number between 1 and {0}.,يجب أن تكون الكمية عددًا صحيحًا بين 1 و {0}.
+Quantity must be a whole number between {0} and {1}.,يجب أن تكون الكمية عددًا صحيحًا بين {0} و {1}.
+Queuing Noon AWB generation...,جارٍ وضع إنشاء بوالص شحن Noon في قائمة الانتظار...
+Noon AWB generation queued. You will be notified when it finishes.,تم وضع إنشاء بوالص شحن Noon في قائمة الانتظار. ستصلك رسالة عند الانتهاء.
+Noon AWB generation is already queued or running for this account.,إنشاء بوالص شحن Noon قيد الانتظار أو التشغيل بالفعل لهذا الحساب.
+Marketplace Account and AWB Nr are required to compute the AWB identity key.,حساب السوق ورقم بوليصة الشحن مطلوبان لحساب مفتاح هوية بوليصة الشحن.
+Marketplace Account {0} requires a Noon country code.,حساب السوق {0} يتطلب رمز دولة Noon.
+Noon AWB generation failed: {0},فشل إنشاء بوالص شحن Noon: {0}
+Stored {0} new Noon AWB(s).,تم حفظ {0} من بوالص شحن Noon الجديدة.
+{0} already existed and were skipped.,{0} كانت موجودة بالفعل وتم تخطيها.
