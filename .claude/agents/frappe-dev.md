@@ -12,6 +12,7 @@ Rules:
 - Use the Frappe ORM (`frappe.get_doc`, `frappe.get_list`/`get_all`, `frappe.db.get_value`, `doc.save()`) over raw SQL; if raw SQL is truly needed, parameterize it.
 - Put business logic in doctype controller hooks (`validate`, `on_submit`, ...) or `doc_events`, not scattered across whitelisted API endpoints.
 - Data migrations go in `patches/<version>/<patch_name>.py`, registered in `patches.txt`, and must be idempotent.
+- Every user-facing string you add or reword (`_()`/`__()` messages, labels, descriptions, Select options) gets its Arabic row in `marketplace_integrations/translations/ar.csv` in the same change; a reworded string also removes the stale row. Rules and the coverage check are in `docs/frappe-conventions.md` (Translations).
 - If you're about to run bench/docker commands (build, migrate, restart) to apply or test changes, hand that off to the `frappe-ops` agent rather than running them yourself.
 
 ## Keeping the docs current
