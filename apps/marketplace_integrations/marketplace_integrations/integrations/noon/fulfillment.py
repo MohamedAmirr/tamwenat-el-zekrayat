@@ -69,6 +69,7 @@ from marketplace_integrations.integrations.noon.awb_pool import claim_pool_awb
 from marketplace_integrations.integrations.noon.catalog import get_account, validate_connection_enabled
 from marketplace_integrations.integrations.noon.client import NoonClient
 from marketplace_integrations.integrations.noon.constants import (
+	FBPI_ORDER_INVOICE_UPLOAD_PATH,
 	FBPI_ORDER_UPDATE_PATH,
 	NOON_LOGISTICS_AWBS_GET_PATH,
 	SHIPMENT_CANCEL_PATH,
@@ -95,6 +96,10 @@ _ACTIVE_SHIPMENT_STATUSES = {"Pending", "Created", "Cancel Pending", "Error"}
 
 def _invoice_job_id(order_name, integration_shipment_nr, idempotency_key):
 	return f"{RQ_JOB_PREFIX}-{order_name}-{integration_shipment_nr}-invoice-{idempotency_key}"
+
+
+def _order_invoice_job_id(order_name, idempotency_key):
+	return f"{RQ_JOB_PREFIX}-{order_name}-order-invoice-{idempotency_key}"
 
 
 # ---------------------------------------------------------------------------
@@ -239,9 +244,18 @@ def get_available_actions(order):
 	if created:
 		actions.append("cancel_shipment")
 		actions.append("add_awb")
-	# upload_invoice() also refuses while an upload is already Pending.
-	if any(row.invoice_status != "Pending" for row in created):
+	# upload_invoice() also refuses while an upload is already Pending, and
+	# (no mixing) while an order-level invoice is Pending/Uploaded.
+	if not _order_invoice_blocks_shipment_invoice(order) and any(
+		row.invoice_status != "Pending" for row in created
+	):
 		actions.append("upload_invoice")
+	if (
+		created
+		and order.noon_order_invoice_status != "Pending"
+		and not _shipment_invoices_block_order_invoice(order)
+	):
+		actions.append("upload_order_invoice")
 
 	# Mirrors retry(): Pending/Error re-run CreateShipment, Cancel Pending
 	# re-runs CancelShipment, and a Created shipment can retry a Pending
@@ -256,6 +270,8 @@ def get_available_actions(order):
 		or any(row.invoice_status in ("Pending", "Error") for row in created)
 	):
 		actions.append("retry")
+	if created and order.noon_order_invoice_status in ("Pending", "Error"):
+		actions.append("retry_order_invoice")
 
 	if statuses & set(_DISCARDABLE_SHIPMENT_STATUSES):
 		actions.append("discard_shipment")
@@ -1440,26 +1456,9 @@ def run_mark_out_of_stock(marketplace_order_name, mp_item_nrs):
 # ---------------------------------------------------------------------------
 
 
-def upload_invoice(marketplace_order_name, integration_shipment_nr, file_url, invoice_nr, issued_at):
-	"""Request path (#146 decision 19): only ``Created`` shipments. Reads
-	and validates the File here (never logs its bytes), generates a fresh
-	idempotency key for this explicit upload action, and writes Pending
-	invoice state before enqueuing the actual Noon call."""
-	order = _lock_and_load_order(marketplace_order_name)
-	_account_and_client(order)
-	shipment = _find_shipment_row(order, integration_shipment_nr)
-	if not shipment or shipment.status != "Created":
-		frappe.throw(
-			_("Shipment {0} must be Created before uploading an invoice.").format(integration_shipment_nr)
-		)
-	if shipment.invoice_status == "Pending":
-		frappe.throw(
-			_("An invoice upload is already pending for shipment {0}.").format(integration_shipment_nr)
-		)
-	invoice_nr = cstr(invoice_nr).strip()
-	if not invoice_nr or not issued_at:
-		frappe.throw(_("Invoice Nr and Issued At are required."))
-
+def _validate_invoice_file(file_url):
+	"""Shared by the shipment and order invoice request paths: the File must
+	be readable, private, a real PDF and within Noon's 5 MiB decoded limit."""
 	file_doc = frappe.get_doc("File", {"file_url": file_url})
 	file_doc.check_permission("read")
 	# #146 review finding #9: this field's own description says "Private PDF
@@ -1478,6 +1477,48 @@ def upload_invoice(marketplace_order_name, integration_shipment_nr, file_url, in
 		frappe.throw(_("Invoice must be a PDF file."))
 	if len(raw_bytes) > SHIPMENT_INVOICE_MAX_BYTES:
 		frappe.throw(_("Invoice file exceeds the 5 MiB limit."))
+
+
+def _order_invoice_blocks_shipment_invoice(order):
+	"""No mixing: a shipment invoice is refused while the order-level invoice
+	is Pending or Uploaded."""
+	return order.noon_order_invoice_status in ("Pending", "Uploaded")
+
+
+def _shipment_invoices_block_order_invoice(order):
+	"""No mixing: the order-level invoice is refused while any shipment
+	invoice is Pending or Uploaded."""
+	return any(row.invoice_status in ("Pending", "Uploaded") for row in order.noon_shipments or [])
+
+
+def upload_invoice(marketplace_order_name, integration_shipment_nr, file_url, invoice_nr, issued_at):
+	"""Request path (#146 decision 19): only ``Created`` shipments. Reads
+	and validates the File here (never logs its bytes), generates a fresh
+	idempotency key for this explicit upload action, and writes Pending
+	invoice state before enqueuing the actual Noon call."""
+	order = _lock_and_load_order(marketplace_order_name)
+	_account_and_client(order)
+	shipment = _find_shipment_row(order, integration_shipment_nr)
+	if not shipment or shipment.status != "Created":
+		frappe.throw(
+			_("Shipment {0} must be Created before uploading an invoice.").format(integration_shipment_nr)
+		)
+	if shipment.invoice_status == "Pending":
+		frappe.throw(
+			_("An invoice upload is already pending for shipment {0}.").format(integration_shipment_nr)
+		)
+	if _order_invoice_blocks_shipment_invoice(order):
+		frappe.throw(
+			_(
+				"This order already has an order-level invoice (Pending or Uploaded); "
+				"shipment invoices cannot be mixed with it."
+			)
+		)
+	invoice_nr = cstr(invoice_nr).strip()
+	if not invoice_nr or not issued_at:
+		frappe.throw(_("Invoice Nr and Issued At are required."))
+
+	_validate_invoice_file(file_url)
 
 	shipment.invoice_file = file_url
 	shipment.invoice_nr = invoice_nr
@@ -1628,6 +1669,164 @@ def run_upload_invoice(marketplace_order_name, integration_shipment_nr, invoice_
 	order.save()
 	frappe.db.commit()
 	_log_fulfillment(order, "UploadShipmentInvoice", "Success", request_metadata)
+
+
+# ---------------------------------------------------------------------------
+# Order invoice (UploadFbpiOrderInvoice)
+# ---------------------------------------------------------------------------
+
+
+def upload_order_invoice(marketplace_order_name, file_url, invoice_nr, issued_at):
+	"""Request path for the order-level invoice. Same shape as
+	``upload_invoice()``. Precondition: at least one ``Created`` shipment
+	(mirrors the shipment-invoice gating). No mixing: refused while any
+	shipment invoice is Pending/Uploaded. Re-uploading over an Uploaded
+	order invoice is allowed (Noon supersedes the previous one)."""
+	order = _lock_and_load_order(marketplace_order_name)
+	_account_and_client(order)
+	if not any(row.status == "Created" for row in order.noon_shipments or []):
+		frappe.throw(_("The order needs at least one Created shipment before uploading an order invoice."))
+	if order.noon_order_invoice_status == "Pending":
+		frappe.throw(_("An order invoice upload is already pending."))
+	if _shipment_invoices_block_order_invoice(order):
+		frappe.throw(
+			_(
+				"A shipment invoice is already Pending or Uploaded on this order; "
+				"an order invoice cannot be mixed with it."
+			)
+		)
+	invoice_nr = cstr(invoice_nr).strip()
+	if not invoice_nr or not issued_at:
+		frappe.throw(_("Invoice Nr and Issued At are required."))
+	_validate_invoice_file(file_url)
+
+	order.noon_order_invoice_file = file_url
+	order.noon_order_invoice_nr = invoice_nr
+	order.noon_order_invoice_issued_at = issued_at
+	order.noon_order_invoice_idempotency_key = frappe.generate_hash(length=32)
+	order.noon_order_invoice_status = "Pending"
+	order.noon_order_invoice_last_error = None
+	order.save()
+	frappe.db.commit()
+
+	job = frappe.enqueue(
+		run_upload_order_invoice,
+		queue="long",
+		timeout=300,
+		job_id=_order_invoice_job_id(order.name, order.noon_order_invoice_idempotency_key),
+		deduplicate=True,
+		marketplace_order_name=order.name,
+		invoice_idempotency_key=order.noon_order_invoice_idempotency_key,
+	)
+	return {"queued": job is not None}
+
+
+def _set_order_invoice_error(order, message):
+	order.noon_order_invoice_status = "Error"
+	order.noon_order_invoice_last_error = message
+	order.save()
+	frappe.db.commit()
+
+
+def run_upload_order_invoice(marketplace_order_name, invoice_idempotency_key):
+	"""Worker for ``upload_order_invoice()``. Releases the order lock around
+	the File read and Noon call and re-checks ``invoice_idempotency_key`` on
+	re-acquisition, exactly like ``run_upload_invoice()``. Errors go to the
+	dedicated ``noon_order_invoice_last_error`` field."""
+	frappe.set_user("Administrator")
+	order = _lock_and_load_order(marketplace_order_name)
+	if (
+		not order.noon_order_invoice_file
+		or order.noon_order_invoice_idempotency_key != invoice_idempotency_key
+		or order.noon_order_invoice_status not in ("Pending", "Error")
+	):
+		frappe.db.commit()
+		return
+	if not any(row.status == "Created" for row in order.noon_shipments or []):
+		message = _("The order no longer has a Created shipment.")
+		_set_order_invoice_error(order, message)
+		_log_fulfillment(order, "UploadOrderInvoice", "Error", {}, message)
+		return
+	try:
+		_account, client = _account_and_client(order)
+	except Exception:
+		_set_order_invoice_error(order, cstr(frappe.get_traceback()).strip()[:500])
+		_log_fulfillment(order, "UploadOrderInvoice", "Error", {}, traceback_text=frappe.get_traceback())
+		return
+	invoice_file = order.noon_order_invoice_file
+	invoice_nr = order.noon_order_invoice_nr
+	issued_at = (
+		get_datetime(order.noon_order_invoice_issued_at).strftime("%Y-%m-%d")
+		if order.noon_order_invoice_issued_at
+		else ""
+	)
+	fbpi_order_nr = order.external_order_id
+	request_metadata = {"fbpi_order_nr": fbpi_order_nr, "invoice_nr": invoice_nr, "issued_at": issued_at}
+	frappe.db.commit()  # release the order lock before reading the File and calling Noon
+
+	try:
+		file_doc = frappe.get_doc("File", {"file_url": invoice_file})
+		raw_bytes = file_doc.get_content()
+		if isinstance(raw_bytes, str):
+			raw_bytes = raw_bytes.encode()
+		encoded = base64.b64encode(raw_bytes).decode()
+		response = client.request(
+			"POST",
+			FBPI_ORDER_INVOICE_UPLOAD_PATH,
+			json={
+				"fbpi_order_nr": fbpi_order_nr,
+				"invoice": encoded,
+				"invoice_nr": invoice_nr,
+				"issued_at": issued_at,
+				"idempotency_key": invoice_idempotency_key,
+			},
+		)
+	except Exception:
+		order = _lock_and_load_order(marketplace_order_name)
+		if order.noon_order_invoice_idempotency_key == invoice_idempotency_key:
+			order.noon_order_invoice_status = "Error"
+			order.noon_order_invoice_last_error = cstr(frappe.get_traceback()).strip()[:500]
+			order.save()
+		frappe.db.commit()
+		# Never include the base64 payload in the Sync Log.
+		_log_fulfillment(
+			order, "UploadOrderInvoice", "Error", request_metadata, traceback_text=frappe.get_traceback()
+		)
+		return
+
+	order = _lock_and_load_order(marketplace_order_name)
+	if order.noon_order_invoice_idempotency_key != invoice_idempotency_key:
+		# A deliberate re-upload (fresh key) superseded this call in flight.
+		frappe.db.commit()
+		return
+
+	if response.status_code != 200:
+		_set_order_invoice_error(order, client.error_message(response)[:500])
+		_log_fulfillment(order, "UploadOrderInvoice", "Error", request_metadata, client.error_message(response))
+		return
+
+	order.noon_order_invoice_status = "Uploaded"
+	order.noon_order_invoice_last_error = None
+	order.save()
+	frappe.db.commit()
+	_log_fulfillment(order, "UploadOrderInvoice", "Success", request_metadata)
+
+
+def retry_order_invoice(marketplace_order_name):
+	"""Re-enqueue a Pending/Error order invoice upload with its saved key."""
+	order = _lock_and_load_order(marketplace_order_name)
+	if order.noon_order_invoice_status not in ("Pending", "Error") or not order.noon_order_invoice_file:
+		frappe.throw(_("The order invoice has nothing to retry."))
+	job = frappe.enqueue(
+		run_upload_order_invoice,
+		queue="long",
+		timeout=300,
+		job_id=_order_invoice_job_id(order.name, order.noon_order_invoice_idempotency_key),
+		deduplicate=True,
+		marketplace_order_name=order.name,
+		invoice_idempotency_key=order.noon_order_invoice_idempotency_key,
+	)
+	return {"queued": job is not None}
 
 
 # ---------------------------------------------------------------------------

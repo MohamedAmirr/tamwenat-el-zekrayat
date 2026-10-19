@@ -1527,3 +1527,21 @@ Marketplace Account {0} requires a Noon country code.,حساب السوق {0} ي
 Noon AWB generation failed: {0},فشل إنشاء بوالص شحن Noon: {0}
 Stored {0} new Noon AWB(s).,تم حفظ {0} من بوالص شحن Noon الجديدة.
 {0} already existed and were skipped.,{0} كانت موجودة بالفعل وتم تخطيها.
+Order Invoice,فاتورة الطلب
+Order Invoice File,ملف فاتورة الطلب
+Order Invoice Nr,رقم فاتورة الطلب
+Order Invoice Issued At,تاريخ إصدار فاتورة الطلب
+Order Invoice Idempotency Key,مفتاح التكرار الآمن لفاتورة الطلب
+Order Invoice Status,حالة فاتورة الطلب
+Order Invoice Last Error,آخر خطأ في فاتورة الطلب
+Private PDF attachment uploaded by the user; sent to Noon as raw base64 via UploadFbpiOrderInvoice. Cannot be combined with shipment invoices.,مرفق PDF خاص رفعه المستخدم؛ يُرسل إلى Noon بترميز base64 الخام عبر UploadFbpiOrderInvoice. لا يمكن الجمع بينه وبين فواتير الشحنات.
+"frappe.generate_hash(length=32), saved before the UploadFbpiOrderInvoice call and reused on retry; a deliberate re-upload gets a fresh key.",frappe.generate_hash(length=32)، يُحفظ قبل استدعاء UploadFbpiOrderInvoice ويُعاد استخدامه عند إعادة المحاولة؛ أما إعادة الرفع المتعمدة فتحصل على مفتاح جديد.
+Upload Order Invoice,رفع فاتورة الطلب
+Retry Order Invoice,إعادة محاولة فاتورة الطلب
+Upload Noon Order Invoice,رفع فاتورة طلب Noon
+This order already has an order-level invoice (Pending or Uploaded); shipment invoices cannot be mixed with it.,لهذا الطلب فاتورة على مستوى الطلب (قيد الانتظار أو مرفوعة)؛ لا يمكن الجمع بينها وبين فواتير الشحنات.
+The order needs at least one Created shipment before uploading an order invoice.,يلزم وجود شحنة واحدة على الأقل بحالة Created قبل رفع فاتورة الطلب.
+An order invoice upload is already pending.,رفع فاتورة الطلب قيد الانتظار بالفعل.
+A shipment invoice is already Pending or Uploaded on this order; an order invoice cannot be mixed with it.,توجد فاتورة شحنة قيد الانتظار أو مرفوعة على هذا الطلب؛ لا يمكن الجمع بينها وبين فاتورة الطلب.
+The order no longer has a Created shipment.,لم يعد للطلب شحنة بحالة Created.
+The order invoice has nothing to retry.,لا توجد فاتورة طلب لإعادة محاولتها.
