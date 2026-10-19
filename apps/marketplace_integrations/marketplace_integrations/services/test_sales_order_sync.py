@@ -33,6 +33,8 @@ from marketplace_integrations.services.sales_order_sync import (
 )
 
 _DEFAULT_VARIANT = object()
+# Shopify paymentTerms of an order staff recorded with payment "Due on receipt".
+_DUE_ON_RECEIPT = {"paymentTermsType": "RECEIPT", "paymentTermsName": "Due on receipt", "dueInDays": None}
 
 
 class IntegrationTestSalesOrderSync(IntegrationTestCase):
@@ -160,6 +162,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order_total=None,
 		total_taxes=0,
 		duties_total=0,
+		payment_terms=None,
 	):
 		if order_total is None:
 			order_total = flt(transaction_amount) + flt(shipping_total)
@@ -195,7 +198,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 				"order_total": order_total,
 				"total_taxes": total_taxes,
 				"duties_total": duties_total,
-				"latest_payload": {"updatedAt": "2026-09-28T10:00:00Z"},
+				"latest_payload": {"updatedAt": "2026-09-28T10:00:00Z", "paymentTerms": payment_terms},
 				"items": [
 					{
 						"external_item_id": f"gid://shopify/LineItem/{self.suffix}",
@@ -2178,6 +2181,43 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 				result = sync_sales_order(order.name)
 
 				self.assertTrue(result["ok"], result.get("error"))
+
+	def test_pending_staff_order_with_payment_terms_and_no_transactions_syncs(self):
+		"""A draft order staff recorded in Shopify admin with "Due on receipt" (#24684)."""
+		account = self._make_shopify_account()
+		for transactions in (None, []):
+			with self.subTest(transactions=transactions):
+				order, _mapping = self._make_shopify_order(
+					account,
+					financial_status="PENDING",
+					payment_transactions=transactions,
+					payment_terms=_DUE_ON_RECEIPT,
+				)
+
+				result = sync_sales_order(order.name)
+
+				self.assertTrue(result["ok"], result.get("error"))
+
+	def test_payment_terms_do_not_unblock_an_online_payment_or_a_non_pending_order(self):
+		account = self._make_shopify_account()
+		cases = {
+			"online transaction": ("PENDING", [self._transaction(manual=False, gateway="shopify_payments")]),
+			"authorized": ("AUTHORIZED", []),
+			"empty terms": ("PENDING", []),
+		}
+		for label, (status, transactions) in cases.items():
+			with self.subTest(case=label):
+				order, _mapping = self._make_shopify_order(
+					account,
+					financial_status=status,
+					payment_transactions=transactions,
+					payment_terms={} if label == "empty terms" else _DUE_ON_RECEIPT,
+				)
+
+				result = sync_sales_order(order.name)
+
+				self.assertFalse(result["ok"])
+				self.assertIn("financially eligible", result["error"])
 
 	def test_pending_shopify_order_without_a_manual_payment_stays_blocked(self):
 		account = self._make_shopify_account()
