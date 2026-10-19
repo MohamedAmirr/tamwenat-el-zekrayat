@@ -597,16 +597,34 @@ def _shopify_transactions(order):
 
 
 def _is_manual_payment_pending(order):
-	"""A PENDING Shopify order whose payment is a manual method (COD, bank deposit, custom).
+	"""A PENDING Shopify order whose payment is a manual method (COD, bank deposit, custom),
+	or one staff created with payment terms ("Due on receipt") and no transaction yet.
 
 	Shopify marks the transaction of a manual payment method with ``manualPaymentGateway``
 	(Admin API 2025-01+); the gateway NAME is never used because merchants can rename it.
-	PENDING alone is not enough: Shopify also uses it for online payments still processing.
+	PENDING alone is not enough: Shopify also uses it for online payments still processing,
+	which never carry payment terms.
 	"""
-	return order.external_financial_status == "PENDING" and any(
-		row.get("manualPaymentGateway") is True and row.get("status") == "PENDING"
-		for row in _shopify_transactions(order)
+	if order.external_financial_status != "PENDING":
+		return False
+	transactions = _shopify_transactions(order)
+	if not transactions:
+		return _has_shopify_payment_terms(order)
+	return any(
+		row.get("manualPaymentGateway") is True and row.get("status") == "PENDING" for row in transactions
 	)
+
+
+def _has_shopify_payment_terms(order):
+	"""Shopify sent ``paymentTerms`` with a type (kept only in ``latest_payload``)."""
+	payload = order.get("latest_payload")
+	if isinstance(payload, str):
+		try:
+			payload = frappe.parse_json(payload)
+		except ValueError:
+			return False
+	terms = payload.get("paymentTerms") if isinstance(payload, dict) else None
+	return isinstance(terms, dict) and bool(cstr(terms.get("paymentTermsType")).strip())
 
 
 def _describe_shopify_transactions(order):
