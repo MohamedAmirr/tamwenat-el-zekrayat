@@ -147,8 +147,10 @@ is not supported by this release.
   than being permanently stuck. A worker that died before releasing a
   queued Mark Out of Stock reservation (`noon_pending_oos_units`) can be
   recovered the same way via **Release Stuck Out of Stock Reservation**.
-- A Noon AWB is generated once per shipment and reused on every retry — it
-  is never regenerated. There is no bulk AWB pre-generation.
+- A Noon AWB is chosen once per shipment and reused on every retry — it
+  is never regenerated or swapped. It comes from the pre-generated pool when one
+  is available, otherwise from a single-AWB Noon call (see "Noon AWB pool"
+  below).
 - Every fulfillment call is enqueued on the `long` queue and deduplicated by
   job ID — a second click while an action is already queued/running for the
   same shipment is a no-op toast, not a duplicate job. For Mark Out of Stock,
@@ -257,6 +259,38 @@ relied on in production:
 Do not roll this out to production Noon fulfillment before these nine items
 have been checked against a real Noon account.
 
+## Noon AWB pool (bulk AWB pre-generation)
+
+- **Generate:** on a Noon Marketplace Account, **Generate Noon AWBs** asks for a
+  quantity (1-1000) and queues `api/noon_awbs.py::generate_awbs`, which runs
+  `integrations/noon/awb_pool.py::run_generate` on the `long` queue (deduplicated
+  per account, no Noon HTTP call in the Desk request). The worker calls
+  `GetNoonLogisticsAWBs` once (`country_code` from the account, `qty`) and stores
+  every returned AWB as an `Available` `Noon AWB` row. The result (stored count,
+  or the failure) reaches the requesting user as a realtime message; failures are
+  also written to the Error Log. The form shows **Available Noon AWBs: N** as an
+  intro line. Needs write on the account and create on `Noon AWB`.
+- **`Noon AWB` doctype** (System Manager only): Marketplace Account, AWB Nr,
+  country code, Status (`Available`/`Used`), generated on, and, once used, the
+  Marketplace Order, integration shipment nr and used on. AWB Nr is unique per
+  account through a hidden hashed `awb_identity_key` (composite-uniqueness
+  pattern); an AWB Noon returns twice is skipped, not duplicated.
+- **Claim:** when a Noon-source shipment has no AWB yet,
+  `run_create_shipment()` releases the order lock and calls
+  `claim_pool_awb()`, one `UPDATE ... WHERE status = 'Available' ... LIMIT 1`
+  (oldest first, same account and country) that records the order and shipment on
+  the row, so two workers can never take the same AWB. A repeat claim for the
+  same shipment returns the row already claimed. The claimed AWB then goes
+  through the unchanged path (appended as the shipment's AWB row, reused on
+  retry). An empty pool falls back to the previous qty-1 `GetNoonLogisticsAWBs`
+  call. Lock handling around Noon HTTP calls is unchanged.
+- **A claimed AWB never returns to the pool.** A discarded, cancelled or failed
+  shipment keeps consuming the AWB it claimed; Discard Shipment does not release
+  it. A worker that dies between the claim and writing the shipment's AWB row
+  leaves that AWB `Used` with the order/shipment recorded; the retry reuses it.
+- Unverified (no live Noon call was made): whether Noon rate-limits or caps large
+  quantities, and whether pre-generated AWBs expire.
+
 ## Order-level invoice (UploadFbpiOrderInvoice)
 
 An alternative to per-shipment invoices for merchants who issue one invoice
@@ -292,7 +326,9 @@ shipment invoice (private PDF attachment, Invoice Nr, Issued At).
 
 ## Out of scope (#146)
 
-- Bulk AWB pre-generation, `CreateSandboxOrder` tooling.
+- `CreateSandboxOrder` tooling. (Bulk AWB pre-generation and the order-level
+  `UploadFbpiOrderInvoice` were added later; see "Noon AWB pool" and
+  "Order-level invoice".)
 - Automatic Sales Order amendment after delivery (cancellation of an
   undelivered, unbilled order is done by the reconciliation planner, #179), Delivery Note, Sales
   Invoice, Payment Entry, Credit Note, or stock ledger entries. (A draft Sales
