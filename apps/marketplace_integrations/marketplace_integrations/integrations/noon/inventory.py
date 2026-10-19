@@ -26,6 +26,7 @@ from marketplace_integrations.integrations.noon.sync import (
 	authorize_selection,
 	chunks,
 	enqueue_push,
+	is_push_paused,
 	item_status_error,
 	persist_outcomes,
 	require_items_response,
@@ -47,6 +48,9 @@ def queue_stock_push(account_name, mapping_names=None):
 
 def push_stock(account_name, mapping_names=None):
 	"""Push current stock for enabled exact mappings of one Noon account."""
+	if is_push_paused(account_name, "stock"):
+		# Switch turned off after this job was queued: no Noon call, no mapping touched.
+		return {"synced": 0, "failed": 0, "paused": True}
 	account = get_account(account_name)
 	selected = selected_mappings(account.name, mapping_names, stock_only=True)
 	if not selected:
@@ -94,6 +98,11 @@ def push_stock(account_name, mapping_names=None):
 	synced = 0
 	failed = len(local_errors)
 	for batch in chunks(prepared, STOCK_CHUNK_SIZE):
+		# Fresh DB read before every chunk (the previous chunk's commit ended the
+		# transaction snapshot): a running job makes no further Noon write once the
+		# switch is off. Mappings of unpushed chunks keep their status untouched.
+		if is_push_paused(account.name, "stock"):
+			return {"synced": synced, "failed": failed, "paused": True}
 		try:
 			response = client.request(
 				"POST", STOCK_PATH, json={"items": [payload for _, payload in batch]}
