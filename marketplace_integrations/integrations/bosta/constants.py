@@ -13,6 +13,9 @@ BOSTA_TERMINATE_DELIVERY_PATH = "/deliveries/business/{tracking_number}/terminat
 BOSTA_CITIES_PATH = "/cities"
 BOSTA_PICKUP_LOCATIONS_PATH = "/pickup-locations"
 BOSTA_DISTRICTS_PATH = "/cities/{city_id}/districts"
+BOSTA_ALL_DISTRICTS_PATH = "/cities/getAllDistricts"
+# Not documented by Bosta (commented out in docs/bosta-integration/docs.yaml); seen working live on 2026-10-19 and may change.
+BOSTA_PIN_LOCATION_PATH = "/cities/pinLocation"
 BOSTA_WEBHOOK_PATH = "/api/method/marketplace_integrations.api.bosta_webhooks.delivery_event"
 
 # Bosta documents a different response shape above this count.  The MVP only
