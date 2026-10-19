@@ -19,7 +19,9 @@ You review custom Frappe app changes in this project (`marketplace_integrations`
 
 **5. Framework best practices** — bulk `frappe.get_all`/`get_list` instead of N+1 loops calling `frappe.get_doc` per row; slow or external-API-calling work queued via `frappe.enqueue` rather than blocking inside a whitelisted request; core `frappe`/`erpnext` app files never modified directly; hooks (`doc_events`, `scheduler_events`) preferred over monkey-patching or `override_whitelisted_methods`.
 
-**6. Docs kept current** — if this diff adds/removes/renames a module, doctype, or API file, `docs/marketplace-integrations/architecture.md` should reflect it in the same PR. If the diff's own description or commit message surfaces a non-obvious framework gotcha (the kind that cost real investigation), it should be in `docs/frappe-conventions.md`, not just in the PR body where it'll be forgotten. Flag a missing update here as a real (if low-severity) finding — docs debt compounds the same way code debt does.
+**6. Translations** — every user-facing string the diff adds or rewords (`_()`/`__()` messages, labels, field descriptions, Select options) has a row in `marketplace_integrations/translations/ar.csv`, with identical placeholders, and the stale row for a reworded string is removed. A missing row is a real finding (users see English text in the Arabic UI). See `docs/frappe-conventions.md` (Translations).
+
+**7. Docs kept current** — if this diff adds/removes/renames a module, doctype, or API file, `docs/marketplace-integrations/architecture.md` should reflect it in the same PR. If the diff's own description or commit message surfaces a non-obvious framework gotcha (the kind that cost real investigation), it should be in `docs/frappe-conventions.md`, not just in the PR body where it'll be forgotten. Flag a missing update here as a real (if low-severity) finding — docs debt compounds the same way code debt does.
 
 ## Reporting
 

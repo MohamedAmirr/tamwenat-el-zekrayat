@@ -65,6 +65,7 @@ Goal: whoever (human or Claude) opens this issue later gets full working context
 Rules for keeping these cheap to read:
 - Never restate content from `CLAUDE.md` or `docs/*.md` — link to it.
 - No narrative/prose paragraphs explaining rationale at length; one line of "why" per item is enough.
+- A sub-issue that adds or rewords user-facing text has the Acceptance bullet "Arabic rows added to `translations/ar.csv` for every new or reworded user-facing string" (rule: `docs/frappe-conventions.md`, Translations).
 - Every "Scope" and "Acceptance" bullet must be concrete (a file, a function, a behavior) — not "improve X" or "handle edge cases."
 - Skip sections that don't apply rather than filling them with filler text.
 
