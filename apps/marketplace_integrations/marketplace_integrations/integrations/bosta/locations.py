@@ -27,6 +27,8 @@ CACHE_TTL_SECONDS = 24 * 60 * 60
 CITIES_CACHE_KEY = "marketplace_integrations:bosta:cities"
 DISTRICTS_CACHE_KEY = "marketplace_integrations:bosta:districts:{city_id}"
 DIRECTORY_CACHE_KEY = "marketplace_integrations:bosta:directory"
+LOOKUP_FAILED_CACHE_KEY = "marketplace_integrations:bosta:lookup_failed"
+LOOKUP_FAILURE_TTL_SECONDS = 60
 PIN_CACHE_KEY = "marketplace_integrations:bosta:pin:{lat}:{lng}"
 
 
@@ -48,6 +50,7 @@ def get_cities(refresh=False):
 			cache.delete_value(DISTRICTS_CACHE_KEY.format(city_id=city_id))
 	if refresh:
 		cache.delete_value(DIRECTORY_CACHE_KEY)
+		frappe.local.bosta_directory = None
 	cache.set_value(CITIES_CACHE_KEY, cities, expires_in_sec=CACHE_TTL_SECONDS)
 	return cities
 
@@ -74,20 +77,69 @@ def get_districts(city_id, refresh=False):
 	return districts
 
 
+class BostaLookupUnavailable(Exception):
+	"""A Bosta district lookup failed a moment ago, so no further lookup is tried (fail fast)."""
+
+
+def reset_request_state():
+	"""Forget this request's memoized directory and fail-fast flag, and the shared failure marker."""
+	frappe.local.bosta_directory = None
+	frappe.local.bosta_name_index = None
+	frappe.local.bosta_lookup_failed = False
+	frappe.cache().delete_value(LOOKUP_FAILED_CACHE_KEY)
+
+
+def lookups_blocked():
+	"""True after a failed directory/pinLocation lookup in this request, or within the last
+	minute in any request: orders then simply fall back to review (#305)."""
+	return bool(
+		getattr(frappe.local, "bosta_lookup_failed", False)
+		or frappe.cache().get_value(LOOKUP_FAILED_CACHE_KEY)
+	)
+
+
+def _mark_lookup_failed():
+	frappe.local.bosta_lookup_failed = True
+	frappe.cache().set_value(LOOKUP_FAILED_CACHE_KEY, 1, expires_in_sec=LOOKUP_FAILURE_TTL_SECONDS)
+
+
 def get_directory(refresh=False):
 	"""Every Bosta city with its drop-off-available districts, for district matching:
-	``[{id, name, name_ar, code, districts: [{id, name, name_ar}]}]``. Cached 24 hours;
-	nothing is cached on failure."""
+	``[{id, name, name_ar, code, districts: [{id, name, name_ar}]}]``. Cached 24 hours (and
+	kept for the rest of the request); nothing is cached on failure. A failed fetch blocks
+	further lookups (``BostaLookupUnavailable``) for this request and for a minute."""
+	if not refresh and getattr(frappe.local, "bosta_directory", None):
+		return frappe.local.bosta_directory
 	cache = frappe.cache()
 	if not refresh:
 		cached = cache.get_value(DIRECTORY_CACHE_KEY)
 		if cached:
+			frappe.local.bosta_directory = cached
 			return cached
-	client = BostaClient()
-	response = client.get_all_districts()
-	directory = _parse_directory(_data_or_throw(client, response))
+		if lookups_blocked():
+			raise BostaLookupUnavailable
+	try:
+		client = BostaClient()
+		response = client.get_all_districts()
+		directory = _parse_directory(_data_or_throw(client, response))
+	except Exception:
+		_mark_lookup_failed()
+		raise
 	cache.set_value(DIRECTORY_CACHE_KEY, directory, expires_in_sec=CACHE_TTL_SECONDS)
+	frappe.local.bosta_directory = directory
 	return directory
+
+
+def city_name_for(city_id, default):
+	"""The name ``GET /cities`` gives this city, else ``default`` (the directory's name), so the
+	automatic path sends the same city name as the dialog."""
+	try:
+		for city in get_cities():
+			if city["id"] == city_id:
+				return city["name"]
+	except Exception:
+		frappe.clear_last_message()
+	return default
 
 
 def get_pin_districts(lat, lng):
@@ -103,6 +155,8 @@ def get_pin_districts(lat, lng):
 	cached = cache.get_value(key)
 	if cached is not None:
 		return cached
+	if lookups_blocked():
+		return []
 	try:
 		client = BostaClient()
 		data = _data_or_throw(client, client.pin_location(lat, lng))
@@ -110,6 +164,7 @@ def get_pin_districts(lat, lng):
 		if not isinstance(items, list):
 			raise ValueError("unrecognised pinLocation response")
 	except Exception:
+		_mark_lookup_failed()
 		frappe.clear_last_message()
 		frappe.log_error(frappe.get_traceback(with_context=False)[-500:], "Bosta pin location failed")
 		return []

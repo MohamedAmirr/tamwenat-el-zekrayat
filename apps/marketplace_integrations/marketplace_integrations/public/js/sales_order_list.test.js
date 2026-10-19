@@ -6,7 +6,7 @@ global.__ = (message, args) => {
 	return message.replace(/\{(\d+)\}/g, (_, index) => args[index]);
 };
 
-function load({ creator = true, original_onload = null } = {}) {
+function load({ creator = true, original_onload = null, defaults = null, defaults_fail = false } = {}) {
 	const msgprints = [];
 	const calls = [];
 	const dialogs = [];
@@ -15,9 +15,16 @@ function load({ creator = true, original_onload = null } = {}) {
 		utils: { escape_html: (value) => String(value).replace(/</g, "&lt;") },
 		listview_settings: { "Sales Order": original_onload ? { onload: original_onload } : {} },
 		msgprint: (message) => msgprints.push(message),
-		require: () => Promise.resolve(),
+		// Loading sales_order.js is what exports the creator roles.
+		require: () => {
+			global.frappe.marketplace_integrations = { BOSTA_CREATOR_ROLES: ["Sales Manager"] };
+			return Promise.resolve();
+		},
 		call: (opts) => {
 			calls.push(opts);
+			if (opts.method.endsWith("get_create_defaults")) {
+				return defaults_fail ? Promise.reject(new Error("boom")) : Promise.resolve({ message: defaults });
+			}
 			return Promise.resolve({ message: { skipped: [], ready: [], review: [] } });
 		},
 		ui: {
@@ -50,19 +57,21 @@ function listview(names = []) {
 	};
 }
 
-test("creators get the bulk action and ERPNext's own onload still runs", () => {
+test("creators get the bulk action and ERPNext's own onload still runs", async () => {
 	let erpnext_ran = false;
 	const { settings } = load({ original_onload: () => (erpnext_ran = true) });
 	const view = listview();
 	settings.onload(view);
+	await new Promise((resolve) => setTimeout(resolve, 5));
 	assert.ok(erpnext_ran);
 	assert.deepEqual(view.items.map((item) => item.label), ["Create Bosta Shipments"]);
 });
 
-test("users without a creator role do not get the action", () => {
+test("users without a creator role do not get the action", async () => {
 	const { settings } = load({ creator: false });
 	const view = listview();
 	settings.onload(view);
+	await new Promise((resolve) => setTimeout(resolve, 5));
 	assert.deepEqual(view.items, []);
 });
 
@@ -85,18 +94,42 @@ test("the plan summary lists each skipped order with its reason before anything 
 	assert.equal(calls.length, 0);
 });
 
-test("a retry entry reopens the dialog with the values already used", () => {
-	const { module_exports } = load();
-	const entry = module_exports.retry_entry({
-		sales_order: "SO-1",
-		receiver_name: "Ahmed",
-		receiver_phone: "0100",
-		city: "Cairo",
-		district_id: "d-1",
-		address_first_line: "12 Example Street",
-		expected_cod: 150,
-	});
-	assert.equal(entry.sales_order, "SO-1");
+const USED = {
+	sales_order: "SO-1",
+	receiver_name: "Ahmed",
+	receiver_phone: "0100",
+	city: "Cairo",
+	district_id: "d-1",
+	address_first_line: "12 Example Street",
+	expected_cod: 150,
+};
+
+test("a retry entry re-reads the server defaults and keeps the values already used", async () => {
+	const fresh = { cod_amount: 175, city_id: "c-cairo", city_name: "Cairo", district_candidates: ["d-1", "d-2"], receiver_name: "Other", address_first_line: "changed" };
+	const { module_exports, calls } = load({ defaults: fresh });
+	const entry = await module_exports.retry_entry(USED);
+	assert.equal(calls[0].args.sales_order, "SO-1");
+	assert.equal(entry.defaults.cod_amount, 175);
+	assert.equal(entry.defaults.city_id, "c-cairo");
+	assert.deepEqual(entry.defaults.district_candidates, ["d-1", "d-2", "d-1"]);
+	assert.equal(entry.defaults.district_id, "d-1");
+	assert.equal(entry.defaults.receiver_name, "Ahmed");
+	assert.equal(entry.defaults.receiver_phone, "0100");
+	assert.equal(entry.defaults.address_first_line, "12 Example Street");
+});
+
+test("a retry entry drops the resolved city when it is not the city used", async () => {
+	const { module_exports } = load({ defaults: { cod_amount: 175, city_id: "c-giza", city_name: "Giza", district_candidates: ["g-1"] } });
+	const entry = await module_exports.retry_entry(USED);
+	assert.equal(entry.defaults.city_id, undefined);
+	assert.equal(entry.defaults.district_candidates, undefined);
+	assert.equal(entry.defaults.address_city, "Cairo");
+	assert.equal(entry.defaults.district_id, "d-1");
+});
+
+test("a retry entry falls back to the used values when the defaults cannot be read", async () => {
+	const { module_exports } = load({ defaults_fail: true });
+	const entry = await module_exports.retry_entry(USED);
 	assert.deepEqual(entry.defaults, {
 		receiver_name: "Ahmed",
 		receiver_phone: "0100",

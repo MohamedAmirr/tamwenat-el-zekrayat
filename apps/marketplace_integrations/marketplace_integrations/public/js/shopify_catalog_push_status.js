@@ -236,7 +236,9 @@
 					.appendTo(this.$status);
 			});
 
-			build_results_table(this.$status, results, truncated, total, this.result_link_route, this.result_column_label, this.status_labels, this.detail_column_label);
+			// The table gets its own container: build_results_table() empties what it is given, which
+			// would otherwise wipe the totals line and the failed-job lines drawn above.
+			build_results_table($("<div></div>").appendTo(this.$status), results, truncated, total, this.result_link_route, this.result_column_label, this.status_labels, this.detail_column_label);
 		}
 	};
 

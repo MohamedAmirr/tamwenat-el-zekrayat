@@ -8,7 +8,7 @@ from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
 from frappe import _
 from frappe.utils import add_to_date, cint, cstr, escape_html, flt, get_datetime, now_datetime
 
-from marketplace_integrations.integrations.bosta import district_match
+from marketplace_integrations.integrations.bosta import district_match, locations
 from marketplace_integrations.integrations.bosta.client import (
 	BostaClient,
 	is_success_response,
@@ -201,12 +201,20 @@ def _shopify_geo(order):
 
 def _district_prefill(address):
 	"""``city_id`` / ``city_name`` and, when known, ``district_id`` or ``district_candidates``
-	for the dialog. An unreachable district list only loses the prefill."""
+	for the dialog. A failed Bosta district lookup (or a recent one, see
+	``locations.lookups_blocked``) only loses the prefill: the operator picks, and no popup shows."""
 	try:
-		return district_match.resolve_location(address)
+		result = district_match.resolve_location(address)
+	except locations.BostaLookupUnavailable:
+		return {}
 	except Exception:
+		frappe.clear_last_message()
 		frappe.log_error(frappe.get_traceback(with_context=False), "Bosta district match failed")
 		return {}
+	if result.get("city_id"):
+		# The name the dialog would send for this city (from GET /cities), not the directory's.
+		result["city_name"] = locations.city_name_for(result["city_id"], result["city_name"])
+	return result
 
 
 def create_bosta_shipment(

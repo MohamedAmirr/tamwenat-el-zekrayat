@@ -12,7 +12,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api import bosta_shipments
-from marketplace_integrations.integrations.bosta import bulk, deliveries
+from marketplace_integrations.integrations.bosta import bulk, deliveries, locations
 from marketplace_integrations.tests.bosta_fixtures import BostaFixtureMixin, FakeResponse, created
 
 DIRECTORY = [
@@ -38,6 +38,8 @@ class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 		)
 		patcher.start()
 		self.addCleanup(patcher.stop)
+		frappe.cache().delete_value(locations.CITIES_CACHE_KEY)
+		self.addCleanup(frappe.cache().delete_value, locations.CITIES_CACHE_KEY)
 
 	def _addressed_order(self, address_line1, phone="01000000000", **order_kwargs):
 		order = self.make_order(**order_kwargs)
@@ -94,6 +96,11 @@ class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 		self.http.queue["create"].append(created())
 		self.create(has_shipment)
 		self.http.calls.clear()
+		self.http.queue["cities"].append(
+			FakeResponse(
+				200, {"success": True, "data": {"list": [{"_id": "city-cairo", "name": "Cairo (Bosta)"}]}}
+			)
+		)
 
 		plan = self._plan(
 			ready, no_match, ambiguous, no_phone, short_line, draft, too_much_cod, closed, has_shipment
@@ -101,6 +108,8 @@ class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 
 		self.assertEqual([row["sales_order"] for row in plan["ready"]], [ready.name])
 		self.assertEqual(plan["ready"][0]["defaults"]["district_id"], "d-maadi")
+		# The city name sent is the one GET /cities gives, as in the dialog.
+		self.assertEqual(plan["ready"][0]["defaults"]["city_name"], "Cairo (Bosta)")
 		self.assertEqual(
 			[row["sales_order"] for row in plan["review"]],
 			[no_match.name, ambiguous.name, no_phone.name, short_line.name],
@@ -113,7 +122,7 @@ class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 		self.assertIn(str(bulk.deliveries.BOSTA_COD_LIMIT), reasons[too_much_cod.name])
 		self.assertIn("Closed", reasons[closed.name])
 		self.assertIn("already exists", reasons[has_shipment.name])
-		self.assertEqual(self.http.calls, [])
+		self.assertEqual(self.http.calls_of("create") + self.http.calls_of("search"), [])
 
 	def test_plan_skips_an_order_with_nothing_left_to_deliver(self):
 		order = self.make_order()
@@ -126,6 +135,17 @@ class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 			bulk.get_bulk_create_plan(names)
 		with self.assertRaisesRegex(frappe.ValidationError, "at most 50"):
 			bulk.queue_bulk_create(frappe.as_json([{"sales_order": f"SO-{index}"} for index in range(51)]))
+
+	def test_the_same_order_twice_is_queued_once(self):
+		order = self.make_order()
+		with patch.object(bulk.frappe, "enqueue") as enqueue:
+			bulk.queue_bulk_create(
+				frappe.as_json([self._row(order), self._row(order, receiver_name="Second")])
+			)
+		orders = enqueue.call_args.kwargs["orders"]
+		self.assertEqual(
+			[(o["sales_order"], o["receiver_name"]) for o in orders], [(order.name, self._receiver())]
+		)
 
 	def test_users_without_a_creator_role_are_rejected(self):
 		viewer = self.make_user("Sales User")

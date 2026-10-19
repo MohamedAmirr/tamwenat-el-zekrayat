@@ -5,9 +5,13 @@
 
 1. City: Shopify's province code (Egypt only) through a fixed map to a Bosta city code, else
    the Address city/state text against Bosta's city name, Arabic name or code.
-2. District by text, inside that city: a district is a candidate only when ALL of its
-   significant words appear in the address. The area Bosta puts in parentheses
-   ("ElBurouj (ElShorouk)") may be left out when the rest of the name is unique in the city.
+2. District by text, within the resolved city (or every city when none resolved, in which case
+   a hit is only ever offered as a candidate, never used as the district): a district is a
+   candidate only when ALL of its significant words appear in the address, and a number in its
+   name sits next to a generic word or another word of that name there. A number that follows
+   a filler word ("فيلا 3") is a house number and is ignored. The area Bosta puts in parentheses
+   ("ElBurouj (ElShorouk)") may be left out when the rest of the name is unique in the city, but
+   such a match is only ever a candidate: "elandalos" alone is not proof of "ElAndalous (Badr City)".
    Latin words are spelling-folded ("Al Buroj" == "ElBurouj"; al/el, ou/oo/o, ee). A candidate whose words are a
    strict subset of another's is dropped. Exactly one left is the district.
 3. Otherwise Bosta's ``pinLocation`` for the Shopify coordinates (Egypt only).
@@ -17,14 +21,14 @@
 
 import re
 
+import frappe
 from frappe.utils import cstr
 
 from marketplace_integrations.integrations.bosta import locations
 
 # Shopify Egypt province code -> Bosta city code (Bosta cities: /cities `code`).
-# Only "SU" (Shopify's "6th of October" province, which Bosta files under Giza) is confirmed
-# from a real production order. The other codes follow Shopify's ISO 3166-2:EG-style codes and
-# MUST be checked against production orders before they are trusted.
+# Verified against Shopify's Egypt checkout province list on 2026-10-19. "SU" ("6th of October")
+# and "HU" (Helwan) are Shopify-only provinces; Bosta has them under Giza and Cairo.
 SHOPIFY_EG_PROVINCE_TO_BOSTA_CITY_CODE = {
 	"ALX": "EG-02",
 	"ASN": "EG-21",
@@ -95,13 +99,25 @@ GENERIC_WORDS = _normalized_words("الحي الحى district مجاورة مج�
 
 def tokens(text):
 	"""The address or name as words: normalized, digits split from letters, filler dropped,
-	Latin words spelling-folded."""
+	Latin words spelling-folded, leading zeros of numbers dropped ("09" == "9"). A number that
+	directly follows a filler word is a house number ("فيلا 3", "building 12") and is dropped."""
 	spaced = _DIGIT_LETTER_GAP.sub(" ", normalize(text))
-	return [
-		_fold_latin(word)
-		for word in spaced.split()
-		if word not in FILLER_WORDS and word not in _LATIN_ARTICLE_WORDS
-	]
+	words = []
+	after_filler = False
+	for word in spaced.split():
+		if word in FILLER_WORDS:
+			after_filler = True
+			continue
+		if word in _LATIN_ARTICLE_WORDS:
+			after_filler = False
+			continue
+		if word.isdigit():
+			if not after_filler:
+				words.append(word.lstrip("0") or "0")
+		else:
+			words.append(_fold_latin(word))
+		after_filler = False
+	return words
 
 
 def _fold_latin(word):
@@ -129,19 +145,22 @@ def resolve_location(address):
 		return {}
 	directory = locations.get_directory()
 	city = _resolve_city(directory, address)
-	words = set(tokens(address.get("text")))
+	address_seq = tokens(address.get("text"))
+	words = set(address_seq)
 
-	hits = _text_hits(directory, [city] if city else directory, words)
-	if len(hits) == 1:
+	hits = _text_hits([city] if city else directory, address_seq)
+	# Without a resolved city a text hit is never trusted on its own: a word like "Maadi" can
+	# name a district in several cities, so it can only be offered as a candidate. Nor is one
+	# that matched without its parenthesized area.
+	if city and len(hits) == 1 and not hits[0][2]:
 		return _result(hits[0][0], hits[0][1])
 
 	pin_hits = _pin_hits(directory, city, address, words)
 	if len(pin_hits) == 1:
 		return _result(pin_hits[0][0], pin_hits[0][1])
 
-	candidates = pin_hits if len(pin_hits) > 1 else hits
-	candidate_cities = {candidate_city["id"] for candidate_city, _district in candidates}
-	if len(candidates) > 1 and len(candidate_cities) == 1:
+	candidates = pin_hits if len(pin_hits) > 1 else [(hit[0], hit[1]) for hit in hits]
+	if candidates and len({candidate_city["id"] for candidate_city, _district in candidates}) == 1:
 		return _result(candidates[0][0], None, [district["id"] for _city, district in candidates])
 	return _result(city, None) if city else {}
 
@@ -170,32 +189,72 @@ def _resolve_city(directory, address):
 	return None
 
 
-def _text_hits(directory, cities, address_words):
-	"""``[(city, district)]`` whose every significant word is in the address, minus any whose
-	word set is a strict subset of another hit's."""
-	hits = []  # (city, district, words)
+def _text_hits(cities, address_seq):
+	"""``[(city, district, partial)]`` whose every significant word is in the address, minus
+	any whose word set is a strict subset of another hit's. ``partial``: matched without the
+	parenthesized area. A number in a district name must sit next to a generic word
+	("الحي 3", "District 3") or another word of that name in the address."""
+	address_words = set(address_seq)
+	hits = []  # (city, district, words, partial)
 	for city in cities:
-		main_name_counts = _main_name_counts(city)
-		for district in city["districts"]:
+		for district, options in _city_index(city):
 			matched = None
-			for name in (district["name"], district["name_ar"]):
-				options = [set(tokens(name))]
-				main_words = frozenset(tokens(_PARENTHESIZED.sub(" ", name)))
-				# The parenthesized area is optional only when the rest is unique in the city.
-				if main_words != options[0] and main_name_counts.get(main_words) == 1:
-					options.append(set(main_words))
-				for name_words in options:
-					if (
-						name_words
-						and any(_is_specific(word) for word in name_words)
-						and name_words <= address_words
-						and (matched is None or len(name_words) > len(matched))
-					):
-						matched = name_words
+			for name_words, partial in options:
+				if (
+					name_words <= address_words
+					and (matched is None or len(name_words) > len(matched[0]))
+					and _numbers_adjacent(name_words, address_seq)
+				):
+					matched = (name_words, partial)
 			if matched:
-				hits.append((city, district, matched))
+				hits.append((city, district, *matched))
 	kept = [hit for hit in hits if not any(hit[2] < other[2] for other in hits)]
-	return [(city, district) for city, district, _words in kept]
+	return [(city, district, partial) for city, district, _words, partial in kept]
+
+
+def _numbers_adjacent(name_words, address_seq):
+	neighbours = GENERIC_WORDS | {word for word in name_words if not word.isdigit()}
+	for number in (word for word in name_words if word.isdigit()):
+		if not any(
+			word == number and _next_to(address_seq, index, neighbours)
+			for index, word in enumerate(address_seq)
+		):
+			return False
+	return True
+
+
+def _next_to(sequence, index, words):
+	before = sequence[index - 1] if index > 0 else None
+	after = sequence[index + 1] if index + 1 < len(sequence) else None
+	return before in words or after in words
+
+
+def _city_index(city):
+	"""``[(district, [(word set that may match, partial)])]`` for a city, tokenized once per request
+	(the directory itself is kept per request by ``locations.get_directory``)."""
+	index = getattr(frappe.local, "bosta_name_index", None)
+	if index is None:
+		index = frappe.local.bosta_name_index = {}
+	entry = index.get(id(city))
+	if entry and entry[0] is city:
+		return entry[1]
+	main_name_counts = _main_name_counts(city)
+	rows = []
+	for district in city["districts"]:
+		options = []
+		for name in (district["name"], district["name_ar"]):
+			full = frozenset(tokens(name))
+			candidates = [(full, False)]
+			main_words = frozenset(tokens(_PARENTHESIZED.sub(" ", name)))
+			# The parenthesized area is optional only when the rest is unique in the city.
+			if main_words != full and main_name_counts.get(main_words) == 1:
+				candidates.append((main_words, True))
+			options.extend(
+				(words, partial) for words, partial in candidates if words and any(_is_specific(w) for w in words)
+			)
+		rows.append((district, options))
+	index[id(city)] = (city, rows)
+	return rows
 
 
 def _main_name_counts(city):
@@ -203,7 +262,8 @@ def _main_name_counts(city):
 	counts = {}
 	for district in city["districts"]:
 		for main_words in {
-			frozenset(tokens(_PARENTHESIZED.sub(" ", name))) for name in (district["name"], district["name_ar"])
+			frozenset(tokens(_PARENTHESIZED.sub(" ", name)))
+			for name in (district["name"], district["name_ar"])
 		}:
 			counts[main_words] = counts.get(main_words, 0) + 1
 	return counts

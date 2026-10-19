@@ -3,7 +3,7 @@
 
 """Create Bosta shipments for several Sales Orders at once (#305).
 
-``get_bulk_create_plan`` checks each order locally (no Bosta call) and sorts it into
+``get_bulk_create_plan`` checks each order locally (the only Bosta calls are the district lookups, which stop after the first failure) and sorts it into
 skipped / ready to send / needs review. ``queue_bulk_create`` enqueues one ``long`` job
 that calls ``deliveries.create_bosta_shipment`` per order, each isolated from the rest.
 Progress and results sit in the cache under a job id only the requesting user can read
@@ -72,7 +72,7 @@ def get_bulk_create_plan(sales_orders):
 
 def _check_order(name):
 	"""``(reason, defaults)``: a one-line reason this order cannot be sent, else the dialog
-	defaults. Checks run without a Bosta call."""
+	defaults. Nothing is created in Bosta."""
 	try:
 		deliveries._get_sales_order(name)
 		active = deliveries._active_shipment(name)
@@ -106,6 +106,11 @@ def queue_bulk_create(orders, skipped=None):
 	(``[{sales_order, reason}]``) only carries the pre-check and Skip rows into the results."""
 	deliveries._require_creator_role()
 	orders = [_clean_order(order) for order in frappe.parse_json(orders) or []]
+	# The same order twice would only fail the second time: keep the first.
+	first_by_name = {}
+	for order in orders:
+		first_by_name.setdefault(order["sales_order"], order)
+	orders = list(first_by_name.values())
 	skipped = [
 		{
 			"sales_order": cstr(row.get("sales_order")).strip(),

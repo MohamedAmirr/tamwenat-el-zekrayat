@@ -503,16 +503,19 @@
 					// The first load for the prefilled city lists only the districts the address
 					// points to; a city change or "Refresh Bosta Lists" loads them all.
 					let districts = r.message || [];
+					let only_candidate = null;
 					const candidates = state.candidates;
 					state.candidates = null;
 					if (candidates && !refresh && city_id === defaults.city_id) {
 						const narrowed = districts.filter((d) => candidates.includes(d.id));
 						if (narrowed.length) districts = narrowed;
+						if (narrowed.length === 1) only_candidate = narrowed[0].id;
 					}
 					dialog.fields_dict.district.set_data(location_options(districts));
 					set_ready(true);
-					// Edit starts from the shipment's current district when it is in this city.
-					const current = defaults.district_id;
+					// Edit starts from the shipment's current district when it is in this city; a
+					// single address candidate starts selected.
+					const current = defaults.district_id || only_candidate;
 					if (current && !dialog.get_value("district") && (r.message || []).some((d) => d.id === current)) {
 						return dialog.set_value("district", current);
 					}
@@ -790,6 +793,7 @@
 	if (typeof frappe !== "undefined") {
 		frappe.marketplace_integrations = frappe.marketplace_integrations || {};
 		frappe.marketplace_integrations.open_bosta_create_dialog = open_create_dialog;
+		frappe.marketplace_integrations.BOSTA_CREATOR_ROLES = BOSTA_CREATOR_ROLES;
 		if (frappe.ui && frappe.ui.form && !frappe.ui.form.__mi_sales_order_hooks) {
 			frappe.ui.form.__mi_sales_order_hooks = true;
 			frappe.ui.form.on("Sales Order", {

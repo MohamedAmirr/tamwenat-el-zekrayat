@@ -1375,6 +1375,8 @@ test("a resolved city and district candidates open the dialog with only those di
 	const { dialog, calls } = await open_bosta_dialog({ city_id: "c-cairo", city_name: "Cairo", district_candidates: ["d-2"] });
 	assert.equal(dialog.values.city, "c-cairo");
 	assert.deepEqual(dialog.data.district, [{ value: "d-2", label: "Maadi - المعادي" }]);
+	// A single candidate starts selected.
+	assert.equal(dialog.values.district, "d-2");
 	// Changing the city (and back) loads the full list.
 	await dialog.set_value("city", "c-alex");
 	await settle();
@@ -1382,6 +1384,12 @@ test("a resolved city and district candidates open the dialog with only those di
 	await settle();
 	assert.equal(dialog.data.district.length, 2);
 	assert.equal(calls.filter((c) => c.method.endsWith("get_districts")).length, 3);
+});
+
+test("several district candidates are listed with none selected", async () => {
+	const { dialog } = await open_bosta_dialog({ city_id: "c-cairo", city_name: "Cairo", district_candidates: ["d-1", "d-2"] });
+	assert.equal(dialog.data.district.length, 2);
+	assert.equal(dialog.values.district, "");
 });
 
 test("a matched district is selected in its resolved city", async () => {

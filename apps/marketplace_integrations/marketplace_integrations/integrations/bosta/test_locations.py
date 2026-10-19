@@ -147,12 +147,34 @@ class IntegrationTestBostaLocations(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual(second, first)
 		self.assertEqual(self.http.calls_of("pin"), [{"lat": 29.9749, "lng": 30.94}])
 
-	def test_a_failing_pin_lookup_returns_nothing_and_never_raises(self):
+	def test_a_failing_pin_lookup_returns_nothing_never_raises_and_blocks_later_lookups(self):
 		self.http.queue["pin"] += [FakeResponse(500, {"success": False}), RuntimeError("down")]
 		self.assertEqual(locations.get_pin_districts(29.9749, 30.94), [])
+		# Fail fast: the next lookup in this request, and in the next minute, makes no call.
+		self.assertEqual(locations.get_pin_districts(30.1, 31.2), [])
+		self.assertEqual(len(self.http.calls_of("pin")), 1)
+		frappe.local.bosta_lookup_failed = False
+		self.assertEqual(locations.get_pin_districts(30.1, 31.2), [])
+		self.assertEqual(len(self.http.calls_of("pin")), 1)
+		# Once the marker is gone a lookup is tried again; a raised network error is handled too.
+		locations.reset_request_state()
 		self.assertEqual(locations.get_pin_districts(29.9749, 30.94), [])
+		self.assertEqual(len(self.http.calls_of("pin")), 2)
 		self.assertEqual(locations.get_pin_districts("x", None), [])
 		self.assertIsNone(frappe.cache().get_value(locations.PIN_CACHE_KEY.format(lat=29.9749, lng=30.94)))
+
+	def test_a_failed_directory_fetch_blocks_every_later_lookup_for_this_request_and_a_minute(self):
+		self.http.queue["all_districts"].append(FakeResponse(500, {"success": False}))
+		with self.assertRaises(frappe.ValidationError):
+			locations.get_directory()
+		with self.assertRaises(locations.BostaLookupUnavailable):
+			locations.get_directory()
+		self.assertEqual(locations.get_pin_districts(29.9749, 30.94), [])
+		frappe.local.bosta_lookup_failed = False  # a new request, still within the minute
+		with self.assertRaises(locations.BostaLookupUnavailable):
+			locations.get_directory()
+		self.assertEqual(len(self.http.calls_of("all_districts")), 1)
+		self.assertEqual(self.http.calls_of("pin"), [])
 
 	def test_a_failed_directory_fetch_caches_nothing(self):
 		self.http.queue["all_districts"].append(FakeResponse(500, {"success": False}))
@@ -385,13 +407,20 @@ class IntegrationTestBostaAddressPrefill(BostaFixtureMixin, IntegrationTestCase)
 			("city-giza", "Giza", "d-9"),
 		)
 
-	def test_an_unreachable_district_list_only_loses_the_prefill(self):
+	def test_an_unreachable_district_list_only_loses_the_prefill_without_a_popup_or_a_second_try(self):
 		order = self.make_order()
+		other = self.make_order()
 		address = self._address(address_line1="5th Settlement")
 		frappe.db.set_value("Sales Order", order.name, "shipping_address_name", address.name)
+		frappe.db.set_value("Sales Order", other.name, "shipping_address_name", address.name)
 		self.http.queue["all_districts"].append(FakeResponse(500, {"success": False}))
+		frappe.local.message_log = []
 
 		defaults = self._defaults(order)
+		self._defaults(other)
+
+		self.assertEqual(frappe.local.message_log, [])
+		self.assertEqual(len(self.http.calls_of("all_districts")), 1)
 
 		self.assertEqual(defaults["address_first_line"], "5th Settlement")
 		self.assertNotIn("district_id", defaults)

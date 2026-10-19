@@ -140,3 +140,36 @@ test("transient poll errors are retried; three consecutive errors fail the job w
 	assert.equal(dialog.job_states.j1.error, "Could not retrieve the inventory sync status.");
 	assert.equal(on_done_count, 1);
 });
+
+test("the results table is drawn in its own container, so the totals line is not wiped", async () => {
+	dialogs = [];
+	install_call(() =>
+		Promise.resolve({
+			message: {
+				status: "completed",
+				result: { results: [{ mapping_name: "M1", ok: true }], total: 1, succeeded: 1, failed: 0, skipped_mappings: 0 },
+			},
+		})
+	);
+	const status_spy = chain();
+	let status_empties = 0;
+	const wrapper = new Proxy(status_spy, {
+		get: (target, prop) => (prop === "empty" ? () => (status_empties++, wrapper) : target[prop]),
+	});
+	class SpyDialog extends FakeDialog {
+		constructor(options) {
+			super(options);
+			this.fields_dict = { status_html: { $wrapper: wrapper } };
+		}
+	}
+	global.frappe.ui.Dialog = SpyDialog;
+	try {
+		const status = new Status({ jobs: [{ account: "A", job_id: "j1" }], poll_interval: 1 });
+		await tick();
+		// One empty() per render() (the initial one and the one after the poll): never a third from the table.
+		assert.equal(status_empties, 2);
+		assert.ok(status.finished);
+	} finally {
+		global.frappe.ui.Dialog = FakeDialog;
+	}
+});

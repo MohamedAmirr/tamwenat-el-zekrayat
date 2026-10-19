@@ -196,16 +196,58 @@ class UnitTestBostaDistrictMatch(UnitTestCase):
 	# Spelling fold and the optional parenthesized area
 
 	def test_latin_spelling_variants_match_the_bosta_name(self):
-		for text in ("Al Buroj, Cairo, Cairo", "El Burouj, Cairo", "elburooj Cairo"):
+		for text in ("Al Buroj ElShorouk, Cairo", "El Burouj (Shorouk), Cairo", "elburooj elshoruk Cairo"):
 			with self.subTest(text=text):
 				self.assertEqual(_resolve(text, hints=["Cairo"]).get("district_id"), "d-burouj")
 
-	def test_parenthesized_area_is_optional_when_the_rest_is_unique_in_the_city(self):
-		self.assertEqual(_resolve("البروج، عمارة 5", hints=["Cairo"]).get("district_id"), "d-burouj")
+	def test_a_match_without_the_parenthesized_area_is_only_a_candidate(self):
+		# "5th Settlement elandalos" must not be sent as "ElAndalous (Badr City)" unseen.
+		for text in ("Al Buroj, Cairo, Cairo", "البروج، عمارة 5"):
+			with self.subTest(text=text):
+				result = _resolve(text, hints=["Cairo"])
+				self.assertNotIn("district_id", result)
+				self.assertEqual(result["district_candidates"], ["d-burouj"])
 		self.assertEqual(_resolve("Al Buroj (ElShorouk)", hints=["Cairo"]).get("district_id"), "d-burouj")
+
+	def test_a_pin_match_still_settles_a_match_without_the_area(self):
+		self.pin = [{"city_id": "city-cairo", "district_id": "d-burouj"}]
+		result = _resolve("Al Buroj", country_code="EG", province_code="C", lat=1, lng=2)
+		self.assertEqual(result.get("district_id"), "d-burouj")
 
 	def test_parenthesized_area_is_required_when_the_rest_is_shared(self):
 		self.assertNotIn("district_id", _resolve("Dar Masr building 3", hints=["Cairo"]))
 		self.assertEqual(
 			_resolve("Dar Masr ElShorouk building 3", hints=["Cairo"]).get("district_id"), "d-darmasr-shorouk"
 		)
+
+	# House numbers, unresolved city, leading zeros
+
+	def test_a_number_after_a_filler_word_is_a_house_number_not_a_district_number(self):
+		# "فيلا 3" is villa 3: it must not select 5th Settlement - District 3.
+		result = _resolve("التجمع الخامس - الحي الاول فيلا 3", hints=["Cairo"])
+		self.assertNotIn("district_id", result)
+		for text in ("التجمع الخامس - الحي 3 فيلا 160", "5th Settlement District 3 building 12"):
+			self.assertEqual(_resolve(text, hints=["Cairo"])["district_id"], "d-5th-3")
+		self.assertEqual(district_match.tokens("عمارة 12 الحي 3"), ["الحي", "3"])
+		self.assertEqual(district_match.tokens("street 9 Maadi"), ["maadi"])
+
+	def test_a_district_number_must_sit_next_to_a_generic_or_name_word(self):
+		# "3" is far from "الحي": not the district number.
+		result = _resolve("التجمع الخامس الحي الاول 3", hints=["Cairo"])
+		self.assertNotIn("district_id", result)
+		result = _resolve("التجمع الخامس 3 الحي", hints=["Cairo"])
+		self.assertEqual(result["district_id"], "d-5th-3")
+
+	def test_leading_zeros_of_numbers_are_ignored_on_both_sides(self):
+		self.assertEqual(district_match.tokens("الحي 09"), district_match.tokens("الحي 9"))
+		result = _resolve("النرجس 2", country_code="EG", province_code="GZ")
+		self.assertEqual(result["district_id"], "d-narges-2")
+
+	def test_without_a_city_a_text_hit_is_only_ever_a_candidate(self):
+		result = _resolve("Dokki")
+		self.assertNotIn("district_id", result)
+		self.assertEqual(
+			result, {"city_id": "city-giza", "city_name": "Giza", "district_candidates": ["d-dokki"]}
+		)
+		# Hits in several cities give nothing at all.
+		self.assertEqual(_resolve("Maadi"), {})

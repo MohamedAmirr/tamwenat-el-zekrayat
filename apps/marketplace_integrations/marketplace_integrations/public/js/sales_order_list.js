@@ -12,15 +12,19 @@
 // Wrapped in a function: doctype_list_js files share one scope with ERPNext's own list script.
 (function () {
 	const PLAN_METHOD = "marketplace_integrations.api.bosta_shipments.get_bulk_create_plan";
+	const DEFAULTS_METHOD = "marketplace_integrations.api.bosta_shipments.get_create_defaults";
 	const QUEUE_METHOD = "marketplace_integrations.api.bosta_shipments.queue_bulk_create";
 	const FORM_ASSET = "/assets/marketplace_integrations/js/sales_order.js";
 	const STATUS_ASSET = "/assets/marketplace_integrations/js/shopify_catalog_push_status.js";
-	const BOSTA_CREATOR_ROLES = ["Sales Manager", "Stock User", "System Manager"];
 	const MAX_ORDERS = 50;
 
+	// The creator roles come from sales_order.js, so they are known once it has loaded.
 	function add_bulk_action(listview) {
-		if (!(frappe.user && frappe.user.has_role(BOSTA_CREATOR_ROLES))) return;
-		listview.page.add_actions_menu_item(__("Create Bosta Shipments"), () => start(listview));
+		return frappe.require(FORM_ASSET).then(() => {
+			const roles = frappe.marketplace_integrations.BOSTA_CREATOR_ROLES;
+			if (!(frappe.user && frappe.user.has_role(roles))) return;
+			listview.page.add_actions_menu_item(__("Create Bosta Shipments"), () => start(listview));
+		});
 	}
 
 	function start(listview) {
@@ -200,7 +204,8 @@
 		if (!failed.length) return;
 		status.dialog.set_primary_action(__("Retry failed"), async () => {
 			status.dialog.hide();
-			const entries = failed.map((row) => retry_entry(used[row.mapping_name]));
+			const entries = [];
+			for (const row of failed) entries.push(await retry_entry(used[row.mapping_name]));
 			const asked = await ask_all(entries);
 			if (!asked) {
 				frappe.show_alert({ message: __("Cancelled. Nothing was sent to Bosta."), indicator: "orange" });
@@ -210,18 +215,44 @@
 		});
 	}
 
+	// Fresh server defaults (COD, resolved city and district candidates) under the values the
+	// operator already used. If the defaults can no longer be read, the used values stand alone.
 	function retry_entry(order) {
-		return {
+		const used = {
+			receiver_name: order.receiver_name,
+			receiver_phone: order.receiver_phone,
+			address_first_line: order.address_first_line,
+		};
+		const fallback = {
 			sales_order: order.sales_order,
 			defaults: {
-				receiver_name: order.receiver_name,
-				receiver_phone: order.receiver_phone,
+				...used,
 				address_city: order.city,
 				district_id: order.district_id,
-				address_first_line: order.address_first_line,
 				cod_amount: order.expected_cod,
 			},
 		};
+		return frappe
+			.call({ method: DEFAULTS_METHOD, type: "POST", silent: true, args: { sales_order: order.sales_order } })
+			.then((r) => {
+				const fresh = r.message || {};
+				const same_city =
+					fresh.city_id && String(fresh.city_name || "").trim().toLowerCase() === String(order.city || "").trim().toLowerCase();
+				const defaults = { ...fresh, ...used, address_city: order.city };
+				if (same_city) {
+					// The resolved city is the one used: keep its candidates and select the used district.
+					defaults.district_id = order.district_id || fresh.district_id;
+					if (fresh.district_candidates && order.district_id) {
+						defaults.district_candidates = [...fresh.district_candidates, order.district_id];
+					}
+				} else {
+					delete defaults.city_id;
+					delete defaults.district_candidates;
+					defaults.district_id = order.district_id;
+				}
+				return { sales_order: order.sales_order, defaults };
+			})
+			.catch(() => fallback);
 	}
 
 	// Add the action to ERPNext's own Sales Order list settings instead of replacing them.

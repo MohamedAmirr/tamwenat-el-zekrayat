@@ -90,6 +90,10 @@ class FakeBosta:
 
 class BostaFixtureMixin:
 	def setUp(self):
+		from marketplace_integrations.integrations.bosta import locations
+
+		locations.reset_request_state()
+		self.addCleanup(locations.reset_request_state)
 		self.suffix = frappe.generate_hash(length=8)
 		self._created = []
 		self._purged = []
