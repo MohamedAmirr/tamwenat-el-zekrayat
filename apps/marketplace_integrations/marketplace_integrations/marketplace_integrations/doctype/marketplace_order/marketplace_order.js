@@ -207,7 +207,17 @@ function render_noon_fulfillment_buttons(frm, available_actions) {
 			label: __("Upload Invoice"),
 			click: () => show_noon_upload_invoice_dialog(frm),
 		},
+		{
+			action: "upload_order_invoice",
+			label: __("Upload Order Invoice"),
+			click: () => show_noon_upload_order_invoice_dialog(frm),
+		},
 		{ action: "retry", label: __("Retry"), click: () => show_noon_retry_dialog(frm) },
+		{
+			action: "retry_order_invoice",
+			label: __("Retry Order Invoice"),
+			click: () => run_noon_retry_order_invoice(frm),
+		},
 		// #146 review finding #2: recovery actions for a shipment stuck in Error
 		// or Cancel Pending with no other way out, and for an order-level Out of
 		// Stock reservation orphaned by a hard-killed worker.
@@ -584,6 +594,54 @@ function show_noon_upload_invoice_dialog(frm) {
 		},
 	});
 	dialog.show();
+}
+
+function show_noon_upload_order_invoice_dialog(frm) {
+	const dialog = new frappe.ui.Dialog({
+		title: __("Upload Noon Order Invoice"),
+		fields: [
+			{
+				fieldname: "invoice_file",
+				fieldtype: "Attach",
+				label: __("Invoice PDF"),
+				reqd: 1,
+				// Same as the shipment invoice dialog: the server rejects a
+				// non-private File; this just tells the user up front.
+				description: __("Must be uploaded as Private - a public file is rejected."),
+			},
+			{ fieldname: "invoice_nr", fieldtype: "Data", label: __("Invoice Nr"), reqd: 1 },
+			{ fieldname: "issued_at", fieldtype: "Date", label: __("Issued At"), reqd: 1 },
+		],
+		primary_action_label: __("Upload"),
+		primary_action(values) {
+			dialog.hide();
+			frappe
+				.call({
+					method: "marketplace_integrations.api.noon_fulfillment.upload_order_invoice",
+					args: {
+						marketplace_order: frm.doc.name,
+						file_url: values.invoice_file,
+						invoice_nr: values.invoice_nr,
+						issued_at: values.issued_at,
+					},
+					freeze: true,
+					freeze_message: __("Queuing invoice upload..."),
+				})
+				.then((r) => show_noon_queue_toast(r, frm));
+		},
+	});
+	dialog.show();
+}
+
+function run_noon_retry_order_invoice(frm) {
+	frappe
+		.call({
+			method: "marketplace_integrations.api.noon_fulfillment.retry_order_invoice",
+			args: { marketplace_order: frm.doc.name },
+			freeze: true,
+			freeze_message: __("Queuing retry..."),
+		})
+		.then((r) => show_noon_queue_toast(r, frm));
 }
 
 function show_noon_retry_dialog(frm) {

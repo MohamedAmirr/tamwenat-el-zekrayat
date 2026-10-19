@@ -14,7 +14,7 @@ below). The reconciliation Script Report is not built (findings are Needs Attent
   eligibility rule, line-grouping, date, currency and customer handling.
 - A Noon-only "Noon Fulfillment" tab on Marketplace Order: Create Shipment,
   Cancel Shipment, Add AWB, Mark Out of Stock (UpdateOrder), Upload Shipment
-  Invoice, and Retry — backed by three new child doctypes (`Marketplace
+  Invoice (or one order-level invoice), and Retry — backed by three new child doctypes (`Marketplace
   Order Shipment`, `...Unit`, `...AWB`) and a `Fulfillment` sync_type on
   `Marketplace Sync Log`.
 - No ERPNext stock or accounting side effects: no Delivery Note, Sales
@@ -257,10 +257,42 @@ relied on in production:
 Do not roll this out to production Noon fulfillment before these nine items
 have been checked against a real Noon account.
 
+## Order-level invoice (UploadFbpiOrderInvoice)
+
+An alternative to per-shipment invoices for merchants who issue one invoice
+for the whole order (`POST /fbpi/v1/fbpi-order/invoice/upload`). Button
+"Upload Order Invoice" in the Noon Fulfillment group, same dialog as the
+shipment invoice (private PDF attachment, Invoice Nr, Issued At).
+
+- State lives on the Marketplace Order (Noon Fulfillment tab, "Order
+  Invoice" section): `noon_order_invoice_file`, `_nr`, `_issued_at`,
+  `_status` (Not Uploaded/Pending/Uploaded/Error), `_last_error`, and a
+  hidden `_idempotency_key`.
+- It runs exactly like the shipment invoice: order lock, private/`%PDF-`/5 MiB
+  checks, a fresh idempotency key per explicit upload, Pending committed
+  before the enqueue, the worker releases the lock around the Noon call and
+  ignores a stale key, errors go to the dedicated last-error field, and each
+  call writes a `Fulfillment` Sync Log row (`UploadOrderInvoice`, never the
+  base64). A "Retry Order Invoice" button re-enqueues a Pending/Error upload
+  with its saved key. Re-uploading over an Uploaded order invoice is allowed
+  (Noon supersedes the previous one); a second upload while Pending is not.
+- **Precondition:** the order must have at least one shipment with status
+  `Created` (mirrors the shipment-invoice gating). Noon's endpoint documents
+  no shipment requirement; this is a deliberate local choice, and the worker
+  re-checks it before calling Noon.
+- **No mixing:** the order invoice is refused while any shipment invoice is
+  Pending or Uploaded, and a shipment invoice is refused while the order
+  invoice is Pending or Uploaded. An `Error` invoice on either side does not
+  block the other kind.
+- Unverified against a real account: the endpoint's documented success
+  and error bodies are only "a successful response" and "an unexpected error
+  response", so the failure message shown is whatever
+  `client.error_message()` extracts; idempotency/supersede behavior is the
+  same open item as checklist item 8.
+
 ## Out of scope (#146)
 
-- Order-level `UploadFbpiOrderInvoice` (shipment-level was chosen instead),
-  bulk AWB pre-generation, `CreateSandboxOrder` tooling.
+- Bulk AWB pre-generation, `CreateSandboxOrder` tooling.
 - Automatic Sales Order amendment after delivery (cancellation of an
   undelivered, unbilled order is done by the reconciliation planner, #179), Delivery Note, Sales
   Invoice, Payment Entry, Credit Note, or stock ledger entries. (A draft Sales
