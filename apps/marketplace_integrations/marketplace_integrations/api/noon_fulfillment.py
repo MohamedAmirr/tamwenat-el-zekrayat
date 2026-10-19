@@ -106,6 +106,18 @@ def upload_invoice(
 
 
 @frappe.whitelist(methods=["POST"])
+def upload_order_invoice(marketplace_order: str, file_url: str, invoice_nr: str, issued_at: str):
+	_get_noon_order(marketplace_order)
+	return fulfillment.upload_order_invoice(marketplace_order, file_url, invoice_nr, issued_at)
+
+
+@frappe.whitelist(methods=["POST"])
+def retry_order_invoice(marketplace_order: str):
+	_get_noon_order(marketplace_order)
+	return fulfillment.retry_order_invoice(marketplace_order)
+
+
+@frappe.whitelist(methods=["POST"])
 def retry(marketplace_order: str, integration_shipment_nr: str):
 	_get_noon_order(marketplace_order)
 	return fulfillment.retry(marketplace_order, integration_shipment_nr)

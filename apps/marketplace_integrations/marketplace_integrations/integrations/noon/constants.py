@@ -30,8 +30,9 @@ SHIPMENT_COURIER_AWBS_ADD_PATH = "/fbpi/v1/shipment/courier-awbs/add"
 NOON_LOGISTICS_AWBS_GET_PATH = "/fbpi/v1/shipment/noon-logistics-awbs/get"
 FBPI_ORDER_UPDATE_PATH = "/fbpi/v1/fbpi-order/update"
 SHIPMENT_INVOICE_UPLOAD_PATH = "/fbpi/v1/shipment/invoice/upload"
+FBPI_ORDER_INVOICE_UPLOAD_PATH = "/fbpi/v1/fbpi-order/invoice/upload"
 
-# Decision 19: UploadShipmentInvoice documents a 5 MiB DECODED limit.
+# Decision 19: UploadShipmentInvoice and UploadFbpiOrderInvoice document a 5 MiB DECODED limit.
 SHIPMENT_INVOICE_MAX_BYTES = 5 * 1024 * 1024
 
 # #163 FBPI event-notification webhook receiver (api/noon_webhooks.py).

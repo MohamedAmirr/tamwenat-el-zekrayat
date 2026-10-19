@@ -24,7 +24,9 @@ from marketplace_integrations.api.noon_fulfillment import (
 	mark_out_of_stock,
 	release_stuck_oos_reservation,
 	retry,
+	retry_order_invoice,
 	upload_invoice,
+	upload_order_invoice,
 )
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 from marketplace_integrations.tests.utils import make_role_user
@@ -140,6 +142,20 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 		mock_fn.return_value = {"queued": True}
 		result = upload_invoice(self.order.name, "ORD-1", "/files/invoice.pdf", "INV-1", "2026-10-01")
 		mock_fn.assert_called_once_with(self.order.name, "ORD-1", "/files/invoice.pdf", "INV-1", "2026-10-01")
+		self.assertEqual(result, {"queued": True})
+
+	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.upload_order_invoice")
+	def test_upload_order_invoice_delegates(self, mock_fn):
+		mock_fn.return_value = {"queued": True}
+		result = upload_order_invoice(self.order.name, "/files/invoice.pdf", "INV-1", "2026-10-01")
+		mock_fn.assert_called_once_with(self.order.name, "/files/invoice.pdf", "INV-1", "2026-10-01")
+		self.assertEqual(result, {"queued": True})
+
+	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.retry_order_invoice")
+	def test_retry_order_invoice_delegates(self, mock_fn):
+		mock_fn.return_value = {"queued": True}
+		result = retry_order_invoice(self.order.name)
+		mock_fn.assert_called_once_with(self.order.name)
 		self.assertEqual(result, {"queued": True})
 
 	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.retry")
