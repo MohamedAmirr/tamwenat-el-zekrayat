@@ -98,6 +98,7 @@ def get_sales_order_shipment(sales_order_name):
 		"address_first_line",
 		"cod_amount",
 		"delivery_note",
+		"delivery_note_error",
 	]
 	for active, status_filter in ((True, ["!=", "Canceled"]), (False, "Canceled")):
 		rows = frappe.get_list(
@@ -124,6 +125,7 @@ def get_sales_order_shipment(sales_order_name):
 				"address_first_line": row.address_first_line or "",
 				"cod_amount": flt(row.cod_amount),
 				"delivery_note": row.delivery_note or "",
+				"delivery_note_error": row.delivery_note_error or "",
 				"delivery_note_status": _readable_delivery_note_status(row.delivery_note),
 			}
 	return None

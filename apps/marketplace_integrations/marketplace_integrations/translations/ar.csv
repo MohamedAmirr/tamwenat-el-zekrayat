@@ -666,6 +666,9 @@ Catalog webhook secret copied.,تم نسخ سر Webhook الكتالوج.
 Changed,تم التغيير
 Changing the Noon destination's active state,تغيير حالة تفعيل وجهة Noon
 Check Bosta,فحص Bosta
+Retry Delivery Note,إعادة محاولة إنشاء إذن التسليم
+Creating the Delivery Note...,جارٍ إنشاء إذن التسليم...
+Delivery Note created.,تم إنشاء إذن التسليم.
 Checking Bosta...,جارٍ فحص Bosta...
 Choose a Bosta city and district.,اختر مدينة ومنطقة Bosta.
 Choose a Bosta district.,اختر منطقة Bosta.

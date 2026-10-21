@@ -84,3 +84,24 @@ test("buttons are re-added on every refresh and Check Bosta is hidden from non-c
 	handlers["Bosta Shipment"].refresh(frm);
 	assert.deepEqual(buttons, ["Print Bosta A4 Label"]);
 });
+
+test("Delivery Note Failed shows Retry Delivery Note and an escaped red banner", () => {
+	const { handlers } = load();
+	global.frappe.utils = { escape_html: (value) => String(value).replace(/</g, "&lt;") };
+	const buttons = [];
+	const headlines = [];
+	const frm = {
+		doc: { name: "S", status: "Delivery Note Failed", delivery_note: "", delivery_note_error: "<b>no stock" },
+		is_new: () => false,
+		add_custom_button: (label) => buttons.push(label),
+		dashboard: { set_headline: (...args) => headlines.push(args) },
+	};
+	handlers["Bosta Shipment"].refresh(frm);
+	assert.deepEqual(buttons, ["Retry Delivery Note"]);
+	assert.deepEqual(headlines, [["&lt;b>no stock", "red"]]);
+
+	headlines.length = 0;
+	frm.doc.status = "Bosta Failed";
+	handlers["Bosta Shipment"].refresh(frm);
+	assert.deepEqual(headlines, []);
+});

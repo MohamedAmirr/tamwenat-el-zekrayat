@@ -762,6 +762,13 @@ test("the tab shows every listed value, with the district as its ID", async () =
 	}
 });
 
+test("a Delivery Note Failed shipment shows its escaped error in red above the table", async () => {
+	const { html } = await tab_for({ status: "Delivery Note Failed", delivery_note_error: "<b>no stock" });
+	assert.match(html, /^<p class="text-danger">&lt;b&gt;no stock<\/p><table/);
+	const ok = await tab_for({ status: "Bosta Created", delivery_note_error: "old" });
+	assert.doesNotMatch(ok.html, /text-danger/);
+});
+
 test("a zero COD is shown as 0, and the Delivery Note status is only shown when given", async () => {
 	const { html } = await tab_for({ cod_amount: 0, delivery_note_status: "" });
 	assert.match(html, /COD Sent<\/th><td>EGP 0<\/td>/);
