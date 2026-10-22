@@ -1276,27 +1276,56 @@ class IntegrationTestQueueInventorySync(InventoryFixtureMixin, IntegrationTestCa
 		self.assertEqual(result["jobs"], [])
 		self.assertIn("not a Shopify account", result["skipped_accounts"][0]["reason"])
 
-	def test_requires_write_permission_on_the_mapping(self):
-		# A real user with WRITE on the account (so the account-level checks pass)
-		# but only READ on the mapping: only the mapping check can fail.
+	def test_user_without_a_platform_role_is_denied(self):
+		# #322 (strict): marketplace rows are visible only through a platform role (or System
+		# Manager). A user with read/write DocPerms but no platform role is denied.
 		mapping = self._one(5)
 		email, _role = make_role_user(
 			self,
-			"Inv Reader",
-			{"Marketplace Account": ["write"], "Marketplace Product Mapping": ["read"]},
+			"Inv No Platform",
+			{"Marketplace Account": ["write"], "Marketplace Product Mapping": ["write"]},
 		)
 		frappe.set_user(email)
 		try:
-			self.assertTrue(frappe.has_permission("Marketplace Account", "read", self.account.name))
-			self.assertTrue(frappe.has_permission("Marketplace Account", "write", self.account.name))
-			self.assertTrue(frappe.has_permission("Marketplace Product Mapping", "read"))
-			self.assertFalse(frappe.has_permission("Marketplace Product Mapping", "write"))
 			with self.assertRaises(frappe.PermissionError):
 				inventory_sync.queue_inventory_sync([mapping.name])
 			with self.assertRaises(frappe.PermissionError):
 				inventory_sync.queue_account_reconciliation(self.account.name)
 		finally:
 			frappe.set_user("Administrator")
+
+	def test_requires_write_permission_on_the_mapping(self):
+		# A mock is legitimate here: every platform role is granted full rights on Marketplace
+		# Product Mapping, so a read-only platform user cannot exist (#322). Administrator passes
+		# every real check; only WRITE on the mapping doctype/doc is denied, so only the
+		# endpoint's own mapping write check can raise.
+		mapping = self._one(5)
+		real_has_permission = frappe.has_permission
+		real_doc_has_permission = frappe.model.document.Document.has_permission
+
+		def deny_mapping_write(doctype=None, ptype="read", *args, **kwargs):
+			if doctype == "Marketplace Product Mapping" and ptype == "write":
+				return False
+			return real_has_permission(doctype, ptype, *args, **kwargs)
+
+		def deny_mapping_doc_write(doc, permtype="write", *args, **kwargs):
+			if doc.doctype == "Marketplace Product Mapping" and permtype == "write":
+				return False
+			return real_doc_has_permission(doc, permtype, *args, **kwargs)
+
+		with (
+			patch("frappe.has_permission", side_effect=deny_mapping_write),
+			patch.object(
+				frappe.model.document.Document,
+				"has_permission",
+				autospec=True,
+				side_effect=deny_mapping_doc_write,
+			),
+		):
+			with self.assertRaises(frappe.PermissionError):
+				inventory_sync.queue_inventory_sync([mapping.name])
+			with self.assertRaises(frappe.PermissionError):
+				inventory_sync.queue_account_reconciliation(self.account.name)
 
 	def test_rejects_an_empty_selection(self):
 		with self.assertRaises(frappe.ValidationError):

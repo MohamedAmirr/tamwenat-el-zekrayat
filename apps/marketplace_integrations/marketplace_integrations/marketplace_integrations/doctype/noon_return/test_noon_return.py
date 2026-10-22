@@ -119,7 +119,8 @@ class TestNoonReturn(IntegrationTestCase):
 			self.assertTrue(fields[fieldname].read_only, fieldname)
 
 		permissions = {perm.role: perm for perm in meta.permissions}
-		self.assertEqual(set(permissions), {"System Manager"})
+		# #322: Noon User gets full access alongside System Manager.
+		self.assertEqual(set(permissions), {"System Manager", "Noon User"})
 		self.assertTrue(permissions["System Manager"].read)
 		self.assertTrue(permissions["System Manager"].create)
 		self.assertTrue(permissions["System Manager"].write)

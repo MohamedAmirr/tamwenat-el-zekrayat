@@ -197,16 +197,25 @@ class IntegrationTestMappingImport(IntegrationTestCase):
 		)
 
 	def test_export_is_limited_to_accounts_the_user_may_read(self):
-		allowed, other = self.make_account(), self.make_account()
+		# #322 (strict): a user sees marketplace rows only through a platform role, so the user
+		# holds Talabat User (its shipped DocPerm rows grant mapping/account access). Export is
+		# limited by platform (no Shopify rows) and by a User Permission on one Talabat account.
+		allowed, other, foreign = self.make_account(), self.make_account(), self.make_account()
+		frappe.db.set_value("Marketplace Account", foreign.name, "platform", "Shopify", update_modified=False)
 		item = self.make_item()
 		prefix = self.unique("scoped")
 		self.make_mapping(allowed, item, f"{prefix}-allowed")
 		self.make_mapping(other, item, f"{prefix}-other")
-		email, _role = make_role_user(
-			self, "Mapping Export Scoped", {"Marketplace Product Mapping": ["read"], "Marketplace Account": ["read"]}
-		)
+		self.make_mapping(foreign, item, f"{prefix}-foreign")
+		email, _role = make_role_user(self, "Mapping Export Scoped", {})
+		frappe.get_doc("User", email).add_roles("Talabat User")
 		user_permission = frappe.get_doc(
-			{"doctype": "User Permission", "user": email, "allow": "Marketplace Account", "for_value": allowed.name}
+			{
+				"doctype": "User Permission",
+				"user": email,
+				"allow": "Marketplace Account",
+				"for_value": allowed.name,
+			}
 		).insert()
 		self.track(user_permission)
 		frappe.clear_cache(user=email)
@@ -217,6 +226,25 @@ class IntegrationTestMappingImport(IntegrationTestCase):
 		references = {row["external_reference"] for row in self.exported_rows(content)}
 		self.assertIn(f"{prefix}-allowed", references)
 		self.assertNotIn(f"{prefix}-other", references)
+		self.assertNotIn(f"{prefix}-foreign", references)
+
+	def test_export_without_user_permission_is_limited_to_the_users_platform(self):
+		talabat, shopify = self.make_account(), self.make_account()
+		frappe.db.set_value("Marketplace Account", shopify.name, "platform", "Shopify", update_modified=False)
+		item = self.make_item()
+		prefix = self.unique("platform")
+		self.make_mapping(talabat, item, f"{prefix}-talabat")
+		self.make_mapping(shopify, item, f"{prefix}-shopify")
+		email, _role = make_role_user(self, "Mapping Export Platform", {})
+		frappe.get_doc("User", email).add_roles("Talabat User")
+		frappe.clear_cache(user=email)
+
+		with self.set_user(email):
+			content = self.export_bytes()
+
+		references = {row["external_reference"] for row in self.exported_rows(content)}
+		self.assertIn(f"{prefix}-talabat", references)
+		self.assertNotIn(f"{prefix}-shopify", references)
 
 	def test_new_rows_create_and_existing_identity_updates_without_duplication(self):
 		account = self.make_account()
@@ -413,15 +441,11 @@ class IntegrationTestMappingImport(IntegrationTestCase):
 			with self.set_user(user.name):
 				self.assertFalse(frappe.has_permission("Marketplace Product Mapping", "read"))
 				self.assertTrue(frappe.has_permission("Marketplace Product Mapping", "select"))
-				# This proves the Frappe behavior the explicit read checks protect
-				# against: get_list accepts select-only access and returns data.
+				# No get_list-leak assertion any more: with strict #322 filtering a user without a
+				# platform role gets no marketplace rows even with select access, and a platform
+				# role grants full rights, so select-only access to a row cannot be shown here.
 				self.assertEqual(
-					frappe.get_list(
-						"Marketplace Product Mapping",
-						filters={"name": mapping.name},
-						fields=["name", "external_reference"],
-					),
-					[{"name": mapping.name, "external_reference": mapping.external_reference}],
+					frappe.get_list("Marketplace Product Mapping", filters={"name": mapping.name}), []
 				)
 				with self.assertRaises(frappe.PermissionError):
 					mapping_import.export_mappings_xlsx()

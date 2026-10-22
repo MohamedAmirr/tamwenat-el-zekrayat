@@ -7,6 +7,9 @@ Users are ordinary (non-Administrator) users built with ``make_role_user`` and t
 real platform roles created by the Role fixture, so the shipped DocPerm rows and the
 ``permissions.py`` hooks are what is exercised. The test class deletes what it creates in
 ``tearDown`` because ``make_role_user`` commits.
+
+There is no read-only platform user by design: every platform role is granted full rights on the
+doctypes it sees, so tests that need a user lacking one ptype cannot use a platform role.
 """
 
 import json
@@ -125,6 +128,7 @@ class IntegrationTestPlatformPermissions(IntegrationTestCase):
 				"sync_type": "Order Import",
 				"status": "Error",
 				"trigger_source": "Manual",
+				"attempted_at": frappe.utils.now_datetime(),
 				"marketplace_account": account,
 			}
 		).insert()
@@ -158,6 +162,19 @@ class IntegrationTestPlatformPermissions(IntegrationTestCase):
 		for role in ("Talabat User", "Noon User", "Shopify User", "Bosta User"):
 			with self.subTest(role=role):
 				self.assertEqual(frappe.db.get_value("Role", role, "desk_access"), 1)
+
+	def test_explicit_docperm_without_platform_role_gets_no_rows(self):
+		# #322 strict decision: a DocPerm alone never grants marketplace rows; the user needs a
+		# platform role (or System Manager). make_role_user grants real Custom DocPerm rows.
+		email, _role = make_role_user(self, "No Platform Role", {doctype: ["read"] for doctype in FILTERED})
+		frappe.clear_cache(user=email)
+		for doctype in FILTERED:
+			with self.subTest(doctype=doctype):
+				self.assertEqual(self.visible(email, doctype), set())
+				for name in self.names_for(doctype).values():
+					doc = frappe.get_doc(doctype, name)
+					with as_user(email), self.assertRaises(frappe.PermissionError):
+						doc.check_permission("read")
 
 	def test_talabat_user_lists_only_talabat_rows(self):
 		user = self.make_user("Talabat Staff", "Talabat User")
