@@ -31,7 +31,7 @@ Branch model: `dev` is the integration branch, `prod` is the DEFAULT branch (der
 - Never merge a PR (`gh pr merge`) unless the user explicitly tells you to for that PR. The user merges PRs. Do not add `--delete-branch` workarounds either; the repo already deletes head branches on merge.
 - Do not add attribution lines (Co-Authored-By or "Generated with") to commits or PR bodies.
 - `Closes #N` in a PR merged into `dev` does NOT auto-close the issue (only merges into the default branch `prod` do). The publish PR carries the Closes lines; close issues manually only when told to.
-- After the user says a PR is merged, sync locally: `git fetch` then `git checkout dev && git pull --ff-only`. Then re-run `bench migrate` + the full test suite against the dev site via `frappe-ops` so the dev environment reflects the new baseline (see `docs/dev-environment.md`'s branch-tracking gotcha; a stale dev-site schema is easy to end up with otherwise).
+- After the user says a PR is merged, sync locally: `git fetch` then `git checkout dev && git pull --ff-only`. Then, via `frappe-ops`, run `bench --site dev.localhost migrate` (back up first if the site has data that matters) so the dev site's schema reflects the new baseline, and separately `bench --site test.localhost migrate` followed by the full suite with `--site test.localhost`. Never run tests on `dev.localhost` or a production site (see `docs/frappe-best-practices.md`, "Test site vs dev site", and `docs/dev-environment.md`'s branch-tracking gotcha).
 
 Report back concisely: what you ran, the resulting commit SHA / PR URL / repo URL / issue URLs, and anything you deliberately did NOT do (e.g. "left .env untracked, didn't commit it").
 

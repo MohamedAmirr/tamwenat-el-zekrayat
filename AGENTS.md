@@ -22,6 +22,8 @@ load every document by default.
 | Talabat API behavior | `docs/talabat-integration/README.md`, then `openapi.json` as needed |
 | Docker, bench, logs, backups, migration | `docs/docker-ops.md`; read `.env` before using site/version values |
 | Dev bench or tests | `docs/dev-environment.md`, `docs/frappe-conventions.md` |
+| Cross-cutting Frappe rules (permissions, data integrity, background work, verification, version compatibility) | `docs/frappe-best-practices.md` |
+| Desk UI, workspace/sidebar, forms, lists, reports, custom pages | `docs/ui-customization.md` (and `.claude/skills/frappe-desk-ui/SKILL.md` for client scripts) |
 | Issue, branch, PR, or commit work | `docs/issue-conventions.md` |
 
 ## Non-negotiable rules
@@ -51,8 +53,9 @@ load every document by default.
   immediately afterward and offer to revise it.
 - Never edit vendored `frappe` or `erpnext`; change only the custom app or
   exported Frappe fixtures.
-- Prefer the Frappe ORM. Parameterize any unavoidable SQL.
-- Keep business logic in controllers or `doc_events`, not in API endpoints.
+- Prefer the Frappe ORM. Parameterize any unavoidable SQL. Details and
+  pitfalls: `docs/frappe-best-practices.md`.
+- Business logic: shared services for reusable workflows, controllers for document invariants, `doc_events` only as an intentional trigger (none for catalog), API endpoints authorize/validate/delegate. See `docs/frappe-best-practices.md`.
 - Do not expose secrets in logs or responses. Every whitelisted API method
   authorizes its caller; public webhooks validate their signature.
 - Update `docs/marketplace-integrations/architecture.md` when
@@ -74,7 +77,11 @@ load every document by default.
 ## Verification and handoff
 
 - Test changed Frappe code using the dev stack and its documented `bench`
-  commands. Do not weaken a test merely to make it pass.
+  commands. Frappe tests run only with `--site test.localhost`, never
+  `dev.localhost` or a production site. Updating the dev site schema
+  (`migrate` on `dev.localhost`) is separate from migrating and testing
+  `test.localhost`; see "Test site vs dev site" in
+  `docs/frappe-best-practices.md`. Do not weaken a test merely to make it pass.
 - Run configured linting for touched files.
 - Before committing, inspect `git status` and both staged and unstaged diffs.
 - Use one branch per issue (`<type>/<issue>-<slug>`), and never commit `.env`
