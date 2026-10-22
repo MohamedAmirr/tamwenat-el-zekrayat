@@ -30,6 +30,9 @@ def add_reference_labels(rows):
 
 	titles = {}
 	for doctype, names in names_by_doctype.items():
+		# No read permission: no label (the row still shows its name); never raise for the whole report.
+		if not frappe.has_permission(doctype, "read"):
+			continue
 		meta = frappe.get_meta(doctype)
 		if not (meta.show_title_field_in_link and meta.title_field):
 			continue

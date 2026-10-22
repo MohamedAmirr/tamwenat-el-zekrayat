@@ -8,11 +8,6 @@ const { get_bosta_shipment_indicator, show_row_name_on_hover } = require("./bost
 
 const SETTINGS = () => frappe.listview_settings["Bosta Shipment"];
 
-test("the status column is translated for display and empty-safe", () => {
-	assert.equal(SETTINGS().formatters.status("Bosta Created"), "ar:Bosta Created");
-	assert.equal(SETTINGS().formatters.status(""), "");
-});
-
 test("the indicator shows the translated status with a colour and a stored-value filter", () => {
 	assert.deepEqual(get_bosta_shipment_indicator({ status: "Completed" }), [
 		"ar:Completed",
@@ -24,18 +19,35 @@ test("the indicator shows the translated status with a colour and a stored-value
 	assert.equal(get_bosta_shipment_indicator({})[2], "status,=,Pending Bosta");
 });
 
-test("the row tooltip adds the docname after the tracking number", () => {
-	let handler;
-	show_row_name_on_hover({ $result: { on: (_events, _selector, fn) => (handler = fn) } });
-	const link = { textContent: "TRK123", dataset: { name: "BOSTA-SHP-00001" }, title: "" };
-	handler.call(link);
-	assert.equal(link.title, "TRK123 (BOSTA-SHP-00001)");
+test("Bosta Shipment list hides the docname column; the readable title is the subject (#324)", () => {
+	assert.equal(SETTINGS().hide_name_column, true);
 });
 
-test("the tooltip is skipped when the subject already is the docname", () => {
-	let handler;
-	show_row_name_on_hover({ $result: { on: (_events, _selector, fn) => (handler = fn) } });
-	const link = { textContent: "BOSTA-SHP-00001", dataset: { name: "BOSTA-SHP-00001" }, title: "" };
-	handler.call(link);
-	assert.equal(link.title, "");
+test("Bosta Shipment list attaches the shared row tooltip helper once it is loaded, and survives a load failure", async () => {
+	const attached = [];
+	global.frappe.require = () => Promise.resolve();
+	global.frappe.marketplace_integrations = { list_row_name: { attach_to_list: (lv) => attached.push(lv) } };
+	const listview = { $result: {} };
+	await show_row_name_on_hover(listview);
+	assert.deepEqual(attached, [listview]);
+
+	// Helper missing after the load: nothing happens, nothing throws.
+	global.frappe.marketplace_integrations = {};
+	await show_row_name_on_hover(listview);
+	assert.equal(attached.length, 1);
+
+	// Load failure is logged, not thrown.
+	const original = console.error;
+	console.error = () => {};
+	global.frappe.require = () => Promise.reject(new Error("offline"));
+	try {
+		await show_row_name_on_hover(listview);
+	} finally {
+		console.error = original;
+	}
+});
+
+test("the status shows only as the translated indicator: no status formatter is defined (Frappe drops that column)", () => {
+	assert.equal(SETTINGS().formatters, undefined);
+	assert.equal(typeof SETTINGS().get_indicator, "function");
 });

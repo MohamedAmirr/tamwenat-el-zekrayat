@@ -2,9 +2,10 @@
 // For license information, please see license.txt
 
 // #324: Bosta Shipment's title_field is `tracking_number`, so the subject link reads as
-// the tracking number (the docname while Bosta has not accepted the shipment yet).
-// Status is a normal list column plus an indicator; the docname stays on the form
-// and in the row tooltip.
+// the tracking number (list/link display shows the docname while Bosta has not accepted the
+// shipment yet; Document.get_title() itself returns ''). The status shows as the translated,
+// coloured indicator pill: defining get_indicator makes Frappe drop the status field column.
+// The docname (ID) column is hidden; the docname stays on the form, in search and in the row tooltip.
 const BOSTA_STATUS_COLORS = {
 	"Pending Bosta": "orange",
 	"Bosta Created": "blue",
@@ -21,25 +22,24 @@ function get_bosta_shipment_indicator(doc) {
 
 if (typeof frappe !== "undefined") {
 	frappe.listview_settings["Bosta Shipment"] = {
+		hide_name_column: true,
 		add_fields: ["status"],
 		get_indicator: get_bosta_shipment_indicator,
-		formatters: {
-			// Translate the fixed English status for display only (filters use the stored value).
-			status(value) {
-				return value ? frappe.utils.escape_html(__(value)) : "";
-			},
-		},
 		onload: show_row_name_on_hover,
 	};
 }
 
+// #324: loads the shared row tooltip helper (public/js/list_row_name.js). The tooltip is a
+// convenience: if the helper cannot load, the list works the same without it. (No top-level const:
+// list scripts share one global scope, so a repeated const name would break the other lists.)
 function show_row_name_on_hover(listview) {
-	if (!listview.$result) return;
-	listview.$result.on("mouseenter focusin", ".list-subject a[data-name]", function () {
-		const text = this.textContent.trim();
-		const name = this.dataset.name;
-		if (name && text !== name) this.title = `${text} (${name})`;
-	});
+	return frappe
+		.require("/assets/marketplace_integrations/js/list_row_name.js")
+		.then(() => {
+			const helper = frappe.marketplace_integrations && frappe.marketplace_integrations.list_row_name;
+			if (helper) helper.attach_to_list(listview);
+		})
+		.catch((error) => console.error("List row name helper failed to load (#324).", error));
 }
 
 if (typeof module !== "undefined") {

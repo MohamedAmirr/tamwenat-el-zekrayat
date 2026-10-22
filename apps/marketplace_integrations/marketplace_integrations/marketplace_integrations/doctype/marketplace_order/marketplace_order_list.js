@@ -4,6 +4,8 @@ if (typeof frappe !== "undefined") {
 		// status formatter reads the Shopify financial/fulfillment statuses
 		// (hidden doctype fields, fetched here regardless).
 		add_fields: ["erpnext_sync_status", "external_financial_status", "external_fulfillment_status", "platform"],
+		// #324: the readable order reference is the subject; the docname (ID) column is hidden.
+		hide_name_column: true,
 		get_indicator: get_order_indicator,
 		formatters: {
 			external_status(value, df, doc) {
@@ -37,15 +39,17 @@ if (typeof frappe !== "undefined") {
 	};
 }
 
-// #324: the subject link shows a readable title; keep the docname reachable as the
-// row tooltip (set lazily on hover/focus, so no per-row work on render).
+// #324: loads the shared row tooltip helper (public/js/list_row_name.js). The tooltip is a
+// convenience: if the helper cannot load, the list works the same without it. (No top-level const:
+// list scripts share one global scope, so a repeated const name would break the other lists.)
 function show_row_name_on_hover(listview) {
-	if (!listview.$result) return;
-	listview.$result.on("mouseenter focusin", ".list-subject a[data-name]", function () {
-		const text = this.textContent.trim();
-		const name = this.dataset.name;
-		if (name && text !== name) this.title = `${text} (${name})`;
-	});
+	return frappe
+		.require("/assets/marketplace_integrations/js/list_row_name.js")
+		.then(() => {
+			const helper = frappe.marketplace_integrations && frappe.marketplace_integrations.list_row_name;
+			if (helper) helper.attach_to_list(listview);
+		})
+		.catch((error) => console.error("List row name helper failed to load (#324).", error));
 }
 
 // #169: one colour per ERPNext sync state so a merchant can scan the list for

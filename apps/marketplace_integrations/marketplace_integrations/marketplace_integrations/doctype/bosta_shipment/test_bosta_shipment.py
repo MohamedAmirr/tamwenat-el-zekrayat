@@ -68,7 +68,7 @@ class TestBostaShipmentTitle(IntegrationTestCase):
 
 		doc.update(
 			{
-				"sales_order": "SAL-ORD-00001",
+				"sales_order": f"SAL-ORD-{frappe.generate_hash(length=10)}",
 				"receiver_name": "Ahmed",
 				"receiver_phone": "01000000000",
 				"city": "Cairo",
@@ -79,6 +79,9 @@ class TestBostaShipmentTitle(IntegrationTestCase):
 		)
 		doc.flags.ignore_links = True
 		doc.insert()
+		self.addCleanup(frappe.delete_doc, "Bosta Shipment", doc.name, force=True, ignore_permissions=True)
 
 		self.assertEqual(doc.status, "Pending Bosta")
-		self.assertEqual(doc.get_title(), doc.name)  # empty tracking number falls back to the docname
+		# Document.get_title() has no docname fallback: it is "" for an empty tracking number.
+		# The docname fallback happens in list and link display, not here.
+		self.assertEqual(doc.get_title(), "")

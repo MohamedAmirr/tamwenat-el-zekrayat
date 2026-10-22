@@ -465,6 +465,7 @@ Inventory Last Synced On,آخر مزامنة للمخزون
 Inventory Last Error,آخر خطأ في المخزون
 Sync Type,نوع المزامنة
 Completed At,تاريخ الاكتمال
+Completed,مكتمل
 Response Data,بيانات الاستجابة
 Connection Name,اسم الاتصال
 Project Code,رمز المشروع
