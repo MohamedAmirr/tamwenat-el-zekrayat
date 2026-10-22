@@ -86,3 +86,12 @@ class IntegrationTestMarketplaceNeedsAttentionReport(IntegrationTestCase):
 	def test_report_is_restricted_to_system_manager(self):
 		report = frappe.get_doc("Report", "Marketplace Needs Attention")
 		self.assertEqual([row.role for row in report.roles], ["System Manager"])
+
+	def test_rows_carry_the_order_title_for_the_dynamic_link_column(self):
+		# #324: Frappe sends link titles for Link columns only, so the report adds
+		# `reference_label` for the Dynamic Link `reference_name` column.
+		_columns, data = execute({"account": self.account.name})
+
+		self.assertEqual(data[0]["reference_name"], self.order.name)
+		self.assertEqual(data[0]["reference_label"], self.order.platform_order_reference)
+		self.assertNotEqual(data[0]["reference_label"], self.order.name)

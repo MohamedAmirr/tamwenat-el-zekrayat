@@ -12,6 +12,7 @@ if (typeof frappe !== "undefined") {
 			},
 		},
 		onload(listview) {
+			show_row_name_on_hover(listview);
 			listview.page.add_inner_button(__("Needs Attention"), () => {
 				frappe.set_route("query-report", "Marketplace Needs Attention");
 			});
@@ -34,6 +35,17 @@ if (typeof frappe !== "undefined") {
 			}
 		},
 	};
+}
+
+// #324: the subject link shows a readable title; keep the docname reachable as the
+// row tooltip (set lazily on hover/focus, so no per-row work on render).
+function show_row_name_on_hover(listview) {
+	if (!listview.$result) return;
+	listview.$result.on("mouseenter focusin", ".list-subject a[data-name]", function () {
+		const text = this.textContent.trim();
+		const name = this.dataset.name;
+		if (name && text !== name) this.title = `${text} (${name})`;
+	});
 }
 
 // #169: one colour per ERPNext sync state so a merchant can scan the list for
@@ -363,6 +375,7 @@ if (typeof module !== "undefined") {
 		get_order_indicator,
 		platform_status_text,
 		retry_erpnext_sync,
+		show_row_name_on_hover,
 		settle_with_concurrency,
 		show_refunded_orders,
 		summarize_retry_results,

@@ -27,6 +27,7 @@ const {
 	get_order_indicator,
 	platform_status_text,
 	retry_erpnext_sync,
+	show_row_name_on_hover,
 	settle_with_concurrency,
 	show_refunded_orders,
 	summarize_retry_results,
@@ -221,4 +222,12 @@ test("retry action runs sync calls with a small concurrency limit and one summar
 	await retry_erpnext_sync(listview);
 	assert.ok(max_in_flight <= 3);
 	assert.match(summary.message, /Succeeded: 5/);
+});
+
+test("the row tooltip shows the order reference with the docname, set on hover", () => {
+	let handler;
+	show_row_name_on_hover({ $result: { on: (_events, _selector, fn) => (handler = fn) } });
+	const link = { textContent: "#1027", dataset: { name: "MKTORD-00001" }, title: "" };
+	handler.call(link);
+	assert.equal(link.title, "#1027 (MKTORD-00001)");
 });

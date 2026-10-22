@@ -4,7 +4,7 @@ const test = require("node:test");
 global.__ = (message) => message;
 global.frappe = { listview_settings: {} };
 
-const { marketplace_account_get_indicator } = require("./marketplace_account_list.js");
+const { marketplace_account_get_indicator, show_row_name_on_hover } = require("./marketplace_account_list.js");
 
 test("a disabled account is always grey, regardless of platform or status", () => {
 	for (const platform of ["Talabat", "Shopify", "Noon"]) {
@@ -67,4 +67,23 @@ test("the error check takes priority over a stale OPEN/CLOSED status on the same
 		external_status_error: "Could not confirm status",
 	});
 	assert.equal(color, "red");
+});
+
+test("the row tooltip shows the readable title with the docname, set on hover", () => {
+	let handler;
+	show_row_name_on_hover({
+		$result: {
+			on(events, selector, fn) {
+				assert.equal(events, "mouseenter focusin");
+				assert.equal(selector, ".list-subject a[data-name]");
+				handler = fn;
+			},
+		},
+	});
+	const link = { textContent: " Acme Store ", dataset: { name: "MKTACC-00001" }, title: "" };
+	handler.call(link);
+	assert.equal(link.title, "Acme Store (MKTACC-00001)");
+	const same = { textContent: "MKTACC-00002", dataset: { name: "MKTACC-00002" }, title: "" };
+	handler.call(same);
+	assert.equal(same.title, "");
 });

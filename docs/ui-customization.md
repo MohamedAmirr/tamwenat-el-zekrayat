@@ -34,6 +34,13 @@ All paths are under `apps/marketplace_integrations/marketplace_integrations/` un
 - Custom pages: set the page's roles, authorize every server call, and render server values escaped.
 - Loading, empty, success and error states are required on every async screen. Errors show the server message escaped, with a recovery action where one exists.
 
+## Readable references in lists
+
+- Prefer native settings: `title_field` + `show_title_field_in_link` on the target doctype, and `in_list_view` / `in_standard_filter` on real fields. Formatters are client display only; sorting, filtering and search must stay on real stored fields (`search_fields`).
+- Frappe falls back to the docname when the title field is empty, so keep the title field filled (see `MarketplaceOrder.before_save`).
+- Keep the docname reachable (form, plus the row tooltip from `show_row_name_on_hover`). Link report columns get titles in one batched query; Dynamic Link columns get none, so send a label from the report and render it escaped in `<bdi dir="ltr">`.
+- The subject link is plain text: it takes no HTML from a formatter.
+
 ## Scoped styling
 
 - Add CSS only when no standard control does the job. Scope every rule under a class owned by this app (for example a wrapper class on your page or dialog), never bare element selectors or global overrides.

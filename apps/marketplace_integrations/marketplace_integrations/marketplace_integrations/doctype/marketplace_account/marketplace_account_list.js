@@ -25,9 +25,21 @@ function marketplace_account_get_indicator(doc) {
 if (typeof frappe !== "undefined") {
 	frappe.listview_settings["Marketplace Account"] = {
 		get_indicator: marketplace_account_get_indicator,
+		onload: show_row_name_on_hover,
 	};
 }
 
 if (typeof module !== "undefined") {
-	module.exports = { marketplace_account_get_indicator };
+	module.exports = { marketplace_account_get_indicator, show_row_name_on_hover };
+}
+
+// #324: the subject link shows a readable title; keep the docname reachable as the
+// row tooltip (set lazily on hover/focus, so no per-row work on render).
+function show_row_name_on_hover(listview) {
+	if (!listview.$result) return;
+	listview.$result.on("mouseenter focusin", ".list-subject a[data-name]", function () {
+		const text = this.textContent.trim();
+		const name = this.dataset.name;
+		if (name && text !== name) this.title = `${text} (${name})`;
+	});
 }

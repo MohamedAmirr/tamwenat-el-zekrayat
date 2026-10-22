@@ -62,9 +62,20 @@ if (typeof frappe !== "undefined") {
 			if (column.fieldname === "problem_type" || column.fieldname === "reference_doctype") {
 				return default_formatter(__(value || ""), row, column, data);
 			}
+			if (column.fieldname === "reference_name") return reference_html(data);
 			return default_formatter(value, row, column, data);
 		},
 	};
+}
+
+// #324: Dynamic Link columns get no link title from Frappe, so the server sends
+// `reference_label`. The docname stays in the tooltip; both are LTR-isolated for RTL.
+function reference_html(data) {
+	const name = data.reference_name || "";
+	if (!name) return "";
+	const label = frappe.utils.escape_html(data.reference_label || name);
+	const href = `/app/${to_slug(data.reference_doctype)}/${encodeURIComponent(name)}`;
+	return `<a href="${frappe.utils.escape_html(href)}" title="${frappe.utils.escape_html(name)}"><bdi dir="ltr">${label}</bdi></a>`;
 }
 
 function to_slug(doctype) {
@@ -126,5 +137,5 @@ function retry_order_sync(marketplace_order, report) {
 }
 
 if (typeof module !== "undefined") {
-	module.exports = { MARKETPLACE_ATTENTION_PROBLEM_TYPES, next_action_html, to_slug };
+	module.exports = { MARKETPLACE_ATTENTION_PROBLEM_TYPES, next_action_html, reference_html, to_slug };
 }
