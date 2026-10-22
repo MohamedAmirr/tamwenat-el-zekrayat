@@ -308,6 +308,7 @@
  "sort_field": "creation",
  "sort_order": "DESC",
  "states": [],
+ "show_title_field_in_link": 1,
  "title_field": "account_name",
  "track_changes": 1
 }

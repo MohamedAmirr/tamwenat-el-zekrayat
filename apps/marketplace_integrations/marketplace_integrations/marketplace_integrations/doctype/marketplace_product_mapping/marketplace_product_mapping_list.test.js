@@ -780,3 +780,30 @@ test("sync_selected_inventory returns each skipped account's reason and opens th
 	assert.equal(dialog_args.status_method, "inventory.status");
 	assert.deepEqual(dialog_args.jobs, [{ account: "A", job_id: "j", mapping_count: 1 }]);
 });
+
+test("the mapping list hides the docname column and wires the shared row tooltip helper (#324)", async () => {
+	const path = require.resolve("./marketplace_product_mapping_list.js");
+	delete require.cache[path];
+	install_frappe({ listview_settings: {} });
+	const loaded = require("./marketplace_product_mapping_list.js");
+	const settings = global.frappe.listview_settings["Marketplace Product Mapping"];
+	assert.equal(settings.hide_name_column, true);
+
+	// onload keeps the existing buttons and actions, and attaches the tooltip helper.
+	const attached = [];
+	global.frappe.marketplace_integrations = { list_row_name: { attach_to_list: (lv) => attached.push(lv) } };
+	const buttons = [];
+	const actions = [];
+	const listview = {
+		page: {
+			add_inner_button: (label) => buttons.push(label),
+			add_actions_menu_item: (label) => actions.push(label),
+		},
+	};
+	settings.onload(listview);
+	await settle();
+	assert.deepEqual(attached, [listview]);
+	assert.deepEqual(buttons, ["Sync Errors", "Inventory Errors"]);
+	assert.deepEqual(actions, ["Push selected", "Sync Inventory", "Sync All"]);
+	assert.equal(typeof loaded.show_row_name_on_hover, "function");
+});

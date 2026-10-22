@@ -562,3 +562,46 @@ class IntegrationTestMarketplaceOrder(IntegrationTestCase):
         clear_outbound_cancelled_marker(order.name)
 
         self.assertIsNone(frappe.db.get_value("Marketplace Order", order.name, "outbound_cancelled_on"))
+
+    def test_title_is_platform_order_reference_shown_in_links(self):
+        """#324: Links and the list show the merchant-facing reference, not the docname."""
+        meta = frappe.get_meta("Marketplace Order")
+
+        self.assertEqual(meta.title_field, "platform_order_reference")
+        self.assertTrue(meta.show_title_field_in_link)
+
+    def test_external_order_id_is_not_a_list_column_but_stays_searchable(self):
+        """#324: the list subject already shows the platform order number, so the
+        external order id is not a duplicate list column; search still finds it."""
+        meta = frappe.get_meta("Marketplace Order")
+
+        self.assertFalse(meta.get_field("external_order_id").in_list_view)
+        self.assertIn("external_order_id", meta.get_search_fields())
+
+    def test_order_code_is_not_a_list_column_but_stays_searchable(self):
+        """#324: order_code stays on the form and in search, but the list keeps one
+        reference column (the subject)."""
+        meta = frappe.get_meta("Marketplace Order")
+
+        self.assertFalse(meta.get_field("order_code").in_list_view)
+        self.assertIn("order_code", meta.get_search_fields())
+
+    def test_empty_platform_order_reference_falls_back_to_external_order_id(self):
+        """#324: Frappe falls back to the docname for an empty title, so the controller
+        fills platform_order_reference from external_order_id instead."""
+        account = self.make_account()
+        payload = self.sample_order("fallback-order-001")
+        payload["platform_order_reference"] = None
+
+        order = upsert_marketplace_order(account.name, payload)
+        order.reload()
+
+        self.assertEqual(order.platform_order_reference, "fallback-order-001")
+
+    def test_filled_platform_order_reference_is_kept(self):
+        account = self.make_account()
+
+        order = upsert_marketplace_order(account.name, self.sample_order("kept-order-001"))
+        order.reload()
+
+        self.assertEqual(order.platform_order_reference, "platform-order-001")
