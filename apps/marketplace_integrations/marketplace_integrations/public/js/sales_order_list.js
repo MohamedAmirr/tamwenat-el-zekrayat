@@ -9,6 +9,9 @@
 // until the review is finished; closing a dialog cancels the whole run. Then one background job
 // creates the shipments and the shared status dialog shows Created / Failed / Skipped per order.
 //
+// Also adds the order details hover card to every row (#325, order_hover_card.js): the helper is
+// loaded with frappe.require, the card is a convenience and failing to load it changes nothing else.
+//
 // Wrapped in a function: doctype_list_js files share one scope with ERPNext's own list script.
 (function () {
 	const PLAN_METHOD = "marketplace_integrations.api.bosta_shipments.get_bulk_create_plan";
@@ -16,6 +19,8 @@
 	const QUEUE_METHOD = "marketplace_integrations.api.bosta_shipments.queue_bulk_create";
 	const FORM_ASSET = "/assets/marketplace_integrations/js/sales_order.js";
 	const STATUS_ASSET = "/assets/marketplace_integrations/js/shopify_catalog_push_status.js";
+	const CARD_METHOD = "marketplace_integrations.api.order_hover_card.get_sales_order_card";
+	const CARD_ASSET = "/assets/marketplace_integrations/js/order_hover_card.js";
 	const MAX_ORDERS = 50;
 
 	// The creator roles come from sales_order.js, so they are known once it has loaded.
@@ -25,6 +30,17 @@
 			if (!(frappe.user && frappe.user.has_role(roles))) return;
 			listview.page.add_actions_menu_item(__("Create Bosta Shipments"), () => start(listview));
 		});
+	}
+
+	function add_hover_card(listview) {
+		return frappe
+			.require(CARD_ASSET)
+			.then(() => {
+				frappe.marketplace_integrations.order_hover_card
+					.create({ method: CARD_METHOD, arg: "sales_order" })
+					.attach_to_list(listview);
+			})
+			.catch((error) => console.error("Order hover card failed to load (#325).", error));
 	}
 
 	function start(listview) {
@@ -232,17 +248,20 @@
 	// Add the action to ERPNext's own Sales Order list settings instead of replacing them.
 	if (typeof frappe !== "undefined" && frappe.listview_settings) {
 		const settings = (frappe.listview_settings["Sales Order"] = frappe.listview_settings["Sales Order"] || {});
-		if (!settings.__mi_bosta_bulk) {
+		// Marks the settings as already extended (bulk action and hover card), so loading this file
+		// again (route revisit, asset reload) never wraps onload twice.
+		if (!settings.__mi_list_extended) {
 			const original_onload = settings.onload;
 			settings.onload = function (listview) {
 				if (original_onload) original_onload.call(this, listview);
 				add_bulk_action(listview);
+				add_hover_card(listview);
 			};
-			settings.__mi_bosta_bulk = true;
+			settings.__mi_list_extended = true;
 		}
 	}
 
 	if (typeof module !== "undefined") {
-		module.exports = { add_bulk_action, start, confirm_plan, review_and_send, send, offer_retry, retry_entry };
+		module.exports = { add_hover_card, add_bulk_action, start, confirm_plan, review_and_send, send, offer_retry, retry_entry };
 	}
 })();

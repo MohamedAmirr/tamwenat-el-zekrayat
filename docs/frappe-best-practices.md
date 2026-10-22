@@ -68,6 +68,12 @@ Do not present a workaround seen on one v16 release as valid for all of v16. Dev
 
 Existing entries in `docs/frappe-conventions.md` and the architecture doc that name a framework version already follow this; add the three fields when you touch one.
 
+Framework-internals dependencies on record:
+- #325 Sales Order hover card (`public/js/order_hover_card.js`) relies on `frappe.ui.hover_card` (`frappe/public/js/frappe/ui/components/hover_card.js`), on Desk list row markup (`list-row-container`, the subject link `.list-subject a[data-name]`, checkbox `data-name`, `level-right`), on the instance handle (`frappe.ui.hover_card` stores it in jQuery data `es-hover-card`, read once at attach time and kept in a `WeakMap` by row, since jQuery `.remove()` wipes that data before a MutationObserver runs), and on ERPNext selling `sales_order_list.js` assigning `frappe.listview_settings["Sales Order"]`.
+- Verified: Frappe 16.51.0 on dev, 2026-10-22. Prod version NOT known; look it up (Frappe Cloud Apps tab).
+- Evidence: the always-on test `marketplace_integrations/test_order_hover_card_js_wiring.py`, plus the framework source paths above.
+- Recheck: on any Frappe/ERPNext upgrade, and before shipping to prod.
+
 ## Skills (optional help)
 
 Repository rules, this file and the installed framework version take precedence over any skill. Project-local: `.claude/skills/frappe-desk-ui/SKILL.md` for Desk client scripts. Third-party Frappe skill packs exist (community, not official, unreviewed here); none are installed. General frontend-design guidance may help with custom screens but stays subordinate to established Frappe patterns.
