@@ -1303,10 +1303,14 @@ class IntegrationTestQueueInventorySync(InventoryFixtureMixin, IntegrationTestCa
 		real_has_permission = frappe.has_permission
 		real_doc_has_permission = frappe.model.document.Document.has_permission
 
-		def deny_mapping_write(doctype=None, ptype="read", *args, **kwargs):
+		# Mirrors frappe.has_permission(doctype, ptype, doc, user, throw, *, ...): a denial
+		# raises when throw is truthy, otherwise returns False.
+		def deny_mapping_write(doctype=None, ptype="read", doc=None, user=None, throw=False, **kwargs):
 			if doctype == "Marketplace Product Mapping" and ptype == "write":
+				if throw:
+					raise frappe.PermissionError
 				return False
-			return real_has_permission(doctype, ptype, *args, **kwargs)
+			return real_has_permission(doctype, ptype, doc, user, throw, **kwargs)
 
 		def deny_mapping_doc_write(doc, permtype="write", *args, **kwargs):
 			if doc.doctype == "Marketplace Product Mapping" and permtype == "write":

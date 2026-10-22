@@ -247,6 +247,7 @@ class IntegrationTestPlatformPermissions(IntegrationTestCase):
 					"sync_type": "Order Import",
 					"status": "Error",
 					"trigger_source": "Manual",
+					"attempted_at": frappe.utils.now_datetime(),
 					"marketplace_account": account,
 				}
 			).insert()
