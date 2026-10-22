@@ -78,10 +78,10 @@ class IntegrationTestOrderHoverCard(IntegrationTestCase):
 			insert=True,
 		)
 
-	def _call_as(self, email):
+	def _call_as(self, email, sales_order=None):
 		frappe.set_user(email)
 		try:
-			return get_sales_order_card(self.fixture.name)
+			return get_sales_order_card(sales_order or self.fixture.name)
 		finally:
 			frappe.set_user("Administrator")
 
@@ -118,6 +118,13 @@ class IntegrationTestOrderHoverCard(IntegrationTestCase):
 
 		with self.assertRaises(frappe.PermissionError):
 			self._call_as(email)
+
+	def test_user_without_sales_order_read_gets_permission_error_for_a_missing_name_too(self):
+		email, _role = make_role_user(self, "Hover No SO Missing", {"Customer": ["read"]})
+
+		# The same error whether or not the name exists: no existence probing.
+		with self.assertRaises(frappe.PermissionError):
+			self._call_as(email, "SAL-ORD-DOES-NOT-EXIST")
 
 	def test_sales_order_reader_without_marketplace_read_gets_no_marketplace_fields(self):
 		email, _role = make_role_user(self, "Hover SO Only", {"Sales Order": ["read"]})
@@ -224,4 +231,13 @@ class IntegrationTestOrderHoverCard(IntegrationTestCase):
 			get_sales_order_card("SAL-ORD-DOES-NOT-EXIST")
 
 		self.assertNotIsInstance(caught.exception, frappe.DoesNotExistError)
-		self.assertEqual(getattr(caught.exception, "http_status_code", 417), 417)
+		self.assertEqual(caught.exception.http_status_code, 417)
+
+	def test_deleted_order_for_a_sales_order_reader_is_still_a_validation_error(self):
+		email, _role = make_role_user(self, "Hover SO Reader Gone", {"Sales Order": ["read"]})
+
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self._call_as(email, "SAL-ORD-DOES-NOT-EXIST")
+
+		self.assertNotIsInstance(caught.exception, frappe.PermissionError)
+		self.assertEqual(caught.exception.http_status_code, 417)

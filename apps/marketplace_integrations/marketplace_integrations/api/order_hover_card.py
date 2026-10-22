@@ -24,6 +24,9 @@ def get_sales_order_card(sales_order: str):
 	# A missing order raises ValidationError (HTTP 417), not DoesNotExistError (HTTP 404):
 	# Desk's request layer opens a modal for every 404 even with silent=True, while a 417 is
 	# left to the caller, so the card can show the message itself (see docs/frappe-conventions.md).
+	# Doctype-level check first, so a user who cannot read Sales Orders learns nothing about
+	# which names exist; the document-level check (permission rules) follows.
+	frappe.has_permission("Sales Order", "read", throw=True)
 	if not frappe.db.exists("Sales Order", sales_order):
 		frappe.throw(_("Sales Order {0} was not found. It may have been deleted.").format(sales_order))
 	frappe.has_permission("Sales Order", "read", doc=sales_order, throw=True)

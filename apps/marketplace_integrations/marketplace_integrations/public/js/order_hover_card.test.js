@@ -50,6 +50,7 @@ function load({ hover_card = true } = {}) {
 	const pending = [];
 	const hover_cards = [];
 	global.document = { createElement: fake_element };
+	delete global.$;
 	global.frappe = {
 		utils: { escape_html: (value) => String(value).replace(/</g, "&lt;").replace(/>/g, "&gt;") },
 		call: (opts) => {
@@ -68,9 +69,24 @@ function load({ hover_card = true } = {}) {
 		},
 	};
 	if (hover_card) {
+		// Like the real one: the instance goes into jQuery data on the trigger (when jQuery exists).
 		global.frappe.ui.hover_card = (trigger, opts) => {
-			hover_cards.push({ row: trigger, trigger, opts });
-			return trigger;
+			const instance = {
+				closed: 0,
+				destroyed: 0,
+				close() {
+					this.closed++;
+				},
+				destroy() {
+					this.destroyed++;
+					this.close();
+				},
+			};
+			hover_cards.push({ row: trigger, trigger, opts, instance });
+			if (typeof global.$ !== "function") return trigger;
+			const $trigger = global.$(trigger);
+			$trigger.data("es-hover-card", instance);
+			return $trigger;
 		};
 	}
 	const path = require.resolve("./order_hover_card.js");
@@ -86,6 +102,8 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 function row(name) {
 	const el = fake_element();
 	el.ownerDocument = { createElement: fake_element };
+	el.nodeType = 1;
+	el.matches = (selector) => selector === ".list-row-container";
 	el.link = name ? { getAttribute: () => name, dataset: { name } } : null;
 	el.querySelector = (selector) => {
 		if (selector === ".list-subject a[data-name]") return el.link;
@@ -94,9 +112,11 @@ function row(name) {
 	return el;
 }
 
-// jQuery stand-in: `$(el).data("es-hover-card")` returns the card the fake hover_card stored.
-function install_jquery(cards) {
+// jQuery stand-in with real `.data()` semantics: values live per element, and `remove(el)` wipes
+// them like jQuery.cleanData does when Frappe calls `.remove()` on a row (before any observer).
+function install_jquery() {
 	const document_handlers = {};
+	const store = new Map();
 	global.document.addEventListener = () => {};
 	global.$ = (target) => {
 		if (target === global.document) {
@@ -107,9 +127,18 @@ function install_jquery(cards) {
 				},
 			};
 		}
-		return { data: () => cards.get(target) };
+		return {
+			data: (key, value) => {
+				if (value === undefined) return (store.get(target) || {})[key];
+				store.set(target, { ...(store.get(target) || {}), [key]: value });
+			},
+		};
 	};
-	return document_handlers;
+	const remove = (el) => {
+		store.delete(el);
+		if (el.link) store.delete(el.link);
+	};
+	return { handlers: document_handlers, store, remove };
 }
 
 test("the card shows the readable platform number, escapes server text and totals", () => {
@@ -272,51 +301,80 @@ function list_with(rows) {
 	return container;
 }
 
-test("a row removed by a re-render has its hover card destroyed", () => {
+test("a row removed by a re-render has its hover card destroyed, although jQuery data is wiped", () => {
 	const { helper, hover_cards } = load();
-	const cards = new Map();
-	install_jquery(cards);
+	const { remove, store } = install_jquery();
 	const el = row("SO-1");
-	const container = list_with([el]);
-	const scan = helper.attach_to_list({ $result: [container] });
-	const destroyed = [];
-	cards.set(el.link, { destroy: () => destroyed.push("SO-1"), close() {} });
+	const rows = [el];
+	const scan = helper.attach_to_list({ $result: [list_with(rows)] });
 	assert.equal(hover_cards.length, 1);
-	// Frappe removes the row container itself on refresh (the removed node is the row).
-	el.nodeType = 1;
-	el.matches = (selector) => selector === ".list-row-container";
+	const { instance } = hover_cards[0];
+	// The card is open; Frappe removes the row with jQuery .remove(), then the observer fires.
+	remove(el);
+	rows.length = 0;
+	assert.equal(store.has(el.link), false);
 	scan([{ removedNodes: [el] }]);
-	assert.deepEqual(destroyed, ["SO-1"]);
+	assert.equal(instance.destroyed, 1);
+	assert.equal(instance.closed, 1);
+	// A second notification for the same row does not destroy twice.
+	scan([{ removedNodes: [el] }]);
+	assert.equal(instance.destroyed, 1);
 });
 
 test("a removed wrapper destroys the cards of the rows inside it", () => {
-	const { helper } = load();
-	const cards = new Map();
-	install_jquery(cards);
+	const { helper, hover_cards } = load();
+	const { remove } = install_jquery();
 	const el = row("SO-1");
-	const scan = helper.attach_to_list({ $result: [list_with([el])] });
-	const destroyed = [];
-	cards.set(el.link, { destroy: () => destroyed.push(true), close() {} });
+	const rows = [el];
+	const scan = helper.attach_to_list({ $result: [list_with(rows)] });
 	const wrapper = { nodeType: 1, matches: () => false, querySelectorAll: () => [el] };
+	remove(el);
+	rows.length = 0;
 	scan([{ removedNodes: [wrapper] }, { removedNodes: [{ nodeType: 3 }] }]);
-	assert.deepEqual(destroyed, [true]);
+	assert.equal(hover_cards[0].instance.destroyed, 1);
 });
 
 test("a route change closes open cards without destroying them", () => {
-	const { helper } = load();
-	const cards = new Map();
-	const handlers = install_jquery(cards);
+	const { helper, hover_cards } = load();
+	const { handlers } = install_jquery();
 	const el = row("SO-1");
 	const container = list_with([el]);
 	container.isConnected = true;
 	helper.attach_to_list({ $result: [container] });
-	const calls = [];
-	cards.set(el.link, { destroy: () => calls.push("destroy"), close: () => calls.push("close") });
 	handlers["page-change"]();
-	assert.deepEqual(calls, ["close"]);
+	assert.equal(hover_cards[0].instance.closed, 1);
+	assert.equal(hover_cards[0].instance.destroyed, 0);
 	container.isConnected = false;
 	handlers["page-change"]();
 	assert.equal("page-change" in handlers, false);
+});
+
+test("a route change still closes the cards of rows whose jQuery data was wiped", () => {
+	const { helper, hover_cards } = load();
+	const { handlers, remove } = install_jquery();
+	const el = row("SO-1");
+	const container = list_with([el]);
+	container.isConnected = true;
+	helper.attach_to_list({ $result: [container] });
+	remove(el);
+	handlers["page-change"]();
+	assert.equal(hover_cards[0].instance.closed, 1);
+});
+
+test("a route change with rows already removed does not touch their destroyed cards", () => {
+	const { helper, hover_cards } = load();
+	const { handlers, remove } = install_jquery();
+	const el = row("SO-1");
+	const rows = [el];
+	const container = list_with(rows);
+	container.isConnected = true;
+	const scan = helper.attach_to_list({ $result: [container] });
+	remove(el);
+	rows.length = 0;
+	scan([{ removedNodes: [el] }]);
+	handlers["page-change"]();
+	assert.equal(hover_cards[0].instance.destroyed, 1);
+	assert.equal(hover_cards[0].instance.closed, 1);
 });
 
 test("a deleted order shows the server's own escaped message, not a framework dialog", async () => {

@@ -9,6 +9,9 @@
 //     off the subject link only (never the whole row), start-aligned, so it can sit over the
 //     other columns but never over the row checkboxes, which are left of the link. Rows removed
 //     by a refresh or re-render have their card destroyed, and a route change closes open cards.
+//     The card instance is read from the trigger's jQuery data once, at attach time, and kept in a
+//     WeakMap keyed by row: Frappe removes rows with jQuery `.remove()`, which wipes that data
+//     before the MutationObserver callback runs, so cleanup never reads jQuery data.
 //   - keyboard: the link opens the card on focus (Tab order: link, ..., Details button). Arrow-key
 //     row navigation focuses `.list-row-container`, which is not a trigger, so scrolling through
 //     rows with the arrows fires no request. Positive tabindex on Frappe's rows (tabindex=1)
@@ -136,12 +139,17 @@
 		return holder ? holder.getAttribute("data-name") : "";
 	}
 
+	// frappe.ui.hover_card stores its instance in jQuery data on the trigger. That data is wiped
+	// by jQuery's `.remove()` (Frappe removes list rows that way) before a MutationObserver
+	// callback runs, so it is read once at attach time and kept by `create` (see `handles`).
 	function hover_card_of(trigger) {
 		return typeof $ === "function" ? $(trigger).data("es-hover-card") : null;
 	}
 
 	function create({ method, arg = "name", render = render_sales_order_card }) {
 		const cache = new Map();
+		// Hover card instance per attached row, kept here so cleanup never needs jQuery data.
+		const handles = new WeakMap();
 		let latest = 0;
 
 		function load(name) {
@@ -213,6 +221,8 @@
 						return el;
 					},
 				});
+				const instance = hover_card_of(link);
+				if (instance) handles.set(row, instance);
 			}
 			details.addEventListener("click", (event) => {
 				event.preventDefault();
@@ -225,11 +235,13 @@
 
 		// Closes (or, when the row is gone, destroys) the card hanging off a row's subject link.
 		function release(row, destroy) {
-			const link = row_link(row);
-			const card = link && hover_card_of(link);
+			const card = handles.get(row);
 			if (!card) return;
-			if (destroy && card.destroy) card.destroy();
-			else if (card.close) card.close();
+			if (destroy) {
+				handles.delete(row);
+				if (card.destroy) card.destroy();
+				else if (card.close) card.close();
+			} else if (card.close) card.close();
 		}
 
 		function rows_in(node) {
