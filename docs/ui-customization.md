@@ -39,7 +39,8 @@ All paths are under `apps/marketplace_integrations/marketplace_integrations/` un
 - Prefer native settings: `title_field` + `show_title_field_in_link` on the target doctype, and `in_list_view` / `in_standard_filter` on real fields. Formatters are client display only; sorting, filtering and search must stay on real stored fields (`search_fields`).
 - Frappe falls back to the docname when the title field is empty, so keep the title field filled (see `MarketplaceOrder.before_save`).
 - Keep the docname reachable (form, plus the row tooltip from `show_row_name_on_hover`). Link report columns get titles in one batched query; Dynamic Link columns get none, so send a label from the report and render it escaped in `<bdi dir="ltr">`.
-- Do not repeat the title value as a list column: the Marketplace Order list shows the platform order number as the subject; `external_order_id` stays on the form and in `search_fields` but is not `in_list_view`.
+- Do not repeat the title value as a list column: the Marketplace Order list shows the platform order number as the subject; `external_order_id` and `order_code` stay on the form and in `search_fields` but are not `in_list_view`. Bosta Shipment's subject is the tracking number; status is a separate translated column plus indicator.
+- Never use a mandatory field with a default as `title_field` (the default is dropped on new docs, see `frappe-conventions.md`).
 - The subject link is plain text: it takes no HTML from a formatter.
 
 ## Scoped styling

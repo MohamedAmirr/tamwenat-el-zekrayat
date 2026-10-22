@@ -5,9 +5,9 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
+  "status",
   "sales_order",
   "delivery_note",
-  "status",
   "receiver_section",
   "receiver_name",
   "receiver_phone",
@@ -60,6 +60,7 @@
    "default": "Pending Bosta",
    "fieldname": "status",
    "fieldtype": "Select",
+   "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Status",
    "options": "Pending Bosta\nBosta Created\nDelivery Note Failed\nCompleted\nBosta Failed\nCanceled",
@@ -156,7 +157,6 @@
    "fieldname": "tracking_number",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
-   "in_list_view": 1,
    "label": "Tracking Number",
    "read_only": 1,
    "search_index": 1
@@ -276,7 +276,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-22 12:00:00.000000",
+ "modified": "2026-10-22 16:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Bosta Shipment",
@@ -326,5 +326,5 @@
  "sort_field": "modified",
  "sort_order": "DESC",
  "states": [],
- "title_field": "status"
+ "title_field": "tracking_number"
 }

@@ -578,6 +578,14 @@ class IntegrationTestMarketplaceOrder(IntegrationTestCase):
         self.assertFalse(meta.get_field("external_order_id").in_list_view)
         self.assertIn("external_order_id", meta.get_search_fields())
 
+    def test_order_code_is_not_a_list_column_but_stays_searchable(self):
+        """#324: order_code stays on the form and in search, but the list keeps one
+        reference column (the subject)."""
+        meta = frappe.get_meta("Marketplace Order")
+
+        self.assertFalse(meta.get_field("order_code").in_list_view)
+        self.assertIn("order_code", meta.get_search_fields())
+
     def test_empty_platform_order_reference_falls_back_to_external_order_id(self):
         """#324: Frappe falls back to the docname for an empty title, so the controller
         fills platform_order_reference from external_order_id instead."""
