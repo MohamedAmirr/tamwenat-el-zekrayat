@@ -111,7 +111,8 @@ class TestMarketplaceSyncLog(IntegrationTestCase):
 		for fieldname in ("attempted_at", "completed_at", "request_data", "response_data", "traceback"):
 			self.assertTrue(fields[fieldname].read_only, fieldname)
 		permissions = {perm.role: perm for perm in meta.permissions}
-		self.assertEqual(set(permissions), {"System Manager"})
+		# #322: the platform roles get full access alongside System Manager.
+		self.assertEqual(set(permissions), {"System Manager", "Talabat User", "Noon User", "Shopify User"})
 		self.assertTrue(permissions["System Manager"].read)
 		self.assertTrue(permissions["System Manager"].create)
 		self.assertTrue(permissions["System Manager"].write)

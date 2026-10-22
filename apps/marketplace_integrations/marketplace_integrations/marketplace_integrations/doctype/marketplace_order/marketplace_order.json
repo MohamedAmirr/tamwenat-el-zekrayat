@@ -191,14 +191,17 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-10-22 16:00:00.000000",
+ "modified": "2026-10-22 20:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Marketplace Order",
  "naming_rule": "Expression",
  "owner": "Administrator",
  "permissions": [
-  {"create": 1, "delete": 1, "email": 1, "print": 1, "read": 1, "report": 1, "role": "System Manager", "share": 1, "write": 1}
+  {"create": 1, "delete": 1, "email": 1, "print": 1, "read": 1, "report": 1, "role": "System Manager", "share": 1, "write": 1},
+  {"create": 1, "delete": 1, "read": 1, "report": 1, "role": "Talabat User", "write": 1},
+  {"create": 1, "delete": 1, "read": 1, "report": 1, "role": "Noon User", "write": 1},
+  {"create": 1, "delete": 1, "read": 1, "report": 1, "role": "Shopify User", "write": 1}
  ],
  "search_fields": "marketplace_account,external_order_id,platform_order_reference,order_code",
  "sort_field": "creation",

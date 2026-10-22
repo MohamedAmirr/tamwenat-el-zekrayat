@@ -280,6 +280,25 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 				frappe.set_user("Administrator")
 			self.assertEqual(bool(self.shipment_for(order)), allowed)
 
+	def test_bosta_user_creates_the_delivery_and_submits_the_delivery_note(self):
+		# Accepted decision (#322): Bosta User is a creator role. Like the Stock User case it
+		# also holds ERPNext's own Sales Order read (Sales User) and Account read (Accounts
+		# User); the role grants the Bosta flow, not ERPNext rights.
+		user = self.make_user("Bosta User", "Sales User", "Accounts User")
+		order = self.make_order()
+		self.http.queue["create"].append(created("TRK-BU", "D-BU"))
+
+		frappe.set_user(user)
+		try:
+			result = self.create(order)
+		finally:
+			frappe.set_user("Administrator")
+
+		self.assertEqual(result["tracking_number"], "TRK-BU")
+		self.assertEqual(frappe.db.get_value("Delivery Note", result["delivery_note"], "docstatus"), 1)
+		self.assertEqual(frappe.db.get_value("Delivery Note", result["delivery_note"], "owner"), user)
+		self.assertEqual(self.shipment_for(order).status, "Completed")
+
 	def test_creator_without_account_read_ends_delivery_note_failed_and_is_resumable(self):
 		# OPEN DECISION: ERPNext refuses a Delivery Note for a user without Account read.
 		manager = self.make_user("Sales Manager")

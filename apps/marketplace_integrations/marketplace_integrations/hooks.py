@@ -142,13 +142,20 @@ doctype_list_js = {"Sales Order": "public/js/sales_order_list.js"}
 # -----------
 # Permissions evaluated in scripted ways
 
-# permission_query_conditions = {
-# 	"Event": "frappe.desk.doctype.event.event.get_permission_query_conditions",
-# }
-#
-# has_permission = {
-# 	"Event": "frappe.desk.doctype.event.event.has_permission",
-# }
+# Platform row filtering (#322): see permissions.py. System Manager/Administrator bypass.
+permission_query_conditions = {
+	"Marketplace Account": "marketplace_integrations.permissions.marketplace_account_query_conditions",
+	"Marketplace Order": "marketplace_integrations.permissions.marketplace_order_query_conditions",
+	"Marketplace Product Mapping": "marketplace_integrations.permissions.marketplace_product_mapping_query_conditions",
+	"Marketplace Sync Log": "marketplace_integrations.permissions.marketplace_sync_log_query_conditions",
+}
+
+has_permission = {
+	"Marketplace Account": "marketplace_integrations.permissions.marketplace_account_has_permission",
+	"Marketplace Order": "marketplace_integrations.permissions.marketplace_order_has_permission",
+	"Marketplace Product Mapping": "marketplace_integrations.permissions.marketplace_product_mapping_has_permission",
+	"Marketplace Sync Log": "marketplace_integrations.permissions.marketplace_sync_log_has_permission",
+}
 
 # Document Events
 # ---------------
@@ -290,6 +297,12 @@ scheduler_events["cron"].setdefault(NOON_INVENTORY_SWEEP_CRON, []).append(
 # purely server-side `.insert()`/`.save()`, so no separate assignment is
 # needed for it).
 fixtures = [
+	# #322: the four platform roles (fixtures/role.json). The doctype permission rows that
+	# use them ship in each doctype's JSON.
+	{
+		"dt": "Role",
+		"filters": [["name", "in", ["Talabat User", "Noon User", "Shopify User", "Bosta User"]]],
+	},
 	{
 		"dt": "Property Setter",
 		"filters": [

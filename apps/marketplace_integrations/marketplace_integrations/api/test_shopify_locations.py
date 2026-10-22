@@ -63,6 +63,46 @@ class IntegrationTestListActiveLocations(IntegrationTestCase):
 
         self.assertEqual(result, [{"id": "gid://shopify/Location/1", "name": "Active"}])
 
+    def _make_user(self, *roles):
+        email = f"locations-{frappe.generate_hash(length=8)}@example.com"
+        frappe.get_doc(
+            {
+                "doctype": "User",
+                "email": email,
+                "first_name": "Locations Test",
+                "send_welcome_email": 0,
+                "roles": [{"role": role} for role in roles],
+            }
+        ).insert()
+        self.addCleanup(
+            frappe.delete_doc, "User", email, force=True, ignore_permissions=True, delete_permanently=True
+        )
+        return email
+
+    def test_platform_user_cannot_use_a_connection_they_cannot_read(self):
+        # #322: a Shopify User passes the doc-less Marketplace Account write check but
+        # Connections stay System Manager only, so the token must not be usable.
+        user = self._make_user("Shopify User")
+        frappe.set_user(user)
+        try:
+            self.assertTrue(frappe.has_permission("Marketplace Account", "write"))
+            with patch(EXECUTE_TARGET, return_value=GRAPHQL_RESULT) as execute:
+                with self.assertRaises(frappe.PermissionError):
+                    list_active_locations(self.connection.name)
+        finally:
+            frappe.set_user("Administrator")
+        execute.assert_not_called()
+
+    def test_system_manager_can_list_locations(self):
+        user = self._make_user("System Manager")
+        frappe.set_user(user)
+        try:
+            with patch(EXECUTE_TARGET, return_value=GRAPHQL_RESULT):
+                result = list_active_locations(self.connection.name)
+        finally:
+            frappe.set_user("Administrator")
+        self.assertEqual(result, [{"id": "gid://shopify/Location/1", "name": "Active"}])
+
     def test_nonexistent_connection_rejected_with_clean_error(self):
         # Review finding #8: a bad/nonexistent Connection name must surface a
         # clean ValidationError from this API boundary, not an unhandled

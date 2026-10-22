@@ -18,6 +18,10 @@ specific-document check, deliberately - unlike Talabat's outlet actions
 (which always act on an already-saved account), the picker also needs to
 work on a brand-new, unsaved Marketplace Account that has no document name
 yet to check permission against.
+
+On top of that, the caller must be able to read the Shopify Connection document itself
+(#322): the platform roles pass the Marketplace Account check, but Connections stay System
+Manager only, and the request is made with the Connection's token.
 """
 
 import frappe
@@ -32,6 +36,9 @@ def list_active_locations(connection: str):
     picker."""
     _require_marketplace_account_write_permission()
     _require_shopify_connection_exists(connection)
+    # The doc-less check above passes for any platform user (#322); the call uses this
+    # Connection's token, so the caller must also be able to read the Connection itself.
+    frappe.has_permission("Shopify Connection", "read", doc=connection, throw=True)
     return fetch_shop_and_active_locations(connection)["active_locations"]
 
 

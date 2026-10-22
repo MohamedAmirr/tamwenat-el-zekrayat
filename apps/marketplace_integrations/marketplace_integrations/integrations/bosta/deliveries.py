@@ -22,7 +22,7 @@ from marketplace_integrations.services import sales_order_sync
 BOSTA_DELIVERY_TYPE = 10
 
 # Roles that may create/check Bosta shipments (D3). Sales User is read-only.
-CREATOR_ROLES = ("Sales Manager", "Stock User", "System Manager")
+CREATOR_ROLES = ("Sales Manager", "Stock User", "System Manager", "Bosta User")
 
 # Bosta's documented COD ceiling for a delivery (OpenAPI ``cod`` description).
 BOSTA_COD_LIMIT = 30000

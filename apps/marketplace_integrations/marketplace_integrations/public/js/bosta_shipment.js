@@ -6,7 +6,7 @@
 		"marketplace_integrations.api.bosta_shipments.print_a4_arabic_label";
 
 	const CHECK_METHOD = "marketplace_integrations.api.bosta_shipments.check_shipment";
-	const CREATOR_ROLES = ["Sales Manager", "Stock User", "System Manager"];
+	const CREATOR_ROLES = ["Sales Manager", "Stock User", "System Manager", "Bosta User"];
 	const STUCK_STATUSES = ["Pending Bosta", "Bosta Failed", "Delivery Note Failed", "Bosta Created"];
 
 	// bosta_status_snapshot is remote text in a read-only JSON field, which the framework
