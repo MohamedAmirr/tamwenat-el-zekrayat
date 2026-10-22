@@ -1,9 +1,11 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-"""Bulk Bosta shipment creation (#305): the local pre-check plan, the isolated job, retry.
+"""Bulk Bosta shipment creation (#305, #318): the local pre-check plan, the isolated job, retry.
 
-Real database and cache; only the HTTP layer and the district list are faked.
+Real database and cache; only the HTTP layer (Bosta's city list and directory included) is
+faked. A Shopify Marketplace Order is stood in for by its shipping address JSON, since
+building a real one needs a Marketplace Account.
 """
 
 from unittest.mock import patch
@@ -12,36 +14,35 @@ import frappe
 from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api import bosta_shipments
-from marketplace_integrations.integrations.bosta import bulk, deliveries, locations
+from marketplace_integrations.integrations.bosta import bulk, deliveries
 from marketplace_integrations.tests.bosta_fixtures import BostaFixtureMixin, FakeResponse, created
-
-DIRECTORY = [
-	{
-		"id": "city-cairo",
-		"name": "Cairo",
-		"name_ar": "القاهرة",
-		"code": "EG-01",
-		"districts": [
-			{"id": "d-maadi", "name": "Maadi", "name_ar": "المعادي"},
-			{"id": "d-nasr", "name": "Nasr City", "name_ar": "مدينة نصر"},
-		],
-	}
-]
 
 
 class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 	def setUp(self):
 		super().setUp()
-		patcher = patch(
-			"marketplace_integrations.integrations.bosta.district_match.locations.get_directory",
-			return_value=DIRECTORY,
-		)
+		# Marketplace Order name -> {platform, shipping_address (JSON), customer_phone_number}.
+		self.marketplace_rows = {}
+		real_get_value = frappe.db.get_value
+
+		def get_value(doctype, *args, **kwargs):
+			if doctype == "Marketplace Order":
+				row = self.marketplace_rows.get(args[0], {})
+				if isinstance(args[1], list):
+					return frappe._dict(
+						platform=row.get("platform", ""),
+						customer_phone_number=row.get("customer_phone_number", ""),
+						shipping_address=row.get("shipping_address"),
+					)
+				return ""
+			return real_get_value(doctype, *args, **kwargs)
+
+		patcher = patch.object(frappe.db, "get_value", side_effect=get_value)
 		patcher.start()
 		self.addCleanup(patcher.stop)
-		frappe.cache().delete_value(locations.CITIES_CACHE_KEY)
-		self.addCleanup(frappe.cache().delete_value, locations.CITIES_CACHE_KEY)
 
-	def _addressed_order(self, address_line1, phone="01000000000", **order_kwargs):
+	def _addressed_order(self, address_line1, phone="01000000000", city="Cairo", **order_kwargs):
+		"""A submitted order whose shipping Address is typed by hand (never a Shopify province)."""
 		order = self.make_order(**order_kwargs)
 		address = frappe.get_doc(
 			{
@@ -49,7 +50,7 @@ class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 				"address_title": f"Bosta Bulk {self.suffix} {order.name}",
 				"address_type": "Shipping",
 				"address_line1": address_line1,
-				"city": "Cairo",
+				"city": city,
 				"country": frappe.db.get_value("Country", {}, "name"),
 				"links": [{"link_doctype": "Customer", "link_name": self.customer.name}],
 			}
@@ -57,6 +58,20 @@ class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 		self._track(address)
 		frappe.db.set_value("Sales Order", order.name, "shipping_address_name", address.name)
 		frappe.db.set_value("Sales Order", order.name, "contact_mobile", phone)
+		frappe.db.commit()
+		return order
+
+	def _shopify_order(self, address_line1, phone="01000000000", province="C", **order_kwargs):
+		"""An order from a Shopify Egypt Marketplace Order: its province code is the trusted city."""
+		order = self._addressed_order(address_line1, phone, **order_kwargs)
+		marketplace_order = f"MKTORD-{self.suffix}-{order.name}"
+		frappe.db.set_value("Sales Order", order.name, "custom_marketplace_order", marketplace_order)
+		self.marketplace_rows[marketplace_order] = {
+			"platform": "Shopify",
+			"shipping_address": frappe.as_json(
+				{"countryCodeV2": "EG", "provinceCode": province, "city": "Cairo"}
+			),
+		}
 		frappe.db.commit()
 		return order
 
@@ -68,8 +83,7 @@ class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 			"sales_order": order.name,
 			"receiver_name": self._receiver(),
 			"receiver_phone": "01000000000",
-			"city": "Cairo",
-			"district_id": "d-maadi",
+			"city_id": "city-cairo",
 			"address_first_line": "12 Example Street",
 			"expected_cod": 100,
 			**overrides,
@@ -82,12 +96,30 @@ class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 
 	# Plan
 
+	def test_plan_sends_without_review_only_a_shopify_city_with_phone_and_a_long_first_line(self):
+		self.http.queue["cities"].append(
+			FakeResponse(
+				200, {"success": True, "data": {"list": [{"_id": "city-cairo", "name": "Cairo (Bosta)"}]}}
+			)
+		)
+		ready = self._shopify_order("12 Example Street, Maadi")
+
+		plan = self._plan(ready)
+
+		self.assertEqual([row["sales_order"] for row in plan["ready"]], [ready.name])
+		self.assertEqual(plan["review"], [])
+		defaults = plan["ready"][0]["defaults"]
+		self.assertEqual((defaults["city_id"], defaults["from_shopify"]), ("city-cairo", True))
+		# The city name sent is the one GET /cities gives, as in the dialog.
+		self.assertEqual(defaults["city_name"], "Cairo (Bosta)")
+		self.assertNotIn("district_id", defaults)
+
 	def test_plan_sorts_orders_into_ready_review_and_skipped_without_calling_bosta(self):
-		ready = self._addressed_order("12 Example Street, Maadi")
-		no_match = self._addressed_order("12 Example Street, Somewhere Else")
-		ambiguous = self._addressed_order("12 Example Street, Maadi near Nasr City")
-		no_phone = self._addressed_order("12 Example Street, Maadi", phone="")
-		short_line = self._addressed_order("Maadi")
+		ready = self._shopify_order("12 Example Street, Maadi")
+		typed_city = self._addressed_order("12 Example Street, Maadi")
+		no_match = self._addressed_order("12 Example Street, Somewhere Else", city="Somewhere Else")
+		shopify_no_phone = self._shopify_order("12 Example Street, Maadi", phone="")
+		short_line = self._shopify_order("Maadi")
 		draft = self.make_order(submit=False)
 		too_much_cod = self.make_order(rate=bulk.deliveries.BOSTA_COD_LIMIT + 1)
 		closed = self.make_order()
@@ -96,26 +128,30 @@ class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 		self.http.queue["create"].append(created())
 		self.create(has_shipment)
 		self.http.calls.clear()
-		self.http.queue["cities"].append(
-			FakeResponse(
-				200, {"success": True, "data": {"list": [{"_id": "city-cairo", "name": "Cairo (Bosta)"}]}}
-			)
-		)
 
 		plan = self._plan(
-			ready, no_match, ambiguous, no_phone, short_line, draft, too_much_cod, closed, has_shipment
+			ready,
+			typed_city,
+			no_match,
+			shopify_no_phone,
+			short_line,
+			draft,
+			too_much_cod,
+			closed,
+			has_shipment,
 		)
 
 		self.assertEqual([row["sales_order"] for row in plan["ready"]], [ready.name])
-		self.assertEqual(plan["ready"][0]["defaults"]["district_id"], "d-maadi")
-		# The city name sent is the one GET /cities gives, as in the dialog.
-		self.assertEqual(plan["ready"][0]["defaults"]["city_name"], "Cairo (Bosta)")
 		self.assertEqual(
 			[row["sales_order"] for row in plan["review"]],
-			[no_match.name, ambiguous.name, no_phone.name, short_line.name],
+			[typed_city.name, no_match.name, shopify_no_phone.name, short_line.name],
 		)
-		self.assertNotIn("district_id", plan["review"][0]["defaults"])
-		self.assertNotIn("district_id", plan["review"][1]["defaults"])
+		# A city read from typed address text is shown for review, but never sent without it.
+		typed = plan["review"][0]["defaults"]
+		self.assertEqual((typed["city_id"], typed["from_shopify"]), ("city-cairo", False))
+		self.assertNotIn("city_id", plan["review"][1]["defaults"])
+		for row in plan["review"]:
+			self.assertNotIn("district_id", row["defaults"])
 		reasons = {row["sales_order"]: row["reason"] for row in plan["skipped"]}
 		self.assertEqual(set(reasons), {draft.name, too_much_cod.name, closed.name, has_shipment.name})
 		self.assertIn("submitted", reasons[draft.name])
@@ -173,6 +209,7 @@ class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual(enqueue.call_args.args, (bulk.run_bulk_create,))
 		self.assertEqual(kwargs["queue"], "long")
 		self.assertEqual(kwargs["orders"][0]["sales_order"], order.name)
+		self.assertEqual(kwargs["orders"][0]["city_id"], "city-cairo")
 		self.assertEqual(kwargs["skipped"], [{"sales_order": "SO-X", "reason": "Closed"}])
 		self.assertEqual(bulk.get_bulk_create_status(job_id)["status"], "queued")
 
@@ -195,7 +232,7 @@ class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 				{
 					"success": False,
 					"errorCode": 777,
-					"message": "dropOffAddress must contain at least one of [districtId, districtName]",
+					"message": "Could not resolve the district for this address",
 				},
 			),
 			created("TRK-3", "D-3"),
@@ -212,7 +249,10 @@ class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 		self.assertIn("TRK-1", rows[first.name]["detail"])
 		self.assertFalse(rows[failing.name]["ok"])
 		self.assertFalse(rows[failing.name]["skipped"])
-		self.assertEqual(rows[failing.name]["detail"], "Bosta needs a district for this address.")
+		self.assertEqual(
+			rows[failing.name]["detail"],
+			"Bosta could not find the district from this address. Add the area name to the address and retry.",
+		)
 		self.assertTrue(rows[last.name]["ok"])
 		self.assertTrue(rows["SO-PRECHECK"]["skipped"])
 		result = state["result"]
@@ -261,8 +301,10 @@ class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 		self.http.queue["search"].append(FakeResponse(200, {"success": True, "data": []}))
 		self.http.queue["create"].append(created("TRK-2", "D-2"))
 
-		state = self._run([self._row(order, district_id="d-nasr")])
+		state = self._run([self._row(order, city_id="city-giza")])
 
 		self.assertTrue(state["result"]["results"][0]["ok"])
 		self.assertEqual(frappe.db.count("Bosta Shipment", {"sales_order": order.name}), 1)
-		self.assertEqual(self.shipment_for(order).district_id, "d-nasr")
+		shipment = self.shipment_for(order)
+		self.assertEqual((shipment.city_id, shipment.city_code), ("city-giza", "EG-25"))
+		self.assertEqual(self.http.calls_of("create")[-1]["dropOffAddress"]["city"], "EG-25")

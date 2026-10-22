@@ -16,6 +16,47 @@ from frappe.utils import add_days, now_datetime, nowdate
 
 BOSTA_ROLES = ("Sales Manager", "Stock User", "Sales User")
 
+# Bosta's city list (GET /cities) and directory (GET /cities/getAllDistricts) as the fake
+# serves them by default. Cairo is the city the tests use; its code (EG-01) is what Bosta gets.
+DEFAULT_CITIES = {
+	"success": True,
+	"data": {
+		"list": [
+			{"_id": "city-cairo", "name": "Cairo", "nameAr": "القاهرة"},
+			{"_id": "city-giza", "name": "Giza", "nameAr": "الجيزة"},
+			{"_id": "city-alex", "name": "Alexandria", "nameAr": "الإسكندرية"},
+		]
+	},
+}
+DEFAULT_ALL_DISTRICTS = {
+	"success": True,
+	"data": {
+		"list": [
+			{
+				"cityId": "city-cairo",
+				"cityName": "Cairo",
+				"cityOtherName": "القاهرة",
+				"cityCode": "EG-01",
+				"districts": [{"_id": "d-nasr", "name": "Nasr City", "nameAr": "مدينة نصر"}],
+			},
+			{
+				"cityId": "city-giza",
+				"cityName": "Giza",
+				"cityOtherName": "الجيزة",
+				"cityCode": "EG-25",
+				"districts": [],
+			},
+			{
+				"cityId": "city-alex",
+				"cityName": "Alexandria",
+				"cityOtherName": "الإسكندرية",
+				"cityCode": "EG-02",
+				"districts": [],
+			},
+		]
+	},
+}
+
 
 class FakeResponse:
 	def __init__(self, status_code=200, body=None, text=None):
@@ -37,8 +78,15 @@ def created(tracking="TRK-1", delivery_id="DELIVERY-1"):
 	)
 
 
+LOOKUP_DEFAULTS = {"cities": DEFAULT_CITIES, "all_districts": DEFAULT_ALL_DISTRICTS}
+
+
 class FakeBosta:
-	"""Queue of responses (or exceptions to raise) per endpoint; records every call."""
+	"""Queue of responses (or exceptions to raise) per endpoint; records every call.
+
+	``cities`` and ``all_districts`` answer with ``DEFAULT_CITIES`` / ``DEFAULT_ALL_DISTRICTS``
+	once their queue is empty, so a test only queues them to force a failure or a change.
+	"""
 
 	def __init__(self):
 		self.queue = {
@@ -46,9 +94,7 @@ class FakeBosta:
 			"search": [],
 			"get": [],
 			"cities": [],
-			"districts": [],
 			"all_districts": [],
-			"pin": [],
 			"terminate": [],
 			"update": [],
 		}
@@ -57,12 +103,8 @@ class FakeBosta:
 	def __call__(self, method, url, **kwargs):
 		if url.endswith("/cities"):
 			kind = "cities"
-		elif url.endswith("/cities/pinLocation"):
-			kind = "pin"
 		elif url.endswith("/cities/getAllDistricts"):
 			kind = "all_districts"
-		elif url.endswith("/districts"):
-			kind = "districts"
 		elif method == "DELETE":
 			kind = "terminate"
 		elif method == "PUT":
@@ -70,15 +112,10 @@ class FakeBosta:
 		else:
 			kind = "search" if url.endswith("/deliveries/search") else "create" if method == "POST" else "get"
 		self.calls.append(
-			(
-				kind,
-				kwargs.get("params")
-				if kind == "pin"
-				else kwargs.get("json")
-				if kind not in ("cities", "districts", "all_districts", "terminate")
-				else url,
-			)
+			(kind, url if kind in ("cities", "all_districts", "terminate") else kwargs.get("json"))
 		)
+		if kind in LOOKUP_DEFAULTS and not self.queue[kind]:
+			return FakeResponse(200, LOOKUP_DEFAULTS[kind])
 		item = self.queue[kind].pop(0)
 		if isinstance(item, Exception):
 			raise item
@@ -87,6 +124,12 @@ class FakeBosta:
 	def calls_of(self, kind):
 		return [payload for call_kind, payload in self.calls if call_kind == kind]
 
+	def sent(self):
+		"""Every call except the read-only city list and directory lookups (GET /cities and
+		/cities/getAllDistricts). Those run before validation, so "nothing was sent" means
+		nothing but these."""
+		return [call for call in self.calls if call[0] not in ("cities", "all_districts")]
+
 
 class BostaFixtureMixin:
 	def setUp(self):
@@ -94,6 +137,13 @@ class BostaFixtureMixin:
 
 		locations.reset_request_state()
 		self.addCleanup(locations.reset_request_state)
+		# Start cold: the city list and directory are cached for 24 hours in the shared cache.
+		for key in (
+			locations.CITIES_CACHE_KEY,
+			locations.DIRECTORY_CACHE_KEY,
+			locations.LOOKUP_FAILED_CACHE_KEY,
+		):
+			frappe.cache().delete_value(key)
 		self.suffix = frappe.generate_hash(length=8)
 		self._created = []
 		self._purged = []
@@ -237,8 +287,7 @@ class BostaFixtureMixin:
 		args = {
 			"receiver_name": self._receiver(),
 			"receiver_phone": "01000000000",
-			"city": "Cairo",
-			"district_id": "district-id",
+			"city_id": "city-cairo",
 			"address_first_line": "12 Example Street",
 		}
 		args.update(overrides)

@@ -3,7 +3,7 @@
 
 """Create Bosta shipments for several Sales Orders at once (#305).
 
-``get_bulk_create_plan`` checks each order locally (the only Bosta calls are the district lookups, which stop after the first failure) and sorts it into
+``get_bulk_create_plan`` checks each order locally (the only Bosta calls are the cached city lookups, which stop after the first failure) and sorts it into
 skipped / ready to send / needs review. ``queue_bulk_create`` enqueues one ``long`` job
 that calls ``deliveries.create_bosta_shipment`` per order, each isolated from the rest.
 Progress and results sit in the cache under a job id only the requesting user can read
@@ -24,7 +24,7 @@ RESULT_TTL = 60 * 60
 # The address first line must be longer than this to be sent without review.
 MIN_DIRECT_FIRST_LINE_LENGTH = 5
 MAX_MESSAGE_LENGTH = 300
-# Bosta's error code for a delivery created without a district.
+# Bosta's error code for a delivery whose district it could not resolve.
 DISTRICT_REQUIRED_ERROR_CODE = 777
 _BOSTA_MESSAGE = re.compile(r'"message"\s*:\s*"([^"]+)"')
 _DISTRICT_ERROR = re.compile(rf'errorCode"?\s*:\s*"?{DISTRICT_REQUIRED_ERROR_CODE}\b')
@@ -32,8 +32,7 @@ _DISTRICT_ERROR = re.compile(rf'errorCode"?\s*:\s*"?{DISTRICT_REQUIRED_ERROR_COD
 ORDER_FIELDS = (
 	"receiver_name",
 	"receiver_phone",
-	"city",
-	"district_id",
+	"city_id",
 	"address_first_line",
 )
 
@@ -91,9 +90,11 @@ def _check_order(name):
 
 
 def _is_ready(defaults):
+	"""Sent without review only when the city came from Shopify's province code (#318): a city
+	read from the typed Address text may be wrong and goes to review."""
 	return bool(
-		cstr(defaults.get("district_id")).strip()
-		and cstr(defaults.get("city_name")).strip()
+		defaults.get("from_shopify")
+		and cstr(defaults.get("city_id")).strip()
 		and cstr(defaults.get("receiver_name")).strip()
 		and cstr(defaults.get("receiver_phone")).strip()
 		and len(cstr(defaults.get("address_first_line")).strip()) > MIN_DIRECT_FIRST_LINE_LENGTH
@@ -102,7 +103,7 @@ def _is_ready(defaults):
 
 def queue_bulk_create(orders, skipped=None):
 	"""Enqueue one background job for ``orders`` (``[{sales_order, receiver_name,
-	receiver_phone, city, district_id, address_first_line, expected_cod}]``). ``skipped``
+	receiver_phone, city_id, address_first_line, expected_cod}]``). ``skipped``
 	(``[{sales_order, reason}]``) only carries the pre-check and Skip rows into the results."""
 	deliveries._require_creator_role()
 	orders = [_clean_order(order) for order in frappe.parse_json(orders) or []]
@@ -182,8 +183,7 @@ def _create_one(order):
 			order["sales_order"],
 			args["receiver_name"],
 			args["receiver_phone"],
-			args["city"],
-			args["district_id"],
+			args["city_id"],
 			args["address_first_line"],
 			args["expected_cod"],
 		)
@@ -223,7 +223,7 @@ def _failure_line(sales_order, exc):
 
 	raw = html.unescape(cstr(exc))
 	if _DISTRICT_ERROR.search(raw):
-		return _("Bosta needs a district for this address.")
+		return _("Bosta could not find the district from this address. Add the area name to the address and retry.")
 	if isinstance(exc, frappe.ValidationError):
 		# "Bosta request failed (HTTP 400): {...}": show the message Bosta gave when it has one.
 		bosta_message = _BOSTA_MESSAGE.search(raw)

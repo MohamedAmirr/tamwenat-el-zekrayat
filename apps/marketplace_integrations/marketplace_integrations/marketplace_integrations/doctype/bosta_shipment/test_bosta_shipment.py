@@ -13,20 +13,27 @@ class UnitTestBostaShipment(UnitTestCase):
 			"receiver_name": "Ahmed",
 			"receiver_phone": "01000000000",
 			"city": "Cairo",
-			"district_id": "district-id",
+			"city_id": "city-cairo",
+			"city_code": "EG-01",
 			"address_first_line": "12 Example Street",
 		}
 		defaults.update(values)
 		return frappe.get_doc(defaults)
 
-	def test_accepts_district_id_address_variant(self):
+	def test_accepts_a_city_without_any_district(self):
 		self._document().run_method("validate")
 
-	def test_accepts_city_id_and_district_name_address_variant(self):
-		self._document(district_id="", city_id="city-id", district_name="Maadi").run_method("validate")
+	def test_city_is_required(self):
+		with self.assertRaisesRegex(frappe.ValidationError, "City is required"):
+			self._document(city="", city_id="").run_method("validate")
 
-	def test_rejects_missing_or_ambiguous_address_variant(self):
-		with self.assertRaises(frappe.ValidationError):
-			self._document(district_id="", city_id="", district_name="").run_method("validate")
-		with self.assertRaises(frappe.ValidationError):
-			self._document(city_id="city-id", district_name="Maadi").run_method("validate")
+	def test_receiver_and_phone_are_required(self):
+		with self.assertRaisesRegex(frappe.ValidationError, "Receiver Name is required"):
+			self._document(receiver_name=" ").run_method("validate")
+		with self.assertRaisesRegex(frappe.ValidationError, "Receiver Phone is required"):
+			self._document(receiver_phone="").run_method("validate")
+
+	def test_first_line_must_be_more_than_five_characters(self):
+		with self.assertRaisesRegex(frappe.ValidationError, "more than 5 characters"):
+			self._document(address_first_line="12345").run_method("validate")
+		self._document(address_first_line="123456").run_method("validate")

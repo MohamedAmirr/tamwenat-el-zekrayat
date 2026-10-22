@@ -47,7 +47,7 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			self.create(order)
 
-		self.assertEqual(len(self.http.calls), 1)
+		self.assertEqual(len(self.http.sent()), 1)
 		self.assertEqual(frappe.db.count("Bosta Shipment", {"sales_order": order.name}), 1)
 
 	def test_delivery_note_failure_is_savepointed_and_resumed_without_a_second_bosta_call(self):
@@ -70,7 +70,7 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 
 		result = self.create(order)
 
-		self.assertEqual(len(self.http.calls), 1)
+		self.assertEqual(len(self.http.sent()), 1)
 		shipment.reload()
 		self.assertEqual((shipment.status, shipment.delivery_note), ("Completed", result["delivery_note"]))
 		self.assertFalse(shipment.delivery_note_error)
@@ -110,13 +110,13 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 
 		self.http.queue["search"].append(FakeResponse(200, {"success": True, "data": []}))
 		self.http.queue["create"].append(created("TRK-3", "DELIVERY-3"))
-		self.create(order, city="Alexandria", district_id="other", address_first_line="Elsewhere 1")
+		self.create(order, city_id="city-alex", address_first_line="Elsewhere 1")
 
 		retried = self.shipment_for(order)
 		self.assertEqual(retried.name, original.name)
 		self.assertEqual(
-			(retried.city, retried.district_id, retried.address_first_line),
-			("Alexandria", "other", "Elsewhere 1"),
+			(retried.city, retried.city_id, retried.city_code, retried.address_first_line),
+			("Alexandria", "city-alex", "EG-02", "Elsewhere 1"),
 		)
 		self.assertEqual(retried.status, "Completed")
 
@@ -198,7 +198,7 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		shipment = self._pending_shipment(order, minutes_old=0)
 		with self.assertRaises(frappe.ValidationError):
 			deliveries.check_bosta_shipment(shipment.name)
-		self.assertEqual(self.http.calls, [])
+		self.assertEqual(self.http.sent(), [])
 
 		frappe.db.set_value(
 			"Bosta Shipment", shipment.name, "modified", "2020-01-01 00:00:00", update_modified=False
@@ -216,7 +216,7 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			self.create(order)
 
-		self.assertEqual(self.http.calls, [])
+		self.assertEqual(self.http.sent(), [])
 		self.assertIsNone(self.shipment_for(order))
 
 	def test_cod_is_the_outstanding_amount(self):
@@ -246,7 +246,7 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 			with self.subTest(order=order.name), self.assertRaises(frappe.ValidationError):
 				self.create(order)
 			self.assertIsNone(self.shipment_for(order))
-		self.assertEqual(self.http.calls, [])
+		self.assertEqual(self.http.sent(), [])
 
 	def test_permission_matrix(self):
 		# The Delivery Note step needs ERPNext's own rights: Delivery Note create (Stock User)
@@ -296,7 +296,7 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		shipment = self.shipment_for(order)
 		self.assertEqual((shipment.status, shipment.tracking_number), ("Delivery Note Failed", "TRK-1"))
 		self.create(order)  # an administrator resumes without a second Bosta call
-		self.assertEqual(len(self.http.calls), 1)
+		self.assertEqual(len(self.http.sent()), 1)
 		self.assertEqual(self.shipment_for(order).status, "Completed")
 
 	def test_configuration_failure_persists_nothing_and_is_not_an_ambiguous_send(self):
@@ -319,7 +319,7 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError) as raised:
 			self.create(order, expected_cod=500)
 		self.assertIn("Reopen the dialog", str(raised.exception))
-		self.assertEqual(self.http.calls, [])
+		self.assertEqual(self.http.sent(), [])
 
 		self.http.queue["create"].append(created())
 		self.create(order, expected_cod=300)
@@ -334,7 +334,7 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError) as raised:
 			self.create(foreign)
 		self.assertIn("company currency", str(raised.exception))
-		self.assertEqual(len(self.http.calls), 1)
+		self.assertEqual(len(self.http.sent()), 1)
 
 	def test_a_stale_caller_cannot_build_a_second_delivery_note(self):
 		order = self.make_order()
@@ -410,14 +410,15 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 						"receiver_name": self._receiver(),
 						"receiver_phone": "0100",
 						"city": "Cairo",
-						"district_id": "d",
+						"city_id": "city-cairo",
+						"city_code": "EG-01",
 						"address_first_line": "12 Example Street",
 					}
 				).insert()
 		finally:
 			frappe.set_user("Administrator")
 
-	def test_dialog_defaults_and_district_is_required(self):
+	def test_dialog_defaults_and_city_is_required(self):
 		order = self.make_order(rate=500, advance_paid=500)
 		defaults = bosta_shipments.get_create_defaults(order.name)
 		self.assertEqual(
@@ -425,13 +426,14 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		)
 		self.assertEqual(defaults["receiver_name"], self.customer.customer_name)
 
-		# A missing district is refused before anything is sent.
+		# A missing city is refused before anything is sent, and no district is asked for.
+		self.assertNotIn("district_id", defaults)
 		with self.assertRaises(frappe.ValidationError) as raised:
 			bosta_shipments.create_shipment(
-				order.name, self._receiver(), "01000000000", "Cairo", "", "12 Example Street"
+				order.name, self._receiver(), "01000000000", "", "12 Example Street"
 			)
-		self.assertIn("district", str(raised.exception))
-		self.assertEqual(self.http.calls, [])
+		self.assertIn("Choose a Bosta city", str(raised.exception))
+		self.assertEqual(self.http.sent(), [])
 
 	def test_only_one_active_shipment_per_sales_order_but_a_new_one_after_cancel(self):
 		order = self.make_order()
@@ -447,7 +449,8 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 					"receiver_name": self._receiver(),
 					"receiver_phone": "0100",
 					"city": "Cairo",
-					"district_id": "d",
+					"city_id": "city-cairo",
+					"city_code": "EG-01",
 					"address_first_line": "12 Example Street",
 				}
 			)
@@ -487,7 +490,8 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 					"receiver_name": self._receiver(),
 					"receiver_phone": "0100",
 					"city": "Cairo",
-					"district_id": "d",
+					"city_id": "city-cairo",
+					"city_code": "EG-01",
 					"address_first_line": "12 Example Street",
 					"status": "Canceled",
 				}
@@ -507,7 +511,8 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 				"receiver_name": self._receiver(),
 				"receiver_phone": "01000000000",
 				"city": "Cairo",
-				"district_id": "d",
+				"city_id": "city-cairo",
+				"city_code": "EG-01",
 				"address_first_line": "12 Example Street",
 				"bosta_requested_on": now_datetime(),
 			}

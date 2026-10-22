@@ -292,9 +292,9 @@ Business Location ID,معرّف موقع العمل في Bosta
 Receiver,المستلم
 Receiver Name,اسم المستلم
 Receiver Phone,هاتف المستلم
-Required Delivery Address,عنوان التسليم المطلوب
+Delivery Address,عنوان التسليم
 District ID,معرّف المنطقة
-City ID,معرّف المدينة
+Bosta City ID,معرّف مدينة Bosta
 District Name,اسم المنطقة
 Address First Line,السطر الأول من العنوان
 Bosta Delivery ID,معرّف التوصيل في Bosta
@@ -526,7 +526,6 @@ Legacy Migration Source,مصدر الترحيل القديم
 #146: rows are written only by integrations/noon/fulfillment.py - never hand-edited.,#146: تُكتب الصفوف فقط بواسطة integrations/noon/fulfillment.py - ولا تُعدّل يدويًا أبدًا.
 (empty),(فارغ)
 A Bosta business reference is required.,مرجع Bosta التجاري مطلوب.
-A Bosta city ID is required.,معرّف مدينة Bosta مطلوب.
 A Bosta tracking number is required.,رقم تتبع Bosta مطلوب.
 A Marketplace Account for platform {0} and external account {1} already exists ({2}).,يوجد بالفعل حساب سوق للمنصة {0} والحساب الخارجي {1} ({2}).
 A Marketplace Order for Marketplace Account {0} and External Order ID {1} already exists ({2}).,يوجد بالفعل طلب سوق لحساب السوق {0} ومعرّف الطلب الخارجي {1} ({2}).
@@ -625,7 +624,6 @@ Bosta returned no pickup locations. The saved location is unchanged.,لم تُع
 Bosta returned no readable state for this delivery.,لم تُعِد Bosta حالة مقروءة لهذا التوصيل.
 Bosta returned no usable cities.,لم تُعِد Bosta مدنًا صالحة للاستخدام.
 Bosta returned the city list in an unrecognised format.,أعادت Bosta قائمة المدن بتنسيق غير معروف.
-Bosta returned the district list in an unrecognised format.,أعادت Bosta قائمة المناطق بتنسيق غير معروف.
 Bosta returned the pickup locations in an unrecognised format.,أعادت Bosta مواقع الاستلام بتنسيق غير معروف.
 Bosta state refreshed.,تم تحديث حالة Bosta.
 "Bosta terminated the delivery, but ERPNext could not cancel the Delivery Note. The shipment stays active and is listed in Needs Attention; the cancellation is retried automatically.","أنهت Bosta التوصيل، لكن تعذّر على ERPNext إلغاء مذكرة التسليم. تبقى الشحنة نشطة وتظهر في ""يحتاج إلى انتباه""؛ وستُعاد محاولة الإلغاء تلقائيًا."
@@ -667,8 +665,6 @@ Changed,تم التغيير
 Changing the Noon destination's active state,تغيير حالة تفعيل وجهة Noon
 Check Bosta,فحص Bosta
 Checking Bosta...,جارٍ فحص Bosta...
-Choose a Bosta city and district.,اختر مدينة ومنطقة Bosta.
-Choose a Bosta district.,اختر منطقة Bosta.
 Clearing Account {0} does not belong to Company {1}.,حساب التسوية {0} لا ينتمي إلى الشركة {1}.
 Clearing Account {0} does not exist.,حساب التسوية {0} غير موجود.
 Clearing Account {0} is a group account; choose a leaf account.,حساب التسوية {0} حساب مجموعة؛ اختر حسابًا فرعيًا.
@@ -739,7 +735,6 @@ Delivery Note {0} is on a submitted Sales Invoice; cancel the invoice first.,م�
 Discard Noon Shipment,تجاهل شحنة Noon
 Discard Shipment,تجاهل الشحنة
 Discarding shipment...,جارٍ تجاهل الشحنة...
-District,المنطقة
 Draft Credit Note created.,تم إنشاء إشعار دائن مسودة.
 Draft Sales Return created.,تم إنشاء مرتجع مبيعات مسودة.
 Draft or submitted return Delivery Note created from a Sellable outcome.,"مذكرة تسليم مرتجعة (مسودة أو معتمدة) أُنشئت من نتيجة ""قابل للبيع""."
@@ -771,7 +766,6 @@ ERPNext: {0},ERPNext: {0}
 Each REPLACED item must have exactly one replacement.,يجب أن يكون لكل عنصر مستبدَل (REPLACED) بديل واحد بالضبط.
 Echo guard (#181): when ERPNext successfully asked this platform to cancel the order. Durable marker the reconciliation planner reads so the platform cancellation echo does not reopen a Closed Sales Order. Set only by services/marketplace_outbound.py.,حماية الصدى (#181): وقت نجاح ERPNext في طلب إلغاء الطلب من هذه المنصة. علامة دائمة يقرؤها مخطط التسوية حتى لا يعيد صدى الإلغاء من المنصة فتح أمر بيع مغلق. تُضبط فقط بواسطة services/marketplace_outbound.py.
 Edit Bosta Shipment,تعديل شحنة Bosta
-"Enter District ID, or both City ID and District Name.",أدخل معرّف المنطقة، أو معرّف المدينة واسم المنطقة معًا.
 Enter the address first line.,أدخل السطر الأول من العنوان.
 Enter the receiver phone.,أدخل هاتف المستلم.
 Enter your normal local date and time. Talabat receives the server-converted UTC time.,أدخل التاريخ والوقت المحليين المعتادين. يستلم Talabat الوقت بتوقيت UTC بعد تحويله على الخادم.
@@ -1430,7 +1424,6 @@ Upload one .xlsx workbook.,ارفع ملف Excel واحدًا بصيغة .xlsx.
 Uploaded,تم الرفع
 Use Location,استخدام الموقع
 Use Warehouse,استخدام المستودع
-"Use this, or enter both City ID and District Name.",استخدم هذا، أو أدخل معرّف المدينة واسم المنطقة معًا.
 VENDOR-sponsored amount: {0},المبلغ الذي يتحمله البائع: {0}
 VENDOR_DELIVERY,توصيل بواسطة البائع
 "Warehouse is disabled, a group, or belongs to a different Company.",المستودع معطّل، أو مستودع مجموعة، أو ينتمي إلى شركة مختلفة.
@@ -1452,7 +1445,6 @@ blank,فارغ
 catalog sync,مزامنة الكتالوج
 cities,المدن
 "disabled value '{0}' is not recognized; use 1/0, yes/no, or true/false.",القيمة '{0}' لـ disabled غير معروفة؛ استخدم 1/0 أو yes/no أو true/false.
-districts,المناطق
 eg,eg
 "enabled value '{0}' is not recognized; use 1/0, yes/no, or true/false.",القيمة '{0}' لـ enabled غير معروفة؛ استخدم 1/0 أو yes/no أو true/false.
 "frappe.generate_hash(length=32), saved before the UploadShipmentInvoice call and reused on retry; a deliberate re-upload gets a fresh key (decision 19).",frappe.generate_hash(length=32)، يُحفظ قبل استدعاء UploadShipmentInvoice ويُعاد استخدامه عند إعادة المحاولة؛ إعادة الرفع المتعمّدة تحصل على مفتاح جديد (القرار 19).
@@ -1480,7 +1472,6 @@ Each Sales Order to send needs a name.,يجب أن يكون لكل أمر بيع
 Bulk Bosta job not found.,لم يتم العثور على مهمة Bosta الجماعية.
 Bosta shipment {0} created and Delivery Note {1} submitted.,تم إنشاء شحنة Bosta {0} وتقديم مذكرة التسليم {1}.
 Bosta accepted the delivery (tracking number {0}) but the Delivery Note could not be created. Retry creates only the Delivery Note.,قبلت Bosta التوصيل (رقم التتبع {0}) لكن تعذّر إنشاء مذكرة التسليم. تُنشئ إعادة المحاولة مذكرة التسليم فقط.
-Bosta needs a district for this address.,تحتاج Bosta إلى منطقة لهذا العنوان.
 The shipment could not be created. See Error Log for details.,تعذّر إنشاء الشحنة. راجع سجل الأخطاء للتفاصيل.
 Bosta returned the district directory in an unrecognised format.,أعادت Bosta قائمة المناطق بصيغة غير معروفة.
 Create Bosta Shipments,إنشاء شحنات Bosta
@@ -1552,3 +1543,9 @@ Turn off to keep importing Noon orders while ERPNext stops writing stock to this
 Turn off to keep importing Noon orders while ERPNext stops writing prices to this account. Turning it back on does not trigger a full push.,أوقفه لمواصلة استيراد طلبات Noon بينما يتوقف ERPNext عن كتابة الأسعار في هذا الحساب. إعادة تشغيله لا تُطلق إرسالًا كاملًا.
 Price push is paused for this account.,إرسال الأسعار متوقف مؤقتًا لهذا الحساب.
 push paused.,الإرسال متوقف مؤقتًا.
+Bosta City Code,رمز مدينة Bosta
+Sent to Bosta with the address first line; Bosta resolves the district.,يُرسل إلى Bosta مع السطر الأول من العنوان؛ وتحدد Bosta المنطقة.
+Choose a Bosta city.,اختر مدينة Bosta.
+Could not load the Bosta city codes. Try again in a minute.,تعذر تحميل رموز مدن Bosta. حاول مرة أخرى بعد دقيقة.
+Bosta has no city code for {0}. Refresh the Bosta lists and try again.,لا يوجد لدى Bosta رمز مدينة لـ {0}. حدّث قوائم Bosta وحاول مرة أخرى.
+Bosta could not find the district from this address. Add the area name to the address and retry.,لم تتمكن Bosta من تحديد المنطقة من هذا العنوان. أضف اسم المنطقة إلى العنوان وأعد المحاولة.
