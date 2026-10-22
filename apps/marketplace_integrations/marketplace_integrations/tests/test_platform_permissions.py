@@ -81,13 +81,14 @@ class IntegrationTestPlatformPermissions(IntegrationTestCase):
 
 	# -- fixtures ---------------------------------------------------------------------------------
 
-	def make_account(self, platform):
+	def make_account(self, platform, tag=""):
+		# `tag` gives an extra account of the same platform its own unique identity.
 		account = frappe.get_doc(
 			{
 				"doctype": "Marketplace Account",
-				"account_name": f"Platform Perm {platform} {self.suffix}",
+				"account_name": f"Platform Perm {platform}{tag} {self.suffix}",
 				"platform": "Talabat",
-				"external_account_id": f"platform-perm-{platform.lower()}-{self.suffix}",
+				"external_account_id": f"platform-perm-{platform.lower()}{tag}-{self.suffix}",
 				"connection_doctype": STAND_IN_CONNECTION_DOCTYPE,
 				"connection": STAND_IN_CONNECTION,
 			}
@@ -394,7 +395,8 @@ class IntegrationTestPlatformPermissions(IntegrationTestCase):
 				)
 
 	def test_row_whose_account_was_deleted_is_invisible_to_platform_users(self):
-		account = self.make_account("Talabat")
+		account = self.make_account("Talabat", tag="-orphan")
+		self.addCleanup(frappe.db.delete, "Marketplace Account", {"name": account.name})
 		order = self.make_order(account.name, "Orphan")
 		self.addCleanup(frappe.db.delete, "Marketplace Order", {"name": order.name})
 		# Bypass link checks to leave an order pointing at a missing account.
