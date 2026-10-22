@@ -65,6 +65,7 @@ class IntegrationTestMarketplaceNeedsAttentionReport(IntegrationTestCase):
 		self.order.insert()
 
 	def tearDown(self):
+		frappe.set_user("Administrator")
 		frappe.delete_doc("Marketplace Order", self.order.name, force=True)
 		frappe.delete_doc("Marketplace Account", self.account.name, force=True)
 
@@ -103,11 +104,13 @@ class IntegrationTestMarketplaceNeedsAttentionReport(IntegrationTestCase):
 		rows = [{key: row[key] for key in ("reference_doctype", "reference_name")} for row in data]
 		self.assertTrue(rows)
 
-		self.addCleanup(frappe.set_user, frappe.session.user)
+		original_user = frappe.session.user
 		frappe.set_user("Guest")
-		self.assertFalse(frappe.has_permission("Marketplace Order", "read"))
-
-		add_reference_labels(rows)
+		try:
+			self.assertFalse(frappe.has_permission("Marketplace Order", "read"))
+			add_reference_labels(rows)
+		finally:
+			frappe.set_user(original_user)
 
 		self.assertEqual([row["reference_label"] for row in rows], [None] * len(rows))
 		self.assertEqual([row["reference_name"] for row in rows], [self.order.name] * len(rows))
