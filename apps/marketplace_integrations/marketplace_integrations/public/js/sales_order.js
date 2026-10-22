@@ -198,6 +198,9 @@
 			}
 			const cod = escape(format_currency(shipment.cod_amount || 0));
 			const last_update = shipment.last_update ? escape(frappe.datetime.str_to_user(shipment.last_update)) : "";
+			if (shipment.status === "Delivery Note Failed" && shipment.delivery_note_error) {
+				html += `<p class="text-danger">${escape(shipment.delivery_note_error)}</p>`;
+			}
 			html += `<table class="table table-bordered"><tbody>`;
 			html += bosta_row(__("Status"), text(__(shipment.status)));
 			html += bosta_row(__("Tracking Number"), text(shipment.tracking_number));

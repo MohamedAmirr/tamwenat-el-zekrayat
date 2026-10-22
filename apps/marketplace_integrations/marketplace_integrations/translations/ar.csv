@@ -664,6 +664,9 @@ Catalog webhook secret copied.,تم نسخ سر Webhook الكتالوج.
 Changed,تم التغيير
 Changing the Noon destination's active state,تغيير حالة تفعيل وجهة Noon
 Check Bosta,فحص Bosta
+Retry Delivery Note,إعادة محاولة إنشاء مذكرة التسليم
+Creating the Delivery Note...,جارٍ إنشاء مذكرة التسليم...
+Delivery Note created.,تم إنشاء مذكرة التسليم.
 Checking Bosta...,جارٍ فحص Bosta...
 Clearing Account {0} does not belong to Company {1}.,حساب التسوية {0} لا ينتمي إلى الشركة {1}.
 Clearing Account {0} does not exist.,حساب التسوية {0} غير موجود.

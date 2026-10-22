@@ -78,6 +78,7 @@ class IntegrationTestBostaShipmentSummary(BostaFixtureMixin, IntegrationTestCase
 				"address_first_line": "12 Example Street",
 				"cod_amount": 0,
 				"delivery_note": "",
+				"delivery_note_error": "",
 				"delivery_note_status": "",
 			},
 		)
@@ -102,8 +103,16 @@ class IntegrationTestBostaShipmentSummary(BostaFixtureMixin, IntegrationTestCase
 				"address_first_line",
 				"cod_amount",
 				"delivery_note",
+				"delivery_note_error",
 				"delivery_note_status",
 			},
+		)
+
+	def test_delivery_note_error_is_returned_for_a_failed_delivery_note(self):
+		order = self.make_order()
+		self._shipment(order, "Delivery Note Failed", delivery_note_error="stock problem")
+		self.assertEqual(
+			bosta_shipments.get_sales_order_shipment(order.name)["delivery_note_error"], "stock problem"
 		)
 
 	def test_only_canceled_returns_the_latest_canceled_as_inactive(self):

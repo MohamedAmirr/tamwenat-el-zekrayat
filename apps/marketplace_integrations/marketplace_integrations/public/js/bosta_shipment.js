@@ -24,20 +24,22 @@
 		// No "already added" flag: the form clears custom buttons on every refresh.
 		if (!frm.doc || frm.is_new() || !(frappe.user && frappe.user.has_role(CREATOR_ROLES))) return;
 		if (!STUCK_STATUSES.includes(frm.doc.status) || frm.doc.delivery_note) return;
-		frm.add_custom_button(__("Check Bosta"), () => {
+		const retry_dn = frm.doc.status === "Delivery Note Failed";
+		frm.add_custom_button(retry_dn ? __("Retry Delivery Note") : __("Check Bosta"), () => {
 			frappe
 				.call({
 					method: CHECK_METHOD,
 					type: "POST",
 					args: { shipment: frm.doc.name },
 					freeze: true,
-					freeze_message: __("Checking Bosta..."),
+					freeze_message: retry_dn ? __("Creating the Delivery Note...") : __("Checking Bosta..."),
 				})
 				.then((r) => {
 					const result = r.message || {};
 					frappe.show_alert({
-						message:
-							result.found === false
+						message: result.delivery_note
+							? __("Delivery Note created.")
+							: result.found === false
 								? __("Bosta has no such delivery. A retry is allowed.")
 								: __("Bosta delivery linked."),
 						indicator: result.found === false ? "orange" : "green",
@@ -45,6 +47,11 @@
 				})
 				.finally(() => frm.reload_doc());
 		});
+	}
+
+	function show_delivery_note_error(frm) {
+		if (!frm.doc || frm.doc.status !== "Delivery Note Failed" || !frm.doc.delivery_note_error) return;
+		frm.dashboard.set_headline(frappe.utils.escape_html(frm.doc.delivery_note_error), "red");
 	}
 
 	function add_print_label_button(frm) {
@@ -73,11 +80,12 @@
 			refresh(frm) {
 				add_print_label_button(frm);
 				add_check_bosta_button(frm);
+				show_delivery_note_error(frm);
 			},
 		});
 	}
 
 	if (typeof module !== "undefined") {
-		module.exports = { add_print_label_button, add_check_bosta_button, render_snapshot_as_escaped_text };
+		module.exports = { add_print_label_button, add_check_bosta_button, show_delivery_note_error, render_snapshot_as_escaped_text };
 	}
 })();

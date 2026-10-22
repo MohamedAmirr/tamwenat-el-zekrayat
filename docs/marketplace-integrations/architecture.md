@@ -314,8 +314,9 @@ shipment with a tracking number). The dashboard indicator (status, tracking numb
 state, link to the shipment) stays. No shipment shows "No Bosta shipment"; a failed read says
 it could not load (creators still get Create); a user without Bosta Shipment read sends no
 request and sees an empty tab. `Pending Bosta` (after 5 minutes), `Bosta Created` and
-`Delivery Note Failed` are recovered with **Check Bosta** on the shipment form, reached through
-the indicator link. Not built: Sales Order list column, filter or bulk actions.
+`Delivery Note Failed` are recovered with **Check Bosta** on the shipment form (labelled
+**Retry Delivery Note** for `Delivery Note Failed`, which also shows `delivery_note_error` as a red
+banner there and in the Bosta tab), reached through the indicator link. Not built: Sales Order list column, filter or bulk actions.
 
 **Refresh from Bosta (#271).** `statuses.refresh_shipment_state(shipment)` (creator roles
 only; whitelisted as `api.bosta_shipments.refresh_shipment`, POST) does one
