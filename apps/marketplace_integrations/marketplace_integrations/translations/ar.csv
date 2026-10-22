@@ -1556,3 +1556,18 @@ Talabat User,مستخدم Talabat
 Noon User,مستخدم Noon
 Shopify User,مستخدم Shopify
 Bosta User,مستخدم Bosta
+Could not load the order details.,تعذّر تحميل تفاصيل الطلب.
+Order details,تفاصيل الطلب
+Details of {0},تفاصيل {0}
+Platform order number,رقم الطلب في المنصة
+Payment status,حالة الدفع
+Last sync,آخر مزامنة
+Last sync error,آخر خطأ مزامنة
+Marketplace,السوق
+Customer,العميل
+Items,الأصناف
+More items on the order.,يحتوي الطلب على أصناف أخرى.
+Delivery status,حالة التسليم
+Tracking number,رقم التتبع
+Total,الإجمالي
+Sales Order {0} was not found. It may have been deleted.,لم يتم العثور على أمر البيع {0}. ربما تم حذفه.
