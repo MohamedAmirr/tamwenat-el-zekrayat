@@ -34,6 +34,15 @@ All paths are under `apps/marketplace_integrations/marketplace_integrations/` un
 - Custom pages: set the page's roles, authorize every server call, and render server values escaped.
 - Loading, empty, success and error states are required on every async screen. Errors show the server message escaped, with a recovery action where one exists.
 
+## Readable references in lists
+
+- Prefer native settings: `title_field` + `show_title_field_in_link` on the target doctype, and `in_list_view` / `in_standard_filter` on real fields. Formatters are client display only; sorting, filtering and search must stay on real stored fields (`search_fields`).
+- Frappe falls back to the docname in list and link display when the title field is empty (`Document.get_title()` itself returns `''`), so keep the title field filled (see `MarketplaceOrder.before_save`).
+- Set `hide_name_column: true` in the list settings of a doctype with a `title_field`, or Frappe adds a second `ID` (docname) column next to the readable subject. Keep the docname reachable (form, search, plus the row tooltip from the shared `public/js/list_row_name.js` helper: `frappe.require` it in `onload` and guard against it missing; do not copy it per list). Link report columns get titles in one batched query; Dynamic Link columns get none, so send a label from the report and render it escaped in `<bdi dir="ltr">`.
+- Do not repeat the title value as a list column: the Marketplace Order list shows the platform order number as the subject; `external_order_id` and `order_code` stay on the form and in `search_fields` but are not `in_list_view`. Bosta Shipment's subject is the tracking number; its status shows as the translated, coloured indicator pill only (a `get_indicator` makes Frappe drop the status field column, so a `status` formatter never runs).
+- Never use a mandatory field with a default as `title_field` (the default is dropped on new docs, see `frappe-conventions.md`).
+- The subject link is plain text: it takes no HTML from a formatter.
+
 ## Scoped styling
 
 - Add CSS only when no standard control does the job. Scope every rule under a class owned by this app (for example a wrapper class on your page or dialog), never bare element selectors or global overrides.

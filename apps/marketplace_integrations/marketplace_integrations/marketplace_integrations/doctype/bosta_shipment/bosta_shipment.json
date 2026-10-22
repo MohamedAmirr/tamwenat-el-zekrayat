@@ -42,6 +42,7 @@
   {
    "fieldname": "sales_order",
    "fieldtype": "Link",
+   "in_list_view": 1,
    "label": "Sales Order",
    "options": "Sales Order",
    "reqd": 1,
@@ -60,6 +61,7 @@
    "fieldname": "status",
    "fieldtype": "Select",
    "in_list_view": 1,
+   "in_standard_filter": 1,
    "label": "Status",
    "options": "Pending Bosta\nBosta Created\nDelivery Note Failed\nCompleted\nBosta Failed\nCanceled",
    "read_only": 1,
@@ -74,6 +76,7 @@
    "fieldname": "receiver_name",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
+   "in_list_view": 1,
    "label": "Receiver Name",
    "reqd": 1,
    "read_only_depends_on": "eval:doc.tracking_number"
@@ -273,7 +276,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-22 01:37:14.347170",
+ "modified": "2026-10-22 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Bosta Shipment",
@@ -319,7 +322,9 @@
    "role": "Sales User"
   }
  ],
+ "search_fields": "tracking_number,receiver_name,sales_order",
  "sort_field": "modified",
  "sort_order": "DESC",
- "states": []
+ "states": [],
+ "title_field": "tracking_number"
 }

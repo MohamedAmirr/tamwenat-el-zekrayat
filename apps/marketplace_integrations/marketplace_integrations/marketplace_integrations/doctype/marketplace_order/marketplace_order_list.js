@@ -4,6 +4,8 @@ if (typeof frappe !== "undefined") {
 		// status formatter reads the Shopify financial/fulfillment statuses
 		// (hidden doctype fields, fetched here regardless).
 		add_fields: ["erpnext_sync_status", "external_financial_status", "external_fulfillment_status", "platform"],
+		// #324: the readable order reference is the subject; the docname (ID) column is hidden.
+		hide_name_column: true,
 		get_indicator: get_order_indicator,
 		formatters: {
 			external_status(value, df, doc) {
@@ -12,6 +14,7 @@ if (typeof frappe !== "undefined") {
 			},
 		},
 		onload(listview) {
+			show_row_name_on_hover(listview);
 			listview.page.add_inner_button(__("Needs Attention"), () => {
 				frappe.set_route("query-report", "Marketplace Needs Attention");
 			});
@@ -34,6 +37,19 @@ if (typeof frappe !== "undefined") {
 			}
 		},
 	};
+}
+
+// #324: loads the shared row tooltip helper (public/js/list_row_name.js). The tooltip is a
+// convenience: if the helper cannot load, the list works the same without it. (No top-level const:
+// list scripts share one global scope, so a repeated const name would break the other lists.)
+function show_row_name_on_hover(listview) {
+	return frappe
+		.require("/assets/marketplace_integrations/js/list_row_name.js")
+		.then(() => {
+			const helper = frappe.marketplace_integrations && frappe.marketplace_integrations.list_row_name;
+			if (helper) helper.attach_to_list(listview);
+		})
+		.catch((error) => console.error("List row name helper failed to load (#324).", error));
 }
 
 // #169: one colour per ERPNext sync state so a merchant can scan the list for
@@ -363,6 +379,7 @@ if (typeof module !== "undefined") {
 		get_order_indicator,
 		platform_status_text,
 		retry_erpnext_sync,
+		show_row_name_on_hover,
 		settle_with_concurrency,
 		show_refunded_orders,
 		summarize_retry_results,

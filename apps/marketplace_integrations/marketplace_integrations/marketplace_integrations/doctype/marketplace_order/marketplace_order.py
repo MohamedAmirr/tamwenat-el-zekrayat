@@ -38,6 +38,11 @@ class MarketplaceOrder(Document):
 
 	def before_save(self):
 		self.external_order_id = cstr(self.external_order_id).strip()
+		# #324: Links and the list show platform_order_reference (title_field); Frappe's
+		# own fallback for an empty title is the docname, so keep it filled. Mappers that
+		# have no merchant-facing number leave it empty - fall back to external_order_id.
+		if not cstr(self.platform_order_reference).strip():
+			self.platform_order_reference = self.external_order_id
 		self.order_identity_key = compute_order_identity_key(self.marketplace_account, self.external_order_id)
 		# The echo-guard marker is one-way (#181): it is written with update_modified=False,
 		# so a copy loaded before it was set can still be saved and would write NULL back,

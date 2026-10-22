@@ -2,7 +2,10 @@
 # For license information, please see license.txt
 
 import frappe
-from frappe.tests import UnitTestCase
+from frappe.tests import IntegrationTestCase, UnitTestCase
+
+# The regression test inserts a shipment with ignore_links; skip auto-generated linked records.
+IGNORE_TEST_RECORD_DEPENDENCIES = ["Sales Order", "Delivery Note"]
 
 
 class UnitTestBostaShipment(UnitTestCase):
@@ -37,3 +40,48 @@ class UnitTestBostaShipment(UnitTestCase):
 		with self.assertRaisesRegex(frappe.ValidationError, "more than 5 characters"):
 			self._document(address_first_line="12345").run_method("validate")
 		self._document(address_first_line="123456").run_method("validate")
+
+
+class TestBostaShipmentTitle(IntegrationTestCase):
+	def test_title_is_the_tracking_number(self):
+		"""#324: the subject is the tracking number; it is not a list column."""
+		meta = frappe.get_meta("Bosta Shipment")
+
+		self.assertEqual(meta.title_field, "tracking_number")
+		self.assertFalse(meta.get_field("tracking_number").in_list_view)
+		self.assertTrue(meta.get_field("status").in_list_view)
+		self.assertIn("tracking_number", meta.get_search_fields())
+
+	def test_title_field_has_no_default_or_mandatory_flag(self):
+		"""Frappe skips static defaults for the title field on new docs (create_new.py),
+		so a mandatory title field with a default breaks creation (#324)."""
+		field = frappe.get_meta("Bosta Shipment").get_field("tracking_number")
+
+		self.assertFalse(field.default)
+		self.assertFalse(field.reqd)
+
+	def test_new_shipment_keeps_the_pending_status_default(self):
+		"""#324 regression: status is not the title field, so its default survives."""
+		doc = frappe.new_doc("Bosta Shipment")
+
+		self.assertEqual(doc.status, "Pending Bosta")
+
+		doc.update(
+			{
+				"sales_order": f"SAL-ORD-{frappe.generate_hash(length=10)}",
+				"receiver_name": "Ahmed",
+				"receiver_phone": "01000000000",
+				"city": "Cairo",
+				"city_id": "city-cairo",
+				"city_code": "EG-01",
+				"address_first_line": "12 Example Street",
+			}
+		)
+		doc.flags.ignore_links = True
+		doc.insert()
+		self.addCleanup(frappe.delete_doc, "Bosta Shipment", doc.name, force=True, ignore_permissions=True)
+
+		self.assertEqual(doc.status, "Pending Bosta")
+		# Document.get_title() has no docname fallback: it is "" for an empty tracking number.
+		# The docname fallback happens in list and link display, not here.
+		self.assertEqual(doc.get_title(), "")
