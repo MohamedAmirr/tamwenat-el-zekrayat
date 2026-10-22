@@ -121,6 +121,8 @@ def list_unmapped_order_skus(account_name):
 	):
 		return []
 
+	# Query builder reads below skip permissions on purpose: account read, mapping read and the
+	# permission-scoped Order probe above already authorized this caller for this account.
 	ORDER = DocType("Marketplace Order")
 	ITEM = DocType("Marketplace Order Item")
 	MPM = DocType(MAPPING_DOCTYPE)

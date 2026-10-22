@@ -337,6 +337,7 @@ def export_catalog(account_name):
 
 	mapping_by_reference = {
 		row.external_reference: row
+		# Trusted read: get_account() and _require_mapping_permission("read") above authorized the caller.
 		for row in frappe.get_all(
 			MAPPING_DOCTYPE,
 			filters={"marketplace_account": account.name},
@@ -446,6 +447,7 @@ def _find_unmapped_variants(account_name, client, job_id, owner):
 	picking an Item here will re-enable an existing row (upsert_mapping()'s
 	documented behavior, unchanged by this fix) rather than create a new one.
 	"""
+	# Trusted read (sweep worker): queue_catalog_sweep() authorized the account and mapping write.
 	mapping_rows = frappe.get_all(
 		MAPPING_DOCTYPE,
 		filters={"marketplace_account": account_name},
@@ -511,6 +513,7 @@ def _check_saved_mappings(account_name, client, job_id, owner, processed_so_far)
 	last is a plain count of rows whose descriptive-field refresh failed and
 	was rolled back (review finding #4), for the caller to surface in the
 	sweep result."""
+	# Trusted read (sweep worker): queue_catalog_sweep() authorized the account and mapping write.
 	rows = frappe.get_all(
 		MAPPING_DOCTYPE,
 		filters={"marketplace_account": account_name},

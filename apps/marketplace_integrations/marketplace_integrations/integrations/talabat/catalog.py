@@ -61,6 +61,7 @@ def get_catalog_page(account_name, page=1, page_size=20):
 	if page_skus:
 		item_by_sku = {
 			row.external_reference: row.item
+			# Trusted read: get_account() and _require_mapping_permission() above authorized the caller.
 			for row in frappe.get_all(
 				"Marketplace Product Mapping",
 				filters={
@@ -92,6 +93,7 @@ def get_mapped_items(account_name):
 	_require_mapping_permission("read")
 	return {
 		row.external_reference: row.item
+		# Trusted read: get_account() and _require_mapping_permission() above already authorized the caller.
 		for row in frappe.get_all(
 			"Marketplace Product Mapping",
 			filters={"marketplace_account": account.name, "enabled": 1},

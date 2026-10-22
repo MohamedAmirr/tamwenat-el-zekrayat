@@ -21,20 +21,24 @@ function build_page(page) {
 		)
 	);
 
-	make_import_section(container, {
-		title: __("ERPNext Items"),
-		description: __(
-			"Manage Item master fields and one primary barcode per Item. Mapping fields are not included in this workbook."
-		),
-		export_label: __("Export Items"),
-		import_label: __("Import Items"),
-		upload_title: __("Upload Items workbook"),
-		export_method: "marketplace_integrations.api.item_import.queue_items_xlsx_export",
-		preview_method: "marketplace_integrations.api.item_import.preview_items_import",
-		apply_method: "marketplace_integrations.api.item_import.queue_items_import_apply",
-		job_status_method: "marketplace_integrations.api.item_import.get_items_import_job_status",
-		identifier: (row) => row.item_code || "",
-	});
+	// Presentation only (#323): the server already refuses Item import without Item permission,
+	// so platform roles without Item create do not see a section that would only fail.
+	if (frappe.model.can_create("Item")) {
+		make_import_section(container, {
+			title: __("ERPNext Items"),
+			description: __(
+				"Manage Item master fields and one primary barcode per Item. Mapping fields are not included in this workbook."
+			),
+			export_label: __("Export Items"),
+			import_label: __("Import Items"),
+			upload_title: __("Upload Items workbook"),
+			export_method: "marketplace_integrations.api.item_import.queue_items_xlsx_export",
+			preview_method: "marketplace_integrations.api.item_import.preview_items_import",
+			apply_method: "marketplace_integrations.api.item_import.queue_items_import_apply",
+			job_status_method: "marketplace_integrations.api.item_import.get_items_import_job_status",
+			identifier: (row) => row.item_code || "",
+		});
+	}
 
 	make_import_section(container, {
 		title: __("Marketplace Mappings"),

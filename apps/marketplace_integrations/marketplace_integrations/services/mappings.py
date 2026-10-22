@@ -96,6 +96,8 @@ def _resolve(marketplace_account, external_reference):
 
 	key = compute_mapping_identity_key(marketplace_account, external_reference)
 
+	# Trusted internal lookup (query builder, no permission check): resolvers are called by order
+	# import, sync and push code that already runs under an authorized account or a worker.
 	MPM = DocType("Marketplace Product Mapping")
 	MA = DocType("Marketplace Account")
 
