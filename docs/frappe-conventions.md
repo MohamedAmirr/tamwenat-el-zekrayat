@@ -2,6 +2,8 @@
 
 Reference for any custom app work in this project. Applies once a custom app exists under `apps/<app_name>/`.
 
+Cross-cutting rules (permissions, data integrity, background work, verification) live in [`frappe-best-practices.md`](frappe-best-practices.md); Desk UI guidance in [`ui-customization.md`](ui-customization.md).
+
 ## Never touch core
 
 Never edit files inside the `frappe` or `erpnext` apps directly — those changes are lost on upgrade and untracked. All customization goes in:
@@ -39,7 +41,7 @@ apps/<app_name>/
 
 - Doctype **name**: Title Case, human-readable (`Sales Order`, `Member Card`). The folder/file name is the snake_case slug of that (`sales_order`).
 - Field `fieldname`: snake_case, matches the Python attribute (`doc.customer_name`).
-- Prefer the Frappe ORM over raw SQL: `frappe.get_doc`, `frappe.get_list`/`get_all`, `frappe.db.get_value`, `doc.save()`/`doc.submit()`. Reach for `frappe.db.sql` only when the ORM genuinely can't express the query, and always parameterize (`%s`, never string-formatted SQL).
+- Prefer the Frappe ORM over raw SQL: `frappe.get_doc`, `frappe.get_list`/`get_all`, `frappe.db.get_value`, `doc.save()`/`doc.submit()`. Reach for `frappe.db.sql` only when the ORM genuinely can't express the query, and always parameterize (`%s`, never string-formatted SQL). `get_all` bypasses user permissions, see [`frappe-best-practices.md`](frappe-best-practices.md).
 - Controller hooks (`validate`, `on_submit`, `before_save`, etc.) go in `<doctype_name>.py` on the `Document` subclass — don't scatter business logic into API endpoints when it belongs on the doctype.
 - Naming series / autoname: prefer built-in `naming_series` or `autoname` in the JSON over custom Python naming unless there's a real reason.
 - Base autoname on whichever field(s) form the record's **stable identity — never a field meant to change after creation.** The failure mode differs by autoname type, both confirmed directly against Frappe's source (`naming.py`/`base_document.py`), not assumed: for `autoname: field:X` (a single field mirrors `name`), `_sync_autoname_field` force-reverts any edit to `X` back to what `name` implies, on every save — the edit silently fails. For `autoname: format:...` (including a **custom `def autoname(self): self.name = ...`** controller method, needed when the identity fields need encoding beyond simple template substitution — e.g. to avoid a separator-collision risk, see the next bullet), `name` is only computed once, at insert (`set_new_name`) — Frappe never recomputes it on update. So changing an identity field on an existing record *does* persist the field's new value, but `name` silently goes stale/misleading relative to it. Either way, don't build the identity out of a field meant to change.
@@ -63,7 +65,7 @@ apps/<app_name>/
 
 ## hooks.py
 
-- `doc_events` for cross-doctype side effects (e.g. reacting to a Sales Invoice submit) instead of monkey-patching core doctypes.
+- `doc_events` for cross-doctype side effects (e.g. reacting to a Sales Invoice submit) instead of monkey-patching core doctypes. It is preferred over monkey-patching/overrides, not over service functions, and this app registers none for catalog doctypes (`docs/frappe-best-practices.md`).
 - `scheduler_events` for cron-style jobs; keep the job function itself in the app, not inline.
 - `fixtures` to export/version Custom Field, Property Setter, Client Script, Custom DocPerm, Workflow, etc. so `bench migrate` on a fresh site reproduces them.
 - `override_doctype_class` / `override_whitelisted_methods` are last resorts — prefer `doc_events` first.

@@ -21,6 +21,8 @@ always-loaded contract; the files below hold the detail.
 | Legacy Talabat reference/behavior lookup | Frappe conventions, `docs/talabat-integration/architecture.md` (historical), `docs/marketplace-integrations/architecture.md` | The legacy app is removed; implement any Talabat work in `marketplace_integrations`, consulting the historical doc for proven behavior. |
 | Add Talabat API behavior | Talabat README, OpenAPI, marketplace architecture | The checked-in Talabat spec is authoritative; do not infer endpoints/payloads. |
 | Run containers or bench | `docker-ops.md` / `dev-environment.md` | Check `.env`; bound log output; confirm destructive actions. |
+| Cross-cutting Frappe rules (permissions, data integrity, background jobs, version compatibility) | `frappe-best-practices.md` | `get_all` bypasses permissions; tests only on `test.localhost`. |
+| Desk UI (workspace/sidebar, forms, lists, reports, pages) | `ui-customization.md`, `.claude/skills/frappe-desk-ui/SKILL.md` | Check prod Frappe version before framework-UI work. |
 | Add/run tests | `dev-environment.md`, Frappe conventions | Prefer `IntegrationTestCase` or `UnitTestCase`, not deprecated `FrappeTestCase`. |
 | Plan/file issues or create a branch/PR | `issue-conventions.md` | Epic + ordered sub-issues; create GitHub-linked issue branches when available. |
 

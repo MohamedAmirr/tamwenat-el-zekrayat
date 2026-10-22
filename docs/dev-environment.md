@@ -121,6 +121,8 @@ Always pass `-p tamwenat-el-zekrayat-dev` when using `docker compose` for this s
 
 Tests must run on the dedicated `test.localhost` site. Code under test calls `frappe.db.commit()` (per-chunk and per-group commits, `db_set(..., commit=True)`), which defeats `IntegrationTestCase`'s class-level rollback, so **a test run permanently writes to whichever site it runs on**. Running them on `dev.localhost` polluted it with hundreds of leaked rows (by 2026-09-24: 227 test Shopify Connections, 122 accounts, 1359 mappings, 123 Items, 132 Price Lists). An attempt to auto-clean them after each test (a `CleanupTestCase` that deleted "whatever is new", PR #120, closed) made things worse on a live site: its unconditional commit made rows in doctypes outside its list permanent (a leaked test tax template even became the site's default), and deleting "whatever is new" could remove a real row created by another process mid-test. Tests therefore run on a separate site, and `dev.localhost` has `allow_tests` set to `false`, so `run-tests` is refused there ("Testing is disabled for the site!"). That setting is per site and can drift: it was found `true` on `dev.localhost` on 2026-10-08 (it had been left on, and a test run happened on dev). Check `sites/dev.localhost/site_config.json` for `allow_tests` before trusting the guard. Also `common_site_config.json` has `default_site` set to `dev.localhost`, so `bench run-tests` without `--site` targets dev: always pass `--site test.localhost`.
 
+`migrate` on `dev.localhost` (schema update after pulling) is separate from `migrate` plus tests on `test.localhost`; tests never run on dev. See "Test site vs dev site" in [`frappe-best-practices.md`](frappe-best-practices.md).
+
 ```bash
 # Full suite (add --module marketplace_integrations.integrations.shopify.test_products for one module)
 docker exec -w /home/frappe/bench-workspace/frappe-bench tamwenat-el-zekrayat-dev-frappe-1 bash -lc "bench --site test.localhost run-tests --app marketplace_integrations"
@@ -177,6 +179,20 @@ Narrow it while iterating (all flags are from `bench run-tests --help`):
 | Failure detail | `sed -n '/^ FAIL /,/^Ran /p' /tmp/suite.out` inside the container |
 
 Run the full suite once before handing work off. Migrate `test.localhost` (`bench --site test.localhost migrate`) only when a doctype JSON changed. `bench run-parallel-tests` exists but splits runs across builds for CI; it is not used here because all runs share the single `test.localhost` database, so parallel runs would clash. Run the JS test and `ruff check` / `ruff format --check` as separate quick commands.
+
+## Parallel work with git worktrees
+
+Worktrees are for editing and committing only: one branch per worktree, e.g. `../tez-worktrees/<branch>`. Only the main checkout's `apps/marketplace_integrations` is bind-mounted into the dev container (`docker-compose.dev.yml`), so the container cannot see a worktree. `test.localhost` has one shared database and code under test commits to it, so tests and migrates for a branch run serialized through the MAIN checkout under a host lock, covering the whole sequence:
+
+1. `mkdir /tmp/tez-test.lock` (atomic; if it fails, another run holds it: wait and retry). Remove it when finished, also on failure.
+2. In the main checkout make sure the working tree is clean, then `git switch <branch>`. If the branch is checked out in a worktree, use `git switch --detach <branch>` or remove that worktree first.
+3. If a doctype JSON changed, run `bench --site test.localhost migrate` (never `dev.localhost` as part of this).
+4. Run the tests with `--site test.localhost` (commands above).
+5. `git switch dev`, then `rmdir /tmp/tez-test.lock`.
+
+Never run `migrate` on `dev.localhost` while a branch other than `dev` is checked out in the main checkout: a migrate against a branch lacking a doctype drops that doctype's table (see the branch-tracking gotcha below).
+
+True parallel test runs need a second full bench stack (own compose project, DB volume, port and test site). That is not built and is heavy; only do it if the lock becomes a real bottleneck.
 
 ## Running one-off Python against a site
 

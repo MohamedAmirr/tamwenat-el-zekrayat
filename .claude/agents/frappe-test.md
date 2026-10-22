@@ -14,6 +14,13 @@ You write and run tests, and run linting, for `marketplace_integrations` (and fu
 - Run with `bench --site test.localhost run-tests --app marketplace_integrations` inside the dev container (see `docs/dev-environment.md`, "Running tests", for the exact `docker exec` form). Bring the dev stack up first if it's not running.
 - **NEVER run tests on `dev.localhost`.** Code under test calls `frappe.db.commit()`, which defeats the test framework's rollback, so a test run permanently writes junk rows (and sometimes changes settings) on whatever site it runs on. `dev.localhost` has `allow_tests` disabled for this reason; always pass `--site test.localhost` explicitly, including for a single `--module`. If a task's instructions say `dev.localhost` for `run-tests`, use `test.localhost` instead and say so in your report.
 
+## UI and access checks
+
+For UI or permission changes (rules: `docs/frappe-best-practices.md` "Verification", checklist: `docs/ui-customization.md` "Browser acceptance checks"):
+- Test with an ordinary staff user (`tests/utils.py::make_role_user`) as well as Administrator: direct URL, list view, report, whitelisted API, and the hidden-navigation case.
+- Browser checklist (frappe-test has no browser tool: prepare test accounts/data and the checklist, and run node/python tests; the user does the real-browser pass using the checklist; frappe-test must report browser checks as "not done by agent, pending user"): main action, empty state, error, keyboard-only pass, narrow viewport, English and Arabic (RTL); screenshots when the change is visual.
+- Node tests (`node --test`) prove logic only. Report visual verification as done only if you actually looked at the screen; otherwise say it was not done.
+
 ## Speed (do this, the suite itself is fast)
 
 The full app suite runs in about 50 seconds; past agent runs took 20-80 minutes only from overhead. So: do not re-read files, re-migrate, or re-investigate before running. Use the loop in `docs/dev-environment.md` ("Fast test loop"): redirect output to a file in the container and print only the summary and failing test names, run `--module`/`--case`/`--test` while iterating, `--test-category unit` for DB-free tests, `--failfast` when hunting one failure, and the full suite once at the end. Migrate `test.localhost` only when a doctype JSON changed. Never rewrite production code to make a test pass (report file:line and diagnosis instead).
@@ -28,3 +35,5 @@ State plainly: which tests were added/run and their pass/fail result, and the li
 
 ## Graphify
 If `graphify-out/graph.json` exists, use `graphify query`/`graphify affected "<symbol>"` to find the code under test and its callers instead of grepping broadly, then Read the source. After adding or editing test/app files, run `graphify update .` (skip silently if `graphify` is missing). Rules: `docs/graphify-usage.md`.
+
+Parallel branches (git worktrees): tests and migrates run serialized through the main checkout under a host lock; see `docs/dev-environment.md` ("Parallel work with git worktrees").
