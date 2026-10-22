@@ -1,6 +1,8 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
+from unittest.mock import patch
+
 import frappe
 from frappe.tests import IntegrationTestCase
 
@@ -196,13 +198,71 @@ class IntegrationTestOrderHoverCard(IntegrationTestCase):
 
 		self.assertEqual(card["marketplace"]["last_sync"], {"status": "Error"})
 
-	def test_marketplace_reader_without_sync_log_read_gets_no_last_sync(self):
+	def _make_platform_user(self, label, platform_role="Shopify User"):
+		"""A Sales Order reader holding the platform role of the fixture order's account."""
+		email, _role = make_role_user(self, label, {"Sales Order": ["read"]})
+		frappe.get_doc("User", email).add_roles(platform_role)
+		frappe.clear_cache(user=email)
+		return email
+
+	def test_marketplace_reader_without_a_platform_role_gets_no_marketplace_part(self):
+		# #322: rows are filtered by platform role, so a plain Marketplace Order reader sees none.
 		self._make_sync_log("Error")
 		email, _role = make_role_user(
-			self, "Hover No Log", {"Sales Order": ["read"], "Marketplace Order": ["read"]}
+			self, "Hover No Platform", {"Sales Order": ["read"], "Marketplace Order": ["read"]}
 		)
 
 		card = self._call_as(email)
+
+		self.assertIsNone(card["marketplace"])
+		self.assertNotIn(f"#PLAT-{self.suffix}", frappe.as_json(card))
+		self.assertNotIn("Item is not mapped", frappe.as_json(card))
+		self.assertIsNone(card["bosta"])
+
+	def test_bosta_part_does_not_depend_on_a_platform_role(self):
+		self._make_shipment()
+		email, _role = make_role_user(
+			self,
+			"Hover Bosta No Platform",
+			{"Sales Order": ["read"], "Marketplace Order": ["read"], "Bosta Shipment": ["read"]},
+		)
+
+		card = self._call_as(email)
+
+		self.assertIsNone(card["marketplace"])
+		self.assertEqual(card["bosta"]["tracking_number"], f"TRK-{self.suffix}")
+
+	def test_platform_user_gets_the_marketplace_part_with_last_sync(self):
+		self._make_sync_log("Error")
+		email = self._make_platform_user("Hover Shopify User")
+
+		card = self._call_as(email)
+
+		self.assertEqual(card["marketplace"]["reference"], f"#PLAT-{self.suffix}")
+		self.assertEqual(card["marketplace"]["platform"], "Shopify")
+		self.assertEqual(card["marketplace"]["last_sync"], {"status": "Error"})
+
+	def test_user_of_another_platform_gets_no_marketplace_part(self):
+		email = self._make_platform_user("Hover Talabat User", "Talabat User")
+
+		self.assertIsNone(self._call_as(email)["marketplace"])
+
+	def test_last_sync_is_hidden_when_sync_log_read_is_denied(self):
+		# Platform roles grant full Sync Log rights, so a platform user without Sync Log read
+		# cannot exist; the mock is the only way to reach the permission gate in _last_sync.
+		self._make_sync_log("Error")
+		email = self._make_platform_user("Hover Shopify No Log")
+		real_has_permission = frappe.has_permission
+
+		def has_permission(doctype=None, ptype="read", doc=None, user=None, throw=False, **kwargs):
+			if doctype == "Marketplace Sync Log" and ptype == "read":
+				if throw:
+					raise frappe.PermissionError
+				return False
+			return real_has_permission(doctype, ptype, doc, user, throw, **kwargs)
+
+		with patch("frappe.has_permission", has_permission):
+			card = self._call_as(email)
 
 		self.assertEqual(card["marketplace"]["reference"], f"#PLAT-{self.suffix}")
 		self.assertIsNone(card["marketplace"]["last_sync"])
