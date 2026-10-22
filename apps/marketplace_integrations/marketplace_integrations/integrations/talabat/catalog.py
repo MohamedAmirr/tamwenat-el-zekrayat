@@ -35,8 +35,10 @@ def get_account(account_name):
 		frappe.throw(_("Marketplace Account {0} is not a Talabat account.").format(account.name))
 	if account.connection_doctype != "Talabat Connection":
 		frappe.throw(_("Marketplace Account {0} does not use a Talabat Connection.").format(account.name))
+	# Trusted read: Talabat Connection is System Manager only, but the caller already passed the
+	# doc-level check on this Talabat account above. The connection is the account's own and is
+	# used server-side only; its Password fields are never returned to the client.
 	connection = frappe.get_doc("Talabat Connection", account.connection)
-	connection.check_permission("read")
 	return account, connection
 
 

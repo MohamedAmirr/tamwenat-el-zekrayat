@@ -15,9 +15,16 @@ WAREHOUSES_PATH = "/warehouse-platform/v1/warehouses/list"
 MAPPING_DOCTYPE = "Marketplace Product Mapping"
 
 
-def get_account(account_name):
-	"""Load an enabled Noon Marketplace Account with its typed connection."""
+def get_account(account_name, permission=None):
+	"""Load an enabled Noon Marketplace Account with its typed connection.
+
+	``permission`` (e.g. ``"read"``) runs the caller's document-level check on the account
+	BEFORE any platform/enabled/connection validation, so a user who may not see the account
+	learns nothing about its platform or state from the validation messages.
+	"""
 	account = frappe.get_doc("Marketplace Account", account_name)
+	if permission:
+		account.check_permission(permission)
 	if account.platform != "Noon" or account.connection_doctype != "Noon Connection":
 		frappe.throw(_("Marketplace Account {0} is not bound to a Noon Connection.").format(account.name))
 	if not account.enabled:
@@ -106,8 +113,7 @@ def list_unmapped_order_skus(account_name):
 	parents on the account/platform filters rather than read via an IN list of
 	every parent name.
 	"""
-	account = get_account(account_name)
-	account.check_permission("read")
+	account = get_account(account_name, permission="read")
 	if not frappe.has_permission(MAPPING_DOCTYPE, ptype="read"):
 		frappe.throw(_("Not permitted"), frappe.PermissionError)
 	# Parent visibility stays permission-scoped via frappe.get_list, which applies
@@ -160,8 +166,7 @@ def upsert_mapping(account_name, external_reference, item):
 	``integrations/noon/order_mapper.py`` resolves it, so the same value is
 	also written to ``external_sku``.
 	"""
-	account = get_account(account_name)
-	account.check_permission("read")
+	account = get_account(account_name, permission="read")
 	external_reference = cstr(external_reference).strip()
 	item = cstr(item).strip()
 	if not external_reference:

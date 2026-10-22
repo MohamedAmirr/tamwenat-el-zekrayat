@@ -175,7 +175,7 @@ def get_account(account_name):
 	fresh here by direct analogy to
 	``integrations/talabat/catalog.py::get_account()`` (per-document ``read``
 	check on the loaded Marketplace Account, platform/connection_doctype
-	assertions, loading and permission-checking the linked connection too).
+	assertions); the linked connection is loaded as trusted server code.
 	"""
 	account = frappe.get_doc("Marketplace Account", account_name)
 	account.check_permission("read")
@@ -185,8 +185,10 @@ def get_account(account_name):
 		frappe.throw(
 			frappe._("Marketplace Account {0} does not use a Shopify Connection.").format(account.name)
 		)
+	# Trusted read: Shopify Connection is System Manager only, but the caller already passed the
+	# doc-level check on this Shopify account above. The connection is the account's own and is
+	# used server-side only; its Password fields are never returned to the client.
 	connection = frappe.get_doc("Shopify Connection", account.connection)
-	connection.check_permission("read")
 	return account, connection
 
 

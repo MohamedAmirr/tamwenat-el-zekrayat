@@ -144,9 +144,17 @@ def get_inventory_sync_error_count():
 def get_order_sync_error_count():
 	"""Current-state count of ``Marketplace Order`` rows at
 	``erpnext_sync_status = Sync Error`` (#139 Number Card "Marketplace
-	Orders: Sync Error"). Not date-ranged."""
+	Orders: Sync Error", now "Shopify Orders: Sync Error"). Not date-ranged.
+	Limited to orders of the Shopify accounts the user can read (by the account's
+	platform, like the mapping counts), not the stored ``Order.platform``."""
 	require_shopify_reader()
-	return _count("Marketplace Order", {"platform": "Shopify", "erpnext_sync_status": "Sync Error"})
+	accounts = _shopify_accounts()
+	if not accounts:
+		return 0
+	return _count(
+		"Marketplace Order",
+		{"marketplace_account": ["in", accounts], "erpnext_sync_status": "Sync Error"},
+	)
 
 
 def get_webhook_delivery_error_count():
@@ -344,7 +352,7 @@ def get_reconciliation_summary(from_date=None, to_date=None):
 			"detail": "",
 		},
 		{
-			"metric": _("Marketplace Orders: Sync Error (current)"),
+			"metric": _("Shopify Orders: Sync Error (current)"),
 			"value": get_order_sync_error_count(),
 			"detail": "",
 		},
