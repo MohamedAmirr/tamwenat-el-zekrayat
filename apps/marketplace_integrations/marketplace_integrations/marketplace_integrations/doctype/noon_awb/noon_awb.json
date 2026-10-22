@@ -100,7 +100,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-10-19 00:00:00.000000",
+ "modified": "2026-10-22 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Noon AWB",
@@ -116,6 +116,14 @@
    "report": 1,
    "role": "System Manager",
    "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Noon User",
    "write": 1
   }
  ],

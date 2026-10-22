@@ -19,7 +19,7 @@
 	const BOSTA_CITIES_METHOD = "marketplace_integrations.api.bosta_shipments.get_cities";
 	const BOSTA_CREATE_METHOD = "marketplace_integrations.api.bosta_shipments.create_shipment";
 
-	const BOSTA_CREATOR_ROLES = ["Sales Manager", "Stock User", "System Manager"];
+	const BOSTA_CREATOR_ROLES = ["Sales Manager", "Stock User", "System Manager", "Bosta User"];
 
 	const BOSTA_SHIPMENT_METHOD = "marketplace_integrations.api.bosta_shipments.get_sales_order_shipment";
 	const BOSTA_LABEL_METHOD = "marketplace_integrations.api.bosta_shipments.print_a4_arabic_label";
