@@ -1552,3 +1552,17 @@ Choose a Bosta city.,اختر مدينة Bosta.
 Could not load the Bosta city codes. Try again in a minute.,تعذر تحميل رموز مدن Bosta. حاول مرة أخرى بعد دقيقة.
 Bosta has no city code for {0}. Refresh the Bosta lists and try again.,لا يوجد لدى Bosta رمز مدينة لـ {0}. حدّث قوائم Bosta وحاول مرة أخرى.
 Bosta could not find the district from this address. Add the area name to the address and retry.,لم تتمكن Bosta من تحديد المنطقة من هذا العنوان. أضف اسم المنطقة إلى العنوان وأعد المحاولة.
+Could not load the order details.,تعذّر تحميل تفاصيل الطلب.
+Order details,تفاصيل الطلب
+Details of {0},تفاصيل {0}
+Platform order number,رقم الطلب في المنصة
+Payment status,حالة الدفع
+Last sync,آخر مزامنة
+Last sync error,آخر خطأ مزامنة
+Marketplace,السوق
+Customer,العميل
+Items,الأصناف
+More items on the order.,يحتوي الطلب على أصناف أخرى.
+Delivery status,حالة التسليم
+Tracking number,رقم التتبع
+Total,الإجمالي

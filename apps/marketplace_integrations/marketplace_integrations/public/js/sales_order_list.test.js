@@ -10,6 +10,8 @@ function load({ creator = true, original_onload = null, defaults = null, default
 	const msgprints = [];
 	const calls = [];
 	const dialogs = [];
+	const created_cards = [];
+	const attached = [];
 	global.frappe = {
 		user: { has_role: () => creator },
 		utils: { escape_html: (value) => String(value).replace(/</g, "&lt;") },
@@ -17,7 +19,15 @@ function load({ creator = true, original_onload = null, defaults = null, default
 		msgprint: (message) => msgprints.push(message),
 		// Loading sales_order.js is what exports the creator roles.
 		require: () => {
-			global.frappe.marketplace_integrations = { BOSTA_CREATOR_ROLES: ["Sales Manager"] };
+			global.frappe.marketplace_integrations = {
+				BOSTA_CREATOR_ROLES: ["Sales Manager"],
+				order_hover_card: {
+					create: (opts) => {
+						created_cards.push(opts);
+						return { attach_to_list: (view) => attached.push(view) };
+					},
+				},
+			};
 			return Promise.resolve();
 		},
 		call: (opts) => {
@@ -44,7 +54,7 @@ function load({ creator = true, original_onload = null, defaults = null, default
 	const path = require.resolve("./sales_order_list.js");
 	delete require.cache[path];
 	const module_exports = require(path);
-	return { calls, msgprints, dialogs, module_exports, settings: global.frappe.listview_settings["Sales Order"] };
+	return { calls, msgprints, dialogs, created_cards, attached, module_exports, settings: global.frappe.listview_settings["Sales Order"] };
 }
 
 function listview(names = []) {
@@ -170,4 +180,41 @@ test("a retry entry falls back to the used values when the defaults cannot be re
 		address_first_line: "12 Example Street",
 		cod_amount: 150,
 	});
+});
+
+test("onload attaches the order hover card to the list next to the bulk action", async () => {
+	let erpnext_ran = false;
+	const { settings, created_cards, attached } = load({ original_onload: () => (erpnext_ran = true) });
+	const view = listview();
+	settings.onload(view);
+	await new Promise((resolve) => setTimeout(resolve, 5));
+	assert.ok(erpnext_ran);
+	assert.deepEqual(created_cards, [
+		{ method: "marketplace_integrations.api.order_hover_card.get_sales_order_card", arg: "sales_order" },
+	]);
+	assert.deepEqual(attached, [view]);
+});
+
+test("users without a creator role still get the hover card", async () => {
+	const { settings, attached } = load({ creator: false });
+	settings.onload(listview());
+	await new Promise((resolve) => setTimeout(resolve, 5));
+	assert.equal(attached.length, 1);
+});
+
+test("a hover card that fails to load does not break the list", async () => {
+	const { settings } = load();
+	const original_error = console.error;
+	const errors = [];
+	console.error = (...args) => errors.push(args);
+	const original_require = global.frappe.require;
+	global.frappe.require = (asset) =>
+		asset.endsWith("order_hover_card.js") ? Promise.reject(new Error("offline")) : original_require(asset);
+	try {
+		settings.onload(listview());
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	} finally {
+		console.error = original_error;
+	}
+	assert.equal(errors.length, 1);
 });
