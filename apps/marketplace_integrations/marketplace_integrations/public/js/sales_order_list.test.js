@@ -204,6 +204,7 @@ test("users without a creator role still get the hover card", async () => {
 
 test("a hover card that fails to load does not break the list", async () => {
 	const { settings } = load();
+	const view = listview();
 	const original_error = console.error;
 	const errors = [];
 	console.error = (...args) => errors.push(args);
@@ -211,10 +212,28 @@ test("a hover card that fails to load does not break the list", async () => {
 	global.frappe.require = (asset) =>
 		asset.endsWith("order_hover_card.js") ? Promise.reject(new Error("offline")) : original_require(asset);
 	try {
-		settings.onload(listview());
+		settings.onload(view);
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	} finally {
 		console.error = original_error;
 	}
 	assert.equal(errors.length, 1);
+	// The bulk action does not depend on the card: it was still added.
+	assert.deepEqual(view.items.map((item) => item.label), ["Create Bosta Shipments"]);
+});
+
+test("loading the list script again does not wrap onload a second time", async () => {
+	let erpnext_runs = 0;
+	const { settings, module_exports } = load({ original_onload: () => erpnext_runs++ });
+	const wrapped = settings.onload;
+	const path = require.resolve("./sales_order_list.js");
+	delete require.cache[path];
+	require(path);
+	assert.equal(global.frappe.listview_settings["Sales Order"].onload, wrapped);
+	const view = listview();
+	settings.onload(view);
+	await new Promise((resolve) => setTimeout(resolve, 5));
+	assert.equal(erpnext_runs, 1);
+	assert.equal(view.items.length, 1);
+	assert.ok(module_exports);
 });

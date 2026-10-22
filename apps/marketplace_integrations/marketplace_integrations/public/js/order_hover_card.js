@@ -5,7 +5,14 @@
 //
 // `create({ method, arg, render })` returns a controller bound to one whitelisted endpoint:
 //   - `attach_to_list(listview)` gives every list row a hover/focus card and a small "Details"
-//     button that opens the same content in a dialog (hover_card ignores touch).
+//     button that opens the same content in a dialog (hover_card ignores touch). The card hangs
+//     off the subject link only (never the whole row), start-aligned, so it can sit over the
+//     other columns but never over the row checkboxes, which are left of the link. Rows removed
+//     by a refresh or re-render have their card destroyed, and a route change closes open cards.
+//   - keyboard: the link opens the card on focus (Tab order: link, ..., Details button). Arrow-key
+//     row navigation focuses `.list-row-container`, which is not a trigger, so scrolling through
+//     rows with the arrows fires no request. Positive tabindex on Frappe's rows (tabindex=1)
+//     means Tab visits all rows first; this cannot be changed from here.
 //   - the data is fetched on first use only and cached per document, so one request per order
 //     per page load (a failed request is not cached, so the next hover retries).
 //   - a response is rendered only if its card or dialog is still the latest one opened.
@@ -119,9 +126,18 @@
 		return el;
 	}
 
+	// The subject link: the only element that triggers the card.
+	function row_link(row) {
+		return row.querySelector(".list-subject a[data-name]");
+	}
+
 	function row_docname(row) {
-		const holder = row.querySelector(".list-row-checkbox[data-name]") || row.querySelector("a[data-name]");
+		const holder = row_link(row) || row.querySelector(".list-row-checkbox[data-name]");
 		return holder ? holder.getAttribute("data-name") : "";
+	}
+
+	function hover_card_of(trigger) {
+		return typeof $ === "function" ? $(trigger).data("es-hover-card") : null;
 	}
 
 	function create({ method, arg = "name", render = render_sales_order_card }) {
@@ -185,8 +201,9 @@
 			holder.appendChild(details);
 
 			let card = null;
-			if (frappe.ui && frappe.ui.hover_card) {
-				frappe.ui.hover_card(row, {
+			const link = row_link(row);
+			if (link && frappe.ui && frappe.ui.hover_card) {
+				frappe.ui.hover_card(link, {
 					side: "bottom",
 					align: "start",
 					content: (instance) => {
@@ -203,6 +220,22 @@
 				if (card && card.close) card.close();
 				show_details(name);
 			});
+			return link;
+		}
+
+		// Closes (or, when the row is gone, destroys) the card hanging off a row's subject link.
+		function release(row, destroy) {
+			const link = row_link(row);
+			const card = link && hover_card_of(link);
+			if (!card) return;
+			if (destroy && card.destroy) card.destroy();
+			else if (card.close) card.close();
+		}
+
+		function rows_in(node) {
+			if (!node || node.nodeType !== 1) return [];
+			const rows = node.matches && node.matches(".list-row-container") ? [node] : [];
+			return rows.concat(Array.from(node.querySelectorAll ? node.querySelectorAll(".list-row-container") : []));
 		}
 
 		// List rows are rebuilt on every refresh and when scrolling, so new rows are picked up
@@ -211,7 +244,13 @@
 			const container = listview && listview.$result && listview.$result[0];
 			if (!container || container.__mi_order_hover_card) return;
 			container.__mi_order_hover_card = true;
-			const scan = () => {
+			const scan = (mutations) => {
+				// A removed row cannot fire pointerleave/blur, so its open card would stay on screen.
+				(Array.isArray(mutations) ? mutations : []).forEach((mutation) =>
+					Array.from(mutation.removedNodes || []).forEach((node) =>
+						rows_in(node).forEach((row) => release(row, true))
+					)
+				);
 				container.querySelectorAll(".list-row-container").forEach((row) => {
 					if (row.__mi_order_hover_card) return;
 					const name = row_docname(row);
@@ -223,6 +262,17 @@
 			scan();
 			if (typeof MutationObserver !== "undefined") {
 				new MutationObserver(scan).observe(container, { childList: true, subtree: true });
+			}
+			// Leaving the list (route change) keeps the rows in the DOM, hidden: close what is open.
+			if (typeof $ === "function") {
+				const on_page_change = () => {
+					if (!container.isConnected) {
+						$(document).off("page-change", on_page_change);
+						return;
+					}
+					container.querySelectorAll(".list-row-container").forEach((row) => release(row, false));
+				};
+				$(document).on("page-change", on_page_change);
 			}
 			return scan;
 		}
@@ -236,6 +286,6 @@
 	}
 
 	if (typeof module !== "undefined") {
-		module.exports = { create, render_sales_order_card, server_message, row_docname };
+		module.exports = { create, render_sales_order_card, server_message, row_docname, row_link };
 	}
 })();

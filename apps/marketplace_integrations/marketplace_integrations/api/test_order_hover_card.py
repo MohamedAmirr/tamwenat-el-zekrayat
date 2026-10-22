@@ -6,6 +6,9 @@ from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api.order_hover_card import MAX_ITEMS, get_sales_order_card
 from marketplace_integrations.integrations.shopify.test_products import make_shopify_account
+from marketplace_integrations.marketplace_integrations.doctype.bosta_shipment.bosta_shipment import (
+	save_as_system,
+)
 from marketplace_integrations.services.linked_sales_order_fixture import LinkedSalesOrderFixture
 from marketplace_integrations.tests.utils import make_role_user
 
@@ -33,11 +36,47 @@ class IntegrationTestOrderHoverCard(IntegrationTestCase):
 
 	def _delete_fixtures(self):
 		frappe.set_user("Administrator")
+		for name in frappe.get_all(
+			"Bosta Shipment", filters={"sales_order": self.fixture.name}, pluck="name"
+		):
+			frappe.delete_doc("Bosta Shipment", name, force=True, ignore_permissions=True)
+		frappe.db.delete("Marketplace Sync Log", {"marketplace_order": self.marketplace_order.name})
 		self.fixture.cleanup()
 		frappe.delete_doc(
 			"Marketplace Order", self.marketplace_order.name, force=True, ignore_permissions=True
 		)
 		frappe.delete_doc("Marketplace Account", self.account.name, force=True, ignore_permissions=True)
+
+	def _make_sync_log(self, status):
+		return frappe.get_doc(
+			{
+				"doctype": "Marketplace Sync Log",
+				"marketplace_order": self.marketplace_order.name,
+				"marketplace_account": self.account.name,
+				"sync_type": "Sales Order Sync",
+				"trigger_source": "Manual",
+				"status": status,
+				"attempted_at": frappe.utils.now_datetime(),
+			}
+		).insert(ignore_permissions=True)
+
+	def _make_shipment(self):
+		return save_as_system(
+			frappe.get_doc(
+				{
+					"doctype": "Bosta Shipment",
+					"sales_order": self.fixture.name,
+					"status": "Bosta Created",
+					"receiver_name": "Hover Receiver",
+					"receiver_phone": "01000000000",
+					"city": "Cairo",
+					"address_first_line": "12 Example Street",
+					"tracking_number": f"TRK-{self.suffix}",
+					"bosta_state_value": "Out for delivery",
+				}
+			),
+			insert=True,
+		)
 
 	def _call_as(self, email):
 		frappe.set_user(email)
@@ -51,9 +90,7 @@ class IntegrationTestOrderHoverCard(IntegrationTestCase):
 
 		self.assertEqual(card["sales_order"], self.fixture.name)
 		self.assertEqual(card["customer"], self.fixture.customer.customer_name)
-		self.assertEqual(
-			card["items"], [{"item_name": self.fixture.item.item_name, "qty": 1.0, "uom": "Nos"}]
-		)
+		self.assertEqual(card["items"], [{"item_name": self.fixture.item.item_name, "qty": 1.0}])
 		self.assertFalse(card["more_items"])
 		self.assertEqual(card["marketplace"]["reference"], f"#PLAT-{self.suffix}")
 		self.assertEqual(card["marketplace"]["platform"], "Shopify")
@@ -115,3 +152,76 @@ class IntegrationTestOrderHoverCard(IntegrationTestCase):
 
 		self.assertEqual(len(card["items"]), MAX_ITEMS)
 		self.assertTrue(card["more_items"])
+
+	def test_response_holds_only_what_the_card_renders(self):
+		self._make_sync_log("Error")
+		self._make_shipment()
+
+		card = get_sales_order_card(self.fixture.name)
+
+		self.assertEqual(
+			set(card),
+			{
+				"sales_order",
+				"customer",
+				"phone",
+				"status",
+				"currency",
+				"total",
+				"items",
+				"more_items",
+				"marketplace",
+				"bosta",
+			},
+		)
+		self.assertEqual(
+			set(card["marketplace"]),
+			{"reference", "platform", "payment_status", "last_sync_error", "last_sync"},
+		)
+		self.assertEqual(set(card["marketplace"]["last_sync"]), {"status"})
+		self.assertEqual(set(card["bosta"]), {"status", "tracking_number"})
+
+	def test_last_sync_is_the_latest_sync_logs_status(self):
+		self._make_sync_log("Success")
+		self._make_sync_log("Error")
+
+		card = get_sales_order_card(self.fixture.name)
+
+		self.assertEqual(card["marketplace"]["last_sync"], {"status": "Error"})
+
+	def test_marketplace_reader_without_sync_log_read_gets_no_last_sync(self):
+		self._make_sync_log("Error")
+		email, _role = make_role_user(
+			self, "Hover No Log", {"Sales Order": ["read"], "Marketplace Order": ["read"]}
+		)
+
+		card = self._call_as(email)
+
+		self.assertEqual(card["marketplace"]["reference"], f"#PLAT-{self.suffix}")
+		self.assertIsNone(card["marketplace"]["last_sync"])
+
+	def test_bosta_part_shows_the_shipments_state_and_tracking_number(self):
+		self._make_shipment()
+
+		card = get_sales_order_card(self.fixture.name)
+
+		self.assertEqual(
+			card["bosta"], {"status": "Out for delivery", "tracking_number": f"TRK-{self.suffix}"}
+		)
+
+	def test_bosta_part_is_hidden_from_a_user_without_bosta_shipment_read(self):
+		self._make_shipment()
+		email, _role = make_role_user(self, "Hover No Bosta", {"Sales Order": ["read"]})
+
+		card = self._call_as(email)
+
+		self.assertIsNone(card["bosta"])
+		self.assertNotIn(f"TRK-{self.suffix}", frappe.as_json(card))
+
+	def test_deleted_order_is_a_validation_error_not_a_404(self):
+		# DoesNotExistError (HTTP 404) makes Desk open a modal even for silent calls.
+		with self.assertRaises(frappe.ValidationError) as caught:
+			get_sales_order_card("SAL-ORD-DOES-NOT-EXIST")
+
+		self.assertNotIsInstance(caught.exception, frappe.DoesNotExistError)
+		self.assertEqual(getattr(caught.exception, "http_status_code", 417), 417)

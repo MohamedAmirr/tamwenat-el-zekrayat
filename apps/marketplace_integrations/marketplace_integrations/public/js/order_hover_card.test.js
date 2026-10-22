@@ -68,9 +68,9 @@ function load({ hover_card = true } = {}) {
 		},
 	};
 	if (hover_card) {
-		global.frappe.ui.hover_card = (row, opts) => {
-			hover_cards.push({ row, opts });
-			return row;
+		global.frappe.ui.hover_card = (trigger, opts) => {
+			hover_cards.push({ row: trigger, trigger, opts });
+			return trigger;
 		};
 	}
 	const path = require.resolve("./order_hover_card.js");
@@ -82,16 +82,34 @@ function load({ hover_card = true } = {}) {
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+// A list row as Frappe renders it: the subject link carries the document name.
 function row(name) {
 	const el = fake_element();
 	el.ownerDocument = { createElement: fake_element };
+	el.link = name ? { getAttribute: () => name, dataset: { name } } : null;
 	el.querySelector = (selector) => {
-		if (selector.includes("data-name") && selector.startsWith(".list-row-checkbox")) {
-			return { getAttribute: () => name };
-		}
+		if (selector === ".list-subject a[data-name]") return el.link;
 		return null;
 	};
 	return el;
+}
+
+// jQuery stand-in: `$(el).data("es-hover-card")` returns the card the fake hover_card stored.
+function install_jquery(cards) {
+	const document_handlers = {};
+	global.document.addEventListener = () => {};
+	global.$ = (target) => {
+		if (target === global.document) {
+			return {
+				on: (name, fn) => (document_handlers[name] = fn),
+				off: (name, fn) => {
+					if (document_handlers[name] === fn) delete document_handlers[name];
+				},
+			};
+		}
+		return { data: () => cards.get(target) };
+	};
+	return document_handlers;
 }
 
 test("the card shows the readable platform number, escapes server text and totals", () => {
@@ -180,6 +198,11 @@ test("attach adds a Details button and a hover card whose content is built lazil
 	assert.equal(el.children[0].textContent, "Details");
 	assert.equal(el.children[0].type, "button");
 	assert.equal(hover_cards.length, 1);
+	// The trigger is the subject link, never the whole row: the card cannot cover the checkboxes.
+	assert.equal(hover_cards[0].trigger, el.link);
+	assert.notEqual(hover_cards[0].trigger, el);
+	assert.equal(hover_cards[0].opts.side, "bottom");
+	assert.equal(hover_cards[0].opts.align, "start");
 	assert.equal(calls.length, 0);
 	let repositioned = false;
 	const content = hover_cards[0].opts.content({ onreposition: () => (repositioned = true) });
@@ -218,7 +241,6 @@ test("without frappe.ui.hover_card the Details button still works", () => {
 test("attach_to_list handles each row once and ignores rows with no document name", () => {
 	const { helper, hover_cards } = load();
 	const rows = [row("SO-1"), row("")];
-	rows[1].querySelector = () => null;
 	const container = {
 		querySelectorAll: () => rows,
 	};
@@ -226,4 +248,87 @@ test("attach_to_list handles each row once and ignores rows with no document nam
 	scan();
 	assert.equal(hover_cards.length, 1);
 	assert.equal(helper.attach_to_list({ $result: [container] }), undefined);
+});
+
+test("a row without a subject link gets the Details button but no hover card", () => {
+	const { helper, hover_cards } = load();
+	const el = row("SO-1");
+	el.link = null;
+	helper.attach(el, "SO-1");
+	assert.equal(hover_cards.length, 0);
+	assert.equal(el.children.length, 1);
+});
+
+test("row_link only matches the subject link, so the checkbox column never triggers a card", () => {
+	const { module_exports } = load();
+	const seen = [];
+	const el = { querySelector: (selector) => (seen.push(selector), null) };
+	module_exports.row_link(el);
+	assert.deepEqual(seen, [".list-subject a[data-name]"]);
+});
+
+function list_with(rows) {
+	const container = { querySelectorAll: () => rows.slice() };
+	return container;
+}
+
+test("a row removed by a re-render has its hover card destroyed", () => {
+	const { helper, hover_cards } = load();
+	const cards = new Map();
+	install_jquery(cards);
+	const el = row("SO-1");
+	const container = list_with([el]);
+	const scan = helper.attach_to_list({ $result: [container] });
+	const destroyed = [];
+	cards.set(el.link, { destroy: () => destroyed.push("SO-1"), close() {} });
+	assert.equal(hover_cards.length, 1);
+	// Frappe removes the row container itself on refresh (the removed node is the row).
+	el.nodeType = 1;
+	el.matches = (selector) => selector === ".list-row-container";
+	scan([{ removedNodes: [el] }]);
+	assert.deepEqual(destroyed, ["SO-1"]);
+});
+
+test("a removed wrapper destroys the cards of the rows inside it", () => {
+	const { helper } = load();
+	const cards = new Map();
+	install_jquery(cards);
+	const el = row("SO-1");
+	const scan = helper.attach_to_list({ $result: [list_with([el])] });
+	const destroyed = [];
+	cards.set(el.link, { destroy: () => destroyed.push(true), close() {} });
+	const wrapper = { nodeType: 1, matches: () => false, querySelectorAll: () => [el] };
+	scan([{ removedNodes: [wrapper] }, { removedNodes: [{ nodeType: 3 }] }]);
+	assert.deepEqual(destroyed, [true]);
+});
+
+test("a route change closes open cards without destroying them", () => {
+	const { helper } = load();
+	const cards = new Map();
+	const handlers = install_jquery(cards);
+	const el = row("SO-1");
+	const container = list_with([el]);
+	container.isConnected = true;
+	helper.attach_to_list({ $result: [container] });
+	const calls = [];
+	cards.set(el.link, { destroy: () => calls.push("destroy"), close: () => calls.push("close") });
+	handlers["page-change"]();
+	assert.deepEqual(calls, ["close"]);
+	container.isConnected = false;
+	handlers["page-change"]();
+	assert.equal("page-change" in handlers, false);
+});
+
+test("a deleted order shows the server's own escaped message, not a framework dialog", async () => {
+	const { helper, pending, calls } = load();
+	const el = fake_element();
+	const p = helper.fill(el, "SO-GONE");
+	const message = JSON.stringify([JSON.stringify({ message: "Sales Order <i>SO-GONE</i> was not found." })]);
+	// The endpoint raises ValidationError (HTTP 417): Desk shows nothing for a silent call.
+	pending[0].reject({ status: 417, responseJSON: { _server_messages: message } });
+	await p;
+	assert.equal(calls[0].silent, true);
+	assert.match(el.innerHTML, /role="alert"/);
+	assert.match(el.innerHTML, /Sales Order SO-GONE was not found\./);
+	assert.doesNotMatch(el.innerHTML, /<i>/);
 });

@@ -1566,3 +1566,4 @@ More items on the order.,يحتوي الطلب على أصناف أخرى.
 Delivery status,حالة التسليم
 Tracking number,رقم التتبع
 Total,الإجمالي
+Sales Order {0} was not found. It may have been deleted.,لم يتم العثور على أمر البيع {0}. ربما تم حذفه.

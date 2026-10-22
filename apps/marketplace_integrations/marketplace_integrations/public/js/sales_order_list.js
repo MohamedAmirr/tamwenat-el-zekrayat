@@ -248,14 +248,16 @@
 	// Add the action to ERPNext's own Sales Order list settings instead of replacing them.
 	if (typeof frappe !== "undefined" && frappe.listview_settings) {
 		const settings = (frappe.listview_settings["Sales Order"] = frappe.listview_settings["Sales Order"] || {});
-		if (!settings.__mi_bosta_bulk) {
+		// Marks the settings as already extended (bulk action and hover card), so loading this file
+		// again (route revisit, asset reload) never wraps onload twice.
+		if (!settings.__mi_list_extended) {
 			const original_onload = settings.onload;
 			settings.onload = function (listview) {
 				if (original_onload) original_onload.call(this, listview);
 				add_bulk_action(listview);
 				add_hover_card(listview);
 			};
-			settings.__mi_bosta_bulk = true;
+			settings.__mi_list_extended = true;
 		}
 	}
 
