@@ -249,7 +249,7 @@ Queuing Shopify inventory reconciliation...,جارٍ إضافة تسوية مخ�
 Refresh,تحديث
 Shopify Catalog Push Errors (current),أخطاء إرسال كتالوج Shopify (الحالي)
 Shopify Inventory Sync Errors (current),أخطاء مزامنة مخزون Shopify (الحالي)
-Marketplace Orders: Sync Error (current),طلبات السوق: خطأ مزامنة (الحالي)
+Shopify Orders: Sync Error (current),طلبات Shopify: خطأ مزامنة (الحالي)
 Shopify Webhook Deliveries: Error (current),تسليمات Webhook لـ Shopify: خطأ (الحالي)
 Shopify Webhook Deliveries: Exhausted Retries (current),تسليمات Webhook لـ Shopify: استُنفدت المحاولات (الحالي)
 Total Shopify Orders Received (in selected range),إجمالي طلبات Shopify المستلَمة (ضمن النطاق المحدد)
@@ -1572,3 +1572,4 @@ Delivery status,حالة التسليم
 Tracking number,رقم التتبع
 Total,الإجمالي
 Sales Order {0} was not found. It may have been deleted.,لم يتم العثور على أمر البيع {0}. ربما تم حذفه.
+Marketplace Account '{0}' does not exist or is not permitted.,حساب السوق '{0}' غير موجود أو غير مسموح به.

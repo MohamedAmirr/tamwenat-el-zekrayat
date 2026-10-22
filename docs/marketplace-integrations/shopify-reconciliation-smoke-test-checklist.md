@@ -52,11 +52,11 @@ delete/reset the fixture.
       Deliveries: Error (current)" / "Shopify Webhook Deliveries: Exhausted
       Retries (current)" rows in the **Shopify Reconciliation Summary** report.
 
-## 4. Marketplace Orders: Sync Error
+## 4. Shopify Orders: Sync Error
 
 - [ ] Force a `Marketplace Order` into `erpnext_sync_status = Sync Error` (e.g. sync
       an order whose ERPNext prerequisites are intentionally missing on a test site).
-- [ ] Confirm the "Marketplace Orders: Sync Error (current)" row in the **Shopify
+- [ ] Confirm the "Shopify Orders: Sync Error (current)" row in the **Shopify
       Reconciliation Summary** report reflects it.
 - [ ] Separately, open the `Marketplace Order` list filtered to
       `erpnext_sync_status = Sync Error`, open the order, and use its existing

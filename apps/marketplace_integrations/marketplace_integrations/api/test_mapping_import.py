@@ -246,6 +246,42 @@ class IntegrationTestMappingImport(IntegrationTestCase):
 		self.assertIn(f"{prefix}-talabat", references)
 		self.assertNotIn(f"{prefix}-shopify", references)
 
+	def test_preview_and_apply_refuse_another_platforms_account(self):
+		# #323: a Talabat User may import rows for Talabat accounts only. A Shopify account is
+		# refused in preview and apply alike, with the same message as a missing account (no probe).
+		talabat, shopify = self.make_account(), self.make_account()
+		frappe.db.set_value("Marketplace Account", shopify.name, "platform", "Shopify", update_modified=False)
+		item = self.make_item()
+		prefix = self.unique("platform-import")
+		email, _role = make_role_user(self, "Mapping Import Platform", {})
+		frappe.get_doc("User", email).add_roles("Talabat User")
+		frappe.clear_cache(user=email)
+		file_url = self.make_file(
+			self.build_xlsx(
+				[
+					self.row(talabat.name, item.name, f"{prefix}-own"),
+					self.row(shopify.name, item.name, f"{prefix}-foreign"),
+				]
+			),
+			is_private=0,
+		)
+
+		with self.set_user(email):
+			preview = mapping_import.preview_mappings_import(file_url)
+			applied = mapping_import.apply_mappings_import(file_url)
+
+		for result in (preview, applied):
+			own, foreign = result["rows"]
+			self.assertEqual(own["status"], "new")
+			self.assertEqual(foreign["status"], "error")
+			self.assertIn("does not exist or is not permitted", foreign["errors"][0])
+		self.assertTrue(
+			frappe.db.exists("Marketplace Product Mapping", {"external_reference": f"{prefix}-own"})
+		)
+		self.assertFalse(
+			frappe.db.exists("Marketplace Product Mapping", {"external_reference": f"{prefix}-foreign"})
+		)
+
 	def test_new_rows_create_and_existing_identity_updates_without_duplication(self):
 		account = self.make_account()
 		item_a = self.make_item()

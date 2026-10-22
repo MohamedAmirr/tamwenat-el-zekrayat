@@ -39,6 +39,8 @@ def selected_mappings(account_name, mapping_names=None, stock_only=False):
 		if not mapping_names:
 			return []
 		filters["name"] = ["in", list(mapping_names)]
+	# Trusted read: authorize_selection() authorized the account and every named mapping on the request path;
+	# the worker (push_stock/push_pricing) runs as the same enqueuing user and does not repeat that check.
 	rows = frappe.get_all(
 		MAPPING_DOCTYPE,
 		filters=filters,
@@ -55,6 +57,7 @@ def selected_mappings(account_name, mapping_names=None, stock_only=False):
 		resolved_rows.append((row, resolved))
 	if not resolved_rows:
 		return []
+	# Trusted read: authorize_selection() (or the worker's own context) authorized this account and these mappings.
 	items = frappe.get_all(
 		"Item",
 		filters={"name": ["in", list({resolved["item"] for _, resolved in resolved_rows})]},

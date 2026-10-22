@@ -606,6 +606,7 @@ def _mappings_for_push(account_name, mapping_names):
 	also materializes every child table - barcodes, UOM conversions, taxes -
 	that nothing here uses) is unnecessary."""
 	filters = {"marketplace_account": account_name, "name": ["in", list(mapping_names)]}
+	# Trusted read: the push entry points authorize the account and every named mapping first.
 	return frappe.get_all(
 		MAPPING_DOCTYPE,
 		filters=filters,
@@ -623,6 +624,7 @@ def _fetch_items(item_names):
 	child table) is unnecessary."""
 	if not item_names:
 		return {}
+	# Trusted read: only Item names already reached through authorized mappings.
 	rows = frappe.get_all(
 		"Item", filters={"name": ["in", list(item_names)]}, fields=["name", "disabled", "stock_uom"]
 	)
