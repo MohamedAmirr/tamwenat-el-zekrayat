@@ -110,9 +110,9 @@ def list_unmapped_order_skus(account_name):
 	account.check_permission("read")
 	if not frappe.has_permission(MAPPING_DOCTYPE, ptype="read"):
 		frappe.throw(_("Not permitted"), frappe.PermissionError)
-	# Parent visibility stays permission-scoped via frappe.get_list. Marketplace
-	# Order has no row-level permission hook, so a visible parent here means the
-	# join below covers the same rows.
+	# Parent visibility stays permission-scoped via frappe.get_list, which applies
+	# Marketplace Order's platform row filter (permissions.py, #322), so a visible
+	# parent here means the join below covers the same rows.
 	if not frappe.get_list(
 		"Marketplace Order",
 		filters={"marketplace_account": account.name, "platform": "Noon"},

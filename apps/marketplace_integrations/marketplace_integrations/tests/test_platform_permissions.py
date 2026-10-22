@@ -378,3 +378,49 @@ class IntegrationTestPlatformPermissions(IntegrationTestCase):
 				with self.subTest(doctype=doctype, ptype=ptype):
 					self.assertFalse(frappe.has_permission(doctype, ptype, user=user))
 		self.assertEqual(permissions.get_user_platforms(user), [])
+
+	def test_moving_a_row_to_another_platforms_account_is_denied_on_write(self):
+		# The hook checks the document as it will be saved, so pointing an own row at another
+		# platform's account is refused instead of handing the row over.
+		user = self.make_user("Talabat Staff", "Talabat User")
+		for doctype in ("Marketplace Order", "Marketplace Product Mapping"):
+			with self.subTest(doctype=doctype):
+				doc = frappe.get_doc(doctype, self.names_for(doctype)["Talabat"])
+				doc.marketplace_account = self.accounts["Noon"]
+				with as_user(user), self.assertRaises(frappe.PermissionError):
+					doc.check_permission("write")
+				self.assertEqual(
+					frappe.db.get_value(doctype, doc.name, "marketplace_account"), self.accounts["Talabat"]
+				)
+
+	def test_row_whose_account_was_deleted_is_invisible_to_platform_users(self):
+		account = self.make_account("Talabat")
+		order = self.make_order(account.name, "Orphan")
+		self.addCleanup(frappe.db.delete, "Marketplace Order", {"name": order.name})
+		# Bypass link checks to leave an order pointing at a missing account.
+		frappe.db.delete("Marketplace Account", {"name": account.name})
+		platform_user = self.make_user("All Platforms", "Talabat User", "Noon User", "Shopify User")
+		manager = self.make_user("Manager Only", "System Manager")
+		with as_user(platform_user):
+			self.assertEqual(
+				frappe.get_list("Marketplace Order", filters={"name": order.name}, pluck="name"), []
+			)
+		with as_user(platform_user), self.assertRaises(frappe.PermissionError):
+			frappe.get_doc("Marketplace Order", order.name).check_permission("read")
+		with as_user(manager):
+			self.assertEqual(
+				frappe.get_list("Marketplace Order", filters={"name": order.name}, pluck="name"), [order.name]
+			)
+
+	def test_guest_sees_no_rows_and_is_denied(self):
+		for doctype in FILTERED:
+			with self.subTest(doctype=doctype):
+				self.assertFalse(frappe.has_permission(doctype, "read", user="Guest"))
+				with as_user("Guest"), self.assertRaises(frappe.PermissionError):
+					frappe.get_list(doctype, limit_page_length=1)
+				doc = frappe.get_doc(doctype, next(iter(self.names_for(doctype).values())))
+				with as_user("Guest"), self.assertRaises(frappe.PermissionError):
+					doc.check_permission("read")
+		self.assertEqual(permissions.marketplace_order_query_conditions("Guest"), "1=0")
+		self.assertEqual(permissions.marketplace_account_query_conditions("Guest"), "1=0")
+		self.assertEqual(permissions.get_user_platforms("Guest"), [])
