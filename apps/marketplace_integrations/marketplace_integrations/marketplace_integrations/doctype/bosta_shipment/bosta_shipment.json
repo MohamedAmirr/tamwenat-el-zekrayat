@@ -15,6 +15,7 @@
   "city",
   "district_id",
   "city_id",
+  "city_code",
   "district_name",
   "address_first_line",
   "bosta_section",
@@ -88,7 +89,7 @@
   {
    "fieldname": "address_section",
    "fieldtype": "Section Break",
-   "label": "Required Delivery Address"
+   "label": "Delivery Address"
   },
   {
    "fieldname": "city",
@@ -99,26 +100,35 @@
    "read_only_depends_on": "eval:doc.tracking_number"
   },
   {
-   "description": "Use this, or enter both City ID and District Name.",
    "fieldname": "district_id",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
    "label": "District ID",
-   "read_only_depends_on": "eval:doc.tracking_number"
+   "read_only": 1,
+   "hidden": 1
   },
   {
    "fieldname": "city_id",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
-   "label": "City ID",
-   "read_only_depends_on": "eval:doc.tracking_number"
+   "label": "Bosta City ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "city_code",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Bosta City Code",
+   "read_only": 1,
+   "description": "Sent to Bosta with the address first line; Bosta resolves the district."
   },
   {
    "fieldname": "district_name",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
    "label": "District Name",
-   "read_only_depends_on": "eval:doc.tracking_number"
+   "read_only": 1,
+   "hidden": 1
   },
   {
    "fieldname": "address_first_line",
@@ -263,7 +273,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-13 18:00:00.000000",
+ "modified": "2026-10-22 01:37:14.347170",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Bosta Shipment",

@@ -14,9 +14,8 @@ DELIVERY_DETAIL_FIELDS = (
 	"receiver_name",
 	"receiver_phone",
 	"city",
-	"district_id",
 	"city_id",
-	"district_name",
+	"city_code",
 	"address_first_line",
 )
 SYSTEM_FIELDS = (
@@ -126,10 +125,3 @@ class BostaShipment(Document):
 
 		if len(cstr(self.address_first_line).strip()) <= 5:
 			frappe.throw(_("Address First Line must be more than 5 characters."))
-
-		has_district_id = bool(cstr(self.district_id).strip())
-		has_city_and_district_name = bool(cstr(self.city_id).strip()) and bool(
-			cstr(self.district_name).strip()
-		)
-		if has_district_id == has_city_and_district_name:
-			frappe.throw(_("Enter District ID, or both City ID and District Name."))

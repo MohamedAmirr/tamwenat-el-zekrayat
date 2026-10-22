@@ -98,33 +98,66 @@ const USED = {
 	sales_order: "SO-1",
 	receiver_name: "Ahmed",
 	receiver_phone: "0100",
-	city: "Cairo",
-	district_id: "d-1",
+	city_id: "c-cairo",
 	address_first_line: "12 Example Street",
 	expected_cod: 150,
 };
 
+test("the bulk send maps a ready order to its city ID and sends no district", async () => {
+	const { module_exports, calls } = load();
+	// The queued job opens a status panel; only its constructor matters here.
+	global.frappe.ui.ShopifyCatalogPushStatus = class {};
+	global.frappe.ui.ShopifyCatalogPushStatus.BOSTA_BULK_OPTIONS = {};
+	await module_exports.review_and_send(listview(), {
+		ready: [
+			{
+				sales_order: "SO-1",
+				defaults: {
+					receiver_name: "Ahmed",
+					receiver_phone: "0100",
+					city_id: "c-cairo",
+					address_first_line: "12 Example Street",
+					cod_amount: 150,
+				},
+			},
+		],
+		review: [],
+		skipped: [],
+	});
+	const queued = calls.find((c) => c.method.endsWith("queue_bulk_create"));
+	assert.deepEqual(queued.args.orders, [
+		{
+			sales_order: "SO-1",
+			receiver_name: "Ahmed",
+			receiver_phone: "0100",
+			city_id: "c-cairo",
+			address_first_line: "12 Example Street",
+			expected_cod: 150,
+		},
+	]);
+});
+
 test("a retry entry re-reads the server defaults and keeps the values already used", async () => {
-	const fresh = { cod_amount: 175, city_id: "c-cairo", city_name: "Cairo", district_candidates: ["d-1", "d-2"], receiver_name: "Other", address_first_line: "changed" };
+	const fresh = {
+		cod_amount: 175,
+		city_id: "c-alex",
+		city_name: "Alexandria",
+		address_city: "Cairo",
+		receiver_name: "Other",
+		address_first_line: "changed",
+	};
 	const { module_exports, calls } = load({ defaults: fresh });
 	const entry = await module_exports.retry_entry(USED);
 	assert.equal(calls[0].args.sales_order, "SO-1");
 	assert.equal(entry.defaults.cod_amount, 175);
+	assert.equal(entry.defaults.address_city, "Cairo");
+	// The city and the receiver stay as used, not as the server resolves them now.
 	assert.equal(entry.defaults.city_id, "c-cairo");
-	assert.deepEqual(entry.defaults.district_candidates, ["d-1", "d-2", "d-1"]);
-	assert.equal(entry.defaults.district_id, "d-1");
 	assert.equal(entry.defaults.receiver_name, "Ahmed");
 	assert.equal(entry.defaults.receiver_phone, "0100");
 	assert.equal(entry.defaults.address_first_line, "12 Example Street");
-});
-
-test("a retry entry drops the resolved city when it is not the city used", async () => {
-	const { module_exports } = load({ defaults: { cod_amount: 175, city_id: "c-giza", city_name: "Giza", district_candidates: ["g-1"] } });
-	const entry = await module_exports.retry_entry(USED);
-	assert.equal(entry.defaults.city_id, undefined);
-	assert.equal(entry.defaults.district_candidates, undefined);
-	assert.equal(entry.defaults.address_city, "Cairo");
-	assert.equal(entry.defaults.district_id, "d-1");
+	assert.equal("district_id" in entry.defaults, false);
+	assert.equal("district_candidates" in entry.defaults, false);
 });
 
 test("a retry entry falls back to the used values when the defaults cannot be read", async () => {
@@ -133,8 +166,7 @@ test("a retry entry falls back to the used values when the defaults cannot be re
 	assert.deepEqual(entry.defaults, {
 		receiver_name: "Ahmed",
 		receiver_phone: "0100",
-		address_city: "Cairo",
-		district_id: "d-1",
+		city_id: "c-cairo",
 		address_first_line: "12 Example Street",
 		cod_amount: 150,
 	});

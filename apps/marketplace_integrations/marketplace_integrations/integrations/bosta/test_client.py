@@ -47,7 +47,7 @@ class UnitTestBostaClient(UnitTestCase):
 
 		self.assertIs(result, response)
 		args, kwargs = request.call_args
-		self.assertEqual(args[:2], ("POST", "https://app.bosta.co/api/v2/deliveries?apiVersion=1"))
+		self.assertEqual(args[:2], ("POST", "https://app.bosta.co/api/v2/deliveries"))
 		self.assertEqual(kwargs["json"], payload)
 		self.assertEqual(
 			kwargs["headers"], {"Authorization": "bosta-test-key", "Content-Type": "application/json"}

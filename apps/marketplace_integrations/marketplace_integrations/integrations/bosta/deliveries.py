@@ -8,7 +8,7 @@ from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
 from frappe import _
 from frappe.utils import add_to_date, cint, cstr, escape_html, flt, get_datetime, now_datetime
 
-from marketplace_integrations.integrations.bosta import district_match, locations
+from marketplace_integrations.integrations.bosta import city_match, locations
 from marketplace_integrations.integrations.bosta.client import (
 	BostaClient,
 	is_success_response,
@@ -46,7 +46,7 @@ def get_sales_order_defaults(sales_order_name):
 	return {
 		"address_first_line": address["first_line"],
 		"address_city": address["city"],
-		**_district_prefill(address),
+		**_city_prefill(address),
 		"receiver_name": cstr(order.customer_name).strip(),
 		"receiver_phone": _receiver_phone_prefill(order),
 		"cod_amount": cod["cod"],
@@ -94,7 +94,7 @@ def get_sales_order_shipment(sales_order_name):
 		"receiver_name",
 		"receiver_phone",
 		"city",
-		"district_id",
+		"city_id",
 		"address_first_line",
 		"cod_amount",
 		"delivery_note",
@@ -120,7 +120,7 @@ def get_sales_order_shipment(sales_order_name):
 				"receiver_name": row.receiver_name or "",
 				"receiver_phone": row.receiver_phone or "",
 				"city": row.city or "",
-				"district_id": row.district_id or "",
+				"city_id": row.city_id or "",
 				"address_first_line": row.address_first_line or "",
 				"cod_amount": flt(row.cod_amount),
 				"delivery_note": row.delivery_note or "",
@@ -137,15 +137,15 @@ def _readable_delivery_note_status(delivery_note):
 
 
 def _read_address(order):
-	"""The address for the dialog and for district resolution (#245, #305).
+	"""The address for the dialog and for city resolution (#245, #305).
 
-	The Sales Order's shipping Address wins (``text`` is its lines, city and state); the
-	Marketplace Order's formatted address is only a fallback. For a Shopify order the
-	Marketplace Order's shipping address also supplies the country, province code and
-	coordinates. Read without per-user permissions: the caller can already read this Sales
-	Order, and Address / Marketplace Order are not readable by every creator role.
+	The Sales Order's shipping Address wins; the Marketplace Order's formatted address is
+	only a fallback. For a Shopify order the Marketplace Order's shipping address also
+	supplies the country and province code. Read without per-user permissions: the caller can
+	already read this Sales Order, and Address / Marketplace Order are not readable by every
+	creator role.
 	"""
-	geo = _shopify_geo(order)
+	province = _shopify_province(order)
 	if order.get("shipping_address_name"):
 		address = frappe.db.get_value(
 			"Address",
@@ -160,9 +160,8 @@ def _read_address(order):
 			return {
 				"first_line": ", ".join(line for line in lines if line),
 				"city": city,
-				"text": ", ".join(part for part in (*lines, city, state) if part),
 				"hints": [part for part in (city, state) if part],
-				**geo,
+				**province,
 			}
 	marketplace_order = order.get("custom_marketplace_order")
 	formatted = (
@@ -171,12 +170,12 @@ def _read_address(order):
 		else ""
 	)
 	formatted = cstr(formatted).strip()
-	return {"first_line": formatted, "city": "", "text": formatted, "hints": [], **geo}
+	return {"first_line": formatted, "city": "", "hints": [], **province}
 
 
-def _shopify_geo(order):
-	"""``country_code`` / ``province_code`` / ``lat`` / ``lng`` from a Shopify Marketplace
-	Order's ``shipping_address`` JSON (they are approximate: Shopify geocodes the typed text)."""
+def _shopify_province(order):
+	"""``country_code`` / ``province_code`` from a Shopify Marketplace Order's
+	``shipping_address`` JSON."""
 	marketplace_order = order.get("custom_marketplace_order")
 	if not marketplace_order:
 		return {}
@@ -194,25 +193,23 @@ def _shopify_geo(order):
 	return {
 		"country_code": cstr(data.get("countryCodeV2")).strip(),
 		"province_code": cstr(data.get("provinceCode")).strip(),
-		"lat": data.get("latitude"),
-		"lng": data.get("longitude"),
 	}
 
 
-def _district_prefill(address):
-	"""``city_id`` / ``city_name`` and, when known, ``district_id`` or ``district_candidates``
-	for the dialog. A failed Bosta district lookup (or a recent one, see
-	``locations.lookups_blocked``) only loses the prefill: the operator picks, and no popup shows."""
+def _city_prefill(address):
+	"""``city_id`` / ``city_name`` / ``from_shopify`` for the dialog. A failed Bosta lookup (or a
+	recent one, see ``locations.lookups_blocked``) only loses the prefill: the operator picks,
+	and no popup shows."""
 	try:
-		result = district_match.resolve_location(address)
+		result = city_match.resolve_city(address)
 	except locations.BostaLookupUnavailable:
 		return {}
 	except Exception:
 		frappe.clear_last_message()
-		frappe.log_error(frappe.get_traceback(with_context=False), "Bosta district match failed")
+		frappe.log_error(frappe.get_traceback(with_context=False), "Bosta city match failed")
 		return {}
 	if result.get("city_id"):
-		# The name the dialog would send for this city (from GET /cities), not the directory's.
+		# The name the dialog would show for this city (from GET /cities), not the directory's.
 		result["city_name"] = locations.city_name_for(result["city_id"], result["city_name"])
 	return result
 
@@ -221,8 +218,7 @@ def create_bosta_shipment(
 	sales_order_name,
 	receiver_name,
 	receiver_phone,
-	city,
-	district_id,
+	city_id,
 	address_first_line,
 	expected_cod=None,
 ):
@@ -235,14 +231,16 @@ def create_bosta_shipment(
 	Note. A Bosta acceptance followed by a Delivery Note failure is visible and resumable
 	without ever submitting a second Bosta delivery.
 
-	``expected_cod`` is the amount the dialog showed; if the amount recomputed now differs
-	the request is refused so the operator never sends an amount they have not seen.
+	``city_id`` is the Bosta city; no district is sent, Bosta resolves it from the city code and
+	the address (#318). ``expected_cod`` is the amount the dialog showed; if the amount
+	recomputed now differs the request is refused so the operator never sends an amount they
+	have not seen.
 	"""
 	_require_creator_role()
-	if not cstr(district_id).strip():
-		frappe.throw(_("Choose a Bosta district."))
 	if not cstr(address_first_line).strip():
 		frappe.throw(_("Enter the address first line."))
+	# Before the lock: this may call Bosta (cached lists). No code means nothing is sent.
+	city = locations.get_city(city_id)
 	order = lock_and_load_sales_order(sales_order_name)
 	_validate_deliverable(order)
 	BostaClient().ensure_ready()
@@ -252,8 +250,9 @@ def create_bosta_shipment(
 		details = {
 			"receiver_name": receiver_name,
 			"receiver_phone": receiver_phone,
-			"city": city,
-			"district_id": district_id,
+			"city": city["name"],
+			"city_id": city["id"],
+			"city_code": city["code"],
 			"address_first_line": address_first_line,
 		}
 		return _resume_existing(existing, order, expected_cod, details)
@@ -265,8 +264,9 @@ def create_bosta_shipment(
 			"sales_order": order.name,
 			"receiver_name": receiver_name,
 			"receiver_phone": receiver_phone,
-			"city": city,
-			"district_id": district_id,
+			"city": city["name"],
+			"city_id": city["id"],
+			"city_code": city["code"],
 			"address_first_line": address_first_line,
 			"cod_amount": cod,
 			"bosta_requested_on": now_datetime(),
@@ -527,19 +527,14 @@ def _find_remote_delivery(shipment):
 
 
 def _build_delivery_payload(shipment, cod):
-	"""The MVP sends only Bosta's required fields and approved exceptions."""
+	"""The MVP sends only Bosta's required fields and approved exceptions. The drop-off
+	address is the city code and the first line only: Bosta resolves the district (#318)."""
 	settings = frappe.get_single("Bosta Settings")
-	drop_off_address = {"city": shipment.city, "firstLine": shipment.address_first_line}
-	if cstr(shipment.district_id).strip():
-		drop_off_address["districtId"] = shipment.district_id
-	else:
-		drop_off_address.update({"cityId": shipment.city_id, "districtName": shipment.district_name})
-
 	return {
 		"type": BOSTA_DELIVERY_TYPE,
 		"cod": cod,
 		"receiver": {"firstName": shipment.receiver_name, "phone": shipment.receiver_phone},
-		"dropOffAddress": drop_off_address,
+		"dropOffAddress": {"city": shipment.city_code, "firstLine": shipment.address_first_line},
 		"businessLocationId": settings.business_location_id,
 		# businessReference is the field Bosta documents for searching; keep it identical
 		# to the unique reference so a stuck shipment can be found again.

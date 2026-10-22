@@ -86,8 +86,7 @@
 			sales_order: entry.sales_order,
 			receiver_name: defaults.receiver_name,
 			receiver_phone: defaults.receiver_phone,
-			city: defaults.city_name,
-			district_id: defaults.district_id,
+			city_id: defaults.city_id,
 			address_first_line: defaults.address_first_line,
 			expected_cod: defaults.cod_amount,
 		};
@@ -111,8 +110,7 @@
 							sales_order: entry.sales_order,
 							receiver_name: values.receiver_name,
 							receiver_phone: values.receiver_phone,
-							city: city.name,
-							district_id: values.district,
+							city_id: city.id,
 							address_first_line: values.address_first_line,
 							expected_cod: entry.defaults.cod_amount,
 						},
@@ -215,43 +213,19 @@
 		});
 	}
 
-	// Fresh server defaults (COD, resolved city and district candidates) under the values the
-	// operator already used. If the defaults can no longer be read, the used values stand alone.
+	// Fresh server defaults (COD) under the values the operator already used, including the
+	// city. If the defaults can no longer be read, the used values stand alone.
 	function retry_entry(order) {
 		const used = {
 			receiver_name: order.receiver_name,
 			receiver_phone: order.receiver_phone,
 			address_first_line: order.address_first_line,
+			city_id: order.city_id,
 		};
-		const fallback = {
-			sales_order: order.sales_order,
-			defaults: {
-				...used,
-				address_city: order.city,
-				district_id: order.district_id,
-				cod_amount: order.expected_cod,
-			},
-		};
+		const fallback = { sales_order: order.sales_order, defaults: { ...used, cod_amount: order.expected_cod } };
 		return frappe
 			.call({ method: DEFAULTS_METHOD, type: "POST", silent: true, args: { sales_order: order.sales_order } })
-			.then((r) => {
-				const fresh = r.message || {};
-				const same_city =
-					fresh.city_id && String(fresh.city_name || "").trim().toLowerCase() === String(order.city || "").trim().toLowerCase();
-				const defaults = { ...fresh, ...used, address_city: order.city };
-				if (same_city) {
-					// The resolved city is the one used: keep its candidates and select the used district.
-					defaults.district_id = order.district_id || fresh.district_id;
-					if (fresh.district_candidates && order.district_id) {
-						defaults.district_candidates = [...fresh.district_candidates, order.district_id];
-					}
-				} else {
-					delete defaults.city_id;
-					delete defaults.district_candidates;
-					defaults.district_id = order.district_id;
-				}
-				return { sales_order: order.sales_order, defaults };
-			})
+			.then((r) => ({ sales_order: order.sales_order, defaults: { ...(r.message || {}), ...used } }))
 			.catch(() => fallback);
 	}
 

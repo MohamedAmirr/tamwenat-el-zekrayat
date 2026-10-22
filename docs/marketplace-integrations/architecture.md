@@ -216,88 +216,58 @@ configuration problem (Bosta disabled, no API key) is rejected before anything i
 persisted. A network exception also ends
 `Bosta Failed` with an "outcome unknown" message rather than staying Pending.
 
-**City and district pickers, address prefill (#245).** The create dialog picks the
-city and district from Bosta's lists instead of typing IDs.
-`integrations/bosta/locations.py` fetches `GET /cities` (`data.list[]`: `_id`,
-`name`, `nameAr`) and `GET /cities/{cityId}/districts` (`data[]`: `districtId`,
-`districtName`, `districtOtherName`, `zoneName`, `dropOffAvailability`) through
-`BostaClient` and caches each list for 24 hours in the Frappe cache; districts
-with `dropOffAvailability` explicitly false are dropped, and nothing is cached
-when Bosta fails or answers in an unrecognised shape. These shapes come from the
-OpenAPI examples and are unverified against the live API. The whitelisted POST
-methods `api.bosta_shipments.get_cities` / `get_districts` (`refresh=1`
-refetches; a failed refresh keeps the previous lists) require a creator role. The
-dialog uses Frappe `Autocomplete` controls (searchable, label = escaped name plus
-Arabic name, value = Bosta ID); a load failure shows an error with Retry and
-disables Create. `create_shipment` takes `city` (the city name) and `district_id`;
-the City ID / District Name path is removed from the dialog and the create
-method (the doctype and payload builder still accept it only for rows created
-earlier). Prefill: the address first line comes from the Sales Order's shipping
-Address (`address_line1`, `address_line2`), else the Marketplace Order's
-`customer_formatted_address`. The city and district are resolved as described in the next
-paragraph; when nothing resolves the operator picks both.
-**City and district resolution (#305).** `locations.get_directory()` fetches
-`GET /cities/getAllDistricts` (`data[]`: `cityId`, `cityName`, `cityOtherName`, `cityCode`,
-`districts[]` with `districtId`, `districtName`, `districtOtherName`, `dropOffAvailability`),
-cached 24 hours (a city-list refresh drops it); districts with `dropOffAvailability` false are
-never kept. `district_match.resolve_location(address)` then works in this order:
-1. **City.** For an Egypt Shopify order, `provinceCode` from the Marketplace Order's
-   `shipping_address` JSON goes through `SHOPIFY_EG_PROVINCE_TO_BOSTA_CITY_CODE` to a Bosta city
-   code. The 29 codes were verified against Shopify's Egypt checkout province list on 2026-10-19
-   (`SU` "6th of October" and `HU` Helwan are Shopify-only and map to Giza and Cairo). Else the shipping Address city/state text is matched against Bosta city
-   name, Arabic name or code.
-2. **District by text.** Searched within the resolved city, or in every city when none resolved (see below). The address and each district name are normalized
-   (lowercase; alef variants, teh marbuta, alef maksura folded; diacritics, tatweel removed; Arabic
-   digits to Latin), split into words (digits glued to letters are split; leading zeros of numbers
-   dropped, so "الحي 9" equals "الحي 09") and stripped of filler words (building, floor, street,
-   near...). A number that directly follows a filler word ("فيلا 3", "building 12") is a house
-   number and is dropped. A number in a district name must sit next to a generic word (الحي,
-   district...) or another word of that name in the address. A district is a candidate only when all of its
-   significant words are in the address; names made only of generic words (district, الحي,
-   numbers...) never match. Latin words are spelling-folded on both sides: a leading `al`/`el`
-   (also glued, `ElBurouj`) is dropped and `ou`/`oo`/`o` become `u`, `ee` becomes `i`, so
-   "Al Buroj" matches "ElBurouj (ElShorouk)". The area Bosta puts in parentheses is optional
-   when the rest of the name is unique in the city ("البروج" matches "البروج (الشروق)"), and
-   required when another district shares that rest ("Dar Masr (ElShorouk)" vs
-   "Dar Masr (ElAndalos)"). A match that left the area out is only ever a candidate, never the
-   district on its own: "5th Settlement elandalos" folds to "ElAndalous (Badr City)", which is the
-   wrong area, so a person must see it (in bulk such an order goes to review). A candidate whose
-   word set is a strict subset of another's is dropped; exactly one full-name match left is the
-   district. When no city resolved, a text hit is never used as
-   the district: hits that are all in one city are returned as `district_candidates` (with that
-   city), hits in several cities give nothing.
-3. **Otherwise `pinLocation`** with the Shopify latitude/longitude (Egypt only, approximate: Shopify
-   geocodes the typed text). `BostaClient.pin_location` calls `GET /cities/pinLocation?lat=&lng=`,
-   which Bosta does **not** document (it is commented out in `docs/bosta-integration/docs.yaml`);
-   it was seen working on 2026-10-19 and may change. Results are cached 24 hours per
-   coordinate rounded to 4 decimals; any error is logged to the Error Log and treated as no
-   result, so it never blocks. Results are kept when they are in the resolved city and are
-   drop-off districts; one result is used; several are narrowed to those sharing a specific word
-   with the address, and one left is used.
-4. **Otherwise the operator picks.** When steps 2 or 3 leave candidates in one city (several,
-   or one area-less match), `get_create_defaults` returns them as `district_candidates` and the
-   dialog's first District list shows only those, a single one already selected (a city change
-   or Refresh Bosta Lists loads the full list).
-The address text is the shipping Address (lines, city, state), else the Marketplace Order's
-`customer_formatted_address`. `get_create_defaults` adds `city_id`, `city_name` and, when
-known, `district_id` or `district_candidates`; `city_name` is the name `GET /cities` gives
-that city (the directory's name only as a fallback), so the automatic and dialog paths send the
-same name. **Fail fast:** the first failed directory fetch or `pinLocation` call in a request
-or job blocks every further Bosta lookup of this kind in it (`locations.lookups_blocked`), and
-the failure is also remembered for 60 seconds so the next request does not retry at once; the
-affected orders simply fall back to review. A failure shows no popup. Lookups served from the
-cache still work while blocked. Bosta rejects a create without a district (errorCode 777), so there is no
-no-district path.
-
+**City picker, address prefill (#245, #318).** The create dialog picks the city from
+Bosta's list instead of typing IDs; there is no district. `integrations/bosta/locations.py`
+fetches `GET /cities` (`data.list[]`: `_id`, `name`, `nameAr`) through `BostaClient` and caches
+it for 24 hours in the Frappe cache; nothing is cached when Bosta fails or answers in an
+unrecognised shape. The whitelisted POST method `api.bosta_shipments.get_cities` (`refresh=1`
+refetches; a failed refresh keeps the previous list) requires a creator role. The dialog uses a
+Frappe `Autocomplete` (searchable, label = escaped name plus Arabic name, value = Bosta city
+ID); a load failure shows an error with Retry and disables Create. `create_shipment` takes
+`city_id`. Prefill: the address first line comes from the Sales Order's shipping Address
+(`address_line1`, `address_line2`), else the Marketplace Order's `customer_formatted_address`;
+the city is resolved as described in the next paragraph, and when nothing resolves the operator
+picks it.
+**No district: Bosta resolves it (#318).** The create call is `POST /deliveries` **without**
+`?apiVersion=1` (that version requires a district and rejects a create without one with
+errorCode 777), and `dropOffAddress` is exactly `{city: <Bosta city code>, firstLine}`: no
+`districtId`, `districtName` or `cityId`. Bosta works out the district from the city code and the
+address text, so the first line should carry the area name. This call shape is not in
+`docs/bosta-integration/docs.yaml` (only the `apiVersion=1` call is); it was verified live on
+2026-10-22 (the create without a district, with an English and an Arabic address). `locations.get_city(city_id)` returns
+`{id, name, code}`: the name `GET /cities` gives the city (stored on the shipment and shown) and
+its code from `GET /cities/getAllDistricts` (`data[]`: `cityId`, `cityName`, `cityOtherName`,
+`cityCode`; only these are kept, cached 24 hours, a city-list refresh drops it). It is called
+before the Sales Order lock and before any row is inserted, and throws for an unknown city, a
+city without a code or a blocked lookup, so a city name is never sent in place of a code. The
+shipment stores `city`, `city_id` and `city_code` (read-only "Bosta City Code"); the payload
+sends `city_code`. The district fields (`district_id`, `district_name`) are hidden and read-only;
+only shipments created before #318 have them, and a retry of such a `Bosta Failed` row sends no
+district either. Edit sends the same `{city: <code>, firstLine}` (below).
+**City resolution (#305, #318).** `city_match.resolve_city(address)` returns
+`{city_id, city_name, from_shopify}`: for an Egypt Shopify order, `provinceCode` from the
+Marketplace Order's `shipping_address` JSON goes through `SHOPIFY_EG_PROVINCE_TO_BOSTA_CITY_CODE`
+to a Bosta city code (`from_shopify` true). The 29 codes were verified against Shopify's Egypt
+checkout province list on 2026-10-19 (`SU` "6th of October" and `HU` Helwan are Shopify-only and
+map to Giza and Cairo). Else the shipping Address city/state text is matched against the Bosta
+city name, Arabic name or code (`from_shopify` false). `get_create_defaults` adds `city_id`,
+`city_name` (the `GET /cities` name, the directory's only as a fallback) and `from_shopify`.
+**Fail fast:** the first failed directory fetch in a request or job blocks every further lookup of
+it in that request (`locations.lookups_blocked`), and the failure is remembered for 60 seconds
+so the next request does not retry at once; the affected orders simply fall back to review. A
+failure shows no popup. Lookups served from the cache still work while blocked. The earlier
+district matching (address text against district names, and the undocumented
+`GET /cities/pinLocation`) was removed in #318.
 **Bulk create (#305).** The Sales Order list action **Create Bosta Shipments**
 (`public/js/sales_order_list.js`, registered through `doctype_list_js`; creator roles only; at
 most 50 orders, refused with a message naming 50) calls
 `api.bosta_shipments.get_bulk_create_plan` (`integrations/bosta/bulk.py`). The plan creates nothing in Bosta;
-its only Bosta calls are the cached district lookups above (directory, city names, pinLocation),
-which stop after the first failure. An order is Skipped, with a one-line reason, when it is not submitted, Closed or
+its only Bosta calls are the cached city lookups above (directory, city names), which stop after
+the first failure. An order is Skipped, with a one-line reason, when it is not submitted, Closed or
 On Hold, has nothing left to deliver, is not in the company currency, has COD over 30,000, or
-already has an active Bosta Shipment. Of the rest, an order with a single resolved district (text or pin), a
-receiver phone and an address first line longer than 5 characters is sent without review;
+already has an active Bosta Shipment. Of the rest, an order whose city came from the Shopify province code
+(`from_shopify`), with a receiver phone and an address first line longer than 5 characters, is
+sent without review (a city read from the typed Address text may be wrong);
 every other order opens the existing Create dialog (`sales_order.js`, shared through
 `frappe.marketplace_integrations.open_bosta_create_dialog`) one at a time ("Order 2 of 5",
 with Skip). Closing a dialog cancels the whole run and nothing is sent. The skips are listed
@@ -306,24 +276,24 @@ that calls `deliveries.create_bosta_shipment` per order, each in its own try/exc
 rollback, so one failure never stops the rest. Progress and results live in the cache under a
 job id readable only by the requesting user (`get_bulk_create_status`), shown by
 `ShopifyCatalogPushStatus` with the `BOSTA_BULK_OPTIONS` labels (Created / Failed / Skipped,
-one line per order). Bosta `errorCode` 777 shows "Bosta needs a district for this address.";
+one line per order). Bosta `errorCode` 777 shows "Bosta could not find the district from this address. Add the area
+name to the address and retry.";
 other Bosta errors show Bosta's message; Bosta accepted but the Delivery Note failed shows
 Failed with the tracking number. **Retry failed** reopens the dialog for the failed orders
 with the values already used and sends them again; the existing resume path
 (`_resume_existing`) searches Bosta first or creates only the Delivery Note, so a retry never
-creates a second Bosta delivery. Districts are not remembered per Address.
+creates a second Bosta delivery.
 
 Prefill reads Address / Marketplace Order values without permission checks, after the Sales Order read check and the creator-role check (a conscious decision; `shipping_address_name` is not validated against the order's customer).
-`get_districts` rejects any city id not in the cached/fetched Bosta city list, so no unknown id reaches `/cities/{id}/districts` or the cache.
+`get_city` rejects any city id not in the cached/fetched Bosta city list.
 The API key is sent to the public `/cities` endpoints too (unverified whether Bosta needs it).
-The legacy City ID / District Name validation path is kept only for old `Bosta Failed` rows.
 
 **Bosta Delivery tab on the Sales Order (#246, #271).** Two fixture Custom Fields on Sales
 Order (`custom_bosta_delivery_tab`, shown when `docstatus >= 1`, and the HTML field
 `custom_bosta_delivery_html`) hold the tab; a draft does not show it.
 `api.bosta_shipments.get_sales_order_shipment` (POST) returns the order's current shipment
 summary: `name`, `status`, `tracking_number`, `bosta_state`, `active`, `last_update`
-(`last_bosta_status_on`), `receiver_name`, `receiver_phone`, `city`, `district_id`,
+(`last_bosta_status_on`), `receiver_name`, `receiver_phone`, `city`, `city_id`,
 `address_first_line`, `cod_amount`, `delivery_note` and `delivery_note_status` (the Delivery
 Note's status only when the caller can read that Delivery Note, else empty). It needs read on
 the Sales Order (else a permission error) and on Bosta Shipment (else it returns nothing); it
@@ -333,7 +303,7 @@ returned with `active` false; otherwise nothing. `Bosta Shipment.cod_amount` is 
 when the delivery was created; it is a read-only Currency system field.
 `sales_order.js` asks on every refresh (a reply that arrives after a newer refresh is
 dropped) and draws the tab: status, tracking number, Bosta state, last update, COD,
-receiver, address (the district shown as its ID) and Delivery Note, all escaped. Buttons live
+receiver, address (first line and city) and Delivery Note, all escaped. Buttons live
 in the tab (delegated click handler): **Create Bosta Shipment** (creators; with no shipment, a
 Canceled latest one, or a `Bosta Failed` one without a tracking number - that retry resumes the
 same row: search Bosta, then send, and the receiver and address typed in the dialog replace the
@@ -383,16 +353,17 @@ Sales Invoices, bulk cancel.
 
 **Editing (#273).** `editing.edit_bosta_shipment` (creator roles; whitelisted as
 `api.bosta_shipments.edit_shipment`, POST; the tab's **Edit Bosta Shipment** dialog shares the
-city / district pickers with the create dialog and asks for confirmation before anything is
+city picker with the create dialog and asks for confirmation before anything is
 sent) calls `BostaClient.update_delivery` (`PUT /deliveries/business/{trackingNumber}`). The body is
-exactly `receiver.phone` and `dropOffAddress` (`city` name, `districtId`, `firstLine`); never
+exactly `receiver.phone` and `dropOffAddress` (`city` code, `firstLine`; no district since
+#318, unverified live until the user tests it); never
 COD, open-package, images or the receiver name. It refuses locally, without calling Bosta,
 unless the shipment has a tracking number, is not `Canceled`, and its stored state is one of
 Bosta's documented editable states `{10, 11, 20, 21, 22, 24, 30, 41, 47}` (no stored state yet:
 "Refresh from Bosta first"). A Bosta refusal or a network error changes nothing locally and
 tells the user to verify in Bosta (no auto-reconcile: the shape of the GET address is
 unverified). On success, under the Sales Order lock, only the Bosta Shipment fields are
-updated (the legacy City ID / District Name are cleared). The Sales Order and its address,
+updated (`city`, `city_id`, `city_code`; the old district fields are cleared). The Sales Order and its address,
 Addresses, any Marketplace Order and the Delivery Note are **not** changed, and nothing is pushed
 to Shopify: those must be updated by hand if needed. If recording fails after Bosta accepted,
 the local change is rolled back and the user is told Bosta has the change. The same message is
