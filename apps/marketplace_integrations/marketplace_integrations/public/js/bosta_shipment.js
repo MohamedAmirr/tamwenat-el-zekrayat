@@ -37,7 +37,7 @@
 				.then((r) => {
 					const result = r.message || {};
 					frappe.show_alert({
-						message: retry_dn
+						message: result.delivery_note
 							? __("Delivery Note created.")
 							: result.found === false
 								? __("Bosta has no such delivery. A retry is allowed.")
