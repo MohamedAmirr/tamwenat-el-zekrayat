@@ -58,7 +58,8 @@ def get_city(city_id):
 		frappe.throw(_("Unknown Bosta city. Refresh the Bosta lists and choose the city again."))
 	try:
 		directory = get_directory()
-	except BostaLookupUnavailable:
+	except Exception:
+		frappe.clear_last_message()
 		frappe.throw(_("Could not load the Bosta city codes. Try again in a minute."))
 	code = next((entry["code"] for entry in directory if entry["id"] == city_id), "")
 	if not code:
@@ -123,7 +124,7 @@ def get_directory(refresh=False):
 
 def city_name_for(city_id, default):
 	"""The name ``GET /cities`` gives this city, else ``default`` (the directory's name), so the
-	automatic path sends the same city name as the dialog."""
+	prefilled city matches the dialog's list."""
 	try:
 		for city in get_cities():
 			if city["id"] == city_id:
