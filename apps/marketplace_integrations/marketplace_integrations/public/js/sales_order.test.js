@@ -21,6 +21,7 @@ function load({
 	bosta_read = true,
 	shipment = null,
 	shipment_fails = false,
+	defaults_fails = false,
 } = {}) {
 	const calls = [];
 	const bosta_calls = [];
@@ -71,6 +72,9 @@ function load({
 					? Promise.reject(new Error("boom"))
 					: Promise.resolve({ message: shipment });
 			}
+			if (opts.method.endsWith("get_create_defaults")) {
+				return defaults_fails ? Promise.reject(new Error("ineligible")) : Promise.resolve({ message: {} });
+			}
 			calls.push(opts);
 			if (opts.method.endsWith("get_platform_cancel_option")) {
 				return Promise.resolve({ message: option });
@@ -106,9 +110,13 @@ const eligible = (extra = {}) => ({
 function make_frm(doc, { close_sales_order } = {}) {
 	const buttons = [];
 	const indicators = [];
-	const tab = { html: "", handler: null };
+	const tab = { html: "", handler: null, visible: undefined, body_visible: undefined };
 	const frm = {
 		tab,
+		toggle_display: (field, visible) => {
+			if (field === "custom_bosta_delivery_tab") tab.visible = visible;
+			if (field === "custom_bosta_delivery_html") tab.body_visible = visible;
+		},
 		get_field: (name) =>
 			name === "custom_bosta_delivery_html"
 				? {
@@ -500,6 +508,8 @@ test("an active shipment shows status, tracking and a link, with a label button 
 	assert.match(frm.indicators[0].label, /<a href="\/app\/bosta-shipment\/BOSTA-SHP-00001">Bosta Shipment: Completed<\/a>/);
 	assert.match(frm.indicators[0].label, /Tracking: 77873113 \(Delivered\)/);
 	assert.deepEqual(labels(frm), ["print", "refresh", "cancel"]);
+	assert.equal(frm.tab.visible, true);
+	assert.equal(frm.tab.body_visible, true);
 });
 
 test("indicator colour follows the shipment status", async () => {
@@ -762,6 +772,24 @@ test("the tab shows every listed value and no district", async () => {
 	assert.doesNotMatch(html, /District/);
 });
 
+test("multiple Bosta shipments are shown as collapsible history with separate handover and stock states", async () => {
+	global.format_currency = (value) => `EGP ${value}`;
+	const previous = detailed({ name: "BOSTA-OLD", tracking_number: "TRK-OLD", status: "Canceled", active: false, handover_status: "Review Required", stock_posting_status: "Review Required" });
+	const current = detailed({ name: "BOSTA-CURRENT", tracking_number: "TRK-CURRENT", handover_status: "Awaiting Handover", stock_posting_status: "Not Posted", allocations: [{ item_code: "ITEM-1", qty: 2, uom: "Nos", warehouse: "Main - TEZ", stock_qty: 2 }] });
+	const { handlers, module_exports } = load({ option: NO_PLATFORM, shipment: { ...current, shipments: [current, previous] } });
+	assert.doesNotThrow(() => module_exports.bosta_tab_html({ ...current, shipments: [current, previous] }, { create: true }));
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.match(frm.tab.html, /Bosta shipments: 2/);
+	assert.match(frm.tab.html, /BOSTA-CURRENT/);
+	assert.match(frm.tab.html, /BOSTA-OLD/);
+	assert.match(frm.tab.html, /Awaiting Handover/);
+	assert.match(frm.tab.html, /Not Posted/);
+	assert.match(frm.tab.html, /Main - TEZ/);
+	assert.deepEqual(labels(frm), ["print:BOSTA-CURRENT", "refresh:BOSTA-CURRENT", "cancel:BOSTA-CURRENT", "handover:BOSTA-CURRENT"]);
+});
+
 test("a Delivery Note Failed shipment shows its escaped error in red above the table", async () => {
 	const { html } = await tab_for({ status: "Delivery Note Failed", delivery_note_error: "<b>no stock" });
 	assert.match(html, /^<p class="text-danger">&lt;b&gt;no stock<\/p><table/);
@@ -800,13 +828,26 @@ test("with no shipment the tab says so and offers Create to creators only", asyn
 	await settle();
 	assert.match(frm.tab.html, /No Bosta shipment/);
 	assert.deepEqual(labels(frm), ["create"]);
+	assert.equal(frm.tab.visible, true);
+	assert.equal(frm.tab.body_visible, true);
 
 	const { handlers: h2 } = load({ option: NO_PLATFORM, shipment: null, bosta_creator: false });
 	const reader = make_frm({});
 	h2["Sales Order"].refresh(reader);
 	await settle();
-	assert.match(reader.tab.html, /No Bosta shipment/);
+	assert.equal(reader.tab.visible, false);
+	assert.equal(reader.tab.body_visible, false);
 	assert.deepEqual(labels(reader), []);
+});
+
+test("an ineligible order without a shipment hides the Bosta tab", async () => {
+	const { handlers } = load({ option: NO_PLATFORM, shipment: null, defaults_fails: true });
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.equal(frm.tab.visible, false);
+	assert.equal(frm.tab.body_visible, false);
+	assert.deepEqual(labels(frm), []);
 });
 
 test("without read permission the tab stays empty and nothing is requested", async () => {
@@ -826,6 +867,7 @@ test("a failed read says so instead of 'No Bosta shipment'", async () => {
 	await settle();
 	assert.match(frm.tab.html, /Could not load the Bosta shipment/);
 	assert.doesNotMatch(frm.tab.html, /No Bosta shipment/);
+	assert.deepEqual(labels(frm), ["create"]);
 });
 
 test("Refresh from Bosta is creator-only, needs a tracking number and calls the server then reloads", async () => {
@@ -916,7 +958,8 @@ test("a Delivery Note failure after Bosta accepted the cancel is explained and t
 	confirms[0].on_yes();
 	await settle();
 	assert.equal(printed.length, 1);
-	assert.match(printed[0].message, /Needs Attention/);
+	assert.match(printed[0].message, /Bosta termination was confirmed/);
+	assert.match(printed[0].message, /No posted stock was reversed/);
 	assert.equal(frm.reloads, 1);
 });
 

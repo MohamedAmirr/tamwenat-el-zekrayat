@@ -23,11 +23,11 @@ from marketplace_integrations.tests.bosta_fixtures import (
 
 
 class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
-	def test_creates_delivery_and_submits_the_delivery_note(self):
+	def test_creation_only_reserves_stock_until_handover_is_confirmed(self):
 		order = self.make_order(rate=150)
 		self.http.queue["create"].append(created())
 
-		result = self.create(order)
+		result = self.create(order, confirm_handover=False)
 
 		payload = self.http.calls_of("create")[0]
 		self.assertEqual(payload["cod"], 150)
@@ -35,16 +35,25 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual(payload["businessReference"], payload["uniqueBusinessReference"])
 		shipment = frappe.get_doc("Bosta Shipment", result["shipment"])
 		self.assertEqual(payload["businessReference"], f"BOSTA-{shipment.name}")
-		self.assertEqual((shipment.status, shipment.tracking_number), ("Completed", "TRK-1"))
-		self.assertEqual(shipment.reservation_status, "Fulfilled")
+		self.assertEqual((shipment.status, shipment.tracking_number), ("Bosta Created", "TRK-1"))
+		self.assertEqual(shipment.reservation_status, "Reserved")
+		self.assertEqual(shipment.handover_status, "Awaiting Handover")
+		self.assertEqual(shipment.stock_posting_status, "Not Posted")
 		self.assertTrue(shipment.fulfillment_key)
 		self.assertEqual(len(shipment.shipment_items), 1)
 		allocation = shipment.shipment_items[0]
 		self.assertEqual((allocation.so_detail, allocation.item_code), (order.items[0].name, self.item.name))
-		self.assertEqual((allocation.stock_qty, allocation.fulfilled_qty), (order.items[0].stock_qty, order.items[0].stock_qty))
-		self.assertTrue(allocation.delivery_note_item)
+		self.assertEqual((allocation.stock_qty, allocation.fulfilled_qty), (order.items[0].stock_qty, 0))
+		self.assertFalse(allocation.delivery_note_item)
 		self.assertTrue(shipment.external_delivery_identity_key)
-		self.assertEqual(frappe.db.get_value("Delivery Note", result["delivery_note"], "docstatus"), 1)
+		self.assertFalse(frappe.db.exists("Delivery Note Item", {"against_sales_order": order.name}))
+
+		posted = deliveries.confirm_physical_handover(shipment.name)
+		shipment.reload()
+		self.assertEqual(shipment.shipment_items[0].fulfilled_qty, order.items[0].stock_qty)
+		self.assertEqual(shipment.reservation_status, "Fulfilled")
+		self.assertEqual(shipment.stock_posting_status, "Posted")
+		self.assertEqual(frappe.db.get_value("Delivery Note", posted["delivery_note"], "docstatus"), 1)
 
 	def test_duplicate_click_makes_no_second_request_or_shipment(self):
 		order = self.make_order()
@@ -212,6 +221,9 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 			self.http.calls_of("search"), [{"businessReference": shipment.unique_business_reference}]
 		)
 		shipment.reload()
+		self.assertEqual(shipment.status, "Bosta Created")
+		deliveries.confirm_physical_handover(shipment.name)
+		shipment.reload()
 		self.assertEqual((shipment.status, shipment.tracking_number), ("Completed", "TRK-9"))
 		self.assertEqual(len(self.http.calls_of("create")), 1)
 
@@ -284,9 +296,8 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual(self.http.sent(), [])
 
 	def test_permission_matrix(self):
-		# The Delivery Note step needs ERPNext's own rights: Delivery Note create (Stock User)
-		# and Account read (Accounts User). Sales Manager gets both extra roles here; see the
-		# next test for what happens without them.
+		# Shipment creation and physical handover are separate actions. These creator roles
+		# can reserve and create Bosta deliveries, but cannot confirm handover here.
 		users = {
 			"Sales User": self.make_user("Sales User"),
 			"Sales Manager": self.make_user("Sales Manager", "Stock User", "Accounts User"),
@@ -301,13 +312,10 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 			try:
 				with self.subTest(role=role):
 					if allowed:
-						result = self.create(order)
+						result = self.create(order, confirm_handover=False)
 						self.assertEqual(result["tracking_number"], f"TRK-{role}")
-						# The real user stays the Delivery Note's owner.
-						self.assertEqual(
-							frappe.db.get_value("Delivery Note", result["delivery_note"], "owner"),
-							users[role],
-						)
+						self.assertFalse(result["delivery_note"])
+						self.assertEqual(self.shipment_for(order).handover_status, "Awaiting Handover")
 					else:
 						with self.assertRaises(frappe.PermissionError):
 							self.create(order)
@@ -316,42 +324,44 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 			self.assertEqual(bool(self.shipment_for(order)), allowed)
 
 	def test_bosta_user_creates_the_delivery_and_submits_the_delivery_note(self):
-		# Accepted decision (#322): Bosta User is a creator role. Like the Stock User case it
-		# also holds ERPNext's own Sales Order read (Sales User) and Account read (Accounts
-		# User); the role grants the Bosta flow, not ERPNext rights.
+		# Bosta User may create the carrier record, but only System/Stock Manager can confirm
+		# physical handover and post stock.
 		user = self.make_user("Bosta User", "Sales User", "Accounts User")
 		order = self.make_order()
 		self.http.queue["create"].append(created("TRK-BU", "D-BU"))
 
 		frappe.set_user(user)
 		try:
-			result = self.create(order)
+			result = self.create(order, confirm_handover=False)
 		finally:
 			frappe.set_user("Administrator")
 
 		self.assertEqual(result["tracking_number"], "TRK-BU")
-		self.assertEqual(frappe.db.get_value("Delivery Note", result["delivery_note"], "docstatus"), 1)
-		self.assertEqual(frappe.db.get_value("Delivery Note", result["delivery_note"], "owner"), user)
-		self.assertEqual(self.shipment_for(order).status, "Completed")
+		self.assertFalse(result["delivery_note"])
+		self.assertEqual(self.shipment_for(order).status, "Bosta Created")
+		self.assertEqual(self.shipment_for(order).reservation_status, "Reserved")
+		self.assertFalse(frappe.db.exists("Delivery Note Item", {"against_sales_order": order.name}))
 
-	def test_creator_without_account_read_ends_delivery_note_failed_and_is_resumable(self):
-		# OPEN DECISION: ERPNext refuses a Delivery Note for a user without Account read.
+	def test_creation_without_account_read_keeps_reservation_without_posting_stock(self):
 		manager = self.make_user("Sales Manager")
 		order = self.make_order()
 		self.http.queue["create"].append(created())
 
 		frappe.set_user(manager)
 		try:
-			with self.assertRaises(frappe.PermissionError):
-				self.create(order)
+			result = self.create(order, confirm_handover=False)
 		finally:
 			frappe.set_user("Administrator")
 
 		shipment = self.shipment_for(order)
-		self.assertEqual((shipment.status, shipment.tracking_number), ("Delivery Note Failed", "TRK-1"))
-		self.create(order)  # an administrator resumes without a second Bosta call
+		self.assertEqual((shipment.status, shipment.tracking_number), ("Bosta Created", "TRK-1"))
+		self.assertEqual(shipment.reservation_status, "Reserved")
+		self.assertEqual(shipment.handover_status, "Awaiting Handover")
+		self.assertFalse(result["delivery_note"])
+		self.assertFalse(frappe.db.exists("Delivery Note Item", {"against_sales_order": order.name}))
+		# Creation itself does not create a Delivery Note.
 		self.assertEqual(len(self.http.sent()), 1)
-		self.assertEqual(self.shipment_for(order).status, "Completed")
+		self.assertEqual(self.shipment_for(order).status, "Bosta Created")
 
 	def test_configuration_failure_persists_nothing_and_is_not_an_ambiguous_send(self):
 		order = self.make_order()

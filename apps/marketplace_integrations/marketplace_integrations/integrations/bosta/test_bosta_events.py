@@ -12,7 +12,7 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, now_datetime
 
 from marketplace_integrations.api import bosta_shipments, bosta_webhooks
-from marketplace_integrations.integrations.bosta import statuses
+from marketplace_integrations.integrations.bosta import deliveries, statuses
 from marketplace_integrations.marketplace_integrations.doctype.bosta_shipment.bosta_shipment import (
 	save_as_system,
 )
@@ -27,6 +27,40 @@ SECRET = "bosta-webhook-secret"
 
 
 class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
+	def test_send_state_21_posts_stock_once_and_duplicate_webhook_is_ignored(self):
+		order = self.make_order()
+		self.http.queue["create"].append(created())
+		self.create(order, confirm_handover=False)
+		shipment = self.shipment_for(order)
+		self.assertEqual(shipment.stock_posting_status, "Not Posted")
+		self.assertFalse(frappe.db.exists("Delivery Note Item", {"against_sales_order": order.name}))
+
+		payload = self._event(shipment, 21, 5000)
+		self.assertEqual(statuses.process_webhook_event(payload), statuses.APPLIED)
+		self.assertEqual(statuses.process_webhook_event(payload), statuses.STALE)
+
+		shipment.reload()
+		self.assertEqual((shipment.handover_status, shipment.stock_posting_status), ("Confirmed", "Posted"))
+		self.assertEqual(frappe.db.count("Delivery Note", {"name": shipment.delivery_note}), 1)
+
+	def test_non_send_state_21_does_not_prove_handover_during_check(self):
+		order = self.make_order()
+		self.http.queue["create"].append(created())
+		self.create(order, confirm_handover=False)
+		shipment = self.shipment_for(order)
+		self.assertEqual(
+			statuses.process_webhook_event(self._event(shipment, 21, 5000, type="EXCHANGE")), statuses.APPLIED
+		)
+
+		result = deliveries.check_bosta_shipment(shipment.name)
+
+		shipment.reload()
+		self.assertTrue(result["found"])
+		self.assertEqual(shipment.bosta_delivery_type, "EXCHANGE")
+		self.assertEqual(shipment.handover_status, "Awaiting Handover")
+		self.assertEqual(shipment.stock_posting_status, "Not Posted")
+		self.assertFalse(shipment.delivery_note)
+
 	def _completed_shipment(self, tracking="TRK-1", **order_args):
 		order = self.make_order(**order_args)
 		self.http.queue["create"].append(created(tracking, f"D-{tracking}"))
@@ -58,8 +92,8 @@ class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
 
 	# -- webhook -------------------------------------------------------------------------
 
-	def test_guest_webhook_cancels_the_delivery_note_and_allows_a_new_shipment(self):
-		order, shipment = self._completed_shipment()
+	def test_guest_webhook_records_carrier_cancel_without_reversing_posted_stock(self):
+		_, shipment = self._completed_shipment()
 		delivery_note = shipment.delivery_note
 		frappe.set_user("Guest")
 		try:
@@ -70,15 +104,10 @@ class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
 
 		shipment.reload()
 		self.assertEqual((shipment.status, shipment.bosta_state_code), ("Canceled", 49))
-		self.assertEqual(frappe.db.get_value("Delivery Note", delivery_note, "docstatus"), 2)
+		self.assertEqual(frappe.db.get_value("Delivery Note", delivery_note, "docstatus"), 1)
 		self.assertFalse(shipment.delivery_note_error)
-		self.assertEqual(shipment.reservation_status, "Released")
-
-		self.http.queue["create"].append(created("TRK-NEW", "D-NEW"))
-		self.create(order)
-		new = self.shipment_for(order, status="Completed")
-		self.assertEqual(new.tracking_number, "TRK-NEW")
-		self.assertNotEqual(new.name, shipment.name)
+		self.assertEqual(shipment.reservation_status, "Fulfilled")
+		self.assertEqual(shipment.stock_posting_status, "Posted")
 
 	def test_unknown_tracking_state_or_type_answers_200_and_logs_without_changes(self):
 		_, shipment = self._completed_shipment()
@@ -126,46 +155,21 @@ class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual((shipment.bosta_state_code, shipment.bosta_exception_code), (47, 3))
 		self.assertNotEqual(shipment.status, "Canceled")
 
-	def test_a_failed_cancellation_is_a_needs_attention_problem_until_a_retry_succeeds(self):
+	def test_carrier_cancel_does_not_attempt_to_cancel_delivery_note(self):
 		_, shipment = self._completed_shipment()
 		delivery_note = shipment.delivery_note
 
 		with patch(
 			"erpnext.stock.doctype.delivery_note.delivery_note.DeliveryNote.cancel",
 			side_effect=frappe.ValidationError("linked invoice"),
-		):
+		) as cancel:
 			statuses.process_webhook_event(self._event(shipment, 49, 5000))
 
 		shipment.reload()
-		self.assertEqual((shipment.status, shipment.bosta_state_code), ("Completed", 49))
-		self.assertIn("linked invoice", shipment.delivery_note_error)
-		self.assertIn("could not cancel", shipment.last_error)
+		self.assertEqual((shipment.status, shipment.bosta_state_code), ("Canceled", 49))
+		cancel.assert_not_called()
+		self.assertFalse(shipment.delivery_note_error)
 		self.assertEqual(frappe.db.get_value("Delivery Note", delivery_note, "docstatus"), 1)
-		items = [
-			item
-			for item in marketplace_attention.get_attention_items({"platform": "Bosta"})
-			if item["reference_name"] == shipment.name
-		]
-		self.assertEqual(len(items), 1)
-		self.assertEqual(
-			(items[0]["problem_type"], items[0]["platform"], items[0]["account"], items[0]["next_action"]),
-			("Bosta Delivery Note", "Bosta", "", "Open Shipment"),
-		)
-		self.assertTrue(
-			any(i["reference_name"] == shipment.name for i in marketplace_attention.get_attention_items())
-		)
-		self.assertFalse(marketplace_attention.get_attention_items({"account": "any"}))
-		row = marketplace_channels._bosta_rows()[0]
-		self.assertEqual((row["platform"], row["level"]), ("Bosta", "Error"))
-		self.assertGreaterEqual(row["orders_needing_attention"], 1)
-
-		statuses.retry_failed_cancellations()
-
-		shipment.reload()
-		self.assertEqual(
-			(shipment.status, shipment.delivery_note_error, shipment.last_error), ("Canceled", "", "")
-		)
-		self.assertEqual(frappe.db.get_value("Delivery Note", delivery_note, "docstatus"), 2)
 		self.assertFalse(
 			[
 				item
@@ -262,7 +266,7 @@ class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual((live.bosta_state_code, live.bosta_state_value), (24, "Received at warehouse"))
 		self.assertIn("<b>x</b>", live.bosta_status_snapshot)
 
-	def test_poll_cancels_the_delivery_note_on_state_49_and_ignores_unknown_codes(self):
+	def test_poll_marks_carrier_cancel_without_reversing_stock_and_ignores_unknown_codes(self):
 		_, shipment = self._completed_shipment("T-49")
 		_, unknown = self._completed_shipment("T-UNKNOWN")
 
@@ -272,7 +276,8 @@ class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
 		shipment.reload()
 		unknown.reload()
 		self.assertEqual(shipment.status, "Canceled")
-		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 2)
+		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 1)
+		self.assertEqual(shipment.reservation_status, "Fulfilled")
 		self.assertEqual((unknown.status, unknown.bosta_state_code), ("Completed", 0))
 
 	def test_a_stale_poll_cannot_overwrite_a_newer_webhook(self):
@@ -345,7 +350,8 @@ class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
 
 		shipment.reload()
 		self.assertEqual((shipment.status, shipment.delivery_note_error), ("Canceled", ""))
-		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 2)
+		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 1)
+		self.assertEqual(shipment.reservation_status, "Fulfilled")
 
 	def test_the_calling_user_is_restored_when_processing_raises(self):
 		frappe.set_user("Guest")
@@ -369,29 +375,19 @@ class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
 		shipment.reload()
 		self.assertEqual((shipment.last_bosta_status_on, shipment.modified), (checked_on, modified))
 
-	def test_a_repeated_cancel_failure_is_logged_once_and_keeps_its_detected_time(self):
+	def test_repeated_carrier_cancel_does_not_create_delivery_note_cancellation_errors(self):
 		_, shipment = self._completed_shipment("T-REPEAT")
 		with patch(
 			"erpnext.stock.doctype.delivery_note.delivery_note.DeliveryNote.cancel",
 			side_effect=frappe.ValidationError("linked invoice"),
-		):
+		) as cancel:
 			statuses.process_webhook_event(self._event(shipment, 49, 5000))
-			shipment.reload()
-			first_seen = shipment.delivery_note_error_at
-			self.assertTrue(first_seen)
-			with patch.object(statuses.frappe, "log_error") as log_error:
-				statuses.retry_failed_cancellations()
-				statuses.retry_failed_cancellations()
-			log_error.assert_not_called()
+			statuses.process_webhook_event(self._event(shipment, 49, 6000))
+		cancel.assert_not_called()
 
 		shipment.reload()
-		self.assertEqual(shipment.delivery_note_error_at, first_seen)
-		item = next(
-			i
-			for i in marketplace_attention.get_attention_items({"platform": "Bosta"})
-			if i["reference_name"] == shipment.name
-		)
-		self.assertEqual(item["detected_at"], first_seen)
+		self.assertEqual((shipment.status, shipment.delivery_note_error), ("Canceled", ""))
+		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 1)
 
 
 class IntegrationTestBostaRefresh(BostaFixtureMixin, IntegrationTestCase):
@@ -421,7 +417,7 @@ class IntegrationTestBostaRefresh(BostaFixtureMixin, IntegrationTestCase):
 		self.assertTrue(shipment.last_bosta_status_on)
 		self.assertEqual(shipment.status, "Completed")
 
-	def test_state_49_cancels_the_delivery_note_through_the_existing_path(self):
+	def test_state_49_preserves_the_submitted_delivery_note_and_fulfilled_reservation(self):
 		_, shipment = self._live()
 		self.http.queue["get"].append(self._state(49))
 
@@ -429,8 +425,8 @@ class IntegrationTestBostaRefresh(BostaFixtureMixin, IntegrationTestCase):
 
 		shipment.reload()
 		self.assertEqual(shipment.status, "Canceled")
-		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 2)
-		self.assertEqual(shipment.reservation_status, "Released")
+		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 1)
+		self.assertEqual(shipment.reservation_status, "Fulfilled")
 
 	def test_a_bosta_error_or_network_failure_stores_nothing_and_is_escaped(self):
 		_, shipment = self._live()
@@ -557,15 +553,15 @@ class IntegrationTestBostaCancel(BostaFixtureMixin, IntegrationTestCase):
 		invoice.submit()
 		self._invoice = invoice.name
 		frappe.db.commit()
-		with self.assertRaises(frappe.ValidationError) as caught:
-			bosta_shipments.cancel_shipment(shipment.name)
-		self.assertIn("submitted Sales Invoice", str(caught.exception))
-		# Already Canceled.
+		self.http.queue["terminate"].append(self._ok())
+		result = bosta_shipments.cancel_shipment(shipment.name)
+		self.assertTrue(result["canceled"])
+		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 1)
+		self.assertEqual(frappe.db.get_value("Sales Invoice", invoice.name, "docstatus"), 1)
+		# A manually repeated local cancellation is idempotent and never calls Bosta again.
 		frappe.db.set_value("Bosta Shipment", shipment.name, "status", "Canceled")
-		with self.assertRaises(frappe.ValidationError):
-			bosta_shipments.cancel_shipment(shipment.name)
-		frappe.db.set_value("Bosta Shipment", shipment.name, "status", "Completed")
-		self.assertEqual(self.http.calls_of("terminate"), [])
+		self.assertTrue(bosta_shipments.cancel_shipment(shipment.name)["canceled"])
+		self.assertEqual(len(self.http.calls_of("terminate")), 1)
 		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 1)
 
 	def test_every_other_state_is_sent_to_bosta_and_a_bosta_error_changes_nothing(self):
@@ -584,7 +580,7 @@ class IntegrationTestBostaCancel(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual((shipment.status, shipment.bosta_terminated_on), ("Completed", None))
 		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 1)
 
-	def test_success_cancels_the_delivery_note_and_frees_the_sales_order(self):
+	def test_success_cancels_carrier_shipment_without_reversing_posted_stock(self):
 		order, shipment = self._live()
 		self.http.queue["terminate"].append(self._ok())
 
@@ -595,57 +591,42 @@ class IntegrationTestBostaCancel(BostaFixtureMixin, IntegrationTestCase):
 		shipment.reload()
 		self.assertEqual(shipment.status, "Canceled")
 		self.assertTrue(shipment.bosta_terminated_on)
-		self.assertEqual(shipment.reservation_status, "Released")
-		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 2)
-		self.http.queue["create"].append(created("TRK-NEW", "D-NEW"))
-		self.create(order)
-		self.assertEqual(self.shipment_for(order, status="Completed").tracking_number, "TRK-NEW")
+		self.assertEqual(shipment.reservation_status, "Fulfilled")
+		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 1)
+		self.assertEqual(frappe.db.count("Bosta Shipment", {"sales_order": order.name}), 1)
 
-	def test_a_delivery_note_failure_keeps_the_shipment_active_and_the_poll_retries_it(self):
+	def test_bosta_terminate_does_not_attempt_to_cancel_the_delivery_note(self):
 		_, shipment = self._live()
 		self.http.queue["terminate"].append(self._ok())
 		with patch(
 			"erpnext.stock.doctype.delivery_note.delivery_note.DeliveryNote.cancel",
 			side_effect=frappe.ValidationError("linked invoice"),
-		):
+		) as cancel:
 			result = bosta_shipments.cancel_shipment(shipment.name)
 
-		self.assertFalse(result["canceled"])
-		self.assertIn("linked invoice", result["delivery_note_error"])
+		self.assertTrue(result["canceled"])
+		cancel.assert_not_called()
 		shipment.reload()
-		# State is NOT 49, yet the shipment is retried because Bosta accepted the terminate.
-		self.assertEqual((shipment.status, shipment.bosta_state_code), ("Completed", 0))
+		self.assertEqual((shipment.status, shipment.bosta_state_code), ("Canceled", 0))
 		self.assertTrue(shipment.bosta_terminated_on)
-		self.assertTrue(shipment.delivery_note_error)
-		self.assertEqual(shipment.reservation_status, "Reserved")
+		self.assertFalse(shipment.delivery_note_error)
+		self.assertEqual(shipment.reservation_status, "Fulfilled")
+		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 1)
 
-		statuses.retry_failed_cancellations()
-
-		shipment.reload()
-		self.assertEqual((shipment.status, shipment.delivery_note_error), ("Canceled", ""))
-		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 2)
-
-	def test_a_failure_finishing_after_bosta_accepted_is_recorded_and_retried(self):
+	def test_carrier_termination_never_retries_or_cancels_posted_stock(self):
 		_, shipment = self._live()
 		self.http.queue["terminate"].append(self._ok())
 		with (
-			patch.object(statuses, "_cancel_linked_delivery_note", side_effect=RuntimeError("lock lost")),
-			self.assertRaises(frappe.ValidationError) as caught,
+			patch.object(statuses, "_cancel_linked_delivery_note", wraps=statuses._cancel_linked_delivery_note) as carrier_cancel,
 		):
-			bosta_shipments.cancel_shipment(shipment.name)
-
-		self.assertIn("will be retried", str(caught.exception))
+			result = bosta_shipments.cancel_shipment(shipment.name)
+		self.assertTrue(result["canceled"])
+		carrier_cancel.assert_called_once()
 		shipment.reload()
-		self.assertEqual(shipment.status, "Completed")
+		self.assertEqual(shipment.status, "Canceled")
 		self.assertTrue(shipment.bosta_terminated_on)
-		self.assertIn("lock lost", shipment.delivery_note_error)
 		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 1)
-
-		statuses.retry_failed_cancellations()
-
-		shipment.reload()
-		self.assertEqual((shipment.status, shipment.delivery_note_error), ("Canceled", ""))
-		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 2)
+		self.assertEqual(shipment.reservation_status, "Fulfilled")
 
 	def test_cancelling_again_after_bosta_terminated_does_not_send_a_second_delete(self):
 		_, shipment = self._live()
@@ -653,8 +634,9 @@ class IntegrationTestBostaCancel(BostaFixtureMixin, IntegrationTestCase):
 		with patch(
 			"erpnext.stock.doctype.delivery_note.delivery_note.DeliveryNote.cancel",
 			side_effect=frappe.ValidationError("linked"),
-		):
-			self.assertFalse(bosta_shipments.cancel_shipment(shipment.name)["canceled"])
+		) as cancel:
+			self.assertTrue(bosta_shipments.cancel_shipment(shipment.name)["canceled"])
+		cancel.assert_not_called()
 		self.assertEqual(len(self.http.calls_of("terminate")), 1)
 
 		# Second click (and a stored 48/49): straight to the local finish, no DELETE.
@@ -694,7 +676,7 @@ class IntegrationTestBostaCancel(BostaFixtureMixin, IntegrationTestCase):
 				self.assertEqual(shipment.status == "Canceled", finished)
 				self.assertEqual(
 					frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"),
-					2 if finished else 1,
+					1,
 				)
 				if reported == 48:
 					self.assertTrue(shipment.bosta_terminated_on)

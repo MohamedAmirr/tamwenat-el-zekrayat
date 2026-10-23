@@ -197,13 +197,19 @@ def _create_one(order):
 			"skipped": False,
 			"detail": _failure_line(order["sales_order"], exc),
 		}
+	if outcome.get("delivery_note"):
+		detail = _("Bosta shipment {0} created and Delivery Note {1} submitted.").format(
+			outcome.get("tracking_number"), outcome.get("delivery_note")
+		)
+	else:
+		detail = _("Bosta shipment {0} created. Stock is reserved until physical handover.").format(
+			outcome.get("tracking_number")
+		)
 	return {
 		"mapping_name": order["sales_order"],
 		"ok": True,
 		"skipped": False,
-		"detail": _("Bosta shipment {0} created and Delivery Note {1} submitted.").format(
-			outcome.get("tracking_number"), outcome.get("delivery_note")
-		),
+		"detail": detail,
 	}
 
 
@@ -215,10 +221,14 @@ def _failure_line(sales_order, exc):
 		["tracking_number", "status", "last_error"],
 		as_dict=True,
 	)
-	if shipment and shipment.tracking_number and shipment.status in ("Delivery Note Failed", "Bosta Created"):
+	if shipment and shipment.tracking_number and shipment.status == "Delivery Note Failed":
 		return _(
 			"Bosta accepted the delivery (tracking number {0}) but the Delivery Note could not be created. "
-			"Retry creates only the Delivery Note."
+			"Retry handover posting after resolving the issue."
+		).format(shipment.tracking_number)
+	if shipment and shipment.tracking_number and shipment.status == "Bosta Created":
+		return _(
+			"Bosta accepted the delivery (tracking number {0}); stock remains reserved until physical handover."
 		).format(shipment.tracking_number)
 
 	raw = html.unescape(cstr(exc))

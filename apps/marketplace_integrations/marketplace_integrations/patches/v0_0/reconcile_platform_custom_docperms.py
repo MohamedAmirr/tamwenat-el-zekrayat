@@ -31,7 +31,14 @@ import frappe
 MODULE = "Marketplace Integrations"
 APP = "marketplace_integrations"
 # Only these roles are reconciled; every other role's rows belong to ERPNext or the site.
-RECONCILED_ROLES = ("Talabat User", "Noon User", "Shopify User", "Bosta User", "System Manager")
+RECONCILED_ROLES = (
+	"Talabat User",
+	"Noon User",
+	"Shopify User",
+	"Bosta User",
+	"Stock Manager",
+	"System Manager",
+)
 PTYPES = (
 	"read",
 	"write",

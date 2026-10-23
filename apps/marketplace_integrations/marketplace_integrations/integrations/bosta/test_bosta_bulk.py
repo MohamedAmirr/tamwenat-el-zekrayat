@@ -157,7 +157,7 @@ class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 		self.assertIn("submitted", reasons[draft.name])
 		self.assertIn(str(bulk.deliveries.BOSTA_COD_LIMIT), reasons[too_much_cod.name])
 		self.assertIn("Closed", reasons[closed.name])
-		self.assertIn("already exists", reasons[has_shipment.name])
+		self.assertIn("remaining quantity", reasons[has_shipment.name])
 		self.assertEqual(self.http.calls_of("create") + self.http.calls_of("search"), [])
 
 	def test_plan_skips_an_order_with_nothing_left_to_deliver(self):
@@ -247,6 +247,7 @@ class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 		rows = {row["mapping_name"]: row for row in state["result"]["results"]}
 		self.assertTrue(rows[first.name]["ok"])
 		self.assertIn("TRK-1", rows[first.name]["detail"])
+		self.assertIn("reserved until physical handover", rows[first.name]["detail"])
 		self.assertFalse(rows[failing.name]["ok"])
 		self.assertFalse(rows[failing.name]["skipped"])
 		self.assertEqual(
@@ -258,7 +259,8 @@ class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 		result = state["result"]
 		self.assertEqual((result["succeeded"], result["failed"], result["skipped_mappings"]), (2, 1, 1))
 		self.assertEqual(self.shipment_for(failing).status, "Bosta Failed")
-		self.assertEqual(self.shipment_for(last).status, "Completed")
+		self.assertEqual(self.shipment_for(last).status, "Bosta Created")
+		self.assertEqual(self.shipment_for(last).reservation_status, "Reserved")
 
 	def test_other_bosta_errors_show_bostas_message(self):
 		order = self.make_order()
@@ -271,28 +273,19 @@ class IntegrationTestBostaBulk(BostaFixtureMixin, IntegrationTestCase):
 		detail = state["result"]["results"][0]["detail"]
 		self.assertEqual(detail, "Receiver phone is invalid")
 
-	def test_bosta_accepted_but_delivery_note_failed_names_the_tracking_number_and_retry_makes_only_the_note(
-		self,
-	):
+	def test_bosta_bulk_success_reports_stock_reserved_until_physical_handover(self):
 		order = self.make_order()
 		self.http.queue["create"].append(created("TRK-9", "D-9"))
-		with patch.object(
-			deliveries, "make_delivery_note", side_effect=frappe.ValidationError("stock problem")
-		):
-			state = self._run([self._row(order)])
-
-		row = state["result"]["results"][0]
-		self.assertFalse(row["ok"])
-		self.assertIn("TRK-9", row["detail"])
-		self.assertEqual(self.shipment_for(order).status, "Delivery Note Failed")
-
-		# Retry sends the same values again; no second Bosta delivery is created.
 		state = self._run([self._row(order)])
 
-		self.assertTrue(state["result"]["results"][0]["ok"])
+		row = state["result"]["results"][0]
+		self.assertTrue(row["ok"])
+		self.assertIn("TRK-9", row["detail"])
+		self.assertIn("reserved until physical handover", row["detail"])
+		self.assertEqual(self.shipment_for(order).status, "Bosta Created")
+		self.assertFalse(self.shipment_for(order).delivery_note)
 		self.assertEqual(len(self.http.calls_of("create")), 1)
 		self.assertEqual(frappe.db.count("Bosta Shipment", {"sales_order": order.name}), 1)
-		self.assertEqual(self.shipment_for(order).status, "Completed")
 
 	def test_retry_after_a_failed_bosta_call_searches_first_and_reuses_the_shipment(self):
 		order = self.make_order()

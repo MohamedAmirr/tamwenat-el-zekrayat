@@ -30,6 +30,16 @@ Company {0} does not match Sales Order {1}.,الشركة {0} لا تطابق أ�
 Bosta Shipment Item,عنصر شحنة Bosta
 Fulfillment Key,مفتاح التنفيذ
 Reservation Status,حالة الحجز
+Physical Handover,التسليم الفعلي
+Handover Confirmed By,تأكيد التسليم بواسطة
+Handover Confirmed On,تاريخ تأكيد التسليم
+Stock Posting,ترحيل المخزون
+Awaiting Handover,بانتظار التسليم
+Confirmed,مؤكد
+Review Required,يتطلب المراجعة
+Not Posted,لم يتم الترحيل
+Posted,تم الترحيل
+Failed,فشل
 Reserved,محجوز
 Released,محرر
 Fulfilled,تم تنفيذه
@@ -617,6 +627,35 @@ Bosta Shipment {0} does not need checking.,شحنة Bosta {0} لا تحتاج إ
 Bosta Shipment {0} has no tracking number yet.,شحنة Bosta {0} ليس لها رقم تتبع بعد.
 "Bosta Shipment {0} is still pending. If it is stuck, use Check Bosta on it.","شحنة Bosta {0} لا تزال معلّقة. إذا كانت عالقة، استخدم ""فحص Bosta"" عليها."
 Bosta Shipment {0} was canceled by Bosta.,ألغت Bosta شحنة Bosta {0}.
+Confirm Physical Handover,تأكيد التسليم الفعلي
+Handover,التسليم الفعلي
+Track Bosta Shipment,تتبّع شحنة Bosta
+Retry Bosta Shipment,إعادة محاولة شحنة Bosta
+"Bosta shipments: {0}","شحنات Bosta: {0}"
+"Carrier Status","حالة شركة الشحن"
+"Shipment ID","معرّف الشحنة"
+"Reserved allocations","الكميات المحجوزة"
+"No tracking number","لا يوجد رقم تتبع"
+"Warehouse allocations","توزيعات المستودع"
+"Confirm that this Bosta shipment has physically left the warehouse? This posts its reserved stock once and creates a Delivery Note.","هل تؤكد أن شحنة Bosta غادرت المستودع فعليًا؟ سيُرحّل المخزون المحجوز مرة واحدة وتُنشأ مذكرة تسليم."
+"Posting the reserved stock...","جارٍ ترحيل المخزون المحجوز..."
+"Physical handover recorded","تم تسجيل التسليم الفعلي"
+"Handover was confirmed by {0} at {1}. Carrier status: {2}. Stock posting status: {3}. Delivery Note: {4}.","تم تأكيد التسليم بواسطة {0} في {1}. حالة شركة الشحن: {2}. حالة ترحيل المخزون: {3}. مذكرة التسليم: {4}."
+"Retry Stock Posting","إعادة محاولة ترحيل المخزون"
+"Cancel Bosta delivery {0}? Bosta will terminate the carrier delivery. A submitted Delivery Note and posted stock will remain unchanged. This cannot be undone.","هل تريد إنهاء توصيل Bosta {0}؟ ستُنهي Bosta توصيل شركة الشحن. ستبقى مذكرة التسليم المعتمدة والمخزون المُرحّل دون تغيير. لا يمكن التراجع عن ذلك."
+"Bosta delivery terminated. Posted stock remains unchanged.","تم إنهاء توصيل Bosta. يبقى المخزون المُرحّل دون تغيير."
+"Bosta termination was confirmed, but the local shipment status needs review. No posted stock was reversed.","تم تأكيد إنهاء Bosta، لكن حالة الشحنة المحلية تحتاج إلى مراجعة. لم يتم عكس المخزون المُرحّل."
+"Bosta terminated the delivery, but the local carrier status could not be recorded: {0}","أنهت Bosta التوصيل، لكن تعذّر تسجيل حالة شركة الشحن المحلية: {0}"
+"Bosta terminated the delivery, but ERPNext could not finish recording the status. The carrier status will be retried automatically.","أنهت Bosta التوصيل، لكن تعذّر على ERPNext إكمال تسجيل الحالة. ستُعاد محاولة تسجيل حالة شركة الشحن تلقائيًا."
+"Bosta delivery linked. Stock awaits physical handover.","تم ربط توصيل Bosta. ينتظر المخزون التسليم الفعلي."
+"Bosta shipment {0} created. Stock is reserved until physical handover.","تم إنشاء شحنة Bosta {0}. يظل المخزون محجوزًا حتى التسليم الفعلي."
+"Bosta accepted the delivery (tracking number {0}); stock remains reserved until physical handover.","قبلت Bosta التوصيل (رقم التتبع {0})؛ يظل المخزون محجوزًا حتى التسليم الفعلي."
+Bosta Delivery Type,نوع توصيل Bosta
+"Bosta accepted the delivery (tracking number {0}) but the Delivery Note could not be created. Retry handover posting after resolving the issue.","قبلت Bosta التوصيل (رقم التتبع {0}) لكن تعذّر إنشاء مذكرة التسليم. أعد محاولة ترحيل المخزون بعد معالجة المشكلة."
+Confirm that this shipment was physically handed to Bosta? Stock will be posted.,هل تؤكد تسليم هذه الشحنة فعليًا إلى Bosta؟ سيتم ترحيل المخزون.
+A canceled Bosta Shipment cannot be handed over.,لا يمكن تسليم شحنة Bosta ملغاة.
+Confirm Bosta delivery details before recording physical handover.,أكد تفاصيل توصيل Bosta قبل تسجيل التسليم الفعلي.
+This shipment requires review before stock can be posted.,تتطلب هذه الشحنة المراجعة قبل ترحيل المخزون.
 "Bosta accepted the change, but ERPNext could not record it. Nothing was changed in ERPNext; enter the same receiver phone and address again or fix it by hand. See Error Log.",قبلت Bosta التغيير، لكن تعذّر على ERPNext تسجيله. لم يتغير شيء في ERPNext؛ أدخل هاتف المستلم والعنوان نفسيهما مرة أخرى أو صحّحهما يدويًا. راجع سجل الأخطاء.
 "Bosta accepted the change, but this shipment was canceled in the meantime, so ERPNext did not record it.",قبلت Bosta التغيير، لكن هذه الشحنة أُلغيت في هذه الأثناء، لذا لم يسجّله ERPNext.
 Bosta accepted the request without a delivery ID and tracking number.,قبلت Bosta الطلب دون معرّف توصيل ورقم تتبع.

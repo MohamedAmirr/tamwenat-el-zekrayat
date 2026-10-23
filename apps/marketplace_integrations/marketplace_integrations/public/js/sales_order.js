@@ -28,8 +28,17 @@
 	// Bosta's documented states in which a delivery may be edited (OpenAPI, "Business update delivery").
 	const BOSTA_EDITABLE_STATES = [10, 11, 20, 21, 22, 24, 30, 41, 47];
 	const BOSTA_CANCEL_METHOD = "marketplace_integrations.api.bosta_shipments.cancel_shipment";
+	const BOSTA_HANDOVER_METHOD = "marketplace_integrations.api.bosta_shipments.confirm_physical_handover";
+	const BOSTA_HANDOVER_ROLES = ["System Manager", "Stock Manager"];
 	const BOSTA_DELIVERED_STATE = 45;
+	const BOSTA_TAB_BREAK_FIELD = "custom_bosta_delivery_tab";
 	const BOSTA_TAB_FIELD = "custom_bosta_delivery_html";
+
+	function toggle_bosta_tab(frm, visible) {
+		if (!frm.toggle_display) return;
+		frm.toggle_display(BOSTA_TAB_BREAK_FIELD, visible);
+		frm.toggle_display(BOSTA_TAB_FIELD, visible);
+	}
 
 	// Colours for the Bosta Shipment doctype's own statuses; the status text is the doctype's value.
 	const BOSTA_STATUS_COLORS = {
@@ -130,7 +139,7 @@
 	function cancel_bosta_shipment(frm, shipment) {
 		const escape = frappe.utils.escape_html;
 		const message = escape(
-			__("Cancel Bosta delivery {0}? Bosta will terminate it and Delivery Note {1} will be cancelled. This cannot be undone.", [
+			__("Cancel Bosta delivery {0}? Bosta will terminate the carrier delivery. A submitted Delivery Note and posted stock will remain unchanged. This cannot be undone.", [
 				shipment.tracking_number,
 				shipment.delivery_note || "-",
 			])
@@ -147,13 +156,11 @@
 				.then((r) => {
 					const result = r.message || {};
 					if (result.canceled) {
-						frappe.show_alert({ message: __("Bosta delivery cancelled."), indicator: "green" });
+						frappe.show_alert({ message: __("Bosta delivery terminated. Posted stock remains unchanged."), indicator: "green" });
 					} else {
 						frappe.msgprint({
 							title: __("Bosta Cancel"),
-							message: escape(
-								__("Bosta terminated the delivery, but ERPNext could not cancel the Delivery Note. The shipment stays active and is listed in Needs Attention; the cancellation is retried automatically.")
-							),
+							message: escape(__("Bosta termination was confirmed, but the local shipment status needs review. No posted stock was reversed.")),
 							indicator: "orange",
 						});
 					}
@@ -180,6 +187,7 @@
 	function bosta_tab_html(shipment, options) {
 		const escape = frappe.utils.escape_html;
 		const { create, failed } = options || {};
+		if (shipment && shipment.shipments) return bosta_multi_tab_html(shipment.shipments, { create });
 		const buttons = [];
 		let html = "";
 		if (!shipment) {
@@ -230,18 +238,97 @@
 		return html + (buttons.length ? `<p>${buttons.join("")}</p>` : "");
 	}
 
+	function bosta_multi_tab_html(shipments, { create }) {
+		const escape = frappe.utils.escape_html;
+		const text = (value) => (value ? escape(value) : "");
+		const buttons = [];
+		let html = `<p class="text-muted">${escape(__("Bosta shipments: {0}", [shipments.length]))}</p>`;
+		shipments.forEach((row) => {
+			const address = [row.address_first_line, row.city].filter(Boolean).join(", ");
+			let delivery_note = "";
+			if (row.delivery_note) {
+				const href = `/app/delivery-note/${encodeURIComponent(row.delivery_note)}`;
+				delivery_note = `<a href="${escape(href)}">${escape(row.delivery_note)}</a>`;
+				if (row.delivery_note_status) delivery_note += ` (${escape(__(row.delivery_note_status))})`;
+			}
+			const last_update = row.last_update ? escape(frappe.datetime.str_to_user(row.last_update)) : "";
+			html += `<details${shipments.length === 1 ? " open" : ""}><summary><bdi dir="ltr">${text(row.name)}</bdi> · ${text(row.tracking_number || __("No tracking number"))} · ${text(__(row.bosta_state || row.status))}</summary><table class="table table-bordered"><tbody>`;
+			html += bosta_row(__("Shipment ID"), text(row.name));
+			html += bosta_row(__("Carrier Status"), text(__(row.bosta_state || row.status)));
+			html += bosta_row(__("Tracking Number"), text(row.tracking_number));
+			html += bosta_row(__("Last Bosta Update"), last_update);
+			html += bosta_row(__("COD Sent"), escape(format_currency(row.cod_amount || 0)));
+			html += bosta_row(__("Receiver"), [text(row.receiver_name), text(row.receiver_phone)].filter(Boolean).join(" - "));
+			html += bosta_row(__("Address"), text(address));
+			html += bosta_row(__("Handover"), text(__(row.handover_status)));
+			html += bosta_row(__("Stock Posting"), text(__(row.stock_posting_status)));
+			html += bosta_row(__("Delivery Note"), delivery_note);
+			if (row.allocations && row.allocations.length) {
+				const allocations = row.allocations.map((a) => `${text(a.item_code)}: ${text(a.qty)} ${text(a.uom)} · ${text(a.warehouse)}`).join("<br>");
+				html += bosta_row(__("Reserved allocations"), allocations);
+			}
+			html += `</tbody></table></details>`;
+			if (row.status === "Delivery Note Failed" && row.delivery_note_error) html += `<p class="text-danger">${escape(row.delivery_note_error)}</p>`;
+			if (row.active && row.tracking_number) {
+				buttons.push(bosta_button(`print:${row.name}`, __("Print A4 Label")));
+				if (create) buttons.push(bosta_button(`refresh:${row.name}`, __("Track Bosta Shipment")));
+				if (create && BOSTA_EDITABLE_STATES.includes(row.bosta_state_code)) buttons.push(bosta_button(`edit:${row.name}`, __("Edit Bosta Shipment")));
+				if (create && row.bosta_state_code !== BOSTA_DELIVERED_STATE) buttons.push(bosta_button(`cancel:${row.name}`, __("Cancel Bosta Shipment")));
+			}
+			if (BOSTA_HANDOVER_ROLES.some((role) => frappe.user.has_role(role)) && row.active && (row.handover_status === "Awaiting Handover" || row.stock_posting_status === "Failed")) {
+				buttons.push(bosta_button(`handover:${row.name}`, __(row.handover_status === "Awaiting Handover" ? "Confirm Physical Handover" : "Retry Stock Posting")));
+			}
+			if (create && row.active && row.status === "Bosta Failed" && !row.tracking_number) buttons.push(bosta_button("create", __("Retry Bosta Shipment")));
+		});
+		if (create && !shipments.some((row) => row.active)) buttons.push(bosta_button("create", __("Create Bosta Shipment")));
+		return html + (buttons.length ? `<p>${buttons.join("")}</p>` : "");
+	}
+
 	// Draws the tab and wires its buttons (delegated, so a redraw never stacks handlers).
 	function render_bosta_tab(frm, shipment, options) {
 		const field = frm.get_field && frm.get_field(BOSTA_TAB_FIELD);
 		if (!field || !field.$wrapper) return;
 		field.$wrapper.html(bosta_tab_html(shipment, options));
 		field.$wrapper.off("click.mi_bosta").on("click.mi_bosta", "[data-bosta-action]", (event) => {
-			const action = event.currentTarget.getAttribute("data-bosta-action");
+			const [action, shipment_name] = event.currentTarget.getAttribute("data-bosta-action").split(":");
+			const current = shipment_name
+				? shipment && (shipment.shipments || [shipment]).find((row) => row.name === shipment_name)
+				: shipment;
 			if (action === "create") start_create_bosta_shipment(frm);
-			else if (action === "print") print_bosta_label(shipment);
-			else if (action === "refresh") refresh_bosta_shipment(frm, shipment);
-			else if (action === "cancel") cancel_bosta_shipment(frm, shipment);
-			else if (action === "edit") show_bosta_edit_dialog(frm, shipment);
+			else if (action === "print") print_bosta_label(current);
+			else if (action === "refresh") refresh_bosta_shipment(frm, current);
+			else if (action === "cancel") cancel_bosta_shipment(frm, current);
+			else if (action === "edit") show_bosta_edit_dialog(frm, current);
+			else if (action === "handover") confirm_bosta_handover(frm, current);
+		});
+	}
+
+	function confirm_bosta_handover(frm, shipment) {
+		if (!shipment) return;
+		const escape = frappe.utils.escape_html;
+		const allocations = (shipment.allocations || []).map((row) =>
+			`<li>${escape(row.item_code)} — ${escape(row.qty)} ${escape(row.uom)} · ${escape(row.warehouse)}</li>`
+		).join("");
+		const message = `<p>${escape(__("Confirm that this Bosta shipment has physically left the warehouse? This posts its reserved stock once and creates a Delivery Note."))}</p><p>${escape(__("Shipment"))}: <bdi dir="ltr">${escape(shipment.name)}</bdi><br>${escape(__("Tracking Number"))}: <bdi dir="ltr">${escape(shipment.tracking_number || "-")}</bdi><br>${escape(__("Warehouse allocations"))}:</p><ul>${allocations}</ul>`;
+		frappe.confirm(message, () => {
+			frappe.call({
+				method: BOSTA_HANDOVER_METHOD,
+				type: "POST",
+				args: { shipment: shipment.name },
+				freeze: true,
+				freeze_message: __("Posting the reserved stock..."),
+			}).then((r) => {
+				const result = r.message || {};
+				const confirmed_on = result.handover_confirmed_on
+					? frappe.datetime.str_to_user(result.handover_confirmed_on)
+					: "-";
+				frappe.msgprint({
+					title: __("Physical handover recorded"),
+					message: escape(__("Handover was confirmed by {0} at {1}. Carrier status: {2}. Stock posting status: {3}. Delivery Note: {4}.", [result.handover_confirmed_by || "-", confirmed_on, shipment.bosta_state || shipment.status || "-", result.stock_posting_status || __("Unknown"), result.delivery_note || "-"])),
+					indicator: result.delivery_note ? "green" : "orange",
+				});
+				return frm.reload_doc();
+			}).catch(() => {});
 		});
 	}
 
@@ -260,6 +347,7 @@
 		if (!(frappe.model && frappe.model.can_read("Bosta Shipment"))) {
 			const field = frm.get_field && frm.get_field(BOSTA_TAB_FIELD);
 			if (field && field.$wrapper) field.$wrapper.html("");
+			toggle_bosta_tab(frm, false);
 			return Promise.resolve();
 		}
 		let failed = false;
@@ -274,13 +362,37 @@
 			)
 			.then((shipment) => {
 				if (request !== frm.__mi_bosta_request || frm.doc.name !== sales_order) return;
-				if (shipment && shipment.active && frm.dashboard) {
+				const shipments = shipment && (shipment.shipments || [shipment]);
+				const active = shipments && shipments.find((row) => row.active);
+				if (active && frm.dashboard) {
 					frm.dashboard.add_indicator(
-						bosta_indicator_html(shipment),
-						BOSTA_STATUS_COLORS[shipment.status] || "gray"
+						bosta_indicator_html(active),
+						BOSTA_STATUS_COLORS[active.status] || "gray"
 					);
 				}
-				render_bosta_tab(frm, shipment, { create, failed });
+				if (shipment) {
+					toggle_bosta_tab(frm, true);
+					render_bosta_tab(frm, shipment, { create, failed });
+					return;
+				}
+				if (!create) {
+					toggle_bosta_tab(frm, false);
+					return;
+				}
+				// Existing Bosta defaults/validation are the authority for eligibility; do not
+				// render a shipment tab for arbitrary Sales Orders.
+				frappe.call({ method: BOSTA_DEFAULTS_METHOD, type: "POST", args: { sales_order }, silent: true }).then(
+					() => {
+						if (request !== frm.__mi_bosta_request || frm.doc.name !== sales_order) return;
+						toggle_bosta_tab(frm, true);
+						render_bosta_tab(frm, null, { create, failed });
+					},
+					() => {
+						if (request === frm.__mi_bosta_request && frm.doc.name === sales_order) {
+							toggle_bosta_tab(frm, false);
+						}
+					}
+				);
 			});
 	}
 

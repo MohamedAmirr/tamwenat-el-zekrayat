@@ -204,12 +204,29 @@ quantity by row: ordered stock quantity minus stock quantity on submitted
 outbound Delivery Notes minus other active Bosta reservations. The Sales Order
 lock serializes reservation attempts. This issue has no per-line quantity
 chooser, so true partial shipments and concurrent split shipments are deferred.
-The standard Delivery Note is still submitted immediately after Bosta accepts;
-its rows are limited to the stored reservation. A DN failure keeps the
-reservation. An explicit Bosta rejection releases it; a timeout or malformed
-acceptance keeps it until Check Bosta resolves whether the remote delivery
-exists. A completed DN marks the allocation Fulfilled; cancellation releases
-it only after ERPNext has canceled the linked DN.
+Creating or checking the carrier shipment does not post stock. The reservation
+remains held until Bosta reports `SEND` state 21 (picked up from the business),
+or an authorized user records physical handover. That trigger creates and
+submits one Delivery Note limited to the stored reservation. Delivery Note
+creation failure keeps the reservation and is retried only through an explicit
+handover/check action. An explicit Bosta rejection releases it; a timeout or
+malformed acceptance keeps it until Check Bosta resolves whether the remote
+delivery exists. Handover and stock posting have independent states. System
+Manager and Stock Manager may confirm physical handover before `SEND`/21.
+`Bosta Shipment.bosta_delivery_type` stores the documented type received from a
+carrier status event or poll; the type requested during creation is not treated
+as evidence of the carrier's actual delivery type. Automatic state-21 posting
+and Check Bosta require persisted evidence equal to `SEND`. Historic rows
+without reliable type evidence remain Review Required.
+Carrier cancellation never automatically cancels an already-submitted Delivery
+Note or reverses its stock posting. Historic rows whose handover cannot be
+established are marked Review Required; migration does not change stock.
+The standard Sales Order form's Bosta tab uses the permission-aware summary API
+to show current and historical shipments, their saved allocations and independent
+handover/stock states. It reuses the existing create, track, label and retry APIs;
+authorized System Managers and Stock Managers confirm physical handover there.
+The standard Sales Order list exposes the existing Marketplace Platform and the
+linked Marketplace Order's External Order ID; shipping status stays in the form tab.
 
 Each shipment receives a generated immutable `fulfillment_key`. A hidden unique
 identity key enforces uniqueness for a non-empty Bosta delivery ID. The former
@@ -349,10 +366,11 @@ banner there and in the Bosta tab), reached through the indicator link. Not buil
 only; whitelisted as `api.bosta_shipments.refresh_shipment`, POST) does one
 `GET /deliveries/business/{trackingNumber}` and feeds the documented `data.state` to the same
 `apply_state` as the poll and the webhook (timestamp = the instant the read started), so state
-`49` cancels the Delivery Note through the existing path and a stale read cannot overwrite a
-newer webhook. Unlike the poll it does not skip an unchanged state, so the last-update time
-moves. A Bosta error (escaped), a network failure, a body without a readable state or an
-unrecognised state code raises and stores nothing.
+`49` records carrier cancellation without automatically canceling a submitted Delivery Note,
+and a stale read cannot overwrite a newer webhook. A `SEND` state 21 is the automatic physical
+handover event and posts the Delivery Note once. Unlike the poll the refresh does not skip an
+unchanged state, so the last-update time moves. A Bosta error (escaped), a network failure, a
+body without a readable state or an unrecognised state code raises and stores nothing.
 
 **Cancelling (#272).** `statuses.cancel_bosta_shipment` (creator roles; whitelisted as
 `api.bosta_shipments.cancel_shipment`, POST; the tab's **Cancel Bosta Shipment** button asks
@@ -362,11 +380,10 @@ body; the documented success reply is `success: true`). It refuses locally, with
 Bosta, only when there is no tracking number, the shipment is already `Canceled`, the stored
 state is Delivered (45), or the Delivery Note is on a submitted Sales Invoice; every other
 state goes to Bosta and a Bosta error is shown escaped with nothing changed. On success it
-sets `Bosta Shipment.bosta_terminated_on`, then cancels the Delivery Note and marks the
-shipment `Canceled` through the same `_cancel_linked_delivery_note` as state 49, which frees the
-Sales Order for a new shipment. If the Delivery Note cancel fails the shipment stays active
-with `delivery_note_error` (Needs Attention) and `retry_failed_cancellations` retries it on
-the poll when the state is 49 **or** `bosta_terminated_on` is set. A network error has an
+sets `Bosta Shipment.bosta_terminated_on` and marks the carrier shipment `Canceled`. It never
+automatically cancels a submitted Delivery Note or reverses its stock posting. A shipment
+without a posted Delivery Note releases its reservation; a posted shipment retains its
+Fulfilled reservation. A network error has an
 unknown outcome: nothing is changed, then `refresh_shipment_state` reads the delivery back; a
 reported 48 (Terminated) or 49 finishes the local cancel, anything else (or a failed read)
 tells the user to verify in Bosta. When `bosta_terminated_on` is already set or the stored
@@ -405,7 +422,8 @@ action (shipments that are Pending for more than 5 minutes, Bosta Failed, Delive
 Note Failed, or Bosta Created without a Delivery Note), first search Bosta by
 `businessReference` (`POST /deliveries/search`; searching by
 `uniqueBusinessReference` is not documented). Found: the delivery ID and
-tracking number are linked and the Delivery Note step continues. Not found:
+tracking number are linked; the check itself has no stock effect. A check observing `SEND`
+state 21 can resume handover posting. Not found:
 `Bosta Failed`, so a retry is allowed. An unrecognised search response is an
 error, never "not found". The live search response (seen 2026-10-19) is
 `data: {count, deliveries, limit, page}`; `deliveries` is read as the result list,
@@ -413,27 +431,31 @@ and a `count` larger than the returned page is treated as ambiguous.
 
 **Shipment reservation lifecycle.** `reservation_status` is `Reserved` while a
 shipment holds quantities, `Released` after a definitive Bosta failure or a
-successful cancellation, and `Fulfilled` after the linked Delivery Note submits.
-An ambiguous Bosta outcome remains reserved until Check Bosta resolves it. If
-Delivery Note cancellation fails, the reservation remains held and
-`delivery_note_error` is set; a local retry runs on every poll. There is no
+successful cancellation before stock posting, and `Fulfilled` after the linked Delivery Note submits.
+An ambiguous Bosta outcome remains reserved until Check Bosta resolves it. Carrier cancellation
+never changes a submitted Delivery Note. There is no
 terminal Returned status: state `46` is stored only, and the "Returned to
 business" return Delivery Note remains blocked.
 
-**Delivery Note permissions (undecided).** The Delivery Note step runs as the
-real user with `ignore_permissions`, which is not enough: ERPNext's mapper needs
-Delivery Note *create* (Stock User) and its Delivery Note validation needs Account
-*read* (Accounts User) for the calling user. A creator without them ends
-`Delivery Note Failed` and an authorised user resumes it. No session switch to
-Administrator is made in desk requests (it corrupts the logged-in session).
+**Delivery Note permissions.** Delivery Note posting runs from the handover
+workflow with system-level document writes after the caller is authorized to
+confirm handover (System Manager or Stock Manager). A posting failure keeps the
+reservation and records `stock_posting_status = Failed`; an authorized handover
+retry resumes posting. No session switch to Administrator is made in desk
+requests (it corrupts the logged-in session).
 
 **State application.** The state is applied by one function
 (`statuses.apply_state`) for both webhooks and the 30-minute poll. It takes the
 Sales Order lock then the shipment lock, ignores events not newer than the stored
 `last_bosta_event_timestamp` (a poll uses the instant the read started, so a stale
 poll cannot overwrite a newer webhook; this assumes Bosta's clock and ours are
-roughly aligned), stores only documented fields, and runs
-the cancel handling on `49`. Unknown tracking numbers, state codes and delivery
+roughly aligned), stores only documented fields including the delivery type.
+Only a documented carrier event or poll establishes the stored delivery type;
+the requested type in the create payload is not evidence of the actual type.
+Historical rows without reliable type evidence stay blank.
+Automatic `21` handover and `Check Bosta` posting both require `SEND`; a poll
+without type information can update status but cannot establish the handover.
+Carrier cancellation state `49` never cancels a submitted Delivery Note. Unknown tracking numbers, state codes and delivery
 types are logged and skipped (HTTP 200); only bad authentication or a malformed
 body is an error. The webhook is `allow_guest`, so its processing runs as
 Administrator and restores the caller afterwards. The poll skips terminal states
@@ -443,7 +465,7 @@ header. System-set fields are rejected server-side for anyone but System
 Manager/Administrator, not only read-only in the form; the status snapshot JSON
 is rendered escaped, and remote error text is escaped before `frappe.throw`.
 
-**Needs Attention.** A shipment with a failed Delivery Note create or cancel
+**Needs Attention.** A shipment with failed Delivery Note posting
 (`delivery_note_error`) is listed as problem type `Bosta Delivery Note`
 (platform `Bosta`, no account) in Marketplace Needs Attention and as one `Bosta`
 row in Marketplace Channel Status; it clears when a later attempt succeeds.
