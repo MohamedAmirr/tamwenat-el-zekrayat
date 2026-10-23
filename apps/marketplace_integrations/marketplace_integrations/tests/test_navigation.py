@@ -18,7 +18,13 @@ import frappe
 from frappe.desk.doctype.sidebar.sidebar import resolve_sidebar
 from frappe.tests import UnitTestCase
 
-from marketplace_integrations.tests.test_sidebar import SHELLS, _load, _shell_path, _sprite_icon_ids
+from marketplace_integrations.tests.test_sidebar import (
+	SHELL_MODULES,
+	SHELLS,
+	_load,
+	_shell_path,
+	_sprite_icon_ids,
+)
 from marketplace_integrations.tests.utils import make_role_user
 
 APP = "marketplace_integrations"
@@ -59,9 +65,23 @@ class UnitTestNavigationFiles(UnitTestCase):
 				titles.append(row["title"])
 		self.assertEqual(sorted(titles), sorted(SHELLS))
 
+	def test_each_dock_row_opens_a_sidebar_with_its_own_module(self):
+		# Frappe resolves a Workspace route to the first shell whose module lists it, so two
+		# shells under one module open the first of them for the other's Home (#326).
+		modules = []
+		for row in self.dock["items"]:
+			with self.subTest(row=row.get("title")):
+				self.assertEqual(row["link_type"], "Sidebar")
+				sidebar = _load(_shell_path(frappe.scrub(row["link_to"])))
+				self.assertEqual(sidebar["module"], SHELL_MODULES[row["link_to"]])
+				modules.append(sidebar["module"])
+		self.assertEqual(len(modules), len(set(modules)))
+		self.assertTrue(set(modules) <= set(_read(APP, "modules.txt").splitlines()))
+
 	def test_old_navigation_is_retired(self):
 		root = frappe.get_app_path(APP, MODULE_FOLDER)
 		self.assertFalse(os.path.exists(os.path.join(root, "sidebar", "tamwenat_marketplaces")))
+		self.assertFalse(os.path.exists(os.path.join(root, "sidebar", "bosta")))
 		self.assertFalse(os.path.exists(frappe.get_app_path(APP, "desktop_icon")))
 		self.assertFalse(os.path.exists(frappe.get_app_path(APP, "api", "permission.py")))
 		self.assertEqual(frappe.get_hooks("add_to_apps_screen", app_name=APP), [])
@@ -197,6 +217,45 @@ class UnitTestNavigationPerRole(UnitTestCase):
 		self.assertEqual(set(shells), {"Marketplaces", "Bosta"})
 		self.assertTrue({"Bosta Shipment", "Bosta Settings"} <= self._targets(shells["Bosta"]))
 		self.assertIn("Marketplace Order", self._targets(shells["Marketplaces"]))
+
+
+class UnitTestNavigationRouting(UnitTestCase):
+	"""Site data: shells and module rows exist after migrate; routes resolve to one shell."""
+
+	def test_module_defs_exist(self):
+		for module in SHELL_MODULES.values():
+			self.assertTrue(frappe.db.exists("Module Def", module), module)
+
+	def test_sidebar_row_sits_on_its_own_module(self):
+		for shell, module in SHELL_MODULES.items():
+			self.assertEqual(frappe.db.get_value("Sidebar", shell, "module"), module, shell)
+		self.assertEqual(frappe.db.get_value("Sidebar", "Bosta", "module"), "Bosta")
+
+	def _index(self):
+		from frappe.desk.doctype.sidebar.sidebar import ShellIndex
+
+		email = "Administrator"
+		resolved = {s: resolve_sidebar(s, email) for s in SHELLS}
+		return ShellIndex({s: r.as_boot_entry() for s, r in resolved.items() if r})
+
+	def test_every_shell_workspace_belongs_to_exactly_one_shell(self):
+		index = self._index()
+		self.assertEqual(dict(index.workspace_owners()).get(HOME_WORKSPACE), "Marketplaces")
+		owners = {}
+		for shell, entry in index.all.items():
+			for workspace in entry.get("workspaces") or []:
+				owners.setdefault(workspace, []).append(shell)
+		for name, shells in owners.items():
+			self.assertEqual(len(shells), 1, f"workspace {name} is owned by {shells}")
+
+	def test_bosta_doctypes_resolve_to_the_bosta_shell(self):
+		index = self._index()
+		for doctype in ("Bosta Shipment", "Bosta Settings"):
+			module = frappe.db.get_value("DocType", doctype, "module")
+			self.assertEqual(index.resolve("DocType", doctype, module), "Bosta")
+		self.assertEqual(
+			index.resolve("DocType", "Marketplace Order", "Marketplace Integrations"), "Marketplaces"
+		)
 
 
 class UnitTestDockFrameworkWiring(UnitTestCase):

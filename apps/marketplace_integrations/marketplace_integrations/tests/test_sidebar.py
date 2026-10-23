@@ -29,7 +29,9 @@ ICON_SPRITES = (
 	("erpnext", "public", "icons", "module-icons.svg"),
 )
 SHELLS = {"Marketplaces": "marketplaces", "Bosta": "bosta"}
-SIDEBAR_MODULE = "Marketplace Integrations"
+# Each shell has its own Module Def: Frappe resolves a workspace route to the first shell of
+# the workspace's module, so two shells under one module opened the wrong one (#326).
+SHELL_MODULES = {"Marketplaces": "Marketplace Integrations", "Bosta": "Bosta"}
 # link_type -> (folder holding <name>/<name>.json fixtures, key holding the record name)
 TARGET_FOLDERS = {
 	"DocType": ("doctype", "name"),
@@ -65,7 +67,11 @@ def _sprite_icon_ids():
 
 
 def _shell_path(folder):
-	return frappe.get_app_path(APP, MODULE_FOLDER, "sidebar", folder, f"{folder}.json")
+	names = [n for n, f in SHELLS.items() if f == folder]
+	if not names:
+		raise AssertionError(f"unknown shell folder {folder!r}; known: {sorted(SHELLS.values())}")
+	module_folder = frappe.scrub(SHELL_MODULES[names[0]])
+	return frappe.get_app_path(APP, module_folder, "sidebar", folder, f"{folder}.json")
 
 
 class UnitTestSidebar(UnitTestCase):
@@ -76,9 +82,9 @@ class UnitTestSidebar(UnitTestCase):
 
 	def test_files_sit_where_frappe_imports_them(self):
 		# sync imports <module folder>/sidebar/<scrubbed name>/<scrubbed name>.json
-		module_path = frappe.get_module_path(SIDEBAR_MODULE)
 		for name, folder in SHELLS.items():
 			with self.subTest(shell=name):
+				module_path = frappe.get_module_path(SHELL_MODULES[name])
 				self.assertEqual(frappe.scrub(name), folder)
 				self.assertEqual(
 					os.path.realpath(_shell_path(folder)),
@@ -92,7 +98,7 @@ class UnitTestSidebar(UnitTestCase):
 				self.assertEqual(sidebar["doctype"], "Sidebar")
 				self.assertEqual(sidebar["name"], name)
 				self.assertEqual(sidebar["title"], name)
-				self.assertEqual(sidebar["module"], SIDEBAR_MODULE)
+				self.assertEqual(sidebar["module"], SHELL_MODULES[name])
 				self.assertEqual(sidebar["app"], APP)
 				self.assertEqual(sidebar["standard"], 1)
 
