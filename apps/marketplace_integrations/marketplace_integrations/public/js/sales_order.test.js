@@ -804,6 +804,13 @@ test("a zero COD is shown as 0, and the Delivery Note status is only shown when 
 	assert.match(html, /MAT-DN-1<\/a><\/td>/);
 });
 
+test("a Bosta delivery fee is shown in EGP only when stored", async () => {
+	const { html } = await tab_for({ shipment_fee: 87 });
+	assert.match(html, /Bosta Delivery Fee<\/th><td>EGP 87<\/td>/);
+	const without_fee = await tab_for({ shipment_fee: null });
+	assert.doesNotMatch(without_fee.html, /Bosta Delivery Fee/);
+});
+
 test("stored values render as text in the tab", async () => {
 	const evil = "<img src=x onerror=alert(1)>";
 	const { html } = await tab_for({

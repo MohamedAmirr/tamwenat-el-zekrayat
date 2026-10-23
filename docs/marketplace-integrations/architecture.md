@@ -345,10 +345,11 @@ Note's status only when the caller can read that Delivery Note, else empty), doc
 `bosta_delivery_type`, `bosta_exception_reason`, and `delivery_note_posted` (null when its
 read permission is absent). It needs read on
 the Sales Order (else a permission error) and on Bosta Shipment (else it returns nothing); it
-reads with the caller's permissions. The latest shipment whose status is not `Canceled` wins;
-if there is none, the latest `Canceled` one is
-returned with `active` false; otherwise nothing. `Bosta Shipment.cod_amount` is the COD sent
-when the delivery was created; it is a read-only Currency system field.
+reads with the caller's permissions. The latest non-Canceled shipment is returned at the top
+level; if none exists, the latest Canceled shipment is returned with `active` false. With no
+shipments the response is empty.
+`Bosta Shipment.cod_amount` is the COD sent when the delivery was created; it is a read-only
+Currency system field.
 `sales_order.js` asks on every refresh (a reply that arrives after a newer refresh is
 dropped) and draws the tab: status, tracking number, Bosta state, last update, COD,
 receiver, address (first line and city) and Delivery Note, all escaped. Buttons live
@@ -358,13 +359,21 @@ same row: search Bosta, then send, and the receiver and address typed in the dia
 row's stored values), **Print A4 Label** (active shipment with a tracking number; follows Bosta
 Shipment read; the window is opened inside the click so popup blockers allow it, and if the
 browser blocks it the URL is offered as a link) and **Refresh from Bosta** (creators, active
-shipment with a tracking number). The dashboard indicator (status, tracking number, Bosta
-state, link to the shipment) stays. No shipment shows "No Bosta shipment"; a failed read says
+shipment with a tracking number). `Sales Order.custom_bosta_delivery_status` is a read-only,
+stored, filterable list column containing the exact state name from the latest non-Canceled
+shipment (falling back to the latest Canceled shipment), or the shipment status when its state
+is unknown. The Bosta Shipment controller keeps it in sync with that selection. It is visible
+to anyone who can read the Sales Order. `Bosta Shipment.shipment_fee` is a read-only Currency
+field displayed in EGP in the tab only for users who can read Bosta Shipment. It is display-only
+and has no accounting effect. Existing shipment fees are not backfilled. The dashboard indicator
+(status, tracking number, Bosta state, link to the shipment) stays. No shipment shows "No Bosta
+shipment"; a failed read says
 it could not load (creators still get Create); a user without Bosta Shipment read sends no
 request and sees an empty tab. `Pending Bosta` (after 5 minutes), `Bosta Created` and
 `Delivery Note Failed` are recovered with **Check Bosta** on the shipment form (labelled
 **Retry Delivery Note** for `Delivery Note Failed`, which also shows `delivery_note_error` as a red
-banner there and in the Bosta tab), reached through the indicator link. Not built: Sales Order list column, filter or bulk actions.
+banner there and in the Bosta tab), reached through the indicator link. The Sales Order status
+column is filterable; status bulk actions are not built.
 
 The Sales Order tab renders normal outbound `SEND` as Created (10/20), Picked up (21), In transit
 (24/30), Out for delivery (41) and Delivered (45). Bosta states 47/48/49/100/101/102/103/105
@@ -383,6 +392,10 @@ and a stale read cannot overwrite a newer webhook. A `SEND` state 21 is the auto
 handover event and posts the Delivery Note once. Unlike the poll the refresh does not skip an
 unchanged state, so the last-update time moves. A Bosta error (escaped), a network failure, a
 body without a readable state or an unrecognised state code raises and stores nothing.
+It also reads numeric, nonnegative `data.shipmentFees`; missing or invalid fee data leaves the
+stored fee unchanged. The scheduled poll keeps reading state 45 only while this fee is blank;
+manual Refresh always reads it. The confirmed fee currency is EGP (the response has no currency
+field).
 **Cancelling (#272).** `statuses.cancel_bosta_shipment` (creator roles; whitelisted as
 `api.bosta_shipments.cancel_shipment`, POST; the tab's **Cancel Bosta Shipment** button asks
 for confirmation first and nothing is sent before it) terminates the delivery with

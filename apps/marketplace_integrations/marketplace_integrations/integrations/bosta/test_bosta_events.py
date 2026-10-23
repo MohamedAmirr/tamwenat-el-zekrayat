@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 from erpnext.stock.doctype.delivery_note.delivery_note import make_sales_invoice
-from frappe.tests import IntegrationTestCase
+from frappe.tests import IntegrationTestCase, UnitTestCase
 from frappe.utils import add_days, now_datetime
 
 from marketplace_integrations.api import bosta_shipments, bosta_webhooks
@@ -24,6 +24,14 @@ from marketplace_integrations.tests.bosta_fixtures import (
 )
 
 SECRET = "bosta-webhook-secret"
+
+
+class UnitTestBostaDeliveryFee(UnitTestCase):
+	def test_fee_requires_a_nonnegative_non_boolean_number(self):
+		for value in (0, 87, 87.5):
+			self.assertEqual(statuses._shipment_fee({"data": {"shipmentFees": value}}), value)
+		for value in (True, -1, float("nan"), float("inf"), "87", None, {}):
+			self.assertIsNone(statuses._shipment_fee({"data": {"shipmentFees": value}}))
 
 
 class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
@@ -489,6 +497,50 @@ class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
 		shipment.reload()
 		self.assertEqual((shipment.last_bosta_status_on, shipment.modified), (checked_on, modified))
 
+	def test_unchanged_state_can_still_update_a_changed_delivery_fee(self):
+		order, shipment = self._completed_shipment("T-FEE")
+		self.assertEqual(
+			statuses.apply_state(
+				shipment.tracking_number,
+				state_code=45,
+				timestamp=5000,
+				snapshot={"code": 45},
+				shipment_fee=50,
+			),
+			statuses.APPLIED,
+		)
+		shipment.reload()
+		result = statuses.apply_state(
+			shipment.tracking_number,
+			state_code=45,
+			timestamp=6000,
+			snapshot={"code": 45},
+			skip_if_unchanged=True,
+			shipment_fee=87,
+		)
+
+		self.assertEqual(result, statuses.APPLIED)
+		shipment.reload()
+		self.assertEqual(shipment.shipment_fee, 87)
+		self.assertEqual(frappe.db.get_value("Sales Order", order.name, "custom_bosta_delivery_status"), "Delivered")
+
+	def test_sales_order_status_backfill_uses_latest_shipment_and_is_idempotent(self):
+		order, shipment = self._completed_shipment("T-STATUS-BACKFILL")
+		statuses.apply_state(
+			shipment.tracking_number,
+			state_code=45,
+			timestamp=5000,
+			snapshot={"code": 45},
+		)
+		frappe.db.set_value("Sales Order", order.name, "custom_bosta_delivery_status", "", update_modified=False)
+		from marketplace_integrations.patches.v0_0.backfill_sales_order_bosta_delivery_status import execute
+
+		execute()
+		self.assertEqual(frappe.db.get_value("Sales Order", order.name, "custom_bosta_delivery_status"), "Delivered")
+		modified = frappe.db.get_value("Sales Order", order.name, "modified")
+		execute()
+		self.assertEqual(frappe.db.get_value("Sales Order", order.name, "modified"), modified)
+
 	def test_repeated_carrier_cancel_does_not_create_delivery_note_cancellation_errors(self):
 		_, shipment = self._completed_shipment("T-REPEAT")
 		with patch(
@@ -515,6 +567,18 @@ class IntegrationTestBostaRefresh(BostaFixtureMixin, IntegrationTestCase):
 
 	def _state(self, code):
 		return FakeResponse(200, {"success": True, "data": {"state": {"code": code, "value": "x"}}})
+
+	def test_refresh_reads_and_stores_a_numeric_delivery_fee(self):
+		order, shipment = self._live("TRK-FEE")
+		self.http.queue["get"].append(
+			FakeResponse(200, {"success": True, "data": {"state": {"code": 45}, "shipmentFees": 87}})
+		)
+
+		bosta_shipments.refresh_shipment(shipment.name)
+
+		shipment.reload()
+		self.assertEqual(shipment.shipment_fee, 87)
+		self.assertEqual(frappe.db.get_value("Sales Order", order.name, "custom_bosta_delivery_status"), "Delivered")
 
 	def test_refresh_applies_the_state_and_updates_the_last_update_time(self):
 		_, shipment = self._live()

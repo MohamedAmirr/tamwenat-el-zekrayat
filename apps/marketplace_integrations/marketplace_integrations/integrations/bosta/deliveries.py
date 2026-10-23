@@ -110,6 +110,7 @@ def get_sales_order_shipment(sales_order_name):
 		"city_id",
 		"address_first_line",
 		"cod_amount",
+		"shipment_fee",
 		"delivery_note",
 		"delivery_note_error",
 		"handover_status",
@@ -126,6 +127,7 @@ def get_sales_order_shipment(sales_order_name):
 		limit_page_length=0,
 	)
 	shipments = []
+	current_row = next((row for row in rows if row.status != "Canceled"), rows[0] if rows else None)
 	for row in rows:
 		shipment = {
 			"name": row.name,
@@ -143,6 +145,7 @@ def get_sales_order_shipment(sales_order_name):
 			"city_id": row.city_id or "",
 			"address_first_line": row.address_first_line or "",
 			"cod_amount": flt(row.cod_amount),
+			"shipment_fee": flt(row.shipment_fee) if row.shipment_fee not in (None, "") else None,
 			"delivery_note": row.delivery_note or "",
 			"delivery_note_error": row.delivery_note_error or "",
 			"delivery_note_status": _readable_delivery_note_status(row.delivery_note),
@@ -175,7 +178,8 @@ def get_sales_order_shipment(sales_order_name):
 		shipments.append(shipment)
 	if not shipments:
 		return None
-	return {**shipments[0], "shipments": shipments}
+	current = next((shipment for shipment in shipments if shipment["name"] == current_row.name), shipments[0])
+	return {**current, "shipments": shipments}
 
 
 def _readable_delivery_note_status(delivery_note):

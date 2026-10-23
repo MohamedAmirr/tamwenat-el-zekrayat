@@ -252,6 +252,9 @@
 			if (bosta_state_hint_html(shipment)) html += bosta_row(__("Carrier Attention"), bosta_state_hint_html(shipment));
 			html += bosta_row(__("Last Bosta Update"), last_update);
 			html += bosta_row(__("COD Sent"), cod);
+			if (shipment.shipment_fee !== null && shipment.shipment_fee !== undefined) {
+				html += bosta_row(__("Bosta Delivery Fee"), escape(format_currency(shipment.shipment_fee, "EGP")));
+			}
 			html += bosta_row(__("Receiver"), [text(shipment.receiver_name), text(shipment.receiver_phone)].filter(Boolean).join(" - "));
 			html += bosta_row(__("Address"), text(address));
 			html += bosta_row(__("Delivery Note"), delivery_note);
@@ -296,6 +299,9 @@
 			html += bosta_row(__("Tracking Number"), text(row.tracking_number));
 			html += bosta_row(__("Last Bosta Update"), last_update);
 			html += bosta_row(__("COD Sent"), escape(format_currency(row.cod_amount || 0)));
+			if (row.shipment_fee !== null && row.shipment_fee !== undefined) {
+				html += bosta_row(__("Bosta Delivery Fee"), escape(format_currency(row.shipment_fee, "EGP")));
+			}
 			html += bosta_row(__("Receiver"), [text(row.receiver_name), text(row.receiver_phone)].filter(Boolean).join(" - "));
 			html += bosta_row(__("Address"), text(address));
 			html += bosta_row(__("Handover"), text(__(row.handover_status)));

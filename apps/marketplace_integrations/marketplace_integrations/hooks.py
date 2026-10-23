@@ -323,6 +323,7 @@ fixtures = [
 					"Sales Order-custom_marketplace_external_order_id",
 					"Sales Order-custom_bosta_delivery_tab",
 					"Sales Order-custom_bosta_delivery_html",
+					"Sales Order-custom_bosta_delivery_status",
 					"Payment Entry-custom_marketplace_order",
 					"Payment Entry-custom_marketplace_transaction_id",
 				],

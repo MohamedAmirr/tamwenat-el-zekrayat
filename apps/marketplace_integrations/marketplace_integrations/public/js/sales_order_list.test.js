@@ -6,7 +6,7 @@ global.__ = (message, args) => {
 	return message.replace(/\{(\d+)\}/g, (_, index) => args[index]);
 };
 
-function load({ creator = true, original_onload = null, defaults = null, defaults_fail = false } = {}) {
+function load({ creator = true, original_onload = null, original_formatters = {}, defaults = null, defaults_fail = false } = {}) {
 	const msgprints = [];
 	const calls = [];
 	const dialogs = [];
@@ -15,7 +15,12 @@ function load({ creator = true, original_onload = null, defaults = null, default
 	global.frappe = {
 		user: { has_role: () => creator },
 		utils: { escape_html: (value) => String(value).replace(/</g, "&lt;") },
-		listview_settings: { "Sales Order": original_onload ? { onload: original_onload } : {} },
+		listview_settings: {
+			"Sales Order": {
+				...(original_onload ? { onload: original_onload } : {}),
+				formatters: original_formatters,
+			},
+		},
 		msgprint: (message) => msgprints.push(message),
 		// Loading sales_order.js is what exports the creator roles.
 		require: () => {
@@ -236,4 +241,19 @@ test("loading the list script again does not wrap onload a second time", async (
 	assert.equal(erpnext_runs, 1);
 	assert.equal(view.items.length, 1);
 	assert.ok(module_exports);
+});
+
+test("Bosta delivery status renders as a translated, escaped color pill and preserves ERPNext formatters", () => {
+	const existing = () => "existing";
+	const { settings } = load({ original_formatters: { another_field: existing } });
+	assert.equal(settings.formatters.another_field, existing);
+	assert.equal(
+		settings.formatters.custom_bosta_delivery_status("Delivered"),
+		'<span class="indicator-pill green">Delivered</span>'
+	);
+	assert.equal(
+		settings.formatters.custom_bosta_delivery_status("<unsafe>"),
+		'<span class="indicator-pill grey">&lt;unsafe></span>'
+	);
+	assert.equal(settings.formatters.custom_bosta_delivery_status(""), "");
 });
