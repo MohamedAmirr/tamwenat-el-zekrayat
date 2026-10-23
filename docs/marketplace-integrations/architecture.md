@@ -339,7 +339,9 @@ Order (`custom_bosta_delivery_tab`, shown when `docstatus >= 1`, and the HTML fi
 summary: `name`, `status`, `tracking_number`, `bosta_state`, `active`, `last_update`
 (`last_bosta_status_on`), `receiver_name`, `receiver_phone`, `city`, `city_id`,
 `address_first_line`, `cod_amount`, `delivery_note` and `delivery_note_status` (the Delivery
-Note's status only when the caller can read that Delivery Note, else empty). It needs read on
+Note's status only when the caller can read that Delivery Note, else empty), documented
+`bosta_delivery_type`, `bosta_exception_reason`, and `delivery_note_posted` (null when its
+read permission is absent). It needs read on
 the Sales Order (else a permission error) and on Bosta Shipment (else it returns nothing); it
 reads with the caller's permissions. The latest shipment whose status is not `Canceled` wins;
 if there is none, the latest `Canceled` one is
@@ -362,6 +364,14 @@ request and sees an empty tab. `Pending Bosta` (after 5 minutes), `Bosta Created
 **Retry Delivery Note** for `Delivery Note Failed`, which also shows `delivery_note_error` as a red
 banner there and in the Bosta tab), reached through the indicator link. Not built: Sales Order list column, filter or bulk actions.
 
+The Sales Order tab renders normal outbound `SEND` as Created (10/20), Picked up (21), In transit
+(24/30), Out for delivery (41) and Delivered (45). Bosta states 47/48/49/100/101/102/103/105
+use a problem badge and the stored exception reason where present; 46/60 use a returned badge and
+ask staff to create a return Delivery Note against the linked Delivery Note. Other delivery types
+show their known raw state instead of outbound steps. The dashboard indicator turns red for
+problem/returned states and a delivered `SEND` without a submitted Delivery Note. These are
+presentation/reporting changes only; carrier state does not change stock or create/cancel a
+Delivery Note.
 **Refresh from Bosta (#271).** `statuses.refresh_shipment_state(shipment)` (creator roles
 only; whitelisted as `api.bosta_shipments.refresh_shipment`, POST) does one
 `GET /deliveries/business/{trackingNumber}` and feeds the documented `data.state` to the same
@@ -371,7 +381,6 @@ and a stale read cannot overwrite a newer webhook. A `SEND` state 21 is the auto
 handover event and posts the Delivery Note once. Unlike the poll the refresh does not skip an
 unchanged state, so the last-update time moves. A Bosta error (escaped), a network failure, a
 body without a readable state or an unrecognised state code raises and stores nothing.
-
 **Cancelling (#272).** `statuses.cancel_bosta_shipment` (creator roles; whitelisted as
 `api.bosta_shipments.cancel_shipment`, POST; the tab's **Cancel Bosta Shipment** button asks
 for confirmation first and nothing is sent before it) terminates the delivery with
@@ -465,10 +474,15 @@ header. System-set fields are rejected server-side for anyone but System
 Manager/Administrator, not only read-only in the form; the status snapshot JSON
 is rendered escaped, and remote error text is escaped before `frappe.throw`.
 
-**Needs Attention.** A shipment with failed Delivery Note posting
-(`delivery_note_error`) is listed as problem type `Bosta Delivery Note`
-(platform `Bosta`, no account) in Marketplace Needs Attention and as one `Bosta`
-row in Marketplace Channel Status; it clears when a later attempt succeeds.
+**Needs Attention (#343/#344).** Bosta Shipment rows with failed Delivery Note posting
+(`delivery_note_error`), an exception state (47/48/49/100/101/102/103/105), a return state
+(46/60), a delivered `SEND` (45) without a submitted linked Delivery Note, or a tracking number
+with no Bosta update for 5 days are listed in Marketplace Needs Attention (platform `Bosta`, no
+account). The stale rule uses the poll exclusions: it ignores states 45/49, Canceled shipments
+and shipments older than 60 days. A return finding clears only after a submitted return Delivery
+Note has `return_against` set to the shipment's linked Delivery Note. State 103 also creates a
+Desk System Notification for Sales Manager, Stock User, System Manager and Bosta User. These
+indicators and notifications do not change carrier state or stock.
 
 The Bosta AWB documentation confirms that `POST /deliveries/mass-awb` returns
 a base64-encoded PDF for a request of 50 or fewer AWBs. The live endpoint answers
@@ -478,9 +492,10 @@ shape and a bare base64 body (any other shape is rejected, not guessed), shows B
 escaped error message for a non-success reply (including `success: false` on HTTP 200), and saves each requested label as a private `File`
 attached to its `Bosta Shipment`; a shipment reader may request it on demand.
 The different response shape above 50 labels is intentionally unsupported.
-The product intent to create a Sales Return from a carrier event remains
-blocked: the supplied lifecycle does not define a standard-`SEND` return state,
-and neither polling nor callbacks may infer one.
+Automatic creation of a Sales Return from a carrier event remains blocked: the supplied
+lifecycle does not define a standard-`SEND` return state, and neither polling nor callbacks may
+infer one. Returned states only surface a Needs Attention finding; staff record the return
+against the linked Delivery Note themselves.
 
 ### Order hover card on the Sales Order list (#325)
 

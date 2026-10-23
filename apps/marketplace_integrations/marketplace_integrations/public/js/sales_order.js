@@ -34,6 +34,29 @@
 	const BOSTA_TAB_BREAK_FIELD = "custom_bosta_delivery_tab";
 	const BOSTA_TAB_FIELD = "custom_bosta_delivery_html";
 
+	function bosta_state_presentation(delivery_type, state_code, state_name, exception_reason, delivery_note_posted) {
+		return frappe.marketplace_integrations && frappe.marketplace_integrations.bosta_state_presentation
+			? frappe.marketplace_integrations.bosta_state_presentation(delivery_type, state_code, state_name, exception_reason, delivery_note_posted)
+			: { kind: "state", label: state_name || "", hint: "" };
+	}
+
+	function bosta_state_html(shipment) {
+		const escape = frappe.utils.escape_html;
+		const view = bosta_state_presentation(shipment.bosta_delivery_type, shipment.bosta_state_code, shipment.bosta_state, shipment.bosta_exception_reason, shipment.delivery_note_posted);
+		if (view.kind !== "stepper") return `<span class="${view.kind === "problem" || view.kind === "returned" ? "text-danger" : ""}">${escape(__(view.label))}</span>`;
+		const steps = view.steps.map((step, index) => {
+			const state = index < view.current_step ? "done" : index === view.current_step ? "current" : "future";
+			return `<span class="bosta-progress-step bosta-progress-${state}">${escape(__(step.label))}</span>`;
+		}).join(`<span class="bosta-progress-connector" aria-hidden="true">›</span>`);
+		return `<div class="bosta-progress" aria-label="${escape(__("Bosta delivery progress"))}">${steps}</div>`;
+	}
+
+	function bosta_state_hint_html(shipment) {
+		const escape = frappe.utils.escape_html;
+		const view = bosta_state_presentation(shipment.bosta_delivery_type, shipment.bosta_state_code, shipment.bosta_state, shipment.bosta_exception_reason, shipment.delivery_note_posted);
+		return view.hint ? `<span class="text-warning">${escape(__(view.hint))}</span>` : "";
+	}
+
 	function toggle_bosta_tab(frm, visible) {
 		if (!frm.toggle_display) return;
 		frm.toggle_display(BOSTA_TAB_BREAK_FIELD, visible);
@@ -75,8 +98,21 @@
 		if (shipment.tracking_number) {
 			html += ` &middot; ${escape(__("Tracking"))}: ${escape(shipment.tracking_number)}`;
 		}
-		if (shipment.bosta_state) html += ` (${escape(shipment.bosta_state)})`;
+		if (shipment.bosta_state) html += ` (${escape(__(shipment.bosta_state))})`;
 		return html;
+	}
+
+	function bosta_indicator_color(shipment) {
+		const view = bosta_state_presentation(
+			shipment.bosta_delivery_type,
+			shipment.bosta_state_code,
+			shipment.bosta_state,
+			shipment.bosta_exception_reason,
+			shipment.delivery_note_posted
+		);
+		return ["problem", "returned"].includes(view.kind) || view.hint
+			? "red"
+			: BOSTA_STATUS_COLORS[shipment.status] || "gray";
 	}
 
 	// The window is opened inside the click (a popup blocker only allows that) and pointed at
@@ -212,7 +248,8 @@
 			html += `<table class="table table-bordered"><tbody>`;
 			html += bosta_row(__("Status"), text(__(shipment.status)));
 			html += bosta_row(__("Tracking Number"), text(shipment.tracking_number));
-			html += bosta_row(__("Bosta State"), text(shipment.bosta_state));
+			html += bosta_row(__("Bosta State"), bosta_state_html(shipment));
+			if (bosta_state_hint_html(shipment)) html += bosta_row(__("Carrier Attention"), bosta_state_hint_html(shipment));
 			html += bosta_row(__("Last Bosta Update"), last_update);
 			html += bosta_row(__("COD Sent"), cod);
 			html += bosta_row(__("Receiver"), [text(shipment.receiver_name), text(shipment.receiver_phone)].filter(Boolean).join(" - "));
@@ -254,7 +291,8 @@
 			const last_update = row.last_update ? escape(frappe.datetime.str_to_user(row.last_update)) : "";
 			html += `<details${shipments.length === 1 ? " open" : ""}><summary><bdi dir="ltr">${text(row.name)}</bdi> · ${text(row.tracking_number || __("No tracking number"))} · ${text(__(row.bosta_state || row.status))}</summary><table class="table table-bordered"><tbody>`;
 			html += bosta_row(__("Shipment ID"), text(row.name));
-			html += bosta_row(__("Carrier Status"), text(__(row.bosta_state || row.status)));
+			html += bosta_row(__("Carrier Status"), row.bosta_state ? bosta_state_html(row) : text(__(row.status)));
+			if (bosta_state_hint_html(row)) html += bosta_row(__("Carrier Attention"), bosta_state_hint_html(row));
 			html += bosta_row(__("Tracking Number"), text(row.tracking_number));
 			html += bosta_row(__("Last Bosta Update"), last_update);
 			html += bosta_row(__("COD Sent"), escape(format_currency(row.cod_amount || 0)));
@@ -351,7 +389,10 @@
 			return Promise.resolve();
 		}
 		let failed = false;
-		return frappe
+		const load_presentation = frappe.require
+			? frappe.require("/assets/marketplace_integrations/js/bosta_state_presentation.js").catch(() => {})
+			: Promise.resolve();
+		return load_presentation.then(() => frappe
 			.call({ method: BOSTA_SHIPMENT_METHOD, type: "POST", args: { sales_order }, silent: true })
 			.then(
 				(r) => r.message || null,
@@ -367,7 +408,7 @@
 				if (active && frm.dashboard) {
 					frm.dashboard.add_indicator(
 						bosta_indicator_html(active),
-						BOSTA_STATUS_COLORS[active.status] || "gray"
+						bosta_indicator_color(active)
 					);
 				}
 				if (shipment) {
@@ -393,7 +434,7 @@
 						}
 					}
 				);
-			});
+			}));
 	}
 
 	// Bosta city names are remote text. Frappe renders an Autocomplete label as
@@ -850,6 +891,7 @@
 			bosta_cod_note_html,
 			bosta_indicator_html,
 			bosta_tab_html,
+			bosta_state_html,
 			location_options,
 			match_city,
 			open_create_dialog,

@@ -331,6 +331,43 @@ Unique Business Reference,المرجع التجاري الفريد
 Bosta Status,حالة Bosta
 Bosta State Code,رمز حالة Bosta
 Bosta State,حالة Bosta
+Bosta delivery progress,مسار توصيل Bosta
+Picked up,تم الاستلام
+In transit,قيد النقل
+Out for delivery,خرج للتوصيل
+Delivered,تم التسليم
+Pickup requested,طُلب الاستلام
+Waiting for route,بانتظار المسار
+Route Assigned,تم تعيين المسار
+Picked up from business,تم الاستلام من المنشأة
+Picking up from consignee,جارٍ الاستلام من المستلم
+Picked up from consignee,تم الاستلام من المستلم
+Received at warehouse,تم الاستلام في المستودع
+Fulfilled,تم التنفيذ
+In transit between Hubs,قيد النقل بين المراكز
+Picking up,جارٍ الاستلام
+Returned to business,أُعيد إلى المنشأة
+Terminated,تم الإنهاء
+Returned to stock,أُعيد إلى المخزون
+Lost,مفقود
+Damaged,تالف
+Investigation,قيد التحقيق
+Awaiting your action,بانتظار الإجراء المطلوب منك
+Archived,مؤرشف
+On hold,معلّق
+Review this shipment in Bosta.,راجع هذه الشحنة في Bosta.
+Record and submit a return Delivery Note against the linked Delivery Note.,سجّل واعتمد إشعار مرتجع مرتبط بإشعار التسليم المحدد.
+Bosta is awaiting an action for shipment {{ doc.tracking_number or doc.name }}.,تنتظر Bosta إجراءً على الشحنة {{ doc.tracking_number or doc.name }}.
+Bosta is awaiting your action,تنتظر Bosta الإجراء المطلوب منك
+Review shipment,راجع الشحنة
+Bosta Carrier Exception,استثناء من شركة شحن Bosta
+Bosta Return,مرتجع Bosta
+Bosta Status Stale,حالة شحنة Bosta قديمة
+Bosta Delivered Without Delivery Note,شحنة Bosta مسلّمة دون إشعار تسليم
+Bosta reports this shipment was returned. Submit a return Delivery Note against the linked Delivery Note.,تفيد Bosta بإرجاع هذه الشحنة. اعتمد إشعار مرتجع مرتبط بإشعار التسليم المحدد.
+Bosta reports this SEND delivery as delivered, but it has no submitted Delivery Note.,تفيد Bosta بتسليم شحنة SEND، لكن لا يوجد إشعار تسليم معتمد لها.
+Bosta has not updated this shipment for 5 days.,لم تحدّث Bosta هذه الشحنة منذ ٥ أيام.
+Carrier Attention,تنبيه شركة الشحن
 Last Bosta Event Timestamp,آخر توقيت حدث من Bosta
 Bosta Exception Reason,سبب الاستثناء من Bosta
 Bosta Exception Code,رمز الاستثناء من Bosta

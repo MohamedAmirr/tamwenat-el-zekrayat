@@ -83,7 +83,15 @@ WEBHOOK_RETRIES_EXHAUSTED = "Webhook Retries Exhausted"
 NOON_FULFILLMENT = "Noon Fulfillment"
 NOON_RETURN_UNLINKED = "Noon Return Unlinked"
 BOSTA_DELIVERY_NOTE = "Bosta Delivery Note"
+BOSTA_CARRIER_EXCEPTION = "Bosta Carrier Exception"
+BOSTA_RETURN = "Bosta Return"
+BOSTA_STATUS_STALE = "Bosta Status Stale"
+BOSTA_DELIVERED_WITHOUT_DELIVERY_NOTE = "Bosta Delivered Without Delivery Note"
 BOSTA_PLATFORM = "Bosta"
+BOSTA_PROBLEM_STATE_CODES = (47, 48, 49, 100, 101, 102, 103, 105)
+BOSTA_RETURN_STATE_CODES = (46, 60)
+BOSTA_STALE_DAYS = 5
+BOSTA_MAX_AGE_DAYS = 60
 
 PROBLEM_TYPES = [
 	SYNC_ERROR,
@@ -95,6 +103,10 @@ PROBLEM_TYPES = [
 	NOON_FULFILLMENT,
 	NOON_RETURN_UNLINKED,
 	BOSTA_DELIVERY_NOTE,
+	BOSTA_CARRIER_EXCEPTION,
+	BOSTA_RETURN,
+	BOSTA_STATUS_STALE,
+	BOSTA_DELIVERED_WITHOUT_DELIVERY_NOTE,
 ]
 
 NEXT_OPEN_SHIPMENT = "Open Shipment"
@@ -128,12 +140,19 @@ def get_attention_items(filters=None):
 	"""
 	filters = frappe._dict(filters or {})
 	items = []
+	bosta_types = {
+		BOSTA_DELIVERY_NOTE,
+		BOSTA_CARRIER_EXCEPTION,
+		BOSTA_RETURN,
+		BOSTA_STATUS_STALE,
+		BOSTA_DELIVERED_WITHOUT_DELIVERY_NOTE,
+	}
 	if (
 		not filters.account
 		and filters.platform in (None, "", BOSTA_PLATFORM)
-		and filters.problem_type in (None, "", BOSTA_DELIVERY_NOTE)
+		and filters.problem_type in (None, "", *bosta_types)
 	):
-		items.extend(_collect_bosta_delivery_note_items())
+		items.extend(_collect_bosta_items(filters.problem_type))
 	accounts = {} if filters.platform == BOSTA_PLATFORM else _get_accounts(filters)
 	if not accounts and not items:
 		return []
@@ -411,27 +430,140 @@ def _collect_unmapped_items(accounts):
 	return items
 
 
-def _collect_bosta_delivery_note_items():
+def _collect_bosta_items(problem_type=None):
 	if not frappe.has_permission("Bosta Shipment", "read"):
 		return []
 	carrier = frappe._dict(name="", platform=BOSTA_PLATFORM)
-	return [
-		_item(
-			BOSTA_DELIVERY_NOTE,
-			carrier,
-			"Bosta Shipment",
-			row.name,
-			row.delivery_note_error,
-			row.delivery_note_error_at or row.modified,
-			NEXT_OPEN_SHIPMENT,
-		)
-		for row in frappe.get_list(
-			"Bosta Shipment",
-			filters={"delivery_note_error": ["!=", ""]},
-			fields=["name", "delivery_note_error", "delivery_note_error_at", "modified"],
+	rows = frappe.get_list(
+		"Bosta Shipment",
+		fields=[
+			"name",
+			"status",
+			"tracking_number",
+			"bosta_state_code",
+			"bosta_state_value",
+			"bosta_delivery_type",
+			"bosta_exception_reason",
+			"delivery_note",
+			"delivery_note_error",
+			"delivery_note_error_at",
+			"last_bosta_status_on",
+			"creation",
+			"modified",
+		],
+		limit_page_length=0,
+	)
+	linked_delivery_notes = {row.delivery_note for row in rows if row.delivery_note}
+	submitted_delivery_notes = set()
+	if linked_delivery_notes:
+		# The Bosta Shipment read check above authorizes this derived boolean only. Keep
+		# Delivery Note names and return contents out of the response; platform roles do
+		# not necessarily have Delivery Note read, but attention must not report false absence.
+		submitted_delivery_notes = {
+			row.name
+			for row in frappe.get_all(
+				"Delivery Note",
+				filters={"name": ["in", list(linked_delivery_notes)], "docstatus": 1},
+				fields=["name"],
+				limit_page_length=0,
+			)
+		}
+	return_notes = {}
+	if linked_delivery_notes:
+		for row in frappe.get_all(
+			"Delivery Note",
+			filters={"return_against": ["in", list(linked_delivery_notes)], "docstatus": 1},
+			fields=["name", "return_against"],
 			limit_page_length=0,
-		)
-	]
+		):
+			return_notes.setdefault(row.return_against, []).append(row.name)
+	items = []
+	for row in rows:
+		code = row.bosta_state_code or 0
+		if row.delivery_note_error and problem_type in (None, BOSTA_DELIVERY_NOTE):
+			items.append(
+				_item(
+					BOSTA_DELIVERY_NOTE,
+					carrier,
+					"Bosta Shipment",
+					row.name,
+					row.delivery_note_error,
+					row.delivery_note_error_at or row.modified,
+					NEXT_OPEN_SHIPMENT,
+				)
+			)
+		if code in BOSTA_PROBLEM_STATE_CODES and problem_type in (None, BOSTA_CARRIER_EXCEPTION):
+			items.append(
+				_item(
+					BOSTA_CARRIER_EXCEPTION,
+					carrier,
+					"Bosta Shipment",
+					row.name,
+					row.bosta_exception_reason or row.bosta_state_value,
+					row.last_bosta_status_on or row.modified,
+					NEXT_OPEN_SHIPMENT,
+				)
+			)
+		return_resolved = False
+		if code in BOSTA_RETURN_STATE_CODES and problem_type in (None, BOSTA_RETURN):
+			linked = row.delivery_note
+			# A returned shipment is resolved only by a submitted return against its linked Delivery Note.
+			return_resolved = bool(linked and linked in submitted_delivery_notes and return_notes.get(linked))
+			if not return_resolved:
+				items.append(
+					_item(
+						BOSTA_RETURN,
+						carrier,
+						"Bosta Shipment",
+						row.name,
+						_(
+							"Bosta reports this shipment was returned. Submit a return Delivery Note against the linked Delivery Note."
+						),
+						row.last_bosta_status_on or row.modified,
+						NEXT_OPEN_SHIPMENT,
+					)
+				)
+		if (
+			row.status != "Canceled"
+			and row.bosta_delivery_type == "SEND"
+			and code == 45
+			and row.delivery_note not in submitted_delivery_notes
+			and problem_type in (None, BOSTA_DELIVERED_WITHOUT_DELIVERY_NOTE)
+		):
+			items.append(
+				_item(
+					BOSTA_DELIVERED_WITHOUT_DELIVERY_NOTE,
+					carrier,
+					"Bosta Shipment",
+					row.name,
+					_(
+						"Bosta reports this SEND delivery as delivered, but it has no submitted Delivery Note."
+					),
+					row.last_bosta_status_on or row.modified,
+					NEXT_OPEN_SHIPMENT,
+				)
+			)
+		if (
+			row.status != "Canceled"
+			and row.tracking_number
+			and code not in (45, 49)
+			and row.creation >= add_to_date(now_datetime(), days=-BOSTA_MAX_AGE_DAYS)
+			and (row.last_bosta_status_on or row.creation)
+			<= add_to_date(now_datetime(), days=-BOSTA_STALE_DAYS)
+			and problem_type in (None, BOSTA_STATUS_STALE)
+		):
+			items.append(
+				_item(
+					BOSTA_STATUS_STALE,
+					carrier,
+					"Bosta Shipment",
+					row.name,
+					_("Bosta has not updated this shipment for 5 days."),
+					row.last_bosta_status_on or row.creation,
+					NEXT_OPEN_SHIPMENT,
+				)
+			)
+	return items
 
 
 def _parse_request_data(value):

@@ -17,6 +17,10 @@ const MARKETPLACE_ATTENTION_PROBLEM_TYPES = [
 	"Noon Fulfillment",
 	"Noon Return Unlinked",
 	"Bosta Delivery Note",
+	"Bosta Carrier Exception",
+	"Bosta Return",
+	"Bosta Status Stale",
+	"Bosta Delivered Without Delivery Note",
 ];
 
 if (typeof frappe !== "undefined") {

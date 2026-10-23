@@ -91,6 +91,8 @@ def get_sales_order_shipment(sales_order_name):
 		"tracking_number",
 		"bosta_state_value",
 		"bosta_state_code",
+		"bosta_delivery_type",
+		"bosta_exception_reason",
 		"last_bosta_status_on",
 		"receiver_name",
 		"receiver_phone",
@@ -121,6 +123,8 @@ def get_sales_order_shipment(sales_order_name):
 			"tracking_number": row.tracking_number or "",
 			"bosta_state": row.bosta_state_value or "",
 			"bosta_state_code": row.bosta_state_code or 0,
+			"bosta_delivery_type": row.bosta_delivery_type or "",
+			"bosta_exception_reason": row.bosta_exception_reason or "",
 			"active": row.status != "Canceled",
 			"last_update": cstr(row.last_bosta_status_on) if row.last_bosta_status_on else "",
 			"receiver_name": row.receiver_name or "",
@@ -132,6 +136,7 @@ def get_sales_order_shipment(sales_order_name):
 			"delivery_note": row.delivery_note or "",
 			"delivery_note_error": row.delivery_note_error or "",
 			"delivery_note_status": _readable_delivery_note_status(row.delivery_note),
+			"delivery_note_posted": _delivery_note_is_submitted(row.delivery_note),
 			"handover_status": row.handover_status or "Awaiting Handover",
 			"handover_confirmed_by": row.handover_confirmed_by or "",
 			"handover_confirmed_on": cstr(row.handover_confirmed_on) if row.handover_confirmed_on else "",
@@ -168,6 +173,15 @@ def _readable_delivery_note_status(delivery_note):
 	if not delivery_note or not frappe.has_permission("Delivery Note", "read", doc=delivery_note):
 		return ""
 	return frappe.db.get_value("Delivery Note", delivery_note, "status") or ""
+
+
+def _delivery_note_is_submitted(delivery_note):
+	"""Expose only the linked Delivery Note's submitted state, after its read check."""
+	if not delivery_note:
+		return False
+	if not frappe.has_permission("Delivery Note", "read", doc=delivery_note):
+		return None
+	return frappe.db.get_value("Delivery Note", delivery_note, "docstatus") == 1
 
 
 def _read_address(order):

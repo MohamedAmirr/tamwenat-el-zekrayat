@@ -21,7 +21,7 @@ app_logo_url = "/assets/marketplace_integrations/icons/desktop_icons/solid/tamwe
 # ------------------
 
 # include js, css files in header of desk.html
-# app_include_css = "/assets/marketplace_integrations/css/marketplace_integrations.css"
+app_include_css = "/assets/marketplace_integrations/css/bosta_state.css"
 # app_include_js = "/assets/marketplace_integrations/js/marketplace_integrations.js"
 
 # include js, css files in header of web template
@@ -309,7 +309,7 @@ fixtures = [
 	},
 	{
 		"dt": "Notification",
-		"filters": [["name", "in", ["Refund Detected on Marketplace Order"]]],
+		"filters": [["name", "in", ["Refund Detected on Marketplace Order", "Bosta Awaiting Your Action"]]],
 	},
 	{
 		"dt": "Custom Field",

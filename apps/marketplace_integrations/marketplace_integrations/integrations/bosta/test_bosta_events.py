@@ -202,6 +202,120 @@ class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
 		}
 		self.assertNotIn(shipment.name, names)
 
+	def _attention_rows_for(self, shipment, problem_type):
+		return [
+			row
+			for row in marketplace_attention.get_attention_items(
+				{"platform": "Bosta", "problem_type": problem_type}
+			)
+			if row["reference_name"] == shipment.name
+		]
+
+	def test_carrier_exception_is_listed_in_needs_attention(self):
+		_, shipment = self._completed_shipment(tracking=f"TRK-EX-{self.suffix}")
+		frappe.db.set_value(
+			"Bosta Shipment",
+			shipment.name,
+			{
+				"bosta_state_code": 47,
+				"bosta_state_value": statuses.BOSTA_STATE_NAMES[47],
+				"bosta_exception_reason": "Receiver unavailable",
+			},
+		)
+
+		rows = self._attention_rows_for(shipment, marketplace_attention.BOSTA_CARRIER_EXCEPTION)
+
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0]["explanation"], "Receiver unavailable")
+
+	def test_return_finding_clears_only_after_a_submitted_return_against_linked_delivery_note(self):
+		from erpnext.controllers.sales_and_purchase_return import make_return_doc
+
+		_, shipment = self._completed_shipment(tracking=f"TRK-RETURN-{self.suffix}")
+		frappe.db.set_value(
+			"Bosta Shipment",
+			shipment.name,
+			{
+				"bosta_state_code": 46,
+				"bosta_state_value": statuses.BOSTA_STATE_NAMES[46],
+			},
+		)
+		self.assertEqual(len(self._attention_rows_for(shipment, marketplace_attention.BOSTA_RETURN)), 1)
+
+		return_note = make_return_doc("Delivery Note", shipment.delivery_note)
+		return_note.items[0].qty = -1
+		self._track(return_note.insert())
+		self.assertEqual(len(self._attention_rows_for(shipment, marketplace_attention.BOSTA_RETURN)), 1)
+
+		return_note.submit()
+		self.assertEqual(self._attention_rows_for(shipment, marketplace_attention.BOSTA_RETURN), [])
+
+	def test_delivered_send_without_a_submitted_delivery_note_is_listed(self):
+		order = self.make_order()
+		self.http.queue["create"].append(created(f"TRK-DELIVERED-{self.suffix}"))
+		self.create(order, confirm_handover=False)
+		shipment = self.shipment_for(order)
+		frappe.db.set_value(
+			"Bosta Shipment",
+			shipment.name,
+			{
+				"bosta_state_code": 45,
+				"bosta_state_value": statuses.BOSTA_STATE_NAMES[45],
+				"bosta_delivery_type": "SEND",
+			},
+		)
+
+		rows = self._attention_rows_for(shipment, marketplace_attention.BOSTA_DELIVERED_WITHOUT_DELIVERY_NOTE)
+
+		self.assertEqual(len(rows), 1)
+
+	def test_tracked_shipment_without_any_event_uses_creation_for_stale_attention(self):
+		order = self.make_order()
+		self.http.queue["create"].append(created(f"TRK-STALE-{self.suffix}"))
+		self.create(order, confirm_handover=False)
+		shipment = self.shipment_for(order)
+		frappe.db.set_value(
+			"Bosta Shipment",
+			shipment.name,
+			{"creation": add_days(now_datetime(), -6), "last_bosta_status_on": None},
+			update_modified=False,
+		)
+
+		rows = self._attention_rows_for(shipment, marketplace_attention.BOSTA_STATUS_STALE)
+
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(
+			rows[0]["detected_at"], frappe.db.get_value("Bosta Shipment", shipment.name, "creation")
+		)
+
+	def test_state_103_notification_escapes_tracking_text_and_keeps_shipment_link(self):
+		recipient = self.make_user("Bosta User")
+		_, shipment = self._completed_shipment(tracking=f"TRK-NOTIFY-{self.suffix}")
+		tracking_number = 'TRK-<script>alert("x")</script>'
+		frappe.db.set_value("Bosta Shipment", shipment.name, "tracking_number", tracking_number)
+		shipment.reload()
+		try:
+			statuses.process_webhook_event(self._event(shipment, 103, 9000))
+			logs = frappe.get_all(
+				"Notification Log",
+				filters={
+					"for_user": recipient,
+					"document_type": "Bosta Shipment",
+					"document_name": shipment.name,
+				},
+				fields=["name", "description"],
+				limit_page_length=0,
+			)
+			self.assertEqual(len(logs), 1)
+			self.assertIn("TRK-&lt;script&gt;", logs[0].description)
+			self.assertNotIn("<script>", logs[0].description)
+			self.assertIn(f"/app/bosta-shipment/{shipment.name}", logs[0].description)
+		finally:
+			frappe.db.delete(
+				"Notification Log",
+				{"document_type": "Bosta Shipment", "document_name": shipment.name},
+			)
+
 	# -- polling -------------------------------------------------------------------------
 
 	def _poll(self, responses):
