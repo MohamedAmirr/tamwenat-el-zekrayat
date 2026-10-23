@@ -34,6 +34,7 @@ ORDER_FIELDS = (
 	"receiver_phone",
 	"city_id",
 	"address_first_line",
+	"cod_amount",
 )
 
 
@@ -143,7 +144,11 @@ def _clean_order(order):
 		frappe.throw(_("Each Sales Order to send needs a name."))
 	cleaned = {"sales_order": cstr(order["sales_order"]).strip()}
 	for field in ORDER_FIELDS:
-		cleaned[field] = cstr(order.get(field)).strip()
+		if field == "cod_amount":
+			value = order.get(field)
+			cleaned[field] = None if value in (None, "") else value
+		else:
+			cleaned[field] = cstr(order.get(field)).strip()
 	expected_cod = order.get("expected_cod")
 	cleaned["expected_cod"] = None if expected_cod in (None, "") else flt(expected_cod, 2)
 	return cleaned
@@ -186,6 +191,7 @@ def _create_one(order):
 			args["city_id"],
 			args["address_first_line"],
 			args["expected_cod"],
+			args.get("cod_amount"),
 		)
 	except Exception as exc:
 		# Drop anything the failed order left uncommitted before the next one starts.

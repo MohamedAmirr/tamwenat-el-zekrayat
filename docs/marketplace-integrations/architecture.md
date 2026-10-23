@@ -302,6 +302,8 @@ so the next request does not retry at once; the affected orders simply fall back
 failure shows no popup. Lookups served from the cache still work while blocked. The earlier
 district matching (address text against district names, and the undocumented
 `GET /cities/pinLocation`) was removed in #318.
+**COD amount (#345).** The Sales Order form and reviewed bulk dialogs show the calculated outstanding COD as the initial value in an editable company-currency field. The existing creator roles may enter any amount from 0 through 30,000 EGP, independently of the outstanding balance. The API keeps `expected_cod` as the calculated default for stale-dialog detection, validates the separate entered amount, and stores only the sent amount in `Bosta Shipment.cod_amount`. Bulk orders sent without review omit the entered value and use the calculated default. Retrying a `Bosta Failed` shipment reuses its stored amount.
+
 **Bulk create (#305).** The Sales Order list action **Create Bosta Shipments**
 (`public/js/sales_order_list.js`, registered through `doctype_list_js`; creator roles only; at
 most 50 orders, refused with a message naming 50) calls

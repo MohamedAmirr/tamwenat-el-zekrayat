@@ -129,6 +129,7 @@
 							city_id: city.id,
 							address_first_line: values.address_first_line,
 							expected_cod: entry.defaults.cod_amount,
+							cod_amount: values.cod_amount,
 						},
 					});
 					dialog.hide();
@@ -237,8 +238,13 @@
 			receiver_phone: order.receiver_phone,
 			address_first_line: order.address_first_line,
 			city_id: order.city_id,
+			cod_amount: order.cod_amount,
 		};
-		const fallback = { sales_order: order.sales_order, defaults: { ...used, cod_amount: order.expected_cod } };
+		const retry_cod = order.cod_amount ?? order.expected_cod;
+		const fallback = {
+			sales_order: order.sales_order,
+			defaults: { ...used, cod_amount: retry_cod, retry_cod_amount: retry_cod, currency: "EGP" },
+		};
 		return frappe
 			.call({ method: DEFAULTS_METHOD, type: "POST", silent: true, args: { sales_order: order.sales_order } })
 			.then((r) => ({ sales_order: order.sales_order, defaults: { ...(r.message || {}), ...used } }))

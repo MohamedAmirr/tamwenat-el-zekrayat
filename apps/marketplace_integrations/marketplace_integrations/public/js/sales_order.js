@@ -473,6 +473,7 @@
 						city_id: city.id,
 						address_first_line: values.address_first_line,
 						expected_cod: defaults.cod_amount,
+						cod_amount: values.cod_amount,
 					},
 					freeze: true,
 					freeze_message: __("Creating Bosta shipment..."),
@@ -501,6 +502,19 @@
 			defaults,
 			intro_fields,
 			receiver_fields: [
+				{ fieldname: "currency", fieldtype: "Data", hidden: 1, default: defaults.currency },
+				{
+					fieldname: "cod_amount",
+					fieldtype: "Currency",
+					label: __("COD Amount"),
+					reqd: 1,
+					default: defaults.retry_cod_amount ?? defaults.cod_amount,
+					options: "currency",
+					description: __(
+						"Enter an amount from 0 to {0} in the company currency.",
+						[format_currency(defaults.cod_limit || 30000, defaults.currency)]
+					),
+				},
 				{ fieldname: "receiver_name", fieldtype: "Data", label: __("Receiver Name"), reqd: 1, default: defaults.receiver_name },
 				{ fieldname: "receiver_phone", fieldtype: "Data", label: __("Receiver Phone"), reqd: 1, default: defaults.receiver_phone },
 			],

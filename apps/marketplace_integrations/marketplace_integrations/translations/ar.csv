@@ -728,6 +728,10 @@ Bosta webhook timeStamp in milliseconds since the Unix epoch.,قيمة timeStamp
 COD Sent,تم إرسال مبلغ الدفع عند الاستلام
 "COD is the Sales Order total minus advance payments recorded on the Sales Order. Payments made against a Sales Invoice are not seen, and a partly delivered order still uses the whole-order amount.",مبلغ الدفع عند الاستلام هو إجمالي أمر البيع مطروحًا منه الدفعات المقدمة المسجّلة على أمر البيع. لا تُحتسب الدفعات المسجّلة على فاتورة مبيعات، ويستخدم الطلب المسلَّم جزئيًا مبلغ الطلب كاملًا.
 COD to be sent to Bosta,مبلغ الدفع عند الاستلام المُرسل إلى Bosta
+COD Amount,مبلغ الدفع عند الاستلام
+"Enter an amount from 0 to {0} in the company currency.",أدخل مبلغًا من 0 إلى {0} بعملة الشركة.
+"Enter a valid COD amount in the company currency.",أدخل مبلغًا صالحًا للدفع عند الاستلام بعملة الشركة.
+COD cannot be negative.,لا يمكن أن يكون مبلغ الدفع عند الاستلام سالبًا.
 CONFIRMED,تم التأكيد
 Cancel Bosta Shipment,إلغاء شحنة Bosta
 Cancel Bosta delivery {0}? Bosta will terminate it and Delivery Note {1} will be cancelled. This cannot be undone.,هل تريد إلغاء توصيل Bosta {0}؟ ستنهيه Bosta وسيتم إلغاء مذكرة التسليم {1}. لا يمكن التراجع عن ذلك.
