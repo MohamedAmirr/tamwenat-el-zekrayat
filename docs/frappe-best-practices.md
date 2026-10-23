@@ -73,6 +73,10 @@ Framework-internals dependencies on record:
 - Verified: Frappe 16.51.0 on dev, 2026-10-22. Prod version NOT known; look it up (Frappe Cloud Apps tab).
 - Evidence: the always-on test `marketplace_integrations/test_order_hover_card_js_wiring.py`, plus the framework source paths above.
 - Recheck: on any Frappe/ERPNext upgrade, and before shipping to prod.
+- #326 Navigation Dock mount (`dock/marketplace_integrations/marketplace_integrations.json`) relies on the Dock `mount_on` mechanism (`frappe/desk/doctype/dock/dock.py`: `mounted_apps`, `validate_added_rows` requiring icon and title), on `frappe/model/sync.py` `APP_ROOTED_DOCTYPES` importing `<app>/dock/<app>/<app>.json` and `<module>/sidebar/<name>/<name>.json`, and on `resolve_sidebar` dropping a shell with no permitted item. Mounted rows are appended after the host's rows; a saved site or user Dock layer drops entries it does not name, so on such a site the entries must be added in Manage Dock.
+- Verified: Frappe 16.52.0 / ERPNext 16.51.1 (prod commits 4515014 / 5af6561; prod has no saved Dock layers, checked 2026-10-22), on `test.localhost`.
+- Evidence: the always-on test `marketplace_integrations/tests/test_navigation.py` (`UnitTestDockFrameworkWiring`, plus per-role resolution through `resolve_sidebar`).
+- Recheck: on any Frappe/ERPNext upgrade, and when prod gains a saved erpnext Dock layer.
 
 ## Skills (optional help)
 

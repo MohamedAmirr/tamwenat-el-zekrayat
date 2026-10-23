@@ -1,0 +1,32 @@
+{
+ "app": "marketplace_integrations",
+ "creation": "2026-10-22 12:00:00.000000",
+ "docstatus": 0,
+ "doctype": "Dock",
+ "idx": 0,
+ "items": [
+  {
+   "added": 0,
+   "hidden": 0,
+   "icon": "store",
+   "link_to": "Marketplaces",
+   "link_type": "Sidebar",
+   "title": "Marketplaces"
+  },
+  {
+   "added": 0,
+   "hidden": 0,
+   "icon": "truck",
+   "link_to": "Bosta",
+   "link_type": "Sidebar",
+   "title": "Bosta"
+  }
+ ],
+ "modified": "2026-10-22 12:00:00.000000",
+ "modified_by": "Administrator",
+ "mount_on": "erpnext",
+ "name": "marketplace_integrations",
+ "owner": "Administrator",
+ "standard": 1,
+ "user": ""
+}

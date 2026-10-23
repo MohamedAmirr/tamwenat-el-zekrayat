@@ -13,7 +13,7 @@
  "is_hidden": 0,
  "label": "Tamwenat Marketplaces",
  "links": [],
- "modified": "2026-10-13 18:00:00.000000",
+ "modified": "2026-10-23 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Tamwenat Marketplaces",
@@ -27,6 +27,18 @@
   {
    "doctype": "Has Role",
    "role": "System Manager"
+  },
+  {
+   "doctype": "Has Role",
+   "role": "Talabat User"
+  },
+  {
+   "doctype": "Has Role",
+   "role": "Noon User"
+  },
+  {
+   "doctype": "Has Role",
+   "role": "Shopify User"
   }
  ],
  "sequence_id": 1.0,

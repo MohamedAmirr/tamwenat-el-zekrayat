@@ -13,20 +13,9 @@ app_license = "mit"
 
 required_apps = ["erpnext"]
 
-# Each item in the list will be shown as an app in the apps page
-# The logo is the existing solid desktop-icon tile (a standalone rounded SVG).
-# The route is /desk/<workspace name, lower-cased, spaces -> hyphens>.
+# No add_to_apps_screen: the app has no apps-screen tile of its own. Its Marketplaces and Bosta
+# entries are mounted on ERPNext's rail by dock/marketplace_integrations/ (#326).
 app_logo_url = "/assets/marketplace_integrations/icons/desktop_icons/solid/tamwenat_marketplaces.svg"
-
-add_to_apps_screen = [
-	{
-		"name": app_name,
-		"logo": app_logo_url,
-		"title": app_title,
-		"route": "/desk/tamwenat-marketplaces",
-		"has_permission": "marketplace_integrations.api.permission.has_app_permission",
-	}
-]
 
 # Includes in <head>
 # ------------------

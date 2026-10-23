@@ -15,13 +15,14 @@ All paths are under `apps/marketplace_integrations/marketplace_integrations/` un
 | Reusable table | `public/js/remote_data_grid.js` (`RemoteDataGrid`) | The one deliberate shared component. |
 | Reports | `marketplace_integrations/report/` (channel status, needs attention, Shopify import failures, reconciliation summary) | Script Reports need the `report` permission on `ref_doctype`. |
 | Workspaces | `marketplace_integrations/workspace/` (`tamwenat_marketplaces`, `shopify_reconciliation`) | |
-| Sidebar | `marketplace_integrations/sidebar/tamwenat_marketplaces/` | |
-| Desktop icon | `desktop_icon/`, SVGs under `public/icons/desktop_icons/{solid,subtle}/` | |
+| Dock + Sidebar shells (#326) | `dock/marketplace_integrations/marketplace_integrations.json` (Dock mounted on `erpnext`, rows Marketplaces and Bosta), `marketplace_integrations/sidebar/{marketplaces,bosta}/` | Entries on ERPNext's rail, no apps-screen tile of our own. Visibility is read permission on each item; guard: `tests/test_navigation.py`, `tests/test_sidebar.py`. |
 | Fixtures | `hooks.py` `fixtures`, `fixtures/` | Custom Field, Property Setter, Client Script, etc. |
 
 ## Workspace and sidebar customization
 
-- Workspaces, Sidebar documents and Desktop Icons are standard documents synced by `bench migrate`. The importer reimports a file only when its `modified` is newer than the DB row, so bump `modified` on every edit. Details and the Frappe 16.51+ Sidebar format: `docs/frappe-conventions.md` ("App-level folders auto-synced by `bench migrate`").
+- Workspaces, Sidebar documents and Docks are standard documents synced by `bench migrate`. The importer reimports a file only when its `modified` is newer than the DB row, so bump `modified` on every edit. Details and the Frappe 16.51+ Sidebar format: `docs/frappe-conventions.md` ("App-level folders auto-synced by `bench migrate`").
+- Role-filtered navigation (#326): Sidebar and Sidebar Item have no roles field; an item shows when the user can read its target (a Workspace through its `roles`). A Section Break whose items are all filtered out still renders its header, so give every section at least one item for every role that sees the shell, or merge sections. The first item is the landing item: keep it one every platform role can open (Home = Workspace `Tamwenat Marketplaces`, whose roles include the three platform roles). Workspace shortcuts are filtered per user the same way, so a role-guarded shortcut needs no extra handling.
+- Dock mount: the Marketplaces and Bosta rail entries come from `dock/marketplace_integrations/marketplace_integrations.json` (`mount_on: erpnext`, one Sidebar row each, icon and title required). Rows are appended after ERPNext's own rows. A site or user with a saved erpnext Dock layer drops entries it does not name, so on such a site add them in Manage Dock. Dock row and shell icons are Lucide ids (not every Lucide-looking name exists: `home` does not, `house` does).
 - A shortcut without a `stats_filter` reopens the user's last-used filters. Give filtered or "show all" shortcuts an explicit `stats_filter`.
 - Dev and prod can drift in Frappe version. Check both before depending on newer framework UI (Sidebar doctype); see `docs/frappe-best-practices.md` (Version compatibility).
 - Sync check: after `bench migrate` on a fresh test site, the workspace and sidebar must appear without manual steps.
