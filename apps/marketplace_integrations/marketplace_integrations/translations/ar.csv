@@ -268,8 +268,6 @@ Attempted At,وقت المحاولة
 Request Data,بيانات الطلب
 Bosta Settings requires an API key when enabled.,تتطلب إعدادات Bosta مفتاح API عند التفعيل.
 Bosta Settings requires a business location ID when enabled.,تتطلب إعدادات Bosta معرّف موقع العمل عند التفعيل.
-All Orders,جميع الطلبات
-Platform Orders,طلبات المنصات
 Noon Returns,مرتجعات Noon
 Products & Inventory,المنتجات والمخزون
 Needs Mapping,يحتاج إلى ربط

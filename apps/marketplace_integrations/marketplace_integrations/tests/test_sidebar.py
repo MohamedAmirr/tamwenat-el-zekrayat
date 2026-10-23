@@ -21,8 +21,13 @@ from frappe.tests import UnitTestCase
 
 APP = "marketplace_integrations"
 MODULE_FOLDER = "marketplace_integrations"
-# The Dock and shell icons are Lucide ids (a Dock row's icon is not looked up in the other sprites).
-ICON_SPRITES = ("lucide",)
+# Sprites a Dock/shell icon id may come from: Lucide, plus the `*-soft` module icons that
+# frappe and erpnext ship for their own rows (our `store`/`truck` are Lucide stroke icons).
+ICON_SPRITES = (
+	("frappe", "public", "icons", "lucide", "icons.svg"),
+	("frappe", "public", "icons", "module-icons.svg"),
+	("erpnext", "public", "icons", "module-icons.svg"),
+)
 SHELLS = {"Marketplaces": "marketplaces", "Bosta": "bosta"}
 SIDEBAR_MODULE = "Marketplace Integrations"
 # link_type -> (folder holding <name>/<name>.json fixtures, key holding the record name)
@@ -51,8 +56,8 @@ def _app_record_names(folder, name_key):
 
 def _sprite_icon_ids():
 	ids = set()
-	for sprite in ICON_SPRITES:
-		path = frappe.get_app_path("frappe", "public", "icons", sprite, "icons.svg")
+	for app, *parts in ICON_SPRITES:
+		path = frappe.get_app_path(app, *parts)
 		with open(path) as f:
 			source = f.read()
 		ids.update(part.split('"', 1)[0] for part in source.split('id="icon-')[1:])

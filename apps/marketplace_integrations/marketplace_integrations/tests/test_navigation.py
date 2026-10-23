@@ -10,6 +10,7 @@ users, read the shipped Dock file, and pin the framework internals the mount rel
 (verified on Frappe 16.52.0 / ERPNext 16.51.1; recheck on any Frappe upgrade).
 """
 
+import json
 import os
 import re
 
@@ -78,6 +79,16 @@ class UnitTestNavigationFiles(UnitTestCase):
 		)
 		self.assertEqual({r["role"] for r in _load(path)["roles"]}, {"System Manager", "Shopify User"})
 
+	def test_marketplaces_workspace_has_no_static_platform_headers(self):
+		# Workspace header blocks are not permission-filtered (shortcuts are), so a Talabat
+		# user would see empty "Shopify"/"Noon"/"Bosta" headings. Only neutral headers allowed.
+		path = frappe.get_app_path(
+			APP, MODULE_FOLDER, "workspace", "tamwenat_marketplaces", "tamwenat_marketplaces.json"
+		)
+		blocks = json.loads(_load(path)["content"])
+		headers = [re.sub(r"<[^>]+>", "", b["data"]["text"]) for b in blocks if b["type"] == "header"]
+		self.assertEqual(sorted(headers), ["Operations", "Overview", "Tamwenat Marketplaces"])
+
 
 class UnitTestNavigationPerRole(UnitTestCase):
 	"""Resolve both shells through the framework for throwaway users."""
@@ -105,11 +116,15 @@ class UnitTestNavigationPerRole(UnitTestCase):
 		return result
 
 	def _assert_no_empty_section(self, shell, items):
+		# A section's items are the rows right after it flagged `child`; a following
+		# section, spacer or top-level (non-child) row means the section is empty.
 		for index, item in enumerate(items):
 			if item.get("type") == "Section Break":
 				following = items[index + 1] if index + 1 < len(items) else None
 				self.assertTrue(
-					following and following.get("type") not in ("Section Break", "Spacer"),
+					following
+					and following.get("type") not in ("Section Break", "Spacer")
+					and following.get("child"),
 					f"{shell}: empty section '{item.get('label')}' survived permission filtering",
 				)
 
@@ -159,6 +174,11 @@ class UnitTestNavigationPerRole(UnitTestCase):
 
 	def test_bosta_only_user_sees_bosta_without_settings(self):
 		shells = self._shells(self._user("Nav Bosta Reader", {"Bosta Shipment": ["read"]}))
+		self.assertEqual(set(shells), {"Bosta"})
+		self.assertEqual(self._targets(shells["Bosta"]), {"Bosta Shipment"})
+
+	def test_real_bosta_user_role_sees_bosta_only_without_settings(self):
+		shells = self._shells(self._user("Nav Real Bosta", {"User": ["read"]}, roles=("Bosta User",)))
 		self.assertEqual(set(shells), {"Bosta"})
 		self.assertEqual(self._targets(shells["Bosta"]), {"Bosta Shipment"})
 
