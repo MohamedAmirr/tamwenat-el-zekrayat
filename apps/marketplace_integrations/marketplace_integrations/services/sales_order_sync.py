@@ -185,9 +185,11 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 		return _skip_cancelled_before_sync(order, trigger_source)
 
 	snapshot = None
+	allow_payment_mirroring = False
 	try:
 		account = _get_account(order)
 		_validate_sync_permissions(order, account)
+		allow_payment_mirroring = True
 		sales_order = None
 		evidence = {}
 		if order.erpnext_sales_order:
@@ -290,6 +292,31 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 		)
 		_create_sync_log(order, trigger_source, "Error", snapshot, result, traceback_text=traceback_text)
 		return result
+	finally:
+		# Payment mirroring is a separate workflow with one savepoint per Shopify
+		# transaction. It must never change the outcome of the Sales Order sync.
+		if allow_payment_mirroring:
+			_mirror_shopify_payments_independently(order.name, trigger_source)
+
+
+def _mirror_shopify_payments_independently(marketplace_order, trigger_source):
+	"""Attempt eligible Shopify Payment Entries without changing Sales Order sync status."""
+	try:
+		state = frappe.db.get_value(
+			"Marketplace Order", marketplace_order, ["platform", "erpnext_sales_order"], as_dict=True
+		)
+		if not state or state.platform != "Shopify" or not state.erpnext_sales_order:
+			return
+		if frappe.db.get_value("Sales Order", state.erpnext_sales_order, "docstatus") != 1:
+			return
+		from marketplace_integrations.services.shopify_payments import mirror_shopify_payments
+
+		mirror_shopify_payments(marketplace_order, trigger_source)
+	except Exception:
+		try:
+			frappe.log_error(title=_("Automatic Shopify payment mirroring"))
+		except Exception:
+			pass
 
 
 def _skip_cancelled_before_sync(order, trigger_source):

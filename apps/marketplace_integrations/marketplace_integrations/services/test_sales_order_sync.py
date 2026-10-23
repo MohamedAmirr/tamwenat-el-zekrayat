@@ -31,6 +31,7 @@ from marketplace_integrations.services.sales_order_sync import (
 	snapshot_hash,
 	sync_sales_order,
 )
+from marketplace_integrations.services import sales_order_sync as sales_order_sync_service
 
 _DEFAULT_VARIANT = object()
 # Shopify paymentTerms of an order staff recorded with payment "Due on receipt".
@@ -53,6 +54,33 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.item = self._make_item()
 		self.account = self._make_account()
 		self._make_mapping("SKU-UNIT", self.item.name)
+
+	def test_automatic_payment_step_runs_only_for_linked_submitted_shopify_orders(self):
+		with (
+			patch.object(
+				sales_order_sync_service.frappe.db,
+				"get_value",
+				side_effect=[frappe._dict(platform="Shopify", erpnext_sales_order="SO-1"), 1],
+			),
+			patch(
+				"marketplace_integrations.services.shopify_payments.mirror_shopify_payments"
+			) as mirror,
+		):
+			sales_order_sync_service._mirror_shopify_payments_independently("MKTORD-1", "Shopify Webhook")
+		mirror.assert_called_once_with("MKTORD-1", "Shopify Webhook")
+
+		with (
+			patch.object(
+				sales_order_sync_service.frappe.db,
+				"get_value",
+				return_value=frappe._dict(platform="Talabat", erpnext_sales_order="SO-1"),
+			),
+			patch(
+				"marketplace_integrations.services.shopify_payments.mirror_shopify_payments"
+			) as mirror,
+		):
+			sales_order_sync_service._mirror_shopify_payments_independently("MKTORD-2", "Manual")
+		mirror.assert_not_called()
 
 	def _make_item(self):
 		item = frappe.get_doc(

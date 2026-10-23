@@ -53,6 +53,12 @@ Problem sources (``problem_type``):
   later attempt succeeds). Bosta is a carrier, not a Marketplace Account, so
   these rows have platform "Bosta" and no account; they appear when no account
   filter is set and the platform filter is blank or "Bosta".
+- Payment Error: Shopify Payment Sync Log Error/Invalid rows keyed by order and
+  transaction, hidden by a later Success for the same pair.
+- Payment Excess: submitted mirrored Payment Entries with a positive
+  unallocated amount.
+- Payment Entry Cancelled: cancelled mirrored Payment Entries without a
+  submitted amendment.
 """
 
 import json
@@ -87,6 +93,9 @@ BOSTA_CARRIER_EXCEPTION = "Bosta Carrier Exception"
 BOSTA_RETURN = "Bosta Return"
 BOSTA_STATUS_STALE = "Bosta Status Stale"
 BOSTA_DELIVERED_WITHOUT_DELIVERY_NOTE = "Bosta Delivered Without Delivery Note"
+PAYMENT_ERROR = "Payment Error"
+PAYMENT_EXCESS = "Payment Excess"
+PAYMENT_ENTRY_CANCELLED = "Payment Entry Cancelled"
 BOSTA_PLATFORM = "Bosta"
 BOSTA_PROBLEM_STATE_CODES = (47, 48, 49, 100, 101, 102, 103, 105)
 BOSTA_RETURN_STATE_CODES = (46, 60)
@@ -107,12 +116,16 @@ PROBLEM_TYPES = [
 	BOSTA_RETURN,
 	BOSTA_STATUS_STALE,
 	BOSTA_DELIVERED_WITHOUT_DELIVERY_NOTE,
+	PAYMENT_ERROR,
+	PAYMENT_EXCESS,
+	PAYMENT_ENTRY_CANCELLED,
 ]
 
 NEXT_OPEN_SHIPMENT = "Open Shipment"
 NEXT_MAP_ITEM = "Map Item"
 NEXT_RETRY = "Retry"
 NEXT_OPEN_ORDER = "Open Order"
+NEXT_OPEN_PAYMENT = "Open Payment Entry"
 NEXT_OPEN_RETURN = "Open Return"
 NEXT_VIEW_ERROR = "View Error"
 
@@ -170,6 +183,16 @@ def get_attention_items(filters=None):
 		if not accounts or (filters.problem_type and filters.problem_type not in types):
 			continue
 		items.extend(collector(accounts))
+	shopify_accounts = {name: account for name, account in accounts.items() if account.platform == "Shopify"}
+	if shopify_accounts:
+		payment_collectors = [
+			({PAYMENT_ERROR}, _collect_payment_errors),
+			({PAYMENT_EXCESS}, _collect_payment_excess),
+			({PAYMENT_ENTRY_CANCELLED}, _collect_cancelled_payment_entries),
+		]
+		for types, collector in payment_collectors:
+			if not filters.problem_type or filters.problem_type in types:
+				items.extend(collector(shopify_accounts))
 
 	if filters.problem_type:
 		items = [item for item in items if item["problem_type"] == filters.problem_type]
@@ -184,12 +207,19 @@ def get_attention_counts(account_names):
 	"""Per-account counts derived from ``get_attention_items()``:
 	``orders_needing_attention`` is the number of distinct Marketplace Orders
 	with at least one problem, ``import_errors`` the number of Order Import
-	Error rows and ``fulfillment_errors`` the number of Fulfillment Error rows.
+	Error rows, ``fulfillment_errors`` the number of Fulfillment Error rows,
+	and ``payment_errors`` the number of Shopify payment issues across the
+	Payment Error, Payment Excess and Payment Entry Cancelled types.
 	Webhook Retries Exhausted rows are deliberately not counted (they can never
 	clear, so they would pin the account level forever).
 	"""
 	counts = {
-		name: {"orders_needing_attention": 0, "import_errors": 0, "fulfillment_errors": 0}
+		name: {
+			"orders_needing_attention": 0,
+			"import_errors": 0,
+			"fulfillment_errors": 0,
+			"payment_errors": 0,
+		}
 		for name in account_names
 	}
 	if not account_names:
@@ -200,6 +230,8 @@ def get_attention_counts(account_names):
 		account = item["account"]
 		if account not in counts:
 			continue
+		if item["problem_type"] in {PAYMENT_ERROR, PAYMENT_EXCESS, PAYMENT_ENTRY_CANCELLED}:
+			counts[account]["payment_errors"] += 1
 		if item["reference_doctype"] == "Marketplace Order":
 			order_refs[account].add(item["reference_name"])
 		elif item["problem_type"] == ORDER_IMPORT_ERROR:
@@ -672,6 +704,159 @@ def _collect_import_errors(accounts):
 			)
 		)
 	return items
+
+
+def _collect_payment_errors(accounts):
+	"""Latest unresolved payment mirroring failure per order and transaction."""
+	order_accounts = _shopify_order_accounts(accounts)
+	if not order_accounts:
+		return []
+	filters = {
+		"sync_type": "Payment",
+		"status": ["in", ["Error", "Invalid"]],
+		"marketplace_order": ["in", list(order_accounts)],
+	}
+	fields = [
+		"name",
+		"marketplace_account",
+		"marketplace_order",
+		"request_data",
+		"response_data",
+		"attempted_at",
+		"creation",
+	]
+	errors = frappe.get_list(
+		"Marketplace Sync Log",
+		filters=filters,
+		fields=fields,
+		order_by="attempted_at desc, creation desc",
+		limit_page_length=0,
+	)
+	if not errors:
+		return []
+	order_names = {log.marketplace_order for log in errors if log.marketplace_order}
+	resolving = {}
+	for chunk in _chunks(order_names):
+		for log in frappe.get_list(
+			"Marketplace Sync Log",
+			filters={
+				"sync_type": "Payment",
+				"status": "Success",
+				"marketplace_order": ["in", chunk],
+			},
+			fields=fields,
+			limit_page_length=0,
+		):
+			data = _parse_request_data(log.request_data)
+			transaction_id = cstr(data.get("transaction_id")).strip()
+			key = (log.marketplace_order, transaction_id)
+			stamp = get_datetime(log.attempted_at or log.creation)
+			if transaction_id and (key not in resolving or stamp > resolving[key]):
+				resolving[key] = stamp
+	items = []
+	seen = set()
+	for log in errors:
+		data = _parse_request_data(log.request_data)
+		transaction_id = cstr(data.get("transaction_id")).strip()
+		key = (log.marketplace_order, transaction_id)
+		if not transaction_id or key in seen:
+			continue
+		seen.add(key)
+		stamp = get_datetime(log.attempted_at or log.creation)
+		if resolving.get(key) and resolving[key] > stamp:
+			continue
+		response = _parse_request_data(log.response_data)
+		message = cstr(response.get("message")).strip()[:EXPLANATION_MAX_LENGTH]
+		items.append(
+			_item(
+				PAYMENT_ERROR,
+				accounts[order_accounts[log.marketplace_order]],
+				"Marketplace Order",
+				log.marketplace_order,
+				_("Shopify payment {0} could not be recorded: {1}").format(
+					transaction_id, message or log.status
+				),
+				log.attempted_at or log.creation,
+				NEXT_OPEN_ORDER,
+			)
+		)
+	return items
+
+
+def _shopify_order_accounts(accounts):
+	orders = _get_orders(accounts, {"platform": "Shopify"}, ["name", "marketplace_account"])
+	return {row.name: row.marketplace_account for row in orders}
+
+
+def _collect_payment_excess(accounts):
+	order_accounts = _shopify_order_accounts(accounts)
+	if not order_accounts:
+		return []
+	entries = frappe.get_list(
+		"Payment Entry",
+		filters={
+			"docstatus": 1,
+			"custom_marketplace_order": ["in", list(order_accounts)],
+			"unallocated_amount": [">", 0],
+		},
+		fields=["name", "custom_marketplace_order", "unallocated_amount", "modified"],
+		order_by="modified desc",
+		limit_page_length=0,
+	)
+	return [
+		_item(
+			PAYMENT_EXCESS,
+			accounts[order_accounts[entry.custom_marketplace_order]],
+			"Payment Entry",
+			entry.name,
+			_("Payment exceeds the order by {0}.").format(flt(entry.unallocated_amount)),
+			entry.modified,
+			NEXT_OPEN_PAYMENT,
+		)
+		for entry in entries
+		if entry.custom_marketplace_order in order_accounts
+	]
+
+
+def _collect_cancelled_payment_entries(accounts):
+	order_accounts = _shopify_order_accounts(accounts)
+	if not order_accounts:
+		return []
+	entries = frappe.get_list(
+		"Payment Entry",
+		filters={
+			"docstatus": 2,
+			"custom_marketplace_order": ["in", list(order_accounts)],
+			"custom_marketplace_transaction_id": ["is", "set"],
+		},
+		fields=["name", "custom_marketplace_order", "custom_marketplace_transaction_id", "modified"],
+		order_by="modified desc",
+		limit_page_length=0,
+	)
+	if not entries:
+		return []
+	amendments = frappe.get_list(
+		"Payment Entry",
+		filters={"docstatus": 1, "amended_from": ["in", [row.name for row in entries]]},
+		fields=["amended_from"],
+		limit_page_length=0,
+	)
+	amended = {row.amended_from for row in amendments}
+	return [
+		_item(
+			PAYMENT_ENTRY_CANCELLED,
+			accounts[order_accounts[entry.custom_marketplace_order]],
+			"Payment Entry",
+			entry.name,
+			_("Mirrored payment transaction {0} was cancelled without a submitted amendment.").format(
+				entry.custom_marketplace_transaction_id
+			),
+			entry.modified,
+			NEXT_OPEN_PAYMENT,
+		)
+		for entry in entries
+		if entry.custom_marketplace_order in order_accounts and entry.name not in amended
+	]
 
 
 RECOVERED_VIA_GET_SHIPMENT_NOTE = "found via GetShipment retry"

@@ -367,7 +367,7 @@ Bosta Return,مرتجع Bosta
 Bosta Status Stale,حالة شحنة Bosta قديمة
 Bosta Delivered Without Delivery Note,شحنة Bosta مسلّمة دون إشعار تسليم
 Bosta reports this shipment was returned. Submit a return Delivery Note against the linked Delivery Note.,تفيد Bosta بإرجاع هذه الشحنة. اعتمد إشعار مرتجع مرتبط بإشعار التسليم المحدد.
-Bosta reports this SEND delivery as delivered, but it has no submitted Delivery Note.,تفيد Bosta بتسليم شحنة SEND، لكن لا يوجد إشعار تسليم معتمد لها.
+"Bosta reports this SEND delivery as delivered, but it has no submitted Delivery Note.",تفيد Bosta بتسليم شحنة SEND، لكن لا يوجد إشعار تسليم معتمد لها.
 Bosta has not updated this shipment for 5 days.,لم تحدّث Bosta هذه الشحنة منذ ٥ أيام.
 Carrier Attention,تنبيه شركة الشحن
 Last Bosta Event Timestamp,آخر توقيت حدث من Bosta
@@ -1699,3 +1699,21 @@ A valid Shopify cancellation reason is required.,يجب تحديد سبب صحي
 The order is already cancelled on Shopify.,تم إلغاء الطلب بالفعل على Shopify.
 Shopify cancellation job ID is required.,معرّف مهمة إلغاء Shopify مطلوب.
 Shopify cancellation job failed.,فشلت مهمة إلغاء الطلب في Shopify.
+Load Shopify Payment Gateways,تحميل بوابات الدفع من Shopify
+Loading Shopify payment gateways...,جارٍ تحميل بوابات الدفع من Shopify...
+No successful SALE or CAPTURE gateways were found in the newest 500 local Shopify orders.,لم يتم العثور على بوابات دفع ناجحة من نوع SALE أو CAPTURE في أحدث 500 طلب Shopify محلي.
+Select Shopify Payment Gateways,اختر بوابات دفع Shopify
+Payment Gateway,بوابة الدفع
+Add Selected Gateways,إضافة بوابات الدفع المحددة
+Used by {0} orders,مستخدم في {0} طلب
+Already mapped,مضاف بالفعل
+Choose a Shopify Marketplace Account.,اختر حساب Shopify للسوق.
+Payment Error,خطأ في الدفع
+Payment Excess,زيادة في الدفعة
+Payment Entry Cancelled,إلغاء قيد الدفع
+Payment Issues,مشكلات الدفع
+Open Payment Entry,فتح قيد الدفع
+"This marketplace change would reduce the Sales Order total below its advance of {0}. Reallocate or cancel the advance before updating the order.",سيؤدي هذا التغيير في السوق إلى خفض إجمالي أمر البيع عن الدفعة المقدمة البالغة {0}. أعد تخصيص الدفعة أو ألغها قبل تحديث الطلب.
+Shopify payment {0} could not be recorded: {1},تعذر تسجيل دفعة Shopify {0}: {1}
+Payment exceeds the order by {0}.,تتجاوز الدفعة قيمة الطلب بمقدار {0}.
+Mirrored payment transaction {0} was cancelled without a submitted amendment.,تم إلغاء معاملة الدفع المنسوخة {0} دون تقديم تعديل.

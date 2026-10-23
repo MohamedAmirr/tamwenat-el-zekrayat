@@ -52,6 +52,7 @@ global concurrency cap - debounce is strictly per Marketplace Order.
 
 import hashlib
 import json
+import json
 
 import frappe
 from frappe.utils import add_to_date, cstr, flt, getdate, now_datetime
@@ -126,8 +127,9 @@ def order_evidence_fingerprint(order):
 	reconciliation evidence (#178), so an import can tell a real change from a refresh.
 
 	Covers line ids/SKUs/quantities/amounts/statuses and Shopify fulfillment
-	quantities, whether the order is cancelled (the timestamp itself is not hashed),
-	refund ids, Talabat/Shopify order statuses, and Noon shipment/unit membership.
+	quantities, successful SALE/CAPTURE transaction ids, whether the order is
+	cancelled (the timestamp itself is not hashed), refund ids, Talabat/Shopify
+	order statuses, and Noon shipment/unit membership.
 	Also the snapshot's transaction/delivery date sources (``processed_on``,
 	``received_on``, ``promised_for``, as dates), ``presentment_currency`` and the
 	per-line ``*_missing`` flags, since the snapshot builder reads all of them.
@@ -156,6 +158,7 @@ def order_evidence_fingerprint(order):
 		],
 		"presentment_currency": cstr(order.get("presentment_currency")),
 		"refund_ids": sorted(refund_ids(order)),
+		"successful_payment_transaction_ids": _successful_shopify_payment_ids(order),
 		"items": sorted(items),
 		"shipments": sorted(
 			[cstr(row.integration_shipment_nr), cstr(row.status)] for row in order.get("noon_shipments") or []
@@ -166,6 +169,34 @@ def order_evidence_fingerprint(order):
 		),
 	}
 	return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def _successful_shopify_payment_ids(order):
+	"""Sorted ids of successful SALE/CAPTURE transactions (#231)."""
+	if order.platform != "Shopify":
+		return []
+	transactions = order.get("payment_transactions")
+	if isinstance(transactions, str):
+		try:
+			transactions = json.loads(transactions)
+		except (TypeError, ValueError):
+			return []
+	if isinstance(transactions, dict):
+		transactions = transactions.get("nodes") or []
+	if not isinstance(transactions, list):
+		return []
+	ids = set()
+	for txn in transactions:
+		if (
+			not isinstance(txn, dict)
+			or txn.get("kind") not in {"SALE", "CAPTURE"}
+			or txn.get("status") != "SUCCESS"
+		):
+			continue
+		transaction_id = cstr(txn.get("id")).strip()
+		if transaction_id:
+			ids.add(transaction_id)
+	return sorted(ids)
 
 
 def linked_order_fingerprint(marketplace_account, external_order_id):

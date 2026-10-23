@@ -37,11 +37,6 @@ def mirror_shopify_payments(marketplace_order, trigger_source):
 	``Payment``).  A transaction that already has a Payment Entry in any docstatus is
 	skipped, so a cancelled entry is never re-created.
 	"""
-	# Checked before anything else so a user who could not submit never reaches the savepoints.
-	for ptype in ("create", "submit"):
-		if not frappe.has_permission("Payment Entry", ptype=ptype):
-			frappe.throw(_("Not permitted"), frappe.PermissionError)
-
 	# Serializes concurrent runs for the same order (see docs/frappe-conventions.md, Concurrency).
 	frappe.db.get_value("Marketplace Order", marketplace_order, "name", for_update=True)
 	order = frappe.get_doc("Marketplace Order", marketplace_order)
@@ -59,6 +54,11 @@ def mirror_shopify_payments(marketplace_order, trigger_source):
 	]
 	if not pending or not order.erpnext_sales_order:
 		return []
+	# Check only when there is actual work; empty/non-Shopify imports do not need
+	# Payment Entry permissions. This runs before the transaction savepoints.
+	for ptype in ("create", "submit"):
+		if not frappe.has_permission("Payment Entry", ptype=ptype):
+			frappe.throw(_("Not permitted"), frappe.PermissionError)
 
 	account = frappe.get_doc("Marketplace Account", order.marketplace_account)
 	results = []
@@ -347,6 +347,7 @@ def _create_payment_log(order, trigger_source, result):
 		{
 			"doctype": "Marketplace Sync Log",
 			"sync_type": "Payment",
+			"marketplace_account": order.marketplace_account,
 			"marketplace_order": order.name,
 			"status": result["status"],
 			"trigger_source": trigger_source,

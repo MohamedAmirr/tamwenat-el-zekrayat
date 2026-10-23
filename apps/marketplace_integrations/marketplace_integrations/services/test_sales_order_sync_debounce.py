@@ -329,11 +329,33 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 		self.assertTrue(debounce.bump_if_linked_order_changed(order.name, before, "Noon Order Import"))
 		# Replay: the next import starts from the already-changed state.
 		replay_before = self._fingerprint_before(order)
-		frappe.db.set_value("Marketplace Order", order.name, "sync_debounce_until", None)
-		self.assertFalse(
-			debounce.bump_if_linked_order_changed(order.name, replay_before, "Noon Order Import")
+		self.assertFalse(debounce.bump_if_linked_order_changed(order.name, replay_before, "Noon Order Import"))
+
+	def test_shopify_successful_payment_transaction_changes_the_fingerprint(self):
+		order = self._make_order()
+		frappe.db.set_value("Marketplace Order", order.name, "platform", "Shopify")
+		frappe.db.set_value("Marketplace Order", order.name, "payment_transactions", frappe.as_json([]))
+		order.reload()
+		before = debounce.order_evidence_fingerprint(order)
+		frappe.db.set_value(
+			"Marketplace Order",
+			order.name,
+			"payment_transactions",
+			frappe.as_json(
+				[
+					{
+						"id": "gid://shopify/OrderTransaction/123",
+						"kind": "SALE",
+						"status": "SUCCESS",
+						"gateway": "Kashier",
+						"amountSet": {"shopMoney": {"amount": "25.00", "currencyCode": "EGP"}},
+						"processedAt": "2026-10-23T10:00:00Z",
+					}
+				]
+			),
 		)
-		self.assertIsNone(self._debounce_state(order).sync_debounce_until)
+		order.reload()
+		self.assertNotEqual(before, debounce.order_evidence_fingerprint(order))
 
 	def test_unlinked_order_never_bumps(self):
 		order = self._make_order()

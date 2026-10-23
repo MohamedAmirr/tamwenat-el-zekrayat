@@ -81,6 +81,18 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 		self.assertEqual(result["outcome"], UPDATE_SUBMITTED_ORDER)
 		self.assertEqual(result["changes"][0]["field"], "qty")
 
+	def test_line_reduction_below_existing_advance_needs_attention(self):
+		current = self._current()
+		current["items"][0]["qty"] = 1
+		current["items"][0]["effective_rate"] = 40
+		current["items"][0]["fulfilled_total_price"] = 40
+		self.erp_state.update({"grand_total": 100, "advance_paid": 60})
+
+		result = plan(self.previous, current, {}, self.erp_state)
+
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertIn("advance of 60", result["message"])
+
 	def test_requested_quantity_below_delivered_quantity_needs_attention(self):
 		current = self._current()
 		current["items"][0]["qty"] = 1

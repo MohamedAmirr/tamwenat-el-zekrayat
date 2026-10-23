@@ -30,6 +30,9 @@ from marketplace_integrations.marketplace_integrations.doctype.marketplace_order
 	compute_order_identity_key,
 )
 from marketplace_integrations.services.marketplace_attention import (
+	PAYMENT_ENTRY_CANCELLED,
+	PAYMENT_ERROR,
+	PAYMENT_EXCESS,
 	FULFILLMENT_ERROR,
 	MODIFIED_AFTER_SYNC,
 	NOON_FULFILLMENT,
@@ -41,6 +44,7 @@ from marketplace_integrations.services.marketplace_attention import (
 	get_attention_counts,
 	get_attention_items,
 )
+from marketplace_integrations.services import marketplace_attention
 from marketplace_integrations.services.marketplace_outbound import platform_instruction
 
 NOON_PEM = "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
@@ -62,6 +66,94 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		for doctype, name in reversed(self._created):
 			if frappe.db.exists(doctype, name):
 				frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
+
+	def test_payment_error_is_hidden_by_later_success_for_same_order_and_transaction(self):
+		stamp = now_datetime()
+		account = frappe._dict(name="MKTACC-SHOPIFY", platform="Shopify")
+		failure = frappe._dict(
+			name="LOG-FAIL", marketplace_account=account.name, marketplace_order="MKTORD-1",
+			request_data=frappe.as_json({"transaction_id": "TX-1"}),
+			response_data=frappe.as_json({"message": "Gateway is not mapped"}),
+			attempted_at=stamp, creation=stamp, status="Invalid",
+		)
+		orders = [frappe._dict(name="MKTORD-1", marketplace_account=account.name)]
+		with patch.object(marketplace_attention.frappe, "get_list", side_effect=[orders, [failure], []]):
+			items = marketplace_attention._collect_payment_errors({account.name: account})
+		self.assertEqual(len(items), 1)
+		self.assertEqual(items[0]["problem_type"], PAYMENT_ERROR)
+		self.assertIn("TX-1", items[0]["explanation"])
+		success = frappe._dict(
+			name="LOG-OK", marketplace_account=account.name, marketplace_order="MKTORD-1",
+			request_data=frappe.as_json({"transaction_id": "TX-1"}),
+			attempted_at=stamp + timedelta(seconds=1), creation=stamp + timedelta(seconds=1),
+		)
+		with patch.object(
+			marketplace_attention.frappe, "get_list", side_effect=[orders, [failure], [success]]
+		):
+			self.assertEqual(marketplace_attention._collect_payment_errors({account.name: account}), [])
+
+	def test_payment_excess_and_cancelled_entry_are_listed_live(self):
+		account = frappe._dict(name="MKTACC-SHOPIFY", platform="Shopify")
+		with patch.object(
+			marketplace_attention.frappe,
+			"get_list",
+			side_effect=[
+				[frappe._dict(name="MKTORD-1", marketplace_account=account.name)],
+				[
+					frappe._dict(
+						name="PE-EXCESS", custom_marketplace_order="MKTORD-1", unallocated_amount=12.5,
+						modified=now_datetime(),
+					)
+				],
+			],
+		):
+			excess = marketplace_attention._collect_payment_excess({account.name: account})
+		self.assertEqual(excess[0]["problem_type"], PAYMENT_EXCESS)
+		self.assertIn("12.5", excess[0]["explanation"])
+
+		with patch.object(
+			marketplace_attention.frappe,
+			"get_list",
+			side_effect=[
+				[frappe._dict(name="MKTORD-1", marketplace_account=account.name)],
+				[
+					frappe._dict(
+						name="PE-CANCELLED", custom_marketplace_order="MKTORD-1",
+						custom_marketplace_transaction_id="TX-1", modified=now_datetime(),
+					)
+				],
+				[],
+			],
+		):
+			cancelled = marketplace_attention._collect_cancelled_payment_entries({account.name: account})
+		self.assertEqual(cancelled[0]["problem_type"], PAYMENT_ENTRY_CANCELLED)
+		with patch.object(
+			marketplace_attention.frappe,
+			"get_list",
+			side_effect=[
+				[frappe._dict(name="MKTORD-1", marketplace_account=account.name)],
+				[
+					frappe._dict(
+						name="PE-CANCELLED", custom_marketplace_order="MKTORD-1",
+						custom_marketplace_transaction_id="TX-1", modified=now_datetime(),
+					)
+				],
+				[frappe._dict(amended_from="PE-CANCELLED")],
+			],
+		):
+			self.assertEqual(
+				marketplace_attention._collect_cancelled_payment_entries({account.name: account}), []
+			)
+
+	def test_all_three_payment_attention_types_are_counted(self):
+		account_name = f"MKTACC-{self.suffix}"
+		items = [
+			{"account": account_name, "problem_type": problem_type, "reference_doctype": "Payment Entry"}
+			for problem_type in (PAYMENT_ERROR, PAYMENT_EXCESS, PAYMENT_ENTRY_CANCELLED)
+		]
+		with patch.object(marketplace_attention, "get_attention_items", return_value=items):
+			counts = get_attention_counts([account_name])
+		self.assertEqual(counts[account_name]["payment_errors"], 3)
 
 	# -- fixtures ---------------------------------------------------------
 
@@ -853,7 +945,12 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		self.assertEqual(len(get_attention_items({"account": account.name})), 1)
 		self.assertEqual(
 			get_attention_counts([account.name])[account.name],
-			{"orders_needing_attention": 0, "import_errors": 0, "fulfillment_errors": 0},
+			{
+				"orders_needing_attention": 0,
+				"import_errors": 0,
+				"fulfillment_errors": 0,
+				"payment_errors": 0,
+			},
 		)
 
 	def test_unlinked_returns_are_scoped_to_the_account(self):
@@ -911,11 +1008,21 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		# import and fulfillment errors are counted separately.
 		self.assertEqual(
 			counts[account.name],
-			{"orders_needing_attention": 1, "import_errors": 1, "fulfillment_errors": 1},
+			{
+				"orders_needing_attention": 1,
+				"import_errors": 1,
+				"fulfillment_errors": 1,
+				"payment_errors": 0,
+			},
 		)
 		self.assertEqual(
 			counts[other.name],
-			{"orders_needing_attention": 0, "import_errors": 0, "fulfillment_errors": 0},
+			{
+				"orders_needing_attention": 0,
+				"import_errors": 0,
+				"fulfillment_errors": 0,
+				"payment_errors": 0,
+			},
 		)
 
 	def test_exhausted_webhook_deliveries_are_listed_but_not_counted(self):
@@ -925,7 +1032,12 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		self.assertEqual(len(self.items_for(account, WEBHOOK_RETRIES_EXHAUSTED)), 1)
 		self.assertEqual(
 			get_attention_counts([account.name])[account.name],
-			{"orders_needing_attention": 0, "import_errors": 0, "fulfillment_errors": 0},
+			{
+				"orders_needing_attention": 0,
+				"import_errors": 0,
+				"fulfillment_errors": 0,
+				"payment_errors": 0,
+			},
 		)
 
 	def test_counts_for_no_accounts_is_empty(self):

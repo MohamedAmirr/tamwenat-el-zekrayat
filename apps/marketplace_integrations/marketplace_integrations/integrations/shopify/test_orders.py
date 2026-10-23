@@ -120,6 +120,9 @@ def make_order_payload(order_gid, updated_at="2026-09-27T10:05:00Z", **overrides
 
 
 class IntegrationTestImportOrderNoSideEffects(IntegrationTestCase):
+	def test_order_query_requests_formatted_gateway_beside_exact_gateway(self):
+		self.assertIn("gateway formattedGateway manualPaymentGateway", orders._ORDER_QUERY)
+
 	def setUp(self):
 		self.account = make_shopify_account(f"Order Import {frappe.generate_hash(length=8)}")
 

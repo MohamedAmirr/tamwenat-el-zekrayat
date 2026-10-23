@@ -146,6 +146,7 @@ class IntegrationTestShopifyPayments(IntegrationTestCase):
 		self.assertEqual(flt(frappe.db.get_value("Sales Order", sales_order.name, "advance_paid")), 495)
 		logs = self._logs(order)
 		self.assertEqual([log.status for log in logs], ["Success"])
+		self.assertEqual(logs[0].marketplace_account, order.marketplace_account)
 		self.assertEqual(json.loads(logs[0].request_data), {"transaction_id": self.tid(1)})
 
 	def test_running_again_creates_nothing_and_the_database_enforces_the_unique_id(self):
