@@ -500,11 +500,13 @@ def _cancel_linked_delivery_note(shipment):
 				"Bosta cancelled this shipment, but ERPNext could not cancel Delivery Note {0}. See Error Log."
 			).format(shipment.delivery_note)
 			shipment.delivery_note_error = error
+			shipment.reservation_status = "Reserved"
 			save_as_system(shipment)
 			return False
 		frappe.db.release_savepoint(CANCEL_SAVEPOINT)
 
 	shipment.status = CANCELED
+	shipment.reservation_status = "Released"
 	shipment.last_error = ""
 	shipment.delivery_note_error = ""
 	save_as_system(shipment)

@@ -36,7 +36,14 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		shipment = frappe.get_doc("Bosta Shipment", result["shipment"])
 		self.assertEqual(payload["businessReference"], f"BOSTA-{shipment.name}")
 		self.assertEqual((shipment.status, shipment.tracking_number), ("Completed", "TRK-1"))
-		self.assertEqual(shipment.active_sales_order, order.name)
+		self.assertEqual(shipment.reservation_status, "Fulfilled")
+		self.assertTrue(shipment.fulfillment_key)
+		self.assertEqual(len(shipment.shipment_items), 1)
+		allocation = shipment.shipment_items[0]
+		self.assertEqual((allocation.so_detail, allocation.item_code), (order.items[0].name, self.item.name))
+		self.assertEqual((allocation.stock_qty, allocation.fulfilled_qty), (order.items[0].stock_qty, order.items[0].stock_qty))
+		self.assertTrue(allocation.delivery_note_item)
+		self.assertTrue(shipment.external_delivery_identity_key)
 		self.assertEqual(frappe.db.get_value("Delivery Note", result["delivery_note"], "docstatus"), 1)
 
 	def test_duplicate_click_makes_no_second_request_or_shipment(self):
@@ -49,6 +56,31 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 
 		self.assertEqual(len(self.http.sent()), 1)
 		self.assertEqual(frappe.db.count("Bosta Shipment", {"sales_order": order.name}), 1)
+
+	def test_reservation_subtracts_submitted_delivery_notes_by_exact_sales_order_row(self):
+		order = self.make_order(qty=3)
+		prior_delivery_note = make_delivery_note(order.name)
+		prior_delivery_note.items[0].qty = 1
+		prior_delivery_note.insert()
+		prior_delivery_note.submit()
+		frappe.db.commit()
+		self.http.queue["create"].append(created())
+
+		result = self.create(order)
+
+		shipment = frappe.get_doc("Bosta Shipment", result["shipment"])
+		self.assertEqual(len(shipment.shipment_items), 1)
+		allocation = shipment.shipment_items[0]
+		self.assertEqual(allocation.so_detail, order.items[0].name)
+		self.assertEqual(allocation.stock_qty, 2)
+		self.assertEqual(frappe.db.get_value("Delivery Note", result["delivery_note"], "docstatus"), 1)
+		delivery_rows = frappe.get_all(
+			"Delivery Note Item",
+			filters={"against_sales_order": order.name},
+			fields=["parent", "qty", "so_detail"],
+		)
+		self.assertEqual(len(delivery_rows), 2)
+		self.assertEqual(sorted(row.qty for row in delivery_rows), [1, 2])
 
 	def test_delivery_note_failure_is_savepointed_and_resumed_without_a_second_bosta_call(self):
 		order = self.make_order()
@@ -89,6 +121,7 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		shipment = self.shipment_for(order)
 		self.assertEqual(shipment.status, "Bosta Failed")
 		self.assertIn("HTTP 400", shipment.last_error)
+		self.assertEqual(shipment.reservation_status, "Released")
 
 		# Retry searches first, finds nothing, then sends again on the same shipment.
 		self.http.queue["search"].append(FakeResponse(200, {"success": True, "data": []}))
@@ -148,6 +181,7 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		shipment = self.shipment_for(order)
 		self.assertEqual(shipment.status, "Bosta Failed")
 		self.assertIn("Check Bosta", shipment.last_error)
+		self.assertEqual(shipment.reservation_status, "Reserved")
 
 	def test_check_bosta_links_a_delivery_that_exists_and_continues(self):
 		order = self.make_order()
@@ -192,6 +226,7 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		shipment.reload()
 		self.assertEqual(shipment.status, "Bosta Failed")
 		self.assertIn("A retry is allowed", shipment.last_error)
+		self.assertEqual(shipment.reservation_status, "Released")
 
 	def test_check_bosta_refuses_a_fresh_pending_shipment_and_unrecognised_search_replies(self):
 		order = self.make_order()
@@ -454,49 +489,14 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		self.assertIn("Choose a Bosta city", str(raised.exception))
 		self.assertEqual(self.http.sent(), [])
 
-	def test_only_one_active_shipment_per_sales_order_but_a_new_one_after_cancel(self):
+	def test_new_shipments_do_not_depend_on_the_legacy_active_sales_order_key(self):
 		order = self.make_order()
 		self.http.queue["create"].append(created())
 		self.create(order)
 		first = self.shipment_for(order)
-
-		def candidate():
-			return frappe.get_doc(
-				{
-					"doctype": "Bosta Shipment",
-					"sales_order": order.name,
-					"receiver_name": self._receiver(),
-					"receiver_phone": "0100",
-					"city": "Cairo",
-					"city_id": "city-cairo",
-					"city_code": "EG-01",
-					"address_first_line": "12 Example Street",
-				}
-			)
-
-		# Friendly message from validate...
-		with self.assertRaises(frappe.ValidationError) as raised:
-			save_as_system(candidate(), insert=True)
-		self.assertIn("already has an active", str(raised.exception))
-		# ...and the database-level unique index, even with validation bypassed.
-		bypass = candidate()
-		bypass.active_sales_order = order.name
-		bypass.flags.ignore_validate = True
-		with self.assertRaises(frappe.UniqueValidationError):
-			save_as_system(bypass, insert=True)
-		frappe.db.rollback()
-
-		# A System Manager re-activating a Canceled shipment gets the friendly message too.
-		first.status = "Canceled"
-		save_as_system(first)
-		second = save_as_system(candidate(), insert=True)
-		self.assertEqual(frappe.db.get_value("Bosta Shipment", second.name, "active_sales_order"), order.name)
-		first.reload()
-		first.status = "Completed"
-		with self.assertRaises(frappe.ValidationError) as raised:
-			save_as_system(first)
-		self.assertIn("already has an active", str(raised.exception))
-		frappe.db.rollback()
+		self.assertFalse(first.active_sales_order)
+		self.assertEqual(first.reservation_status, "Fulfilled")
+		self.assertEqual(frappe.db.count("Bosta Shipment", {"sales_order": order.name}), 1)
 
 	def test_several_canceled_shipments_coexist_for_one_sales_order(self):
 		order = self.make_order()

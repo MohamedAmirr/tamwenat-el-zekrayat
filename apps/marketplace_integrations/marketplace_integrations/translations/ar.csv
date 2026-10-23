@@ -25,6 +25,27 @@ Shopify Order Import Failures,أخطاء استيراد طلبات Shopify
 Bosta Settings,إعدادات Bosta
 Bosta Shipments,شحنات Bosta
 Bosta Shipment,شحنة Bosta
+Company,الشركة
+Company {0} does not match Sales Order {1}.,الشركة {0} لا تطابق أمر البيع {1}.
+Bosta Shipment Item,عنصر شحنة Bosta
+Fulfillment Key,مفتاح التنفيذ
+Reservation Status,حالة الحجز
+Reserved,محجوز
+Released,محرر
+Fulfilled,تم تنفيذه
+Shipment Items,عناصر الشحنة
+Sales Order Item,عنصر أمر البيع
+Item Code,رمز الصنف
+Warehouse,المخزن
+Warehouse {0} does not belong to Company {1}.,المخزن {0} لا يتبع الشركة {1}.
+UOM,وحدة القياس
+Conversion Factor,معامل التحويل
+Quantity in Stock UOM,الكمية بوحدة قياس المخزون
+Batch No,رقم الدفعة
+Serial No,الرقم التسلسلي
+Delivery Note Item,عنصر إذن التسليم
+External Delivery Identity Key,مفتاح هوية التوصيل الخارجي
+Legacy field retained for historical records; reservations are tracked by shipment items.,حقل قديم محفوظ للسجلات التاريخية؛ تُتتبّع الحجوزات من خلال عناصر الشحنة.
 Marketplace Order,طلب السوق
 Talabat Catalog Mapping,ربط كتالوج Talabat
 Shopify Catalog Mapping,ربط كتالوج Shopify
@@ -1157,6 +1178,15 @@ SHIPPED,تم الشحن
 Sales Order Sync,مزامنة أمر البيع
 Sales Order synchronization,مزامنة أمر البيع
 Sales Order {0} already has an active Bosta Shipment.,أمر البيع {0} لديه بالفعل شحنة Bosta نشطة.
+Fulfillment Key cannot be changed after creation.,لا يمكن تغيير مفتاح التنفيذ بعد الإنشاء.
+Fulfillment Key must be unique.,يجب أن يكون مفتاح التنفيذ فريدًا.
+Bosta Delivery ID cannot be changed after it is recorded.,لا يمكن تغيير معرّف توصيل Bosta بعد تسجيله.
+Bosta Delivery ID {0} is already linked to another shipment.,معرّف توصيل Bosta {0} مرتبط بالفعل بشحنة أخرى.
+Shipment item {0} does not belong to Sales Order {1}.,عنصر الشحنة {0} لا يتبع أمر البيع {1}.
+Shipment item quantities must be greater than zero.,يجب أن تكون كميات عناصر الشحنة أكبر من صفر.
+Shipment items are managed by the system and cannot be edited.,يدير النظام عناصر الشحنة ولا يمكن تعديلها.
+The Sales Order has no available quantity to reserve for Bosta.,لا توجد كمية متاحة في أمر البيع لحجزها لدى Bosta.
+The Sales Order allocation no longer matches the Delivery Note.,لم يعد تخصيص أمر البيع مطابقًا لإذن التسليم.
 Sales Order {0} has more than one submitted Sales Invoice ({1}); allocate the payment manually.,أمر البيع {0} لديه أكثر من فاتورة مبيعات معتمدة ({1})؛ خصّص الدفعة يدويًا.
 Sales Order {0} is cancelled; the payment cannot be recorded.,أمر البيع {0} ملغى؛ لا يمكن تسجيل الدفعة.
 Sales Order {0} is closed; the payment cannot be recorded.,أمر البيع {0} مغلق؛ لا يمكن تسجيل الدفعة.
