@@ -268,8 +268,6 @@ Attempted At,وقت المحاولة
 Request Data,بيانات الطلب
 Bosta Settings requires an API key when enabled.,تتطلب إعدادات Bosta مفتاح API عند التفعيل.
 Bosta Settings requires a business location ID when enabled.,تتطلب إعدادات Bosta معرّف موقع العمل عند التفعيل.
-All Orders,جميع الطلبات
-Platform Orders,طلبات المنصات
 Noon Returns,مرتجعات Noon
 Products & Inventory,المنتجات والمخزون
 Needs Mapping,يحتاج إلى ربط
@@ -280,7 +278,6 @@ Shopify Catalog,كتالوج Shopify
 Accounts & Connections,الحسابات والاتصالات
 Marketplace Accounts,حسابات السوق
 Shopify Reconciliation,تسوية Shopify
-Logs & Webhooks,السجلات و Webhooks
 Sync Log,سجل المزامنة
 Marketplace Order Item,عنصر طلب السوق
 Marketplace Order Shipment,شحنة طلب السوق
@@ -1573,3 +1570,7 @@ Tracking number,رقم التتبع
 Total,الإجمالي
 Sales Order {0} was not found. It may have been deleted.,لم يتم العثور على أمر البيع {0}. ربما تم حذفه.
 Marketplace Account '{0}' does not exist or is not permitted.,حساب السوق '{0}' غير موجود أو غير مسموح به.
+Marketplaces,الأسواق
+Orders,الطلبات
+Home,الرئيسية
+Reports & Logs,التقارير والسجلات
