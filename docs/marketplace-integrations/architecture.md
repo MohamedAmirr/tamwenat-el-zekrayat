@@ -195,15 +195,39 @@ The `Bosta Shipment` operational record links an ERPNext Sales Order and
 Delivery Note; it is not a marketplace shipment or a generic carrier
 framework.
 
+`Bosta Shipment` has one `Bosta Shipment Item` row per reserved Sales Order
+item row. Each row stores the exact `so_detail`, item, transaction UOM and
+conversion factor, warehouse, stock-UOM quantity, fulfilled quantity, and the
+linked Delivery Note Item when one is submitted. Before contacting Bosta, the
+service locks the Sales Order and reserves all currently available stock
+quantity by row: ordered stock quantity minus stock quantity on submitted
+outbound Delivery Notes minus other active Bosta reservations. The Sales Order
+lock serializes reservation attempts. This issue has no per-line quantity
+chooser, so true partial shipments and concurrent split shipments are deferred.
+The standard Delivery Note is still submitted immediately after Bosta accepts;
+its rows are limited to the stored reservation. A DN failure keeps the
+reservation. An explicit Bosta rejection releases it; a timeout or malformed
+acceptance keeps it until Check Bosta resolves whether the remote delivery
+exists. A completed DN marks the allocation Fulfilled; cancellation releases
+it only after ERPNext has canceled the linked DN.
+
+Each shipment receives a generated immutable `fulfillment_key`. A hidden unique
+identity key enforces uniqueness for a non-empty Bosta delivery ID. The former
+`active_sales_order` column remains only as legacy historical data and no longer
+has a unique index. The migration backfills fulfillment keys, non-conflicting
+external IDs, and allocation rows only from an unambiguous linked Delivery Note;
+duplicate external IDs or ambiguous links are left unchanged for manual review.
+
 **Creating.** Only **Sales Manager**, **Stock User** and **System Manager** may
 create or check a shipment (Sales User is read-only; Stock User can read but not
 submit a Sales Order, so the Sales Order check is `read`). The order must be
-submitted, not Closed or On Hold, and have remaining deliverable quantity; this
+submitted, not Closed or On Hold, and have available deliverable quantity; this
 is checked before any row is inserted or Bosta is called. The flow is: commit,
-lock the Sales Order as the first statement of the transaction, validate,
-insert a `Pending Bosta` row and commit, call Bosta, persist the result and
-commit, then re-lock the Sales Order and create/submit the Delivery Note inside
-a savepoint (rolled back to on failure). COD is the **outstanding** amount:
+lock the Sales Order as the first statement of the transaction, compute and
+persist the per-row reservation in a `Pending Bosta` row, commit, call Bosta,
+persist the result and commit, then re-lock the Sales Order and create/submit
+the standard Delivery Note for that reservation inside a savepoint (rolled
+back on failure, with the reservation retained). COD is the **outstanding** amount:
 `rounded_total` (else `grand_total`) minus `advance_paid`, never below 0, and
 rejected locally above Bosta's documented 30,000 EGP limit. The payload sends
 the same value as `businessReference` and `uniqueBusinessReference`. The OpenAPI
@@ -300,8 +324,8 @@ summary: `name`, `status`, `tracking_number`, `bosta_state`, `active`, `last_upd
 `address_first_line`, `cod_amount`, `delivery_note` and `delivery_note_status` (the Delivery
 Note's status only when the caller can read that Delivery Note, else empty). It needs read on
 the Sales Order (else a permission error) and on Bosta Shipment (else it returns nothing); it
-reads with the caller's permissions. The active shipment (status not `Canceled`; the unique
-`active_sales_order` allows at most one) wins; if there is none, the latest `Canceled` one is
+reads with the caller's permissions. The latest shipment whose status is not `Canceled` wins;
+if there is none, the latest `Canceled` one is
 returned with `active` false; otherwise nothing. `Bosta Shipment.cod_amount` is the COD sent
 when the delivery was created; it is a read-only Currency system field.
 `sales_order.js` asks on every refresh (a reply that arrives after a newer refresh is
@@ -387,14 +411,12 @@ error, never "not found". The live search response (seen 2026-10-19) is
 `data: {count, deliveries, limit, page}`; `deliveries` is read as the result list,
 and a `count` larger than the returned page is treated as ambiguous.
 
-**One active shipment per Sales Order.** `Bosta Shipment.active_sales_order` is a
-unique, hidden field set to the Sales Order while the shipment is not `Canceled`
-and to NULL once it is; MariaDB's unique index therefore allows any number of
-Canceled shipments but only one active one, even under concurrency. A Bosta
-cancellation (state `49`) cancels the Delivery Note, sets the shipment to
-`Canceled`, and a new shipment may then be created. If the Delivery Note cancel
-fails, the shipment stays active (no second shipment while goods are booked out)
-and `delivery_note_error` is set; a local retry runs on every poll. There is no
+**Shipment reservation lifecycle.** `reservation_status` is `Reserved` while a
+shipment holds quantities, `Released` after a definitive Bosta failure or a
+successful cancellation, and `Fulfilled` after the linked Delivery Note submits.
+An ambiguous Bosta outcome remains reserved until Check Bosta resolves it. If
+Delivery Note cancellation fails, the reservation remains held and
+`delivery_note_error` is set; a local retry runs on every poll. There is no
 terminal Returned status: state `46` is stored only, and the "Returned to
 business" return Delivery Note remains blocked.
 

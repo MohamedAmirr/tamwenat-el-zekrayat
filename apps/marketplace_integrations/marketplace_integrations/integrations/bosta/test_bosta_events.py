@@ -72,7 +72,7 @@ class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual((shipment.status, shipment.bosta_state_code), ("Canceled", 49))
 		self.assertEqual(frappe.db.get_value("Delivery Note", delivery_note, "docstatus"), 2)
 		self.assertFalse(shipment.delivery_note_error)
-		self.assertIsNone(shipment.active_sales_order)
+		self.assertEqual(shipment.reservation_status, "Released")
 
 		self.http.queue["create"].append(created("TRK-NEW", "D-NEW"))
 		self.create(order)
@@ -430,7 +430,7 @@ class IntegrationTestBostaRefresh(BostaFixtureMixin, IntegrationTestCase):
 		shipment.reload()
 		self.assertEqual(shipment.status, "Canceled")
 		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 2)
-		self.assertIsNone(shipment.active_sales_order)
+		self.assertEqual(shipment.reservation_status, "Released")
 
 	def test_a_bosta_error_or_network_failure_stores_nothing_and_is_escaped(self):
 		_, shipment = self._live()
@@ -595,7 +595,7 @@ class IntegrationTestBostaCancel(BostaFixtureMixin, IntegrationTestCase):
 		shipment.reload()
 		self.assertEqual(shipment.status, "Canceled")
 		self.assertTrue(shipment.bosta_terminated_on)
-		self.assertIsNone(shipment.active_sales_order)
+		self.assertEqual(shipment.reservation_status, "Released")
 		self.assertEqual(frappe.db.get_value("Delivery Note", shipment.delivery_note, "docstatus"), 2)
 		self.http.queue["create"].append(created("TRK-NEW", "D-NEW"))
 		self.create(order)
@@ -617,7 +617,7 @@ class IntegrationTestBostaCancel(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual((shipment.status, shipment.bosta_state_code), ("Completed", 0))
 		self.assertTrue(shipment.bosta_terminated_on)
 		self.assertTrue(shipment.delivery_note_error)
-		self.assertEqual(shipment.active_sales_order, shipment.sales_order)
+		self.assertEqual(shipment.reservation_status, "Reserved")
 
 		statuses.retry_failed_cancellations()
 

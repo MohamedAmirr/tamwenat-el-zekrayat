@@ -77,8 +77,8 @@ def get_sales_order_shipment(sales_order_name):
 	"""The Sales Order's current Bosta shipment for its form (#246), or None.
 
 	Needs read on the Sales Order and on Bosta Shipment; a user without Bosta Shipment read
-	gets None, never any shipment detail. The active shipment (not Canceled; at most one,
-	``active_sales_order`` is unique) wins; otherwise the latest Canceled one is returned
+	gets None, never any shipment detail. The latest non-canceled shipment wins; otherwise
+	the latest Canceled one is returned
 	with ``active`` False. Read with the caller's permissions, so user permissions apply.
 	"""
 	frappe.has_permission("Sales Order", "read", doc=sales_order_name, throw=True)
@@ -224,14 +224,15 @@ def create_bosta_shipment(
 	address_first_line,
 	expected_cod=None,
 ):
-	"""Create Bosta's delivery, then the full remaining ERPNext Delivery Note.
+	"""Reserve available Sales Order quantities, create Bosta's delivery, then submit a
+	standard Delivery Note for that reservation immediately.
 
 	Transaction shape: commit, lock the Sales Order (first statement of the
-	transaction), validate and decide, persist a ``Pending Bosta`` row and commit
-	(releasing the lock - the unique active-shipment index now blocks a duplicate), call
-	Bosta, persist the result and commit, then re-lock the Sales Order for the Delivery
-	Note. A Bosta acceptance followed by a Delivery Note failure is visible and resumable
-	without ever submitting a second Bosta delivery.
+	transaction), validate and reserve all available quantities by Sales Order item row,
+	persist a ``Pending Bosta`` row and commit, call Bosta, persist the result and commit,
+	then re-lock the Sales Order for the Delivery Note. A Bosta acceptance followed by a
+	Delivery Note failure is visible and resumable without ever submitting a second Bosta
+	delivery. An unknown Bosta outcome keeps its reservation until Check Bosta resolves it.
 
 	``city_id`` is the Bosta city; no district is sent, Bosta resolves it from the city code and
 	the address (#318). ``expected_cod`` is the amount the dialog showed; if the amount
@@ -264,6 +265,7 @@ def create_bosta_shipment(
 		{
 			"doctype": "Bosta Shipment",
 			"sales_order": order.name,
+			"company": order.company,
 			"receiver_name": receiver_name,
 			"receiver_phone": receiver_phone,
 			"city": city["name"],
@@ -274,6 +276,7 @@ def create_bosta_shipment(
 			"bosta_requested_on": now_datetime(),
 		}
 	)
+	_reserve_available_quantity(shipment, order)
 	save_as_system(shipment, insert=True)
 	# The unique row must survive a network/remote failure, preventing a second request
 	# that could duplicate a delivery after an ambiguous timeout.
@@ -304,6 +307,7 @@ def check_bosta_shipment(shipment_name):
 		if not shipment.tracking_number:
 			if not remote:
 				shipment.status = "Bosta Failed"
+				shipment.reservation_status = "Released"
 				shipment.last_error = _(
 					"Bosta has no delivery with reference {0}. A retry is allowed."
 				).format(shipment.unique_business_reference)
@@ -380,10 +384,18 @@ def _current_cod(order, expected_cod):
 
 
 def _active_shipment(sales_order):
-	name = frappe.db.get_value(
-		"Bosta Shipment", {"sales_order": sales_order, "status": ["!=", "Canceled"]}, "name"
+	# The prior active_sales_order field is retained only for old data. A pending
+	# operation is now identified by its status and reservation lifecycle instead.
+	rows = frappe.get_all(
+		"Bosta Shipment",
+		filters={
+			"sales_order": sales_order,
+			"status": ["in", ["Pending Bosta", "Bosta Created", "Delivery Note Failed", "Bosta Failed"]],
+		},
+		fields=["name", "status", "tracking_number", "reservation_status"],
+		order_by="creation desc, name desc",
 	)
-	return frappe.get_doc("Bosta Shipment", name) if name else None
+	return frappe.get_doc("Bosta Shipment", rows[0].name) if rows else None
 
 
 def _resume_existing(shipment, order, expected_cod=None, details=None):
@@ -398,6 +410,8 @@ def _resume_existing(shipment, order, expected_cod=None, details=None):
 		if remote:
 			lock_and_load_sales_order(order.name)
 			shipment.reload()
+			if shipment.reservation_status != "Reserved":
+				_reserve_available_quantity(shipment, _get_sales_order(order.name))
 			_link_bosta_delivery(shipment, remote)
 			frappe.db.commit()
 			return _create_delivery_note(shipment, order.name)
@@ -405,6 +419,7 @@ def _resume_existing(shipment, order, expected_cod=None, details=None):
 		shipment.reload()
 		# Nothing reached Bosta, so the operator may correct the receiver or address.
 		shipment.update(details or {})
+		_reserve_available_quantity(shipment, _get_sales_order(order.name))
 		shipment.status = "Pending Bosta"
 		shipment.cod_amount = cod
 		shipment.bosta_requested_on = now_datetime()
@@ -451,6 +466,7 @@ def _send_to_bosta(shipment, sales_order, cod):
 
 	if not is_success_response(response):
 		shipment.status = "Bosta Failed"
+		shipment.reservation_status = "Released"
 		shipment.last_error = BostaClient().error_message(response)
 		save_as_system(shipment)
 		frappe.db.commit()
@@ -558,11 +574,14 @@ def _create_delivery_note(shipment, sales_order):
 			"delivery_note": shipment.delivery_note,
 			"tracking_number": shipment.tracking_number,
 		}
+	if shipment.reservation_status != "Reserved":
+		_reserve_available_quantity(shipment, _get_sales_order(sales_order))
 	frappe.db.savepoint(DELIVERY_NOTE_SAVEPOINT)
 	# The caller's Bosta role was checked up front; the document work runs as that user
 	# with permission checks skipped (they remain the Delivery Note's owner).
 	try:
 		delivery_note = make_delivery_note(sales_order)
+		_reserved_delivery_note_items(delivery_note, shipment)
 		if not delivery_note.items:
 			frappe.throw(_("The Sales Order has no remaining quantity to deliver."))
 		delivery_note.insert(ignore_permissions=True)
@@ -582,8 +601,14 @@ def _create_delivery_note(shipment, sales_order):
 
 	shipment.delivery_note = delivery_note.name
 	shipment.status = "Completed"
+	shipment.reservation_status = "Fulfilled"
 	shipment.last_error = ""
 	shipment.delivery_note_error = ""
+	fulfilled_items = {row.so_detail: row for row in shipment.shipment_items}
+	for delivery_item in delivery_note.items:
+		allocation = fulfilled_items[delivery_item.so_detail]
+		allocation.fulfilled_qty = delivery_item.stock_qty
+		allocation.delivery_note_item = delivery_item.name
 	save_as_system(shipment)
 	frappe.db.release_savepoint(DELIVERY_NOTE_SAVEPOINT)
 	frappe.db.commit()
@@ -592,6 +617,107 @@ def _create_delivery_note(shipment, sales_order):
 		"delivery_note": delivery_note.name,
 		"tracking_number": shipment.tracking_number,
 	}
+
+
+def _reserve_available_quantity(shipment, order):
+	"""Reserve all currently available stock quantity per Sales Order item row.
+
+	The caller holds the Sales Order row lock. Submitted Delivery Notes and other
+	active shipment reservations are subtracted by exact ``so_detail``.
+	"""
+	precision = frappe.get_precision("Sales Order Item", "stock_qty")
+	qty_precision = frappe.get_precision("Sales Order Item", "qty")
+	ordered = {item.name: flt(item.stock_qty, precision) for item in order.items}
+	delivered = _submitted_delivery_note_quantities(order.name)
+	reserved = _active_reservation_quantities(order.name, exclude=shipment.name)
+	allocations = []
+	for item in order.items:
+		if item.delivered_by_supplier:
+			continue
+		available = flt(ordered[item.name] - delivered.get(item.name, 0) - reserved.get(item.name, 0), precision)
+		if available <= 0:
+			continue
+		conversion_factor = flt(item.conversion_factor) or 1
+		allocations.append(
+			{
+				"doctype": "Bosta Shipment Item",
+				"so_detail": item.name,
+				"item_code": item.item_code,
+				"warehouse": item.warehouse,
+				"qty": flt(available / conversion_factor, qty_precision),
+				"uom": item.uom,
+				"conversion_factor": conversion_factor,
+				"stock_qty": available,
+				"fulfilled_qty": 0,
+			}
+		)
+	if not allocations:
+		frappe.throw(_("The Sales Order has no available quantity to reserve for Bosta."))
+	shipment.set("shipment_items", allocations)
+	shipment.reservation_status = "Reserved"
+
+
+def _submitted_delivery_note_quantities(sales_order):
+	"""Stock quantity already delivered, grouped by the exact Sales Order row."""
+	# This system-internal aggregate runs after the caller has passed the Sales Order
+	# read check; parameterized SQL keeps the child-row join bounded and exact.
+	rows = frappe.db.sql(
+		"""
+		SELECT dni.so_detail, SUM(dni.stock_qty) AS stock_qty
+		FROM `tabDelivery Note Item` dni
+		INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+		WHERE dni.against_sales_order = %s
+			AND dni.so_detail IS NOT NULL AND dni.so_detail != ''
+			AND dn.docstatus = 1 AND IFNULL(dn.is_return, 0) = 0
+		GROUP BY dni.so_detail
+		""",
+		(sales_order,),
+		as_dict=True,
+	)
+	return {row.so_detail: flt(row.stock_qty, frappe.get_precision("Sales Order Item", "stock_qty")) for row in rows}
+
+
+def _active_reservation_quantities(sales_order, exclude=None):
+	# Trusted service read after the creator-role and Sales Order checks above.
+	shipments = frappe.get_all(
+		"Bosta Shipment",
+		filters={"sales_order": sales_order, "reservation_status": "Reserved", "name": ["!=", exclude or ""]},
+		pluck="name",
+	)
+	if not shipments:
+		return {}
+	rows = frappe.get_all(
+		"Bosta Shipment Item",
+		filters={"parent": ["in", shipments], "parenttype": "Bosta Shipment", "parentfield": "shipment_items"},
+		fields=["so_detail", "stock_qty"],
+	)
+	precision = frappe.get_precision("Sales Order Item", "stock_qty")
+	reserved = {}
+	for row in rows:
+		reserved[row.so_detail] = flt(reserved.get(row.so_detail, 0) + flt(row.stock_qty, precision), precision)
+	return reserved
+
+
+def _reserved_delivery_note_items(delivery_note, shipment):
+	"""Limit the standard ERPNext mapper output to this shipment's reserved SO rows."""
+	allocations = {row.so_detail: row for row in shipment.shipment_items}
+	items = []
+	for row in delivery_note.items:
+		allocation = allocations.get(row.so_detail)
+		if not allocation:
+			continue
+		row.qty = allocation.qty
+		row.uom = allocation.uom
+		row.conversion_factor = allocation.conversion_factor
+		row.stock_qty = allocation.stock_qty
+		if allocation.warehouse:
+			row.warehouse = allocation.warehouse
+		else:
+			allocation.warehouse = row.warehouse
+		items.append(row)
+	delivery_note.set("items", items)
+	if len(delivery_note.items) != len(allocations):
+		frappe.throw(_("The Sales Order allocation no longer matches the Delivery Note."))
 
 
 def rollback_to_savepoint(savepoint):

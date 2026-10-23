@@ -6,7 +6,11 @@
  "engine": "InnoDB",
  "field_order": [
   "sales_order",
+  "company",
   "delivery_note",
+  "fulfillment_key",
+  "reservation_status",
+  "shipment_items",
   "status",
   "receiver_section",
   "receiver_name",
@@ -36,7 +40,8 @@
   "bosta_requested_on",
   "cod_amount",
   "bosta_terminated_on",
-  "active_sales_order"
+  "active_sales_order",
+  "external_delivery_identity_key"
  ],
  "fields": [
   {
@@ -54,6 +59,42 @@
    "fieldtype": "Link",
    "label": "Delivery Note",
    "options": "Delivery Note",
+   "read_only": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "fulfillment_key",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "ignore_xss_filter": 1,
+   "label": "Fulfillment Key",
+   "no_copy": 1,
+   "read_only": 1,
+   "unique": 1
+  },
+  {
+   "default": "Reserved",
+   "fieldname": "reservation_status",
+   "fieldtype": "Select",
+   "hidden": 1,
+   "label": "Reservation Status",
+   "options": "Reserved\nReleased\nFulfilled",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "shipment_items",
+   "fieldtype": "Table",
+   "label": "Shipment Items",
+   "options": "Bosta Shipment Item",
    "read_only": 1
   },
   {
@@ -236,12 +277,21 @@
    "read_only": 1
   },
   {
-   "description": "Equals Sales Order while this shipment is active (not Canceled), otherwise empty. Its unique index allows only one active shipment per Sales Order.",
+   "description": "Legacy field retained for historical records; reservations are tracked by shipment items.",
    "fieldname": "active_sales_order",
    "fieldtype": "Data",
    "hidden": 1,
    "ignore_xss_filter": 1,
    "label": "Active Sales Order",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "external_delivery_identity_key",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "ignore_xss_filter": 1,
+   "label": "External Delivery Identity Key",
    "no_copy": 1,
    "read_only": 1,
    "unique": 1
@@ -276,7 +326,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-22 20:00:00.000000",
+ "modified": "2026-10-23 15:30:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Bosta Shipment",

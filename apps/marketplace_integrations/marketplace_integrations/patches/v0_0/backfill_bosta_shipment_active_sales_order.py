@@ -1,10 +1,10 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-"""Fill Bosta Shipment.active_sales_order for rows created before the field existed.
+"""Historical backfill for the legacy active_sales_order field.
 
-``sales_order`` used to be globally unique; the one-active-shipment-per-Sales-Order guard is now
-the unique ``active_sales_order`` column (NULL once a shipment is Canceled). Idempotent.
+The reservation model no longer uses this column; the following patch removes its
+unique index while retaining existing values for audit history. Idempotent.
 """
 
 import frappe

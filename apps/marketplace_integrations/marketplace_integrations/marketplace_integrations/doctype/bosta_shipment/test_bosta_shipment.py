@@ -4,6 +4,10 @@
 import frappe
 from frappe.tests import IntegrationTestCase, UnitTestCase
 
+from marketplace_integrations.marketplace_integrations.doctype.bosta_shipment.bosta_shipment import (
+	save_as_system,
+)
+
 # The regression test inserts a shipment with ignore_links; skip auto-generated linked records.
 IGNORE_TEST_RECORD_DEPENDENCIES = ["Sales Order", "Delivery Note"]
 
@@ -43,6 +47,19 @@ class UnitTestBostaShipment(UnitTestCase):
 
 
 class TestBostaShipmentTitle(IntegrationTestCase):
+	def test_fulfillment_reservation_fields_replace_the_active_sales_order_constraint(self):
+		meta = frappe.get_meta("Bosta Shipment")
+
+		self.assertTrue(meta.get_field("company").reqd)
+		self.assertTrue(meta.get_field("fulfillment_key").unique)
+		self.assertTrue(meta.get_field("external_delivery_identity_key").unique)
+		self.assertFalse(meta.get_field("active_sales_order").unique)
+		self.assertEqual(meta.get_field("shipment_items").options, "Bosta Shipment Item")
+		item_meta = frappe.get_meta("Bosta Shipment Item")
+		self.assertTrue(item_meta.istable)
+		for fieldname in ("so_detail", "item_code", "qty", "uom", "conversion_factor", "warehouse", "stock_qty", "fulfilled_qty"):
+			self.assertTrue(item_meta.get_field(fieldname), fieldname)
+
 	def test_title_is_the_tracking_number(self):
 		"""#324: the subject is the tracking number; it is not a list column."""
 		meta = frappe.get_meta("Bosta Shipment")
@@ -69,6 +86,7 @@ class TestBostaShipmentTitle(IntegrationTestCase):
 		doc.update(
 			{
 				"sales_order": f"SAL-ORD-{frappe.generate_hash(length=10)}",
+				"company": frappe.defaults.get_global_default("company"),
 				"receiver_name": "Ahmed",
 				"receiver_phone": "01000000000",
 				"city": "Cairo",
@@ -78,7 +96,7 @@ class TestBostaShipmentTitle(IntegrationTestCase):
 			}
 		)
 		doc.flags.ignore_links = True
-		doc.insert()
+		save_as_system(doc, insert=True)
 		self.addCleanup(frappe.delete_doc, "Bosta Shipment", doc.name, force=True, ignore_permissions=True)
 
 		self.assertEqual(doc.status, "Pending Bosta")
