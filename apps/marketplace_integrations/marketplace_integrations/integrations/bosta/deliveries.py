@@ -23,6 +23,7 @@ BOSTA_DELIVERY_TYPE = 10
 
 # Roles that may create/check Bosta shipments (D3). Sales User is read-only.
 CREATOR_ROLES = ("Sales Manager", "Stock User", "System Manager", "Bosta User")
+HANDOVER_ROLES = ("System Manager", "Stock Manager")
 
 # Bosta's documented COD ceiling for a delivery (OpenAPI ``cod`` description).
 BOSTA_COD_LIMIT = 30000
@@ -74,12 +75,12 @@ def _receiver_phone_prefill(order):
 
 
 def get_sales_order_shipment(sales_order_name):
-	"""The Sales Order's current Bosta shipment for its form (#246), or None.
+	"""Permission-aware Bosta shipment summaries for a Sales Order form (#246/#338).
 
 	Needs read on the Sales Order and on Bosta Shipment; a user without Bosta Shipment read
-	gets None, never any shipment detail. The latest non-canceled shipment wins; otherwise
-	the latest Canceled one is returned
-	with ``active`` False. Read with the caller's permissions, so user permissions apply.
+	gets an empty list, never shipment detail. All linked rows are returned so historical
+	shipments remain visible; the service that creates shipments enforces one active row.
+	Read with the caller's permissions, so user permissions apply.
 	"""
 	frappe.has_permission("Sales Order", "read", doc=sales_order_name, throw=True)
 	if not frappe.has_permission("Bosta Shipment", "read"):
@@ -99,36 +100,67 @@ def get_sales_order_shipment(sales_order_name):
 		"cod_amount",
 		"delivery_note",
 		"delivery_note_error",
+		"handover_status",
+		"handover_confirmed_by",
+		"handover_confirmed_on",
+		"stock_posting_status",
+		"creation",
 	]
-	for active, status_filter in ((True, ["!=", "Canceled"]), (False, "Canceled")):
-		rows = frappe.get_list(
-			"Bosta Shipment",
-			filters={"sales_order": sales_order_name, "status": status_filter},
-			fields=fields,
-			order_by="creation desc, name desc",
-			limit=1,
-		)
-		if rows:
-			row = rows[0]
-			return {
-				"name": row.name,
-				"status": row.status,
-				"tracking_number": row.tracking_number or "",
-				"bosta_state": row.bosta_state_value or "",
-				"bosta_state_code": row.bosta_state_code or 0,
-				"active": active,
-				"last_update": cstr(row.last_bosta_status_on) if row.last_bosta_status_on else "",
-				"receiver_name": row.receiver_name or "",
-				"receiver_phone": row.receiver_phone or "",
-				"city": row.city or "",
-				"city_id": row.city_id or "",
-				"address_first_line": row.address_first_line or "",
-				"cod_amount": flt(row.cod_amount),
-				"delivery_note": row.delivery_note or "",
-				"delivery_note_error": row.delivery_note_error or "",
-				"delivery_note_status": _readable_delivery_note_status(row.delivery_note),
+	rows = frappe.get_list(
+		"Bosta Shipment",
+		filters={"sales_order": sales_order_name},
+		fields=fields,
+		order_by="creation desc, name desc",
+		limit_page_length=0,
+	)
+	shipments = []
+	for row in rows:
+		shipment = {
+			"name": row.name,
+			"status": row.status,
+			"tracking_number": row.tracking_number or "",
+			"bosta_state": row.bosta_state_value or "",
+			"bosta_state_code": row.bosta_state_code or 0,
+			"active": row.status != "Canceled",
+			"last_update": cstr(row.last_bosta_status_on) if row.last_bosta_status_on else "",
+			"receiver_name": row.receiver_name or "",
+			"receiver_phone": row.receiver_phone or "",
+			"city": row.city or "",
+			"city_id": row.city_id or "",
+			"address_first_line": row.address_first_line or "",
+			"cod_amount": flt(row.cod_amount),
+			"delivery_note": row.delivery_note or "",
+			"delivery_note_error": row.delivery_note_error or "",
+			"delivery_note_status": _readable_delivery_note_status(row.delivery_note),
+			"handover_status": row.handover_status or "Awaiting Handover",
+			"handover_confirmed_by": row.handover_confirmed_by or "",
+			"handover_confirmed_on": cstr(row.handover_confirmed_on) if row.handover_confirmed_on else "",
+			"stock_posting_status": row.stock_posting_status or "Not Posted",
+			"created_on": cstr(row.creation) if row.creation else "",
+		}
+		shipment["allocations"] = [
+			{
+				"item_code": allocation.item_code or "",
+				"warehouse": allocation.warehouse or "",
+				"qty": flt(allocation.qty),
+				"uom": allocation.uom or "",
+				"stock_qty": flt(allocation.stock_qty),
 			}
-	return None
+			# The parent rows above were filtered with permission-aware get_list after
+			# authorizing Sales Order and Bosta Shipment read. Allocation child rows have
+			# no independent read grant for these roles; expose only rows of those parents.
+			for allocation in frappe.get_all(
+				"Bosta Shipment Item",
+				filters={"parent": row.name, "parenttype": "Bosta Shipment"},
+				fields=["item_code", "warehouse", "qty", "uom", "stock_qty"],
+				order_by="idx asc",
+				limit_page_length=0,
+			)
+		]
+		shipments.append(shipment)
+	if not shipments:
+		return None
+	return {**shipments[0], "shipments": shipments}
 
 
 def _readable_delivery_note_status(delivery_note):
@@ -287,8 +319,8 @@ def create_bosta_shipment(
 def check_bosta_shipment(shipment_name):
 	"""Safely resolve a stuck shipment by searching Bosta for its business reference.
 
-	Found: link the delivery and continue to the Delivery Note. Not found: mark the
-	shipment ``Bosta Failed`` so a retry is allowed.
+	Found: link the delivery; stock posts only if SEND state 21 was already observed.
+	Not found: mark the shipment ``Bosta Failed`` so a retry is allowed.
 	"""
 	_require_creator_role()
 	BostaClient().ensure_ready()
@@ -313,10 +345,33 @@ def check_bosta_shipment(shipment_name):
 				).format(shipment.unique_business_reference)
 				save_as_system(shipment)
 				frappe.db.commit()
-				return {"shipment": shipment.name, "found": False}
+				return {"shipment": shipment.name, "tracking_number": "", "delivery_note": "", "found": False}
 			_link_bosta_delivery(shipment, remote)
 			frappe.db.commit()
-	return _create_delivery_note(shipment, order.name) | {"found": True}
+	if (
+		shipment.bosta_state_code == 21
+		and shipment.bosta_delivery_type == "SEND"
+		and shipment.handover_status == "Awaiting Handover"
+	):
+		shipment.handover_status = "Confirmed"
+		shipment.handover_confirmed_by = "Administrator"
+		shipment.handover_confirmed_on = now_datetime()
+		save_as_system(shipment)
+		return _create_delivery_note(shipment, order.name) | {"found": True}
+	if shipment.handover_status == "Confirmed" and shipment.stock_posting_status != "Posted":
+		return _create_delivery_note(shipment, order.name) | {"found": True}
+	return _found_shipment_result(shipment)
+
+
+def _found_shipment_result(shipment):
+	"""Keep the response shape stable when a Bosta delivery was already found."""
+	return {
+		"shipment": shipment.name,
+		"tracking_number": shipment.tracking_number or "",
+		"delivery_note": shipment.delivery_note or "",
+		"stock_posting_status": shipment.stock_posting_status or "Not Posted",
+		"found": True,
+	}
 
 
 def lock_and_load_sales_order(sales_order_name):
@@ -400,8 +455,7 @@ def _active_shipment(sales_order):
 
 def _resume_existing(shipment, order, expected_cod=None, details=None):
 	if shipment.status in ("Delivery Note Failed", "Bosta Created") and shipment.bosta_delivery_id:
-		frappe.db.commit()
-		return _create_delivery_note(shipment, order.name)
+		return _found_shipment_result(shipment)
 	if shipment.status == "Bosta Failed" and not shipment.tracking_number:
 		cod = _current_cod(order, expected_cod)
 		frappe.db.commit()
@@ -414,7 +468,7 @@ def _resume_existing(shipment, order, expected_cod=None, details=None):
 				_reserve_available_quantity(shipment, _get_sales_order(order.name))
 			_link_bosta_delivery(shipment, remote)
 			frappe.db.commit()
-			return _create_delivery_note(shipment, order.name)
+			return _found_shipment_result(shipment)
 		lock_and_load_sales_order(order.name)
 		shipment.reload()
 		# Nothing reached Bosta, so the operator may correct the receiver or address.
@@ -483,7 +537,33 @@ def _send_to_bosta(shipment, sales_order, cod):
 	shipment.cod_amount = flt(cod, 2)
 	_link_bosta_delivery(shipment, data)
 	frappe.db.commit()
-	return _create_delivery_note(shipment, sales_order)
+	return {"shipment": shipment.name, "tracking_number": shipment.tracking_number, "delivery_note": ""}
+
+
+def confirm_physical_handover(shipment_name):
+	"""Record an authorized physical handover and post its reserved stock once."""
+	frappe.only_for(HANDOVER_ROLES)
+	shipment = frappe.get_doc("Bosta Shipment", shipment_name)
+	shipment.check_permission("read")
+	if shipment.status == "Canceled":
+		frappe.throw(_("A canceled Bosta Shipment cannot be handed over."))
+	if not shipment.tracking_number or not shipment.bosta_delivery_id:
+		frappe.throw(_("Confirm Bosta delivery details before recording physical handover."))
+	if shipment.handover_status == "Review Required":
+		frappe.throw(_("This shipment requires review before stock can be posted."))
+	if shipment.handover_status != "Confirmed":
+		shipment.handover_status = "Confirmed"
+		shipment.handover_confirmed_by = frappe.session.user
+		shipment.handover_confirmed_on = now_datetime()
+		save_as_system(shipment)
+		frappe.db.commit()
+	result = _create_delivery_note(shipment, shipment.sales_order)
+	shipment.reload()
+	result["handover_status"] = shipment.handover_status
+	result["stock_posting_status"] = shipment.stock_posting_status
+	result["handover_confirmed_by"] = shipment.handover_confirmed_by
+	result["handover_confirmed_on"] = cstr(shipment.handover_confirmed_on)
+	return result
 
 
 def _delivery_data(body):
@@ -563,6 +643,8 @@ def _build_delivery_payload(shipment, cod):
 
 def _create_delivery_note(shipment, sales_order):
 	"""Create and submit the Delivery Note inside a savepoint, under the Sales Order lock."""
+	if shipment.handover_status != "Confirmed":
+		return {"shipment": shipment.name, "delivery_note": "", "tracking_number": shipment.tracking_number, "stock_posting_status": shipment.stock_posting_status}
 	lock_and_load_sales_order(sales_order)
 	shipment.reload()
 	# The caller decided before the lock; re-check the state it may have changed.
@@ -573,7 +655,10 @@ def _create_delivery_note(shipment, sales_order):
 			"shipment": shipment.name,
 			"delivery_note": shipment.delivery_note,
 			"tracking_number": shipment.tracking_number,
+			"stock_posting_status": shipment.stock_posting_status,
 		}
+	if shipment.stock_posting_status == "Posted":
+		return {"shipment": shipment.name, "delivery_note": shipment.delivery_note, "tracking_number": shipment.tracking_number, "stock_posting_status": shipment.stock_posting_status}
 	if shipment.reservation_status != "Reserved":
 		_reserve_available_quantity(shipment, _get_sales_order(sales_order))
 	frappe.db.savepoint(DELIVERY_NOTE_SAVEPOINT)
@@ -591,6 +676,7 @@ def _create_delivery_note(shipment, sales_order):
 		rollback_to_savepoint(DELIVERY_NOTE_SAVEPOINT)
 		frappe.log_error(frappe.get_traceback(with_context=False), "Bosta Delivery Note creation failed")
 		shipment.status = "Delivery Note Failed"
+		shipment.stock_posting_status = "Failed"
 		shipment.last_error = _("Delivery Note creation failed. See Error Log for details.")
 		shipment.delivery_note_error = _("Delivery Note creation failed: {0}").format(
 			frappe.utils.strip_html(cstr(exc))[:300]
@@ -601,6 +687,7 @@ def _create_delivery_note(shipment, sales_order):
 
 	shipment.delivery_note = delivery_note.name
 	shipment.status = "Completed"
+	shipment.stock_posting_status = "Posted"
 	shipment.reservation_status = "Fulfilled"
 	shipment.last_error = ""
 	shipment.delivery_note_error = ""
@@ -616,6 +703,7 @@ def _create_delivery_note(shipment, sales_order):
 		"shipment": shipment.name,
 		"delivery_note": delivery_note.name,
 		"tracking_number": shipment.tracking_number,
+		"stock_posting_status": shipment.stock_posting_status,
 	}
 
 

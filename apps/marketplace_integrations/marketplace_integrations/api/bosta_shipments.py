@@ -15,6 +15,9 @@ from marketplace_integrations.integrations.bosta.deliveries import (
 	check_bosta_shipment as _check_bosta_shipment,
 )
 from marketplace_integrations.integrations.bosta.deliveries import (
+	confirm_physical_handover as _confirm_physical_handover,
+)
+from marketplace_integrations.integrations.bosta.deliveries import (
 	create_bosta_shipment as _create_bosta_shipment,
 )
 from marketplace_integrations.integrations.bosta.deliveries import (
@@ -92,6 +95,12 @@ def get_bulk_create_status(job_id: str):
 def check_shipment(shipment: str):
 	"""Resolve a stuck Bosta Shipment by searching Bosta for its business reference."""
 	return _check_bosta_shipment(shipment)
+
+
+@frappe.whitelist(methods=["POST"])
+def confirm_physical_handover(shipment: str):
+	"""Record authorized physical handover and post the reserved Delivery Note."""
+	return _confirm_physical_handover(shipment)
 
 
 @frappe.whitelist(methods=["POST"])

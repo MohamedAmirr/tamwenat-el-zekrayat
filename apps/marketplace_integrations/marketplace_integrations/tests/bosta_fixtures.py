@@ -284,6 +284,7 @@ class BostaFixtureMixin:
 	def create(self, order, **overrides):
 		from marketplace_integrations.integrations.bosta import deliveries
 
+		confirm_handover = overrides.pop("confirm_handover", True)
 		args = {
 			"receiver_name": self._receiver(),
 			"receiver_phone": "01000000000",
@@ -291,7 +292,11 @@ class BostaFixtureMixin:
 			"address_first_line": "12 Example Street",
 		}
 		args.update(overrides)
-		return deliveries.create_bosta_shipment(order.name, **args)
+		result = deliveries.create_bosta_shipment(order.name, **args)
+		# Legacy flow tests opt into this convenience; production creation never posts stock.
+		if confirm_handover and result.get("tracking_number"):
+			deliveries.confirm_physical_handover(result["shipment"])
+		return result
 
 	def shipment_for(self, order, **filters):
 		name = frappe.db.get_value("Bosta Shipment", {"sales_order": order.name, **filters}, "name")

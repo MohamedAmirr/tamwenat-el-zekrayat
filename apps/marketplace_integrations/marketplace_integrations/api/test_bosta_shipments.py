@@ -80,6 +80,38 @@ class IntegrationTestBostaShipmentSummary(BostaFixtureMixin, IntegrationTestCase
 				"delivery_note": "",
 				"delivery_note_error": "",
 				"delivery_note_status": "",
+				"handover_status": "Awaiting Handover",
+				"handover_confirmed_by": "",
+				"handover_confirmed_on": "",
+				"stock_posting_status": "Not Posted",
+				"created_on": str(shipment.creation),
+				"allocations": [],
+				"shipments": [
+					{
+						"name": shipment.name,
+						"status": "Bosta Created",
+						"tracking_number": "TRK-9",
+						"bosta_state": "Picked up",
+						"bosta_state_code": 0,
+						"active": True,
+						"last_update": "",
+						"receiver_name": self._receiver(),
+						"receiver_phone": "01000000000",
+						"city": "Cairo",
+						"city_id": "city-cairo",
+						"address_first_line": "12 Example Street",
+						"cod_amount": 0,
+						"delivery_note": "",
+						"delivery_note_error": "",
+						"delivery_note_status": "",
+						"handover_status": "Awaiting Handover",
+						"handover_confirmed_by": "",
+						"handover_confirmed_on": "",
+						"stock_posting_status": "Not Posted",
+						"created_on": str(shipment.creation),
+						"allocations": [],
+					}
+				],
 			},
 		)
 
@@ -105,6 +137,13 @@ class IntegrationTestBostaShipmentSummary(BostaFixtureMixin, IntegrationTestCase
 				"delivery_note",
 				"delivery_note_error",
 				"delivery_note_status",
+				"handover_status",
+				"handover_confirmed_by",
+				"handover_confirmed_on",
+				"stock_posting_status",
+				"created_on",
+				"allocations",
+				"shipments",
 			},
 		)
 
@@ -115,13 +154,14 @@ class IntegrationTestBostaShipmentSummary(BostaFixtureMixin, IntegrationTestCase
 			bosta_shipments.get_sales_order_shipment(order.name)["delivery_note_error"], "stock problem"
 		)
 
-	def test_only_canceled_returns_the_latest_canceled_as_inactive(self):
+	def test_historical_shipments_are_all_returned_with_latest_at_top_level(self):
 		order = self.make_order()
-		self._shipment(order, "Canceled", tracking_number="OLD")
+		older = self._shipment(order, "Canceled", tracking_number="OLD")
 		latest = self._shipment(order, "Canceled", tracking_number="NEWER")
 		summary = bosta_shipments.get_sales_order_shipment(order.name)
 		self.assertEqual(summary["name"], latest.name)
 		self.assertEqual((summary["status"], summary["active"]), ("Canceled", False))
+		self.assertEqual([row["name"] for row in summary["shipments"]], [latest.name, older.name])
 
 	def test_canceled_then_new_active_returns_the_active_one(self):
 		order = self.make_order()
