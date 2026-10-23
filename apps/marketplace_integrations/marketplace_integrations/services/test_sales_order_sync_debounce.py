@@ -439,6 +439,7 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 		per_billed=0,
 		so_cancelled=False,
 		outbound_cancelled=False,
+		cancelled_at=None,
 	):
 		order = self._make_order()
 		fixture = LinkedSalesOrderFixture()
@@ -449,6 +450,8 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 			values["platform"] = platform
 		if outbound_cancelled:
 			values["outbound_cancelled_on"] = now_datetime()
+		if cancelled_at:
+			values["cancelled_at"] = cancelled_at
 		if checked_hours_ago is not None:
 			values["last_reconciliation_check_on"] = add_to_date(now_datetime(), hours=-checked_hours_ago)
 		frappe.db.set_value("Marketplace Order", order.name, values, update_modified=False)
@@ -568,6 +571,20 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 			with self.subTest(**kwargs):
 				order = self._stuck_order(outbound_cancelled=True, **kwargs)
 				self.assertNotIn(order.name, self._candidates())
+
+	def test_shopify_outbound_cancel_marker_is_skipped_only_after_cancel_echo(self):
+		pending = self._stuck_order(
+			status="Modified After Sync", platform="Shopify", outbound_cancelled=True
+		)
+		confirmed = self._stuck_order(
+			status="Modified After Sync",
+			platform="Shopify",
+			outbound_cancelled=True,
+			cancelled_at=now_datetime(),
+		)
+		names = self._candidates()
+		self.assertIn(pending.name, names)
+		self.assertNotIn(confirmed.name, names)
 
 	def test_sweep_does_not_overwrite_a_webhook_bump_made_after_the_candidate_query(self):
 		order = self._stuck_order(status="Sync Error")

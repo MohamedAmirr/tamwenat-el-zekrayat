@@ -171,6 +171,72 @@ class IntegrationTestImportOrderNoSideEffects(IntegrationTestCase):
 		self.assertEqual(restock_types, ["RESTOCK"])
 
 
+class IntegrationTestShopifyOrderCancel(IntegrationTestCase):
+	def setUp(self):
+		self.account = make_shopify_account(f"Order Cancel {frappe.generate_hash(length=8)}")
+		self.order_gid = _order_gid(frappe.generate_hash(length=8))
+
+	def test_cancel_sends_only_approved_fixed_values_and_returns_job_id(self):
+		response = {
+			"orderCancel": {"jobResult": {"id": "gid://shopify/OrderCancelJobResult/1"}, "orderCancelUserErrors": []}
+		}
+		with patch(EXECUTE_TARGET, return_value=response) as execute:
+			result = orders.cancel_order(self.account.name, self.order_gid, "CUSTOMER")
+
+		query, variables = execute.call_args.args[:2]
+		self.assertIn("orderCancel(", query)
+		self.assertIn("orderCancelUserErrors", query)
+		self.assertEqual(
+			variables,
+			{
+				"orderId": self.order_gid,
+				"reason": "CUSTOMER",
+				"restock": False,
+				"notifyCustomer": False,
+			},
+		)
+		self.assertNotIn("refundMethod", query)
+		self.assertEqual(result, {"job_id": "gid://shopify/OrderCancelJobResult/1"})
+
+	def test_cancel_rejects_user_errors_and_a_missing_job(self):
+		for response in (
+			{"orderCancel": {"jobResult": {"id": "gid://shopify/OrderCancelJobResult/1"}, "orderCancelUserErrors": [{"message": "denied"}]}},
+			{"orderCancel": {"jobResult": None, "orderCancelUserErrors": []}},
+		):
+			with self.subTest(response=response), patch(EXECUTE_TARGET, return_value=response):
+				with self.assertRaises(frappe.ValidationError):
+					orders.cancel_order(self.account.name, self.order_gid, "CUSTOMER")
+
+	def test_cancel_job_poll_uses_node_fragment_and_returns_terminal_state(self):
+		response = {
+			"node": {
+				"id": "gid://shopify/OrderCancelJobResult/1",
+				"done": True,
+				"status": "FAILED",
+				"errors": [{"field": ["orderId"], "message": "Cannot cancel", "code": "NOT_CANCELLABLE"}],
+			}
+		}
+		with patch(EXECUTE_TARGET, return_value=response) as execute:
+			result = orders.poll_order_cancel_job(self.account.name, "gid://shopify/OrderCancelJobResult/1")
+
+		query, variables = execute.call_args.args[:2]
+		self.assertIn("node(id: $id)", query)
+		self.assertIn("... on OrderCancelJobResult", query)
+		self.assertIn("errors { field message code }", query)
+		self.assertEqual(variables, {"id": "gid://shopify/OrderCancelJobResult/1"})
+		self.assertEqual(result["status"], "FAILED")
+
+	def test_cancel_job_poll_is_bounded_when_job_stays_started(self):
+		with (
+			patch(EXECUTE_TARGET, return_value={"node": {"done": False, "status": "STARTED"}}) as execute,
+			patch("marketplace_integrations.integrations.shopify.orders.time.sleep"),
+		):
+			result = orders.poll_order_cancel_job(self.account.name, "gid://shopify/OrderCancelJobResult/1")
+
+		self.assertIsNone(result)
+		self.assertEqual(execute.call_count, orders.ORDER_CANCEL_JOB_POLL_ATTEMPTS)
+
+
 class IntegrationTestImportOrderStaleGuard(IntegrationTestCase):
 	def setUp(self):
 		self.account = make_shopify_account(f"Order Stale {frappe.generate_hash(length=8)}")

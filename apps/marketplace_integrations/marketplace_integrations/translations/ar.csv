@@ -1686,3 +1686,16 @@ Marketplaces,الأسواق
 Orders,الطلبات
 Home,الرئيسية
 Reports & Logs,التقارير والسجلات
+Cancel the Shopify order from ERPNext when it is eligible.,يمكن إلغاء طلب Shopify من ERPNext عند استيفائه للشروط.
+The Shopify order is already cancelled.,تم إلغاء طلب Shopify بالفعل.
+The Shopify order has an authorized payment hold; cancel it in Shopify after reviewing the hold.,يوجد حجز مبلغ معتمد على طلب Shopify؛ ألغِ الطلب في Shopify بعد مراجعة الحجز.
+Shopify fulfillment has started for one or more lines; cancel the order in Shopify after review.,بدأ تنفيذ بند واحد أو أكثر من طلب Shopify؛ ألغِ الطلب في Shopify بعد المراجعة.
+Shopify fulfillment status is unknown for one or more lines; refresh the order before cancelling.,حالة تنفيذ بند واحد أو أكثر من طلب Shopify غير معروفة؛ حدّث الطلب قبل إلغائه.
+Shopify returned no order when refreshing after cancellation.,لم يُرجع Shopify طلبًا عند تحديثه بعد الإلغاء.
+Shopify did not return an order cancellation result.,لم يُرجع Shopify نتيجة لإلغاء الطلب.
+Shopify rejected the cancellation.,رفض Shopify إلغاء الطلب.
+Shopify accepted no cancellation job.,لم يُرجع Shopify مهمة لإلغاء الطلب.
+A valid Shopify cancellation reason is required.,يجب تحديد سبب صحيح لإلغاء طلب Shopify.
+The order is already cancelled on Shopify.,تم إلغاء الطلب بالفعل على Shopify.
+Shopify cancellation job ID is required.,معرّف مهمة إلغاء Shopify مطلوب.
+Shopify cancellation job failed.,فشلت مهمة إلغاء الطلب في Shopify.

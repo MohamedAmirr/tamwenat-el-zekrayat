@@ -347,8 +347,13 @@ def _stuck_reconciliation_candidates(limit):
 		.on(so.name == order.erpnext_sales_order)
 		.select(order.name)
 		.where(order.sync_debounce_until.isnull())
-		# An order whose platform cancel ERPNext requested (#181) is the echo; never re-bumped.
-		.where(order.outbound_cancelled_on.isnull())
+		# Talabat's accepted cancel response is already synchronous. For Shopify,
+		# skip only after its cancellation echo is persisted; an accepted async job
+		# that has not cancelled the order must still reach Modified After Sync.
+		.where(
+			(order.outbound_cancelled_on.isnull())
+			| ((order.platform == "Shopify") & order.cancelled_at.isnull())
+		)
 		.where((linked & (attention_due | closed_due | inactive_due)) | (~linked & unlinked_due))
 		.orderby(order.last_reconciliation_check_on)
 		.orderby(order.name)
