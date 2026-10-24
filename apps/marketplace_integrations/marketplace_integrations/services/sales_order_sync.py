@@ -320,31 +320,60 @@ def _mirror_shopify_payments_independently(marketplace_order, trigger_source):
 
 
 def _skip_cancelled_before_sync(order, trigger_source):
-	"""Terminal, successful skip for a Shopify order cancelled before any Sales Order existed.
+	"""Resolve a full Shopify cancellation before any Sales Order exists.
 
-	"Cancelled" is the Shopify evidence's full cancellation: ``cancelledAt`` is set, or the order
-	was fully refunded before any item shipped (same test as for an already synced order).
-	No Sales Order is created just to cancel it, and the cancellation is not a sync error:
-	the order stays ``Not Synced`` with the error cleared (clearing an obsolete error from an
-	earlier attempt, e.g. a COD order first blocked as unpaid). The Marketplace Order and its
-	earlier Sync Log rows are untouched; this attempt adds one Success row. Nothing re-triggers
-	this on a schedule (the reconciliation sweeps only look at orders with a linked Sales Order).
+	Unpaid or fully refunded cancellations become terminal ``Cancelled`` with a
+	Success log. Paid or partially refunded cancellations remain ``Sync Error``
+	with an actionable refund instruction and an Invalid log. Unknown future
+	financial statuses are left untouched for manual review. No Sales Order,
+	customer, or Payment Entry is created on this path.
 	"""
-	if order.erpnext_sync_status != "Not Synced" or order.last_sync_error:
-		order.erpnext_sync_status = "Not Synced"
-		order.last_sync_error = None
+	known_statuses = {
+		"PENDING",
+		"VOIDED",
+		"EXPIRED",
+		"AUTHORIZED",
+		"REFUNDED",
+		"PAID",
+		"PARTIALLY_PAID",
+		"PARTIALLY_REFUNDED",
+	}
+	if order.external_financial_status not in known_statuses:
+		result = {
+			"ok": False,
+			"status": order.erpnext_sync_status,
+			"error": _("Cancelled Shopify order has an unrecognized financial status; review it manually."),
+		}
+		_create_sync_log(order, trigger_source, "Invalid", None, result)
+		return result
+	paid_statuses = {"PAID", "PARTIALLY_PAID", "PARTIALLY_REFUNDED"}
+	if order.external_financial_status in paid_statuses:
+		status = "Sync Error"
+		error = _(
+			"Cancelled in Shopify but the payment was not fully refunded; refund it in Shopify"
+		)
+	else:
+		status = "Cancelled"
+		error = None
+	if order.erpnext_sync_status != status or order.last_sync_error != error:
+		order.erpnext_sync_status = status
+		order.last_sync_error = error
 		order.flags.skip_sync_status_update = True
 		order.save()
-	result = {
-		"ok": True,
-		"skipped": True,
-		"status": order.erpnext_sync_status,
-		"message": _(
-			"The Shopify order was cancelled or fully refunded before an ERPNext Sales Order was created; "
-			"no Sales Order is needed."
-		),
-	}
-	_create_sync_log(order, trigger_source, "Success", None, result)
+	if status == "Cancelled":
+		result = {
+			"ok": True,
+			"skipped": True,
+			"status": status,
+			"message": _(
+				"The Shopify order was cancelled or fully refunded before an ERPNext Sales Order was created; "
+				"no Sales Order is needed."
+			),
+		}
+		_create_sync_log(order, trigger_source, "Success", None, result)
+	else:
+		result = {"ok": False, "status": status, "error": error}
+		_create_sync_log(order, trigger_source, "Invalid", None, result)
 	return result
 
 

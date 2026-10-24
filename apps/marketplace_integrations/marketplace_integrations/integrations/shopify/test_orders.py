@@ -682,6 +682,7 @@ class IntegrationTestReconcileAllAccountsOrders(IntegrationTestCase):
 		self.assertTrue(mocked.call_args_list)
 		for call in mocked.call_args_list:
 			self.assertIs(call.kwargs.get("bump_linked_changes"), True)
+			self.assertIs(call.kwargs.get("bump_unlinked"), False)
 
 
 class IntegrationTestQueueOrderImportDateRange(IntegrationTestCase):

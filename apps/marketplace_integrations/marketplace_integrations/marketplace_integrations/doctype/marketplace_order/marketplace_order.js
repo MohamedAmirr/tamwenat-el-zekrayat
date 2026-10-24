@@ -924,6 +924,7 @@ const ERPNEXT_SYNC_STATUS_COLORS = {
 	Synced: "green",
 	"Modified After Sync": "orange",
 	"Sync Error": "red",
+	Cancelled: "gray",
 };
 
 function get_status_indicator(status, color_by_status) {

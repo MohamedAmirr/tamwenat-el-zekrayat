@@ -178,7 +178,7 @@
   {"fieldname": "erpnext_sync_tab", "fieldtype": "Tab Break", "label": "ERPNext Sync"},
   {"fieldname": "erpnext_section", "fieldtype": "Section Break", "label": "ERPNext Synchronization"},
   {"fieldname": "erpnext_sales_order", "fieldtype": "Link", "label": "ERPNext Sales Order", "options": "Sales Order", "read_only": 1},
-  {"default": "Not Synced", "fieldname": "erpnext_sync_status", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "ERPNext Sync Status", "options": "Not Synced\nSynced\nModified After Sync\nSync Error", "read_only": 1},
+  {"default": "Not Synced", "fieldname": "erpnext_sync_status", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "ERPNext Sync Status", "options": "Not Synced\nSynced\nModified After Sync\nSync Error\nCancelled", "read_only": 1},
   {"fieldname": "last_erpnext_sync_on", "fieldtype": "Datetime", "label": "Last ERPNext Sync On", "read_only": 1},
   {"fieldname": "last_synced_hash", "fieldtype": "Data", "hidden": 1, "label": "Last Synced Hash", "length": 64, "read_only": 1},
   {"fieldname": "last_synced_snapshot", "fieldtype": "JSON", "hidden": 1, "ignore_xss_filter": 1, "label": "Last Synced Snapshot", "read_only": 1},

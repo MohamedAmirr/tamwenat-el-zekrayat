@@ -352,7 +352,13 @@ def _import_order_isolated(
 			bump_if_linked_order_changed(order.name, fingerprint_before, trigger_source)
 		# A manual import has no webhook behind it, so a new order would otherwise
 		# never be synced to ERPNext automatically.
-		if bump_unlinked and order and not order.erpnext_sales_order and not order.cancelled_at:
+		if (
+			bump_unlinked
+			and order
+			and not order.erpnext_sales_order
+			and not order.cancelled_at
+			and order.erpnext_sync_status != "Cancelled"
+		):
 			bump_sync_debounce(order.name, trigger_source)
 	except Exception as exc:
 		frappe.db.rollback(save_point=savepoint)
@@ -485,7 +491,7 @@ def _log_order_import_failure(account, order_gid, error, trigger_source):
 		frappe.db.commit()
 
 
-def reconcile_all_accounts_orders():
+def reconcile_all_accounts_orders(account_name=None, catch_up_unlinked=False):
 	"""Refresh each enabled Shopify account from its persisted watermark.
 
 	Each account's whole run is also isolated from every other account's: an
@@ -506,9 +512,12 @@ def reconcile_all_accounts_orders():
 	already imported for an account that later raises are therefore left
 	committed rather than rolled back - harmless, since re-import is
 	idempotent (same rationale as the docstring above)."""
+	filters = {"platform": "Shopify", "connection_doctype": "Shopify Connection", "enabled": 1}
+	if account_name:
+		filters["name"] = account_name
 	for row in frappe.get_all(
 		"Marketplace Account",
-		filters={"platform": "Shopify", "connection_doctype": "Shopify Connection", "enabled": 1},
+		filters=filters,
 		fields=["name", "shopify_orders_reconciled_through"],
 	):
 		try:
@@ -521,7 +530,49 @@ def reconcile_all_accounts_orders():
 				_as_shopify_timestamp(start),
 				trigger_source="Scheduled Reconciliation",
 				bump_linked_changes=True,
+				bump_unlinked=catch_up_unlinked,
 			)
+			if catch_up_unlinked:
+				from marketplace_integrations.services.sales_order_sync_debounce import bump_sync_debounce
+
+				for candidate in frappe.get_all(
+					"Marketplace Order",
+					filters={
+						"marketplace_account": account.name,
+						"platform": "Shopify",
+						"cancelled_at": ["is", "not set"],
+						"erpnext_sales_order": ["is", "not set"],
+						"erpnext_sync_status": ["!=", "Cancelled"],
+					},
+					fields=["name", "sync_debounce_until", "pending_sync_trigger_source"],
+				):
+					if (
+						candidate.pending_sync_trigger_source == "Scheduled Reconciliation"
+						and candidate.sync_debounce_until
+						and get_datetime(candidate.sync_debounce_until) > now_datetime()
+					):
+						continue
+					bump_sync_debounce(candidate.name, "Scheduled Reconciliation")
+				# Canceled-but-paid orders are intentionally outside the normal
+				# unlinked import bump (their cancelled_at excludes that path).
+				for candidate in frappe.get_all(
+					"Marketplace Order",
+					filters={
+						"marketplace_account": account.name,
+						"platform": "Shopify",
+						"cancelled_at": ["is", "set"],
+						"erpnext_sales_order": ["is", "not set"],
+						"erpnext_sync_status": "Sync Error",
+					},
+					fields=["name", "sync_debounce_until", "pending_sync_trigger_source"],
+				):
+					if (
+						candidate.pending_sync_trigger_source == "Scheduled Reconciliation"
+						and candidate.sync_debounce_until
+						and get_datetime(candidate.sync_debounce_until) > now_datetime()
+					):
+						continue
+					bump_sync_debounce(candidate.name, "Scheduled Reconciliation")
 			# Advance the watermark only after a successful run (decision 8) -
 			# per-order failures are already isolated above and don't count as
 			# a failed run on their own, but to the run-start time MINUS the

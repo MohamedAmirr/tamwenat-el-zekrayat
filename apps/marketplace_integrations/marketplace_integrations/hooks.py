@@ -191,6 +191,9 @@ scheduler_events = {
 		"marketplace_integrations.services.sales_order_sync_debounce.sweep_stuck_sales_order_reconciliations",
 	],
 	"cron": {
+		"59 23 * * *": [
+			"marketplace_integrations.services.marketplace_order_reconciliation.enqueue_nightly_order_reconciliation",
+		],
 		SHOPIFY_INVENTORY_SWEEP_CRON: [
 			"marketplace_integrations.integrations.shopify.inventory_sync.sweep_changed_bins",
 		],

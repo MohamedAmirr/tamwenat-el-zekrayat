@@ -112,6 +112,26 @@ class IntegrationTestUpsertMarketplaceOrderConcurrentRace(IntegrationTestCase):
 		self.assertEqual(result.external_financial_status, "PAID")
 		self.assertEqual(frappe.db.count("Marketplace Order", {"external_order_id": external_order_id}), 1)
 
+	def test_unlinked_cancelled_shopify_order_stays_cancelled_on_later_import(self):
+		payload = {
+			"external_order_id": f"cancelled-{frappe.generate_hash(length=8)}",
+			"latest_payload": {"cancelledAt": "2026-10-24T10:00:00Z"},
+			"cancelled_at": "2026-10-24 10:00:00",
+			"external_financial_status": "PENDING",
+			"items": [],
+		}
+		order = upsert_marketplace_order(self.account.name, payload)
+		order.erpnext_sync_status = "Cancelled"
+		order.last_sync_error = None
+		order.save()
+
+		payload["external_financial_status"] = "REFUNDED"
+		payload["latest_payload"] = {"cancelledAt": "2026-10-24T10:00:00Z", "updatedAt": "2026-10-24T11:00:00Z"}
+		refreshed = upsert_marketplace_order(self.account.name, payload)
+
+		self.assertEqual(refreshed.erpnext_sync_status, "Cancelled")
+		self.assertFalse(refreshed.last_sync_error)
+
 	def test_concurrent_first_insert_race_still_applies_a_genuinely_newer_payload(self):
 		# The fallback branch's is_stale re-check must not block a payload
 		# that is genuinely newer than what's already stored - only staler

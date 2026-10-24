@@ -10,6 +10,7 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, cstr, flt, getdate, now_datetime, nowdate
 
 from marketplace_integrations.patches.v0_0 import backfill_last_synced_snapshot as backfill
+from marketplace_integrations.services import sales_order_sync as sales_order_sync_service
 from marketplace_integrations.services.marketplace_attention import (
 	NEXT_RETRY,
 	SYNC_ERROR,
@@ -31,7 +32,6 @@ from marketplace_integrations.services.sales_order_sync import (
 	snapshot_hash,
 	sync_sales_order,
 )
-from marketplace_integrations.services import sales_order_sync as sales_order_sync_service
 
 _DEFAULT_VARIANT = object()
 # Shopify paymentTerms of an order staff recorded with payment "Due on receipt".
@@ -2200,7 +2200,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertTrue(result["ok"], result.get("error"))
 		self.assertTrue(result["skipped"])
 		self.assertFalse(order.erpnext_sales_order)
-		self.assertEqual(order.erpnext_sync_status, "Not Synced")
+		self.assertEqual(order.erpnext_sync_status, "Cancelled")
 		self.assertFalse(order.last_sync_error)
 		self.assertEqual([(row.sync_type, row.status) for row in logs], [("Sales Order Sync", "Success")])
 		self.assertEqual(frappe.db.count("Sales Order"), orders_before)
@@ -2383,7 +2383,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertTrue(result["ok"], result.get("error"))
 		self.assertTrue(result["skipped"])
 		self.assertFalse(order.erpnext_sales_order)
-		self.assertEqual(order.erpnext_sync_status, "Not Synced")
+		self.assertEqual(order.erpnext_sync_status, "Cancelled")
 		self.assertFalse(order.last_sync_error)
 		self.assertEqual([(row.sync_type, row.status) for row in logs], [("Sales Order Sync", "Success")])
 		self.assertFalse(frappe.db.exists("Sales Order", {"custom_marketplace_order": order.name}))
@@ -2403,7 +2403,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.reload()
 
 		self.assertTrue(second["ok"], second.get("error"))
-		self.assertEqual(order.erpnext_sync_status, "Not Synced")
+		self.assertEqual(order.erpnext_sync_status, "Cancelled")
 		self.assertFalse(order.last_sync_error)
 		statuses = [
 			row.status
@@ -2416,9 +2416,28 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		]
 		self.assertEqual(statuses, ["Invalid", "Success"])  # history preserved, nothing deleted
 
+	def test_cancelled_paid_order_remains_actionable_until_refunded(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account, financial_status="PAID")
+		order.cancelled_at = now_datetime()
+		order.save()
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertEqual(
+			order.last_sync_error,
+			"Cancelled in Shopify but the payment was not fully refunded; refund it in Shopify",
+		)
+		self.assertFalse(order.erpnext_sales_order)
+
 	def test_repeated_syncs_of_a_cancelled_unsynced_order_never_create_a_sales_order(self):
 		account = self._make_shopify_account()
-		order, _mapping = self._make_shopify_order(account, cancelled_at=now_datetime())
+		order, _mapping = self._make_shopify_order(
+			account, financial_status="PENDING", cancelled_at=now_datetime()
+		)
 
 		for _attempt in range(3):
 			result = sync_sales_order(order.name)
@@ -2426,7 +2445,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.reload()
 
 		self.assertFalse(order.erpnext_sales_order)
-		self.assertEqual(order.erpnext_sync_status, "Not Synced")
+		self.assertEqual(order.erpnext_sync_status, "Cancelled")
 
 	def test_cancelled_shopify_order_with_a_draft_sales_order_gets_an_actionable_message(self):
 		account = self._make_shopify_account()
@@ -2962,10 +2981,12 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 	def test_shopify_cancelled_unsynced_order_is_skipped_not_blocked(self):
 		account = self._make_shopify_account()
-		order, _mapping = self._make_shopify_order(account, cancelled_at=nowdate())
+		order, _mapping = self._make_shopify_order(
+			account, financial_status="PENDING", cancelled_at=nowdate()
+		)
 		result = sync_sales_order(order.name)
 		self.assertTrue(result["ok"])
-		self.assertEqual(result["status"], "Not Synced")
+		self.assertEqual(result["status"], "Cancelled")
 		self.assertFalse(order.erpnext_sales_order)
 
 	def test_shopify_unmapped_null_variant_and_fully_refunded_lines_block(self):
