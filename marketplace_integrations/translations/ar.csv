@@ -1680,6 +1680,23 @@ More items on the order.,يحتوي الطلب على أصناف أخرى.
 Delivery status,حالة التسليم
 Tracking number,رقم التتبع
 Total,الإجمالي
+Order Status,حالة الطلب
+Order Reference,مرجع الطلب
+Financial Status,الحالة المالية
+Fulfillment Status,حالة التنفيذ
+Phone,رقم الهاتف
+Subtotal,المجموع الفرعي
+Discount,الخصم
+Difference to Minimum,الفرق عن الحد الأدنى
+Transaction,معاملة الدفع
+Mirrored Payment Entry,قيد الدفع المنسوخ
+Submitted,مُرسل
+Draft,مسودة
+Latest Payment Sync,أحدث مزامنة للدفع
+Amounts,المبالغ
+Payment,الدفع
+Open Marketplace Order,فتح طلب السوق
+Marketplace Order summary unavailable.,ملخص طلب السوق غير متاح.
 Sales Order {0} was not found. It may have been deleted.,لم يتم العثور على أمر البيع {0}. ربما تم حذفه.
 Marketplace Account '{0}' does not exist or is not permitted.,حساب السوق '{0}' غير موجود أو غير مسموح به.
 Marketplaces,الأسواق

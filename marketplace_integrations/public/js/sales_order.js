@@ -33,6 +33,15 @@
 	const BOSTA_DELIVERED_STATE = 45;
 	const BOSTA_TAB_BREAK_FIELD = "custom_bosta_delivery_tab";
 	const BOSTA_TAB_FIELD = "custom_bosta_delivery_html";
+	const MARKETPLACE_TAB_BREAK_FIELD = "custom_marketplace_order_tab";
+	const MARKETPLACE_TAB_FIELD = "custom_marketplace_order_html";
+	const MARKETPLACE_SUMMARY_METHOD = "marketplace_integrations.api.sales_order_marketplace.get_marketplace_order_summary";
+	const MARKETPLACE_REFRESH_METHODS = {
+		Talabat: ["marketplace_integrations.api.talabat_orders.refresh_order", "Refresh from Talabat", "Refreshing from Talabat..."],
+		Shopify: ["marketplace_integrations.api.shopify_orders.refresh_order", "Refresh from Shopify", "Refreshing from Shopify..."],
+		Noon: ["marketplace_integrations.api.noon_orders.refresh_order", "Refresh from Noon", "Queuing Noon refresh..."],
+	};
+	const MARKETPLACE_SYNC_METHOD = "marketplace_integrations.api.marketplace_orders.sync_to_erpnext";
 
 	function bosta_state_presentation(delivery_type, state_code, state_name, exception_reason, delivery_note_posted) {
 		return frappe.marketplace_integrations && frappe.marketplace_integrations.bosta_state_presentation
@@ -61,6 +70,126 @@
 		if (!frm.toggle_display) return;
 		frm.toggle_display(BOSTA_TAB_BREAK_FIELD, visible);
 		frm.toggle_display(BOSTA_TAB_FIELD, visible);
+	}
+
+	function toggle_marketplace_tab(frm, visible) {
+		if (!frm.toggle_display) return;
+		frm.toggle_display(MARKETPLACE_TAB_BREAK_FIELD, visible);
+		frm.toggle_display(MARKETPLACE_TAB_FIELD, visible);
+	}
+
+	function marketplace_row(label, value) {
+		if (value === null || value === undefined || value === "") return "";
+		const escape = frappe.utils.escape_html;
+		return `<tr><th>${escape(__(label))}</th><td>${escape(value)}</td></tr>`;
+	}
+
+	function marketplace_section(title, rows) {
+		const content = rows.filter(Boolean).join("");
+		return content ? `<h5>${frappe.utils.escape_html(__(title))}</h5><table class="table table-bordered"><tbody>${content}</tbody></table>` : "";
+	}
+
+	function marketplace_summary_html(summary) {
+		const escape = frappe.utils.escape_html;
+		const href = `/app/marketplace-order/${encodeURIComponent(summary.name)}`;
+		const identity = marketplace_section("Marketplace Order", [
+			marketplace_row("Platform", summary.platform),
+			marketplace_row("Order Reference", summary.reference),
+			marketplace_row("External Order ID", summary.external_order_id),
+			marketplace_row("Order Status", summary.status),
+			marketplace_row("Financial Status", summary.financial_status),
+			marketplace_row("Fulfillment Status", summary.fulfillment_status),
+		]);
+		const customer = marketplace_section("Customer and Delivery", [
+			marketplace_row("Customer", summary.customer), marketplace_row("Phone", summary.phone),
+			marketplace_row("Email", summary.email), marketplace_row("Delivery Address", summary.address),
+			marketplace_row("City", summary.city),
+		]);
+		const amount_labels = {
+			sub_total: "Subtotal", discount: "Discount", order_total: "Order Total", total_taxes: "Total Taxes",
+			shipping_total: "Shipping Total", duties_total: "Duties Total", delivery_fee: "Delivery Fee",
+			service_fee: "Service Fee", container_charge: "Container Charge", difference_to_minimum: "Difference to Minimum",
+		};
+		const amounts = summary.amounts || {};
+		const amount_rows = Object.entries(amount_labels).map(([key, label]) =>
+			marketplace_row(label, `${amounts[key] ?? 0} ${amounts.presentment_currency || amounts.shop_currency || ""}`)
+		);
+		if (summary.platform === "Talabat") amount_rows.push(marketplace_row("Cash Talabat says should be collected at delivery", `${amounts.collect_at_pickup ?? 0} ${amounts.shop_currency || ""}`));
+		const payment_rows = [];
+		if (summary.platform === "Talabat") payment_rows.push(marketplace_row("Talabat Payment Type", summary.payment_type));
+		if (summary.platform === "Shopify") for (const transaction of summary.payment_transactions || []) {
+			payment_rows.push(marketplace_row("Transaction", [transaction.kind, transaction.status, transaction.gateway, transaction.amount, transaction.currency, transaction.errorCode].filter(Boolean).join(" · ")));
+		}
+		if (summary.platform === "Shopify") for (const entry of summary.mirrored_entries || []) {
+			payment_rows.push(marketplace_row("Mirrored Payment Entry", [entry.name, entry.docstatus === 1 ? __("Submitted") : __("Draft"), entry.paid_amount, entry.custom_marketplace_transaction_id].filter(Boolean).join(" · ")));
+		}
+		if (summary.platform === "Shopify" && summary.latest_payment_log) {
+			payment_rows.push(marketplace_row("Latest Payment Sync", [summary.latest_payment_log.status, summary.latest_payment_log.attempted_at, summary.latest_payment_log.response_data].filter(Boolean).join(" · ")));
+		}
+		const payment = marketplace_section("Payment", payment_rows);
+		const sync = marketplace_section("ERPNext Synchronization", [
+			marketplace_row("ERPNext Sync Status", summary.erpnext_sync_status),
+			marketplace_row("Last Sync Error", summary.last_sync_error),
+		]);
+		return `${identity}${customer}${marketplace_section("Amounts", amount_rows)}${payment}${sync}<p><a class="btn btn-default" href="${escape(href)}">${escape(__("Open Marketplace Order"))}</a></p>`;
+	}
+
+	function add_marketplace_order_tab(frm) {
+		const sales_order = frm.doc && frm.doc.name;
+		const marketplace_order = frm.doc && frm.doc.custom_marketplace_order;
+		if (!marketplace_order || !sales_order) {
+			const field = frm.get_field && frm.get_field(MARKETPLACE_TAB_FIELD);
+			if (field && field.$wrapper) field.$wrapper.html("");
+			toggle_marketplace_tab(frm, false);
+			return Promise.resolve();
+		}
+		toggle_marketplace_tab(frm, true);
+		const field = frm.get_field && frm.get_field(MARKETPLACE_TAB_FIELD);
+		if (!field || !field.$wrapper) return Promise.resolve();
+		const request = (frm.__mi_marketplace_request = (frm.__mi_marketplace_request || 0) + 1);
+		return frappe.call({ method: MARKETPLACE_SUMMARY_METHOD, type: "POST", args: { sales_order }, silent: true }).then(
+			(r) => {
+				if (request !== frm.__mi_marketplace_request || frm.doc.name !== sales_order) return;
+				const summary = r.message;
+				if (!summary) {
+					field.$wrapper.html(`<p class="text-muted">${frappe.utils.escape_html(__("Marketplace Order summary unavailable."))}</p>`);
+					return;
+				}
+				let html = marketplace_summary_html(summary);
+				field.$wrapper.html(html);
+				const refresh = MARKETPLACE_REFRESH_METHODS[summary.platform];
+				if (refresh) {
+					field.$wrapper.append(`<p><button class="btn btn-default" data-marketplace-action="refresh">${frappe.utils.escape_html(__(refresh[1]))}</button></p>`);
+				}
+				if (!(summary.erpnext_sales_order && summary.erpnext_sync_status === "Synced")) {
+					const label = summary.erpnext_sales_order ? "Update ERPNext Order" : "Send to ERPNext";
+					field.$wrapper.append(`<p><button class="btn btn-primary" data-marketplace-action="sync">${frappe.utils.escape_html(__(label))}</button></p>`);
+				}
+				field.$wrapper.off("click.mi_marketplace").on("click.mi_marketplace", "[data-marketplace-action]", (event) => {
+					if (event.currentTarget.getAttribute("data-marketplace-action") === "refresh") {
+						const [method, _label, freeze_message] = refresh;
+						frappe.call({ method, args: { marketplace_order: summary.name }, freeze: true, freeze_message: __(freeze_message) }).then((response) => {
+							if (summary.platform === "Noon") {
+								const queued = (response.message || {}).queued;
+								frappe.show_alert({ message: queued ? __("Noon order refresh queued. Refresh this document to see the results.") : __("A Noon refresh for this order is already queued or running."), indicator: "blue" });
+							} else frm.reload_doc();
+						});
+					} else {
+						frappe.call({ method: MARKETPLACE_SYNC_METHOD, args: { marketplace_order: summary.name }, freeze: true, freeze_message: __("Synchronizing with ERPNext...") }).then((response) => {
+							if (!response.message.ok) frappe.msgprint({ message: frappe.utils.escape_html(response.message.error), indicator: "red", title: __("ERPNext Sync Blocked") });
+							else if (response.message.skipped) frappe.show_alert({ message: frappe.utils.escape_html(response.message.message || ""), indicator: "blue" });
+							else if (response.message.executed_action) frappe.show_alert({ message: frappe.utils.escape_html(response.message.executed_message || ""), indicator: "green" });
+							frm.reload_doc();
+						});
+					}
+				});
+			},
+			() => {
+				if (request === frm.__mi_marketplace_request && frm.doc.name === sales_order) {
+					field.$wrapper.html(`<p class="text-muted">${frappe.utils.escape_html(__("Marketplace Order summary unavailable."))}</p>`);
+				}
+			}
+		);
 	}
 
 	// Colours for the Bosta Shipment doctype's own statuses; the status text is the doctype's value.
@@ -872,6 +1001,7 @@
 	}
 
 	function on_refresh(frm) {
+		add_marketplace_order_tab(frm);
 		add_bosta_shipment_ux(frm);
 		if (!wrap_close_sales_order(frm)) {
 			console.error(
@@ -907,6 +1037,7 @@
 
 	if (typeof module !== "undefined") {
 		module.exports = {
+			add_marketplace_order_tab,
 			add_bosta_shipment_ux,
 			bosta_cod_note_html,
 			bosta_indicator_html,
@@ -924,6 +1055,7 @@
 			is_marketplace_sales_order,
 			load_platform_option,
 			needs_no_dialog,
+			marketplace_summary_html,
 			on_after_cancel,
 			on_refresh,
 			reason_field,
