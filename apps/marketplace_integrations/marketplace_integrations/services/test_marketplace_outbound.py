@@ -133,14 +133,49 @@ class IntegrationTestMarketplaceOutbound(IntegrationTestCase):
 				self.assertTrue(option["reasons"])
 				self.assertTrue(option["instruction"])
 
-	def test_noon_is_always_blocked_and_shopify_is_blocked_until_182(self):
-		for platform in ("Noon", "Shopify"):
-			with self.subTest(platform=platform):
-				self._linked_order("RECEIVED", platform=platform)
+	def test_noon_is_blocked_and_shopify_returns_its_cancellation_reasons(self):
+		self._linked_order("RECEIVED", platform="Noon")
+		option = outbound.get_platform_cancel_option(self.fixture.name)
+		self.assertEqual(option["state"], outbound.BLOCKED)
+		self.assertEqual(option["platform"], "Noon")
+		self.assertTrue(option["reasons"])
+
+		self._linked_order("RECEIVED", platform="Shopify")
+		option = outbound.get_platform_cancel_option(self.fixture.name)
+		self.assertEqual(option["state"], outbound.ELIGIBLE)
+		self.assertEqual(option["cancellation_reasons"], [
+			"CUSTOMER", "DECLINED", "FRAUD", "INVENTORY", "OTHER", "STAFF"
+		])
+
+	def test_shopify_cancel_option_blocks_cancelled_or_authorized_orders(self):
+		for fields in (
+			{"cancelled_at": "2026-10-24 12:00:00"},
+			{"external_financial_status": "AUTHORIZED"},
+			{
+				"payment_transactions": [
+					{"kind": "AUTHORIZATION", "status": "PENDING"}
+				]
+			},
+		):
+			with self.subTest(fields=fields):
+				order = self._linked_order("RECEIVED", platform="Shopify")
+				frappe.db.set_value("Marketplace Order", order.name, fields)
 				option = outbound.get_platform_cancel_option(self.fixture.name)
 				self.assertEqual(option["state"], outbound.BLOCKED)
-				self.assertEqual(option["platform"], platform)
 				self.assertTrue(option["reasons"])
+
+	def test_shopify_fulfillment_preflight_blocks_started_and_unknown_lines(self):
+		from marketplace_integrations.services.marketplace_outbound import (
+			_shopify_fulfillment_problem,
+		)
+
+		for item, expected in (
+			(frappe._dict(fulfillment_quantities_known=1, current_quantity=2, unfulfilled_quantity=1), "started"),
+			(frappe._dict(fulfillment_quantities_known=0), "unknown"),
+		):
+			with self.subTest(expected=expected):
+				problem = _shopify_fulfillment_problem(frappe._dict(items=[item]))
+				self.assertIn(expected, problem)
 
 	def test_a_sales_order_without_a_marketplace_order_is_not_applicable(self):
 		option = outbound.get_platform_cancel_option(self.fixture.name)
@@ -193,6 +228,105 @@ class IntegrationTestMarketplaceOutbound(IntegrationTestCase):
 		self.assertEqual(logs[0].marketplace_account, self.account.name)
 		self.assertEqual(frappe.parse_json(logs[0].request_data)["action"], "platform_cancel")
 		self.assertEqual(frappe.parse_json(logs[0].request_data)["cancellation_reason"], "TOO_BUSY")
+
+	def test_shopify_request_commits_the_marker_then_refreshes_by_order_gid(self):
+		order = self._linked_order("RECEIVED", platform="Shopify")
+		job = {"job_id": "gid://shopify/Job/1"}
+		with (
+			patch.object(outbound, "_send_cancel", return_value=job) as send,
+			patch(
+				"marketplace_integrations.integrations.shopify.orders.import_order",
+				return_value=order,
+			) as refresh,
+			patch(
+				"marketplace_integrations.integrations.shopify.orders.poll_order_cancel_job",
+				return_value={"status": "SUCCEEDED", "done": True, "errors": []},
+			),
+			patch.object(frappe.db, "commit"),
+		):
+			result = outbound.request_platform_cancel(self.fixture.name, "CUSTOMER")
+
+		send.assert_called_once_with(order, "CUSTOMER")
+		refresh.assert_called_once_with(order.marketplace_account, order.external_order_id)
+		self.assertTrue(result["refreshed"])
+		self.assertEqual(result["job_id"], job["job_id"])
+		self.assertIsNotNone(self._marker(order))
+		self.assertEqual(self._action_logs(order)[0].status, "Success")
+		self.assertEqual(
+			frappe.parse_json(self._action_logs(order)[0].response_data)["job_id"], job["job_id"]
+		)
+
+	def test_shopify_confirmed_job_failure_clears_marker_and_logs_error(self):
+		order = self._linked_order("RECEIVED", platform="Shopify")
+		with (
+			patch.object(outbound, "_send_cancel", return_value={"job_id": "gid://shopify/OrderCancelJobResult/1"}),
+			patch(
+				"marketplace_integrations.integrations.shopify.orders.poll_order_cancel_job",
+				return_value={
+					"status": "FAILED",
+					"done": True,
+					"errors": [{"message": "Order has an active return"}],
+				},
+			),
+			patch.object(frappe.db, "commit"),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				outbound.request_platform_cancel(self.fixture.name, "CUSTOMER")
+
+		self.assertIsNone(self._marker(order))
+		self.assertEqual([row.status for row in self._action_logs(order)], ["Success", "Error"])
+		self.assertIn("active return", self._action_logs(order)[-1].traceback)
+
+	def test_shopify_job_timeout_keeps_marker_and_skips_refresh(self):
+		order = self._linked_order("RECEIVED", platform="Shopify")
+		with (
+			patch.object(outbound, "_send_cancel", return_value={"job_id": "gid://shopify/OrderCancelJobResult/1"}),
+			patch(
+				"marketplace_integrations.integrations.shopify.orders.poll_order_cancel_job",
+				return_value=None,
+			),
+			patch(
+				"marketplace_integrations.integrations.shopify.orders.import_order"
+			) as refresh,
+			patch.object(frappe.db, "commit"),
+		):
+			result = outbound.request_platform_cancel(self.fixture.name, "CUSTOMER")
+
+		self.assertTrue(result["job_pending"])
+		self.assertFalse(result["refreshed"])
+		self.assertIsNotNone(self._marker(order))
+		refresh.assert_not_called()
+
+	def test_shopify_poll_graphql_error_keeps_marker_and_is_logged(self):
+		order = self._linked_order("RECEIVED", platform="Shopify")
+		with (
+			patch.object(outbound, "_send_cancel", return_value={"job_id": "gid://shopify/OrderCancelJobResult/1"}),
+			patch(
+				"marketplace_integrations.integrations.shopify.orders.poll_order_cancel_job",
+				side_effect=frappe.ValidationError("top-level GraphQL error"),
+			),
+			patch.object(frappe.db, "commit"),
+		):
+			result = outbound.request_platform_cancel(self.fixture.name, "CUSTOMER")
+
+		self.assertTrue(result["job_pending"])
+		self.assertIsNotNone(self._marker(order))
+		self.assertEqual(self._action_logs(order)[-1].status, "Error")
+		self.assertIn("top-level GraphQL error", self._action_logs(order)[-1].traceback)
+
+	def test_shopify_mutation_failure_is_logged_without_setting_the_marker(self):
+		order = self._linked_order("RECEIVED", platform="Shopify")
+		with (
+			patch.object(outbound, "_send_cancel", side_effect=frappe.ValidationError("scope denied")),
+			patch.object(frappe.db, "commit"),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				outbound.request_platform_cancel(self.fixture.name, "CUSTOMER")
+
+		self.assertIsNone(self._marker(order))
+		logs = self._action_logs(order)
+		self.assertEqual([row.status for row in logs], ["Error"])
+		self.assertIn("scope denied", logs[0].traceback)
 
 	def test_a_second_request_sends_no_api_call(self):
 		order = self._linked_order("RECEIVED")
@@ -376,6 +510,17 @@ class IntegrationTestMarketplaceOutbound(IntegrationTestCase):
 		# Rejected before the try: no Order Action row of any status.
 		self.assertEqual(self._action_logs(order), [])
 
+	def test_an_invalid_shopify_cancellation_reason_is_rejected_without_a_call_or_log(self):
+		order = self._linked_order("RECEIVED", platform="Shopify")
+
+		with patch.object(outbound, "_send_cancel") as send, patch.object(frappe.db, "commit"):
+			with self.assertRaises(frappe.ValidationError):
+				outbound.request_platform_cancel(self.fixture.name, "TOO_BUSY")
+
+		send.assert_not_called()
+		self.assertIsNone(self._marker(order))
+		self.assertEqual(self._action_logs(order), [])
+
 	def test_a_failing_error_log_does_not_mask_the_platform_error(self):
 		order = self._linked_order("RECEIVED")
 
@@ -541,7 +686,11 @@ class IntegrationTestMarketplaceOutbound(IntegrationTestCase):
 		order.external_status = "CANCELLED"
 		self.assertIn("already cancelled on Talabat", outbound.platform_instruction(order))
 		order.external_status = "DELIVERED"
-		self.assertIn("Shopify", outbound.platform_instruction(frappe._dict(platform="Shopify")))
+		self.assertIn("Cancel the Shopify order", outbound.platform_instruction(frappe._dict(platform="Shopify")))
+		self.assertIn(
+			"already cancelled",
+			outbound.platform_instruction(frappe._dict(platform="Shopify", cancelled_at="2026-10-24")),
+		)
 		self.assertIn("Noon", outbound.platform_instruction(frappe._dict(platform="Noon")))
 		order.outbound_cancelled_on = "2026-10-08"
 		self.assertIn("already asked", outbound.platform_instruction(order))

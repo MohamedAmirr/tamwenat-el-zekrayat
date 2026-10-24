@@ -23,7 +23,9 @@ Platform rules (V1, no merchant-visible override):
   status is blocked.  The reason is one of Talabat's ``CANCELLATION_REASONS``.
 - Noon: always blocked (no order-level cancel; ``UpdateOrder`` / ``CancelShipment``
   per ``docs/noon-integration/noon_api_full.md`` are per unit / shipment).
-- Shopify: blocked until #182.
+- Shopify: not already cancelled, no authorized payment hold, and every line's
+  fulfillment state is known and unstarted. Shopify checks for active returns and
+  its own fulfillment restrictions.
 - Any other platform, or a Sales Order with no Marketplace Order: not applicable.
 
 ERP rule for every platform: no delivered quantity and no billed amount on any line.
@@ -90,7 +92,9 @@ def platform_instruction(order):
 			"The Talabat order is {0} and can no longer be cancelled from ERPNext; handle it with Talabat."
 		).format(status or _("in an unknown status"))
 	if platform == "Shopify":
-		return _("Cancel the order in Shopify; ERPNext cannot cancel Shopify orders yet.")
+		if getattr(order, "cancelled_at", None):
+			return _("The order is already cancelled on Shopify.")
+		return _("Cancel the Shopify order from ERPNext when it is eligible.")
 	if platform == "Noon":
 		return _("ERPNext cannot cancel Noon orders; handle the order in Noon.")
 	return ""
@@ -133,6 +137,11 @@ def request_platform_cancel(sales_order, cancellation_reason=None):
 	cancellation_reason = cstr(cancellation_reason).strip()
 	if option["platform"] == "Talabat" and cancellation_reason not in CANCELLATION_REASONS:
 		frappe.throw(_("A valid cancellation reason is required."))
+	if option["platform"] == "Shopify":
+		from marketplace_integrations.integrations.shopify.orders import SHOPIFY_ORDER_CANCEL_REASONS
+
+		if cancellation_reason not in SHOPIFY_ORDER_CANCEL_REASONS:
+			frappe.throw(_("A valid Shopify cancellation reason is required."))
 
 	try:
 		raw_order = _send_cancel(order, cancellation_reason)
@@ -142,16 +151,65 @@ def request_platform_cancel(sales_order, cancellation_reason=None):
 		frappe.db.commit()
 		raise
 
-	# The platform has cancelled the order.  Record that durably before anything that can
-	# fail or re-plan the order (see the module docstring).
+	# The platform accepted the cancellation request. Record that durably before anything
+	# that can fail or re-plan the order (see the module docstring).
 	frappe.db.set_value(
 		"Marketplace Order", order.name, "outbound_cancelled_on", now_datetime(), update_modified=False
 	)
 	_log_order_action(order, sales_order.name, cancellation_reason, raw_order)
 	frappe.db.commit()
+	job_result = None
+	if order.platform == "Shopify":
+		from marketplace_integrations.integrations.shopify.orders import poll_order_cancel_job
+
+		try:
+			job_result = poll_order_cancel_job(
+				order.marketplace_account, raw_order.get("job_id") if isinstance(raw_order, dict) else None
+			)
+		except Exception as exc:
+			# The mutation was accepted but its outcome could not be confirmed. Keep the
+			# marker to prevent a duplicate cancel; record the polling failure for staff.
+			_record_order_action_error(order, sales_order.name, cancellation_reason, exc)
+			frappe.db.commit()
+			return {
+				"ok": True,
+				"already_requested": False,
+				"marketplace_order": order.name,
+				"refreshed": False,
+				"job_id": raw_order.get("job_id"),
+				"job_pending": True,
+			}
+		if isinstance(job_result, dict) and cstr(job_result.get("status")).strip().upper() == "FAILED":
+			clear_outbound_cancelled_marker(order.name)
+			errors = job_result.get("errors") or []
+			messages = [
+				cstr(error.get("message")).strip()
+				for error in errors
+				if isinstance(error, dict) and cstr(error.get("message")).strip()
+			]
+			error_text = "; ".join(messages) or _("Shopify cancellation job failed.")
+			_record_order_action_error(order, sales_order.name, cancellation_reason, error_text)
+			frappe.db.commit()
+			frappe.throw(error_text)
+		if not isinstance(job_result, dict) or cstr(job_result.get("status")).strip().upper() != "SUCCEEDED":
+			return {
+				"ok": True,
+				"already_requested": False,
+				"marketplace_order": order.name,
+				"refreshed": False,
+				"job_id": raw_order.get("job_id"),
+				"job_pending": True,
+			}
 
 	refreshed = _upsert_returned_order(order, raw_order)
-	return {"ok": True, "already_requested": False, "marketplace_order": order.name, "refreshed": refreshed}
+	return {
+		"ok": True,
+		"already_requested": False,
+		"marketplace_order": order.name,
+		"refreshed": refreshed,
+		"job_id": raw_order.get("job_id") if isinstance(raw_order, dict) else None,
+		"job_pending": False,
+	}
 
 
 def clear_outbound_cancelled_marker(marketplace_order):
@@ -224,9 +282,24 @@ def _build_option(sales_order, order):
 	elif platform == "Noon":
 		reasons.append(_("Noon orders cannot be cancelled from ERPNext."))
 	else:
-		reasons.append(_("Shopify order cancellation from ERPNext is not available yet."))
+		if order.cancelled_at:
+			reasons.append(_("The Shopify order is already cancelled."))
+		if _shopify_has_authorized_payment(order):
+			reasons.append(
+				_("The Shopify order has an authorized payment hold; cancel it in Shopify after reviewing the hold.")
+			)
+		fulfillment_problem = _shopify_fulfillment_problem(order)
+		if fulfillment_problem:
+			reasons.append(fulfillment_problem)
 
-	cancellation_reasons = sorted(CANCELLATION_REASONS) if platform == "Talabat" else []
+	if platform == "Talabat":
+		cancellation_reasons = sorted(CANCELLATION_REASONS)
+	elif platform == "Shopify":
+		from marketplace_integrations.integrations.shopify.orders import SHOPIFY_ORDER_CANCEL_REASONS
+
+		cancellation_reasons = list(SHOPIFY_ORDER_CANCEL_REASONS)
+	else:
+		cancellation_reasons = []
 	return _option(
 		BLOCKED if reasons else ELIGIBLE,
 		platform,
@@ -236,6 +309,44 @@ def _build_option(sales_order, order):
 		cancellation_reasons,
 		**flags,
 	)
+
+
+def _shopify_has_authorized_payment(order):
+	"""Whether stored Shopify evidence shows an authorization hold that cancel voids."""
+	if cstr(order.external_financial_status).strip().upper() == "AUTHORIZED":
+		return True
+	transactions = order.payment_transactions
+	if isinstance(transactions, str):
+		try:
+			transactions = frappe.parse_json(transactions)
+		except (TypeError, ValueError):
+			return False
+	if not isinstance(transactions, list):
+		return False
+	return any(
+		isinstance(transaction, dict)
+		and cstr(transaction.get("kind")).strip().upper() == "AUTHORIZATION"
+		and cstr(transaction.get("status")).strip().upper() in {"PENDING", "SUCCESS"}
+		for transaction in transactions
+	)
+
+
+def _shopify_fulfillment_problem(order):
+	"""Require each line's fulfillment state to be known and not started."""
+	from marketplace_integrations.integrations.shopify.order_reconciliation import fulfillment_started
+
+	items = order.items or []
+	for item in items:
+		started = fulfillment_started(item)
+		if started is True:
+			return _(
+				"Shopify fulfillment has started for one or more lines; cancel the order in Shopify after review."
+			)
+		if started is None:
+			return _(
+				"Shopify fulfillment status is unknown for one or more lines; refresh the order before cancelling."
+			)
+	return ""
 
 
 def _lock_and_load_order(marketplace_order):
@@ -252,7 +363,12 @@ def _lock_and_load_order(marketplace_order):
 
 
 def _send_cancel(order, cancellation_reason):
-	"""Call the platform; return its raw order.  Only Talabat is ever eligible."""
+	"""Call the platform; Talabat returns an order and Shopify returns an async JobResult ID."""
+	if order.platform == "Shopify":
+		from marketplace_integrations.integrations.shopify.orders import cancel_order
+
+		return cancel_order(order.marketplace_account, order.external_order_id, cancellation_reason)
+
 	from marketplace_integrations.api.talabat_orders import send_order_update
 
 	return send_order_update(order, "CANCELLED", cancellation_reason)
@@ -270,10 +386,17 @@ def _upsert_returned_order(order, raw_order):
 	savepoint = "marketplace_outbound_upsert"
 	frappe.db.savepoint(savepoint)
 	try:
-		normalized = normalize_order(raw_order)
-		if normalized["external_order_id"] != cstr(order.external_order_id).strip():
-			frappe.throw(_("Talabat returned a different order ID."))
-		upsert_marketplace_order(order.marketplace_account, normalized)
+		if order.platform == "Shopify":
+			from marketplace_integrations.integrations.shopify.orders import import_order
+
+			refreshed = import_order(order.marketplace_account, order.external_order_id)
+			if not refreshed:
+				frappe.throw(_("Shopify returned no order when refreshing after cancellation."))
+		else:
+			normalized = normalize_order(raw_order)
+			if normalized["external_order_id"] != cstr(order.external_order_id).strip():
+				frappe.throw(_("Talabat returned a different order ID."))
+			upsert_marketplace_order(order.marketplace_account, normalized)
 	except Exception:
 		# MariaDB error 1020 rolls back the whole transaction, savepoint included; the cancel
 		# and the marker are already committed, so a full rollback loses nothing.
@@ -307,7 +430,11 @@ def _log_order_action(order, sales_order, cancellation_reason, raw_order):
 				ensure_ascii=False,
 			),
 			"response_data": frappe.as_json(
-				{"external_status": (raw_order or {}).get("status")}, ensure_ascii=False
+				{
+					"external_status": (raw_order or {}).get("status"),
+					"job_id": (raw_order or {}).get("job_id"),
+				},
+				ensure_ascii=False,
 			),
 		}
 	).insert(ignore_permissions=True)

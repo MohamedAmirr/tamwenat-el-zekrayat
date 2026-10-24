@@ -22,6 +22,43 @@
 	const CARD_METHOD = "marketplace_integrations.api.order_hover_card.get_sales_order_card";
 	const CARD_ASSET = "/assets/marketplace_integrations/js/order_hover_card.js";
 	const MAX_ORDERS = 50;
+	const BOSTA_STATUS_COLORS = {
+		Delivered: "green",
+		Completed: "green",
+		Fulfilled: "green",
+		Canceled: "grey",
+		Archived: "grey",
+		"Bosta Created": "blue",
+		"Pending Bosta": "orange",
+		"Delivery Note Failed": "red",
+		"Bosta Failed": "red",
+		"Pickup requested": "orange",
+		"Waiting for route": "orange",
+		"Route Assigned": "blue",
+		"Picked up": "blue",
+		"Picked up from business": "blue",
+		"Picking up from consignee": "blue",
+		"Picked up from consignee": "blue",
+		"Received at warehouse": "blue",
+		"In transit between Hubs": "blue",
+		"Picking up": "blue",
+		"Returned to business": "orange",
+		"Returned to stock": "orange",
+		Exception: "red",
+		Terminated: "red",
+		Lost: "red",
+		Damaged: "red",
+		Investigation: "red",
+		"Awaiting your action": "red",
+		"On hold": "orange",
+	};
+
+	function format_bosta_delivery_status(value) {
+		const status = String(value || "").trim();
+		if (!status) return "";
+		const label = frappe.utils.escape_html(__(status));
+		return `<span class="indicator-pill ${BOSTA_STATUS_COLORS[status] || "grey"}">${label}</span>`;
+	}
 
 	// The creator roles come from sales_order.js, so they are known once it has loaded.
 	function add_bulk_action(listview) {
@@ -129,6 +166,7 @@
 							city_id: city.id,
 							address_first_line: values.address_first_line,
 							expected_cod: entry.defaults.cod_amount,
+							cod_amount: values.cod_amount,
 						},
 					});
 					dialog.hide();
@@ -237,8 +275,13 @@
 			receiver_phone: order.receiver_phone,
 			address_first_line: order.address_first_line,
 			city_id: order.city_id,
+			cod_amount: order.cod_amount,
 		};
-		const fallback = { sales_order: order.sales_order, defaults: { ...used, cod_amount: order.expected_cod } };
+		const retry_cod = order.cod_amount ?? order.expected_cod;
+		const fallback = {
+			sales_order: order.sales_order,
+			defaults: { ...used, cod_amount: retry_cod, retry_cod_amount: retry_cod, currency: "EGP" },
+		};
 		return frappe
 			.call({ method: DEFAULTS_METHOD, type: "POST", silent: true, args: { sales_order: order.sales_order } })
 			.then((r) => ({ sales_order: order.sales_order, defaults: { ...(r.message || {}), ...used } }))
@@ -248,6 +291,10 @@
 	// Add the action to ERPNext's own Sales Order list settings instead of replacing them.
 	if (typeof frappe !== "undefined" && frappe.listview_settings) {
 		const settings = (frappe.listview_settings["Sales Order"] = frappe.listview_settings["Sales Order"] || {});
+		settings.formatters = {
+			...(settings.formatters || {}),
+			custom_bosta_delivery_status: format_bosta_delivery_status,
+		};
 		// Marks the settings as already extended (bulk action and hover card), so loading this file
 		// again (route revisit, asset reload) never wraps onload twice.
 		if (!settings.__mi_list_extended) {
@@ -262,6 +309,16 @@
 	}
 
 	if (typeof module !== "undefined") {
-		module.exports = { add_hover_card, add_bulk_action, start, confirm_plan, review_and_send, send, offer_retry, retry_entry };
+		module.exports = {
+			add_hover_card,
+			add_bulk_action,
+			format_bosta_delivery_status,
+			start,
+			confirm_plan,
+			review_and_send,
+			send,
+			offer_retry,
+			retry_entry,
+		};
 	}
 })();

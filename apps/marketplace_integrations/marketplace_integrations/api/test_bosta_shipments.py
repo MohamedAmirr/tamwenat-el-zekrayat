@@ -26,6 +26,12 @@ class UnitTestBostaShipments(UnitTestCase):
 class IntegrationTestBostaShipmentSummary(BostaFixtureMixin, IntegrationTestCase):
 	"""get_sales_order_shipment on a real database (#246); no HTTP is involved."""
 
+	def test_sales_order_bosta_status_is_a_read_only_list_and_standard_filter_field(self):
+		field = frappe.get_meta("Sales Order").get_field("custom_bosta_delivery_status")
+		self.assertTrue(field.read_only)
+		self.assertTrue(field.in_list_view)
+		self.assertTrue(field.in_standard_filter)
+
 	def _shipment(self, order, status, **values):
 		fields = {
 			"doctype": "Bosta Shipment",
@@ -60,6 +66,7 @@ class IntegrationTestBostaShipmentSummary(BostaFixtureMixin, IntegrationTestCase
 			"Bosta Created",
 			tracking_number="TRK-9",
 			bosta_state_value="Picked up",
+			shipment_fee=87,
 		)
 		self.assertEqual(
 			bosta_shipments.get_sales_order_shipment(order.name),
@@ -77,6 +84,7 @@ class IntegrationTestBostaShipmentSummary(BostaFixtureMixin, IntegrationTestCase
 				"city_id": "city-cairo",
 				"address_first_line": "12 Example Street",
 				"cod_amount": 0,
+				"shipment_fee": 87,
 				"delivery_note": "",
 				"delivery_note_error": "",
 				"delivery_note_status": "",
@@ -101,6 +109,7 @@ class IntegrationTestBostaShipmentSummary(BostaFixtureMixin, IntegrationTestCase
 						"city_id": "city-cairo",
 						"address_first_line": "12 Example Street",
 						"cod_amount": 0,
+						"shipment_fee": 87,
 						"delivery_note": "",
 						"delivery_note_error": "",
 						"delivery_note_status": "",
@@ -134,6 +143,7 @@ class IntegrationTestBostaShipmentSummary(BostaFixtureMixin, IntegrationTestCase
 				"city_id",
 				"address_first_line",
 				"cod_amount",
+				"shipment_fee",
 				"delivery_note",
 				"delivery_note_error",
 				"delivery_note_status",
@@ -162,6 +172,37 @@ class IntegrationTestBostaShipmentSummary(BostaFixtureMixin, IntegrationTestCase
 		self.assertEqual(summary["name"], latest.name)
 		self.assertEqual((summary["status"], summary["active"]), ("Canceled", False))
 		self.assertEqual([row["name"] for row in summary["shipments"]], [latest.name, older.name])
+
+	def test_summary_and_sales_order_status_prefer_latest_non_canceled_shipment(self):
+		order = self.make_order()
+		active = self._shipment(order, "Bosta Created", bosta_state_code=45, bosta_state_value="Delivered")
+		self._shipment(order, "Canceled", bosta_state_code=0, bosta_state_value="")
+
+		summary = bosta_shipments.get_sales_order_shipment(order.name)
+
+		self.assertEqual(summary["name"], active.name)
+		self.assertEqual(frappe.db.get_value("Sales Order", order.name, "custom_bosta_delivery_status"), "Delivered")
+		frappe.db.set_value("Sales Order", order.name, "custom_bosta_delivery_status", "", update_modified=False)
+		from marketplace_integrations.patches.v0_0.backfill_sales_order_bosta_delivery_status import execute
+
+		execute()
+		self.assertEqual(frappe.db.get_value("Sales Order", order.name, "custom_bosta_delivery_status"), "Delivered")
+
+	def test_canceled_shipment_falls_back_to_its_status_when_state_is_unknown(self):
+		order = self.make_order()
+		shipment = self._shipment(order, "Bosta Created", bosta_state_code=0, bosta_state_value="")
+		self.assertEqual(
+			frappe.db.get_value("Sales Order", order.name, "custom_bosta_delivery_status"), "Bosta Created"
+		)
+
+		shipment.status = "Canceled"
+		shipment.bosta_state_value = ""
+		shipment.bosta_state_code = 0
+		save_as_system(shipment)
+
+		self.assertEqual(
+			frappe.db.get_value("Sales Order", order.name, "custom_bosta_delivery_status"), "Canceled"
+		)
 
 	def test_canceled_then_new_active_returns_the_active_one(self):
 		order = self.make_order()
@@ -195,6 +236,15 @@ class IntegrationTestBostaShipmentSummary(BostaFixtureMixin, IntegrationTestCase
 			)
 			self.assertFalse(frappe.has_permission("Bosta Shipment", "read", user=users["Accounts User"]))
 			self.assertIsNone(self._as(users["Accounts User"], order))
+			frappe.db.set_value("Sales Order", order.name, "custom_bosta_delivery_status", "Delivered")
+			frappe.set_user(users["Accounts User"])
+			try:
+				row = frappe.get_list(
+					"Sales Order", filters={"name": order.name}, fields=["custom_bosta_delivery_status"]
+				)
+			finally:
+				frappe.set_user("Administrator")
+			self.assertEqual(row[0].custom_bosta_delivery_status, "Delivered")
 
 	def test_summary_carries_the_cod_update_time_and_delivery_note(self):
 		order = self.make_order(rate=150)

@@ -33,6 +33,7 @@
   "bosta_status_section",
   "bosta_state_code",
   "bosta_state_value",
+  "shipment_fee",
   "bosta_delivery_type",
   "last_bosta_event_timestamp",
   "bosta_exception_reason",
@@ -260,6 +261,13 @@
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
    "label": "Bosta State",
+   "read_only": 1
+  },
+  {
+   "description": "Delivery fee reported by Bosta, in EGP. Display only; it does not affect accounting.",
+   "fieldname": "shipment_fee",
+   "fieldtype": "Currency",
+   "label": "Bosta Delivery Fee",
    "read_only": 1
   },
   {

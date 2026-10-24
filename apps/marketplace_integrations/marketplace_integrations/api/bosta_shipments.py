@@ -61,6 +61,7 @@ def create_shipment(
 	city_id: str,
 	address_first_line: str = "",
 	expected_cod: float | None = None,
+	cod_amount: float | None = None,
 ):
 	return _create_bosta_shipment(
 		sales_order,
@@ -69,6 +70,7 @@ def create_shipment(
 		city_id,
 		address_first_line,
 		expected_cod,
+		cod_amount,
 	)
 
 

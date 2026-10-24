@@ -3,6 +3,8 @@
 
 """Bosta delivery creation and the corresponding ERPNext Delivery Note."""
 
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+
 import frappe
 from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
 from frappe import _
@@ -43,6 +45,12 @@ def get_sales_order_defaults(sales_order_name):
 	order = _get_sales_order(sales_order_name)
 	_validate_deliverable(order)
 	cod = _cod_breakdown(order)
+	existing = _active_shipment(order.name)
+	retry_cod = (
+		flt(existing.cod_amount, 2)
+		if existing and existing.status == "Bosta Failed" and existing.cod_amount not in (None, "")
+		else None
+	)
 	address = _read_address(order)
 	return {
 		"address_first_line": address["first_line"],
@@ -54,6 +62,8 @@ def get_sales_order_defaults(sales_order_name):
 		"order_total": cod["total"],
 		"advance_paid": cod["advance_paid"],
 		"cod_limit": BOSTA_COD_LIMIT,
+		"currency": frappe.get_cached_value("Company", order.company, "default_currency"),
+		"retry_cod_amount": retry_cod,
 	}
 
 
@@ -91,6 +101,8 @@ def get_sales_order_shipment(sales_order_name):
 		"tracking_number",
 		"bosta_state_value",
 		"bosta_state_code",
+		"bosta_delivery_type",
+		"bosta_exception_reason",
 		"last_bosta_status_on",
 		"receiver_name",
 		"receiver_phone",
@@ -98,6 +110,7 @@ def get_sales_order_shipment(sales_order_name):
 		"city_id",
 		"address_first_line",
 		"cod_amount",
+		"shipment_fee",
 		"delivery_note",
 		"delivery_note_error",
 		"handover_status",
@@ -114,6 +127,7 @@ def get_sales_order_shipment(sales_order_name):
 		limit_page_length=0,
 	)
 	shipments = []
+	current_row = next((row for row in rows if row.status != "Canceled"), rows[0] if rows else None)
 	for row in rows:
 		shipment = {
 			"name": row.name,
@@ -121,6 +135,8 @@ def get_sales_order_shipment(sales_order_name):
 			"tracking_number": row.tracking_number or "",
 			"bosta_state": row.bosta_state_value or "",
 			"bosta_state_code": row.bosta_state_code or 0,
+			"bosta_delivery_type": row.bosta_delivery_type or "",
+			"bosta_exception_reason": row.bosta_exception_reason or "",
 			"active": row.status != "Canceled",
 			"last_update": cstr(row.last_bosta_status_on) if row.last_bosta_status_on else "",
 			"receiver_name": row.receiver_name or "",
@@ -129,9 +145,11 @@ def get_sales_order_shipment(sales_order_name):
 			"city_id": row.city_id or "",
 			"address_first_line": row.address_first_line or "",
 			"cod_amount": flt(row.cod_amount),
+			"shipment_fee": flt(row.shipment_fee) if row.shipment_fee not in (None, "") else None,
 			"delivery_note": row.delivery_note or "",
 			"delivery_note_error": row.delivery_note_error or "",
 			"delivery_note_status": _readable_delivery_note_status(row.delivery_note),
+			"delivery_note_posted": _delivery_note_is_submitted(row.delivery_note),
 			"handover_status": row.handover_status or "Awaiting Handover",
 			"handover_confirmed_by": row.handover_confirmed_by or "",
 			"handover_confirmed_on": cstr(row.handover_confirmed_on) if row.handover_confirmed_on else "",
@@ -160,7 +178,8 @@ def get_sales_order_shipment(sales_order_name):
 		shipments.append(shipment)
 	if not shipments:
 		return None
-	return {**shipments[0], "shipments": shipments}
+	current = next((shipment for shipment in shipments if shipment["name"] == current_row.name), shipments[0])
+	return {**current, "shipments": shipments}
 
 
 def _readable_delivery_note_status(delivery_note):
@@ -168,6 +187,15 @@ def _readable_delivery_note_status(delivery_note):
 	if not delivery_note or not frappe.has_permission("Delivery Note", "read", doc=delivery_note):
 		return ""
 	return frappe.db.get_value("Delivery Note", delivery_note, "status") or ""
+
+
+def _delivery_note_is_submitted(delivery_note):
+	"""Expose only the linked Delivery Note's submitted state, after its read check."""
+	if not delivery_note:
+		return False
+	if not frappe.has_permission("Delivery Note", "read", doc=delivery_note):
+		return None
+	return frappe.db.get_value("Delivery Note", delivery_note, "docstatus") == 1
 
 
 def _read_address(order):
@@ -255,6 +283,7 @@ def create_bosta_shipment(
 	city_id,
 	address_first_line,
 	expected_cod=None,
+	cod_amount=None,
 ):
 	"""Reserve available Sales Order quantities, create Bosta's delivery, then submit a
 	standard Delivery Note for that reservation immediately.
@@ -290,9 +319,9 @@ def create_bosta_shipment(
 			"city_code": city["code"],
 			"address_first_line": address_first_line,
 		}
-		return _resume_existing(existing, order, expected_cod, details)
+		return _resume_existing(existing, order, expected_cod, details, cod_amount)
 
-	cod = _current_cod(order, expected_cod)
+	cod = _current_cod(order, expected_cod, cod_amount)
 	shipment = frappe.get_doc(
 		{
 			"doctype": "Bosta Shipment",
@@ -427,14 +456,27 @@ def _cod_breakdown(order):
 	return {"total": flt(total, 2), "advance_paid": flt(advance_paid, 2), "cod": cod}
 
 
-def _current_cod(order, expected_cod):
-	cod = _cod_breakdown(order)["cod"]
-	if expected_cod is not None and flt(expected_cod, 2) != cod:
+def _current_cod(order, expected_cod, cod_amount=None):
+	default_cod = _cod_breakdown(order)["cod"]
+	if expected_cod is not None and flt(expected_cod, 2) != default_cod:
 		frappe.throw(
 			_(
 				"The COD amount changed from {0} to {1} since the dialog was opened. Reopen the dialog and check it."
-			).format(flt(expected_cod, 2), cod)
+			).format(flt(expected_cod, 2), default_cod)
 		)
+	if cod_amount in (None, ""):
+		return default_cod
+	try:
+		amount = Decimal(str(cod_amount))
+		if not amount.is_finite():
+			raise InvalidOperation
+		cod = float(amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+	except (InvalidOperation, TypeError, ValueError):
+		frappe.throw(_("Enter a valid COD amount in the company currency."))
+	if cod < 0:
+		frappe.throw(_("COD cannot be negative."))
+	if cod > BOSTA_COD_LIMIT:
+		frappe.throw(_("The COD amount {0} exceeds Bosta's limit of {1}.").format(cod, BOSTA_COD_LIMIT))
 	return cod
 
 
@@ -453,11 +495,14 @@ def _active_shipment(sales_order):
 	return frappe.get_doc("Bosta Shipment", rows[0].name) if rows else None
 
 
-def _resume_existing(shipment, order, expected_cod=None, details=None):
+def _resume_existing(shipment, order, expected_cod=None, details=None, cod_amount=None):
 	if shipment.status in ("Delivery Note Failed", "Bosta Created") and shipment.bosta_delivery_id:
 		return _found_shipment_result(shipment)
 	if shipment.status == "Bosta Failed" and not shipment.tracking_number:
-		cod = _current_cod(order, expected_cod)
+		# Retrying a Bosta Failed shipment repeats its recorded COD, even if the
+		# Sales Order's calculated default has since changed.
+		_current_cod(order, expected_cod)
+		cod = flt(shipment.cod_amount, 2) if shipment.cod_amount not in (None, "") else _current_cod(order, expected_cod, cod_amount)
 		frappe.db.commit()
 		# The earlier attempt may have reached Bosta (e.g. a timeout): look first.
 		remote = _find_remote_delivery(shipment)

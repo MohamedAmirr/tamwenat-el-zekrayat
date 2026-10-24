@@ -329,11 +329,64 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 		self.assertTrue(debounce.bump_if_linked_order_changed(order.name, before, "Noon Order Import"))
 		# Replay: the next import starts from the already-changed state.
 		replay_before = self._fingerprint_before(order)
-		frappe.db.set_value("Marketplace Order", order.name, "sync_debounce_until", None)
-		self.assertFalse(
-			debounce.bump_if_linked_order_changed(order.name, replay_before, "Noon Order Import")
+		self.assertFalse(debounce.bump_if_linked_order_changed(order.name, replay_before, "Noon Order Import"))
+
+	def test_shopify_successful_payment_transaction_changes_the_fingerprint(self):
+		order = self._make_order()
+		frappe.db.set_value("Marketplace Order", order.name, "platform", "Shopify")
+		frappe.db.set_value("Marketplace Order", order.name, "payment_transactions", frappe.as_json([]))
+		order.reload()
+		before = debounce.order_evidence_fingerprint(order)
+		frappe.db.set_value(
+			"Marketplace Order",
+			order.name,
+			"payment_transactions",
+			frappe.as_json(
+				[
+					{
+						"id": "gid://shopify/OrderTransaction/123",
+						"kind": "SALE",
+						"status": "SUCCESS",
+						"gateway": "Kashier",
+						"amountSet": {"shopMoney": {"amount": "25.00", "currencyCode": "EGP"}},
+						"processedAt": "2026-10-23T10:00:00Z",
+					}
+				]
+			),
 		)
-		self.assertIsNone(self._debounce_state(order).sync_debounce_until)
+		order.reload()
+		self.assertNotEqual(before, debounce.order_evidence_fingerprint(order))
+
+	def test_shopify_successful_transaction_gateway_amount_and_date_changes_fingerprint(self):
+		order = self._make_order()
+		frappe.db.set_value("Marketplace Order", order.name, "platform", "Shopify")
+		self._link(order)
+		base = {
+			"id": "gid://shopify/OrderTransaction/123",
+			"kind": "SALE",
+			"status": "SUCCESS",
+			"gateway": None,
+			"amountSet": {"shopMoney": {"amount": "25.00", "currencyCode": "EGP"}},
+			"processedAt": "2026-10-23T10:00:00Z",
+			"createdAt": "2026-10-23T09:00:00Z",
+		}
+		frappe.db.set_value("Marketplace Order", order.name, "payment_transactions", frappe.as_json([base]))
+		order.reload()
+		for field, value in (
+			("gateway", "Kashier"),
+			("amountSet", {"shopMoney": {"amount": "26.00", "currencyCode": "EGP"}}),
+			("processedAt", "2026-10-23T11:00:00Z"),
+			("createdAt", "2026-10-23T08:00:00Z"),
+		):
+			before = self._fingerprint_before(order)
+			changed = {**base, field: value}
+			frappe.db.set_value(
+				"Marketplace Order", order.name, "payment_transactions", frappe.as_json([changed])
+			)
+			order.reload()
+			self.assertTrue(
+				debounce.bump_if_linked_order_changed(order.name, before, "Shopify Order Import"), field
+			)
 
 	def test_unlinked_order_never_bumps(self):
 		order = self._make_order()
@@ -439,6 +492,7 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 		per_billed=0,
 		so_cancelled=False,
 		outbound_cancelled=False,
+		cancelled_at=None,
 	):
 		order = self._make_order()
 		fixture = LinkedSalesOrderFixture()
@@ -449,6 +503,8 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 			values["platform"] = platform
 		if outbound_cancelled:
 			values["outbound_cancelled_on"] = now_datetime()
+		if cancelled_at:
+			values["cancelled_at"] = cancelled_at
 		if checked_hours_ago is not None:
 			values["last_reconciliation_check_on"] = add_to_date(now_datetime(), hours=-checked_hours_ago)
 		frappe.db.set_value("Marketplace Order", order.name, values, update_modified=False)
@@ -568,6 +624,20 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 			with self.subTest(**kwargs):
 				order = self._stuck_order(outbound_cancelled=True, **kwargs)
 				self.assertNotIn(order.name, self._candidates())
+
+	def test_shopify_outbound_cancel_marker_is_skipped_only_after_cancel_echo(self):
+		pending = self._stuck_order(
+			status="Modified After Sync", platform="Shopify", outbound_cancelled=True
+		)
+		confirmed = self._stuck_order(
+			status="Modified After Sync",
+			platform="Shopify",
+			outbound_cancelled=True,
+			cancelled_at=now_datetime(),
+		)
+		names = self._candidates()
+		self.assertIn(pending.name, names)
+		self.assertNotIn(confirmed.name, names)
 
 	def test_sweep_does_not_overwrite_a_webhook_bump_made_after_the_candidate_query(self):
 		order = self._stuck_order(status="Sync Error")

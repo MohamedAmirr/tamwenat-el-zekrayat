@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 from erpnext.stock.doctype.delivery_note.delivery_note import make_sales_invoice
-from frappe.tests import IntegrationTestCase
+from frappe.tests import IntegrationTestCase, UnitTestCase
 from frappe.utils import add_days, now_datetime
 
 from marketplace_integrations.api import bosta_shipments, bosta_webhooks
@@ -24,6 +24,14 @@ from marketplace_integrations.tests.bosta_fixtures import (
 )
 
 SECRET = "bosta-webhook-secret"
+
+
+class UnitTestBostaDeliveryFee(UnitTestCase):
+	def test_fee_requires_a_nonnegative_non_boolean_number(self):
+		for value in (0, 87, 87.5):
+			self.assertEqual(statuses._shipment_fee({"data": {"shipmentFees": value}}), value)
+		for value in (True, -1, float("nan"), float("inf"), "87", None, {}):
+			self.assertIsNone(statuses._shipment_fee({"data": {"shipmentFees": value}}))
 
 
 class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
@@ -202,6 +210,120 @@ class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
 		}
 		self.assertNotIn(shipment.name, names)
 
+	def _attention_rows_for(self, shipment, problem_type):
+		return [
+			row
+			for row in marketplace_attention.get_attention_items(
+				{"platform": "Bosta", "problem_type": problem_type}
+			)
+			if row["reference_name"] == shipment.name
+		]
+
+	def test_carrier_exception_is_listed_in_needs_attention(self):
+		_, shipment = self._completed_shipment(tracking=f"TRK-EX-{self.suffix}")
+		frappe.db.set_value(
+			"Bosta Shipment",
+			shipment.name,
+			{
+				"bosta_state_code": 47,
+				"bosta_state_value": statuses.BOSTA_STATE_NAMES[47],
+				"bosta_exception_reason": "Receiver unavailable",
+			},
+		)
+
+		rows = self._attention_rows_for(shipment, marketplace_attention.BOSTA_CARRIER_EXCEPTION)
+
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0]["explanation"], "Receiver unavailable")
+
+	def test_return_finding_clears_only_after_a_submitted_return_against_linked_delivery_note(self):
+		from erpnext.controllers.sales_and_purchase_return import make_return_doc
+
+		_, shipment = self._completed_shipment(tracking=f"TRK-RETURN-{self.suffix}")
+		frappe.db.set_value(
+			"Bosta Shipment",
+			shipment.name,
+			{
+				"bosta_state_code": 46,
+				"bosta_state_value": statuses.BOSTA_STATE_NAMES[46],
+			},
+		)
+		self.assertEqual(len(self._attention_rows_for(shipment, marketplace_attention.BOSTA_RETURN)), 1)
+
+		return_note = make_return_doc("Delivery Note", shipment.delivery_note)
+		return_note.items[0].qty = -1
+		self._track(return_note.insert())
+		self.assertEqual(len(self._attention_rows_for(shipment, marketplace_attention.BOSTA_RETURN)), 1)
+
+		return_note.submit()
+		self.assertEqual(self._attention_rows_for(shipment, marketplace_attention.BOSTA_RETURN), [])
+
+	def test_delivered_send_without_a_submitted_delivery_note_is_listed(self):
+		order = self.make_order()
+		self.http.queue["create"].append(created(f"TRK-DELIVERED-{self.suffix}"))
+		self.create(order, confirm_handover=False)
+		shipment = self.shipment_for(order)
+		frappe.db.set_value(
+			"Bosta Shipment",
+			shipment.name,
+			{
+				"bosta_state_code": 45,
+				"bosta_state_value": statuses.BOSTA_STATE_NAMES[45],
+				"bosta_delivery_type": "SEND",
+			},
+		)
+
+		rows = self._attention_rows_for(shipment, marketplace_attention.BOSTA_DELIVERED_WITHOUT_DELIVERY_NOTE)
+
+		self.assertEqual(len(rows), 1)
+
+	def test_tracked_shipment_without_any_event_uses_creation_for_stale_attention(self):
+		order = self.make_order()
+		self.http.queue["create"].append(created(f"TRK-STALE-{self.suffix}"))
+		self.create(order, confirm_handover=False)
+		shipment = self.shipment_for(order)
+		frappe.db.set_value(
+			"Bosta Shipment",
+			shipment.name,
+			{"creation": add_days(now_datetime(), -6), "last_bosta_status_on": None},
+			update_modified=False,
+		)
+
+		rows = self._attention_rows_for(shipment, marketplace_attention.BOSTA_STATUS_STALE)
+
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(
+			rows[0]["detected_at"], frappe.db.get_value("Bosta Shipment", shipment.name, "creation")
+		)
+
+	def test_state_103_notification_escapes_tracking_text_and_keeps_shipment_link(self):
+		recipient = self.make_user("Bosta User")
+		_, shipment = self._completed_shipment(tracking=f"TRK-NOTIFY-{self.suffix}")
+		tracking_number = 'TRK-<script>alert("x")</script>'
+		frappe.db.set_value("Bosta Shipment", shipment.name, "tracking_number", tracking_number)
+		shipment.reload()
+		try:
+			statuses.process_webhook_event(self._event(shipment, 103, 9000))
+			logs = frappe.get_all(
+				"Notification Log",
+				filters={
+					"for_user": recipient,
+					"document_type": "Bosta Shipment",
+					"document_name": shipment.name,
+				},
+				fields=["name", "description"],
+				limit_page_length=0,
+			)
+			self.assertEqual(len(logs), 1)
+			self.assertIn("TRK-&lt;script&gt;", logs[0].description)
+			self.assertNotIn("<script>", logs[0].description)
+			self.assertIn(f"/app/bosta-shipment/{shipment.name}", logs[0].description)
+		finally:
+			frappe.db.delete(
+				"Notification Log",
+				{"document_type": "Bosta Shipment", "document_name": shipment.name},
+			)
+
 	# -- polling -------------------------------------------------------------------------
 
 	def _poll(self, responses):
@@ -375,6 +497,50 @@ class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
 		shipment.reload()
 		self.assertEqual((shipment.last_bosta_status_on, shipment.modified), (checked_on, modified))
 
+	def test_unchanged_state_can_still_update_a_changed_delivery_fee(self):
+		order, shipment = self._completed_shipment("T-FEE")
+		self.assertEqual(
+			statuses.apply_state(
+				shipment.tracking_number,
+				state_code=45,
+				timestamp=5000,
+				snapshot={"code": 45},
+				shipment_fee=50,
+			),
+			statuses.APPLIED,
+		)
+		shipment.reload()
+		result = statuses.apply_state(
+			shipment.tracking_number,
+			state_code=45,
+			timestamp=6000,
+			snapshot={"code": 45},
+			skip_if_unchanged=True,
+			shipment_fee=87,
+		)
+
+		self.assertEqual(result, statuses.APPLIED)
+		shipment.reload()
+		self.assertEqual(shipment.shipment_fee, 87)
+		self.assertEqual(frappe.db.get_value("Sales Order", order.name, "custom_bosta_delivery_status"), "Delivered")
+
+	def test_sales_order_status_backfill_uses_latest_shipment_and_is_idempotent(self):
+		order, shipment = self._completed_shipment("T-STATUS-BACKFILL")
+		statuses.apply_state(
+			shipment.tracking_number,
+			state_code=45,
+			timestamp=5000,
+			snapshot={"code": 45},
+		)
+		frappe.db.set_value("Sales Order", order.name, "custom_bosta_delivery_status", "", update_modified=False)
+		from marketplace_integrations.patches.v0_0.backfill_sales_order_bosta_delivery_status import execute
+
+		execute()
+		self.assertEqual(frappe.db.get_value("Sales Order", order.name, "custom_bosta_delivery_status"), "Delivered")
+		modified = frappe.db.get_value("Sales Order", order.name, "modified")
+		execute()
+		self.assertEqual(frappe.db.get_value("Sales Order", order.name, "modified"), modified)
+
 	def test_repeated_carrier_cancel_does_not_create_delivery_note_cancellation_errors(self):
 		_, shipment = self._completed_shipment("T-REPEAT")
 		with patch(
@@ -401,6 +567,18 @@ class IntegrationTestBostaRefresh(BostaFixtureMixin, IntegrationTestCase):
 
 	def _state(self, code):
 		return FakeResponse(200, {"success": True, "data": {"state": {"code": code, "value": "x"}}})
+
+	def test_refresh_reads_and_stores_a_numeric_delivery_fee(self):
+		order, shipment = self._live("TRK-FEE")
+		self.http.queue["get"].append(
+			FakeResponse(200, {"success": True, "data": {"state": {"code": 45}, "shipmentFees": 87}})
+		)
+
+		bosta_shipments.refresh_shipment(shipment.name)
+
+		shipment.reload()
+		self.assertEqual(shipment.shipment_fee, 87)
+		self.assertEqual(frappe.db.get_value("Sales Order", order.name, "custom_bosta_delivery_status"), "Delivered")
 
 	def test_refresh_applies_the_state_and_updates_the_last_update_time(self):
 		_, shipment = self._live()

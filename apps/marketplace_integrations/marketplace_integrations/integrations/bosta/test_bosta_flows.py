@@ -400,6 +400,18 @@ class IntegrationTestBostaCreate(BostaFixtureMixin, IntegrationTestCase):
 		self.assertIn("company currency", str(raised.exception))
 		self.assertEqual(len(self.http.sent()), 1)
 
+	def test_operator_cod_override_is_sent_and_persisted_independently_of_the_default(self):
+		order = self.make_order(rate=500, advance_paid=200)
+		self.http.queue["create"].append(created())
+
+		result = self.create(order, expected_cod=300, cod_amount=125.75, confirm_handover=False)
+
+		self.assertEqual(self.http.calls_of("create")[0]["cod"], 125.75)
+		self.assertEqual(frappe.db.get_value("Bosta Shipment", result["shipment"], "cod_amount"), 125.75)
+		for invalid in (-1, 30000.01):
+			with self.assertRaises(frappe.ValidationError):
+				deliveries._current_cod(order, 300, invalid)
+
 	def test_a_stale_caller_cannot_build_a_second_delivery_note(self):
 		order = self.make_order()
 		self.http.queue["create"].append(created())

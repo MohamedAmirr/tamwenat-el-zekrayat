@@ -50,6 +50,7 @@ SYSTEM_FIELDS = (
 	"delivery_note_error_at",
 	"bosta_requested_on",
 	"cod_amount",
+	"shipment_fee",
 	"bosta_terminated_on",
 )
 
@@ -156,6 +157,37 @@ class BostaShipment(Document):
 	def after_insert(self):
 		# The name only exists after insert; db_set also updates this instance.
 		self.db_set("unique_business_reference", f"BOSTA-{self.name}", update_modified=False)
+		self._sync_sales_order_bosta_state()
+
+	def on_update(self):
+		self._sync_sales_order_bosta_state()
+
+	def _sync_sales_order_bosta_state(self):
+		"""Mirror the same active-first shipment selection used by the Sales Order summary."""
+		if not self.sales_order or not frappe.db.exists(
+			"Custom Field", "Sales Order-custom_bosta_delivery_status"
+		):
+			return
+		rows = frappe.get_all(
+			"Bosta Shipment",
+			filters={"sales_order": self.sales_order},
+			fields=["name", "status", "bosta_state_code"],
+			order_by="creation desc, name desc",
+			limit_page_length=0,
+		)
+		current = next((row for row in rows if row.status != CANCELED), rows[0] if rows else None)
+		if current:
+			# Import lazily: statuses imports this controller for its CANCELED/save helpers.
+			from marketplace_integrations.integrations.bosta.statuses import BOSTA_STATE_NAMES
+
+			state = BOSTA_STATE_NAMES.get(current.bosta_state_code) or current.status or ""
+		else:
+			state = ""
+		if frappe.db.get_value("Sales Order", self.sales_order, "custom_bosta_delivery_status") != state:
+			# This is a derived display field; don't run Sales Order accounting or update modified.
+			frappe.db.set_value(
+				"Sales Order", self.sales_order, "custom_bosta_delivery_status", state, update_modified=False
+			)
 
 	def _block_system_field_writes(self):
 		"""System-set fields are writable only by server code (``flags.bosta_system_write``,

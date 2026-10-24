@@ -3,7 +3,9 @@
 
 """Persist documented Bosta delivery states and their safe ERP side effects."""
 
+import math
 import time
+from numbers import Real
 
 import frappe
 from frappe import _
@@ -95,6 +97,22 @@ def poll_incomplete_shipments():
 	)
 	updated = 0
 	client = BostaClient(settings=settings)
+	# Delivered is terminal for state polling, but keep reading it until the delivery fee
+	# has been recorded. This system query also bypasses row permissions.
+	fee_shipments = frappe.get_all(
+		"Bosta Shipment",
+		filters={
+			"tracking_number": ["!=", ""],
+			"status": ["!=", CANCELED],
+			"bosta_state_code": DELIVERED_STATE_CODE,
+			"shipment_fee": ["is", "not set"],
+			"creation": [">=", add_to_date(now_datetime(), days=-POLL_MAX_AGE_DAYS)],
+		},
+		fields=["name", "tracking_number"],
+		order_by="name asc",
+	)
+	known = {row.name for row in shipments}
+	shipments.extend(row for row in fee_shipments if row.name not in known)
 	for shipment in shipments:
 		try:
 			# Taken before the request: the snapshot is no newer than this instant.
@@ -103,6 +121,7 @@ def poll_incomplete_shipments():
 			if not is_success_response(response):
 				raise BostaStatusError(client.error_message(response))
 			state = _polled_state(response_body(response))
+			fee = _shipment_fee(response_body(response))
 			if (
 				state
 				and apply_state(
@@ -112,6 +131,7 @@ def poll_incomplete_shipments():
 					delivery_type=state.get("delivery_type"),
 					snapshot=state["snapshot"],
 					skip_if_unchanged=True,
+					shipment_fee=fee,
 				)
 				== APPLIED
 			):
@@ -153,6 +173,7 @@ def refresh_shipment_state(shipment_name):
 		timestamp=fetched_at,
 		delivery_type=state.get("delivery_type"),
 		snapshot=state["snapshot"],
+		shipment_fee=_shipment_fee(response_body(response)),
 	)
 	if result == SKIPPED:
 		frappe.throw(_("Bosta returned a state this app does not recognise. Nothing was changed."))
@@ -321,6 +342,20 @@ def _polled_state(body):
 	return result
 
 
+def _shipment_fee(body):
+	"""Return Bosta's numeric, nonnegative delivery fee; missing or invalid data is ignored."""
+	data = body.get("data") if isinstance(body, dict) else None
+	value = data.get("shipmentFees") if isinstance(data, dict) else None
+	if (
+		isinstance(value, bool)
+		or not isinstance(value, Real)
+		or not math.isfinite(value)
+		or value < 0
+	):
+		return None
+	return value
+
+
 def process_webhook_event(payload):
 	"""Apply one authenticated Bosta webhook event.
 
@@ -357,6 +392,7 @@ def apply_state(
 	exception_code=None,
 	snapshot=None,
 	skip_if_unchanged=False,
+	shipment_fee=None,
 ):
 	"""The one place a Bosta state (from a webhook or a poll) is applied.
 
@@ -386,11 +422,14 @@ def apply_state(
 		return _skip("delivery id mismatch", tracking_number, delivery_id)
 	if _is_duplicate_or_older_event(shipment, timestamp):
 		return STALE
-	if skip_if_unchanged and shipment.bosta_state_code == state_code:
+	fee_changed = shipment_fee is not None and shipment.shipment_fee != shipment_fee
+	if skip_if_unchanged and shipment.bosta_state_code == state_code and not fee_changed:
 		return UNCHANGED
 
 	shipment.bosta_state_code = state_code
 	shipment.bosta_state_value = BOSTA_STATE_NAMES[state_code]
+	if fee_changed:
+		shipment.shipment_fee = shipment_fee
 	if delivery_type is not None:
 		shipment.bosta_delivery_type = delivery_type
 	shipment.last_bosta_event_timestamp = timestamp

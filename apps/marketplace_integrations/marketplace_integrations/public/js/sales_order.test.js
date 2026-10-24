@@ -804,6 +804,13 @@ test("a zero COD is shown as 0, and the Delivery Note status is only shown when 
 	assert.match(html, /MAT-DN-1<\/a><\/td>/);
 });
 
+test("a Bosta delivery fee is shown in EGP only when stored", async () => {
+	const { html } = await tab_for({ shipment_fee: 87 });
+	assert.match(html, /Bosta Delivery Fee<\/th><td>EGP 87<\/td>/);
+	const without_fee = await tab_for({ shipment_fee: null });
+	assert.doesNotMatch(without_fee.html, /Bosta Delivery Fee/);
+});
+
 test("stored values render as text in the tab", async () => {
 	const evil = "<img src=x onerror=alert(1)>";
 	const { html } = await tab_for({
@@ -1142,11 +1149,12 @@ test("remote names cannot inject markup, and an ampersand stays readable", async
 	assert.equal(options[1].value, "bosta-id-7"); // the stored value stays the Bosta ID
 });
 
-test("creating sends the city ID, the receiver, the address and the shown COD, and no district", async () => {
+test("creating sends the city ID, the receiver, the address and the entered COD, and no district", async () => {
 	const { dialog, calls, frm } = await open_bosta_dialog({ cod_amount: 300 });
 	await dialog.set_value("city", "c-cairo");
 	await settle();
 	Object.assign(dialog.values, {
+		cod_amount: 125.75,
 		receiver_name: "Ahmed",
 		receiver_phone: "0100",
 		address_first_line: "12 Example Street",
@@ -1161,6 +1169,7 @@ test("creating sends the city ID, the receiver, the address and the shown COD, a
 		city_id: "c-cairo",
 		address_first_line: "12 Example Street",
 		expected_cod: 300,
+		cod_amount: 125.75,
 	});
 	assert.equal(frm.reloads, 1);
 });
