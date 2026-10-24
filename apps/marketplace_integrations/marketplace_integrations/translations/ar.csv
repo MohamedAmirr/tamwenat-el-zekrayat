@@ -1731,6 +1731,8 @@ Payment Error,خطأ في الدفع
 Payment Excess,زيادة في الدفعة
 Payment Entry Cancelled,إلغاء قيد الدفع
 Payment Issues,مشكلات الدفع
+Cancelled in Shopify but the payment was not fully refunded; refund it in Shopify,أُلغي الطلب في Shopify لكن لم يُرد المبلغ بالكامل؛ أعد المبلغ في Shopify
+"Cancelled Shopify order has an unrecognized financial status; review it manually.",حالة الدفع الملغاة في Shopify غير معروفة؛ راجع الطلب يدويًا.
 Open Payment Entry,فتح قيد الدفع
 "This marketplace change would reduce the Sales Order total below its advance of {0}. Reallocate or cancel the advance before updating the order.",سيؤدي هذا التغيير في السوق إلى خفض إجمالي أمر البيع عن الدفعة المقدمة البالغة {0}. أعد تخصيص الدفعة أو ألغها قبل تحديث الطلب.
 Shopify payment {0} could not be recorded: {1},تعذر تسجيل دفعة Shopify {0}: {1}

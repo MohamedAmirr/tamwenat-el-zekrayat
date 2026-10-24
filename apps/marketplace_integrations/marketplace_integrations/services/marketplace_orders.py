@@ -129,10 +129,24 @@ def upsert_marketplace_order(marketplace_account, normalized_order, is_stale=Non
 	doc = frappe.get_doc("Marketplace Order", name) if name else frappe.new_doc("Marketplace Order")
 	if name and is_stale and is_stale(doc):
 		return doc
+	# A Shopify cancellation resolved before any ERPNext order exists is terminal
+	# across later imports. A linked order remains governed by normal sync.
+	keep_shopify_cancelled = bool(
+		name
+		and doc.platform == "Shopify"
+		and doc.erpnext_sync_status == "Cancelled"
+		and not doc.erpnext_sales_order
+	)
 	doc.marketplace_account = marketplace_account
 	doc.external_order_id = external_order_id
 	_apply_order_fields(doc, normalized_order)
 	_upsert_order_items(doc, normalized_order.get("items") or [])
+	if keep_shopify_cancelled:
+		from marketplace_integrations.integrations.shopify.order_reconciliation import build_evidence
+
+		if doc.cancelled_at or build_evidence(doc).get("cancellation") == "full":
+			doc.erpnext_sync_status = "Cancelled"
+			doc.last_sync_error = None
 
 	if doc.is_new():
 		try:

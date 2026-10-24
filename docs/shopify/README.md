@@ -213,3 +213,21 @@ Source: [Installing and setting up apps](https://help.shopify.com/en/manual/apps
 - [Generate access tokens for admin-created custom apps](https://shopify.dev/docs/apps/build/authentication-authorization/access-tokens/generate-app-access-tokens-admin)
 - [GraphQL Admin API reference](https://shopify.dev/docs/api/admin-graphql/latest)
 - [REST Admin API reference (legacy)](https://shopify.dev/docs/api/admin-rest) — do not build new work against this
+# Order cancellation and nightly catch-up
+
+An unlinked Shopify order canceled before a Sales Order exists is marked
+`Cancelled` when it is unpaid or fully refunded. If it was paid or only
+partially refunded, it stays `Sync Error` with an instruction to finish the
+refund in Shopify. Later Shopify imports preserve the terminal `Cancelled`
+state for unlinked canceled orders. Linked orders continue through the normal
+Sales Order reconciliation path.
+
+The existing daily Shopify watermark reconciliation remains in place. A
+separate nightly coordinator queues one deduplicated long job per enabled
+Shopify or Noon account at `23:59` site time. Only the nightly Shopify job
+enables unlinked-order catch-up; the existing daily watermark sweep continues
+to reconcile linked-order changes only. Shopify reuses its persisted watermark
+and overlap; Noon reuses its seven-day import window. Imports update
+Marketplace Orders and schedule the existing debounce sync; they do not create
+Sales Orders inline. See `docs/user-actions.md` for scheduler restart and the
+production timezone check.

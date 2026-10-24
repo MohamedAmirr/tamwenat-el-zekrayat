@@ -147,6 +147,10 @@ test("Talabat and ERPNext status indicators use the agreed standard colors", () 
 		label: "Sync Error",
 		color: "red",
 	});
+	assert.deepEqual(get_status_indicator("Cancelled", ERPNEXT_SYNC_STATUS_COLORS), {
+		label: "Cancelled",
+		color: "gray",
+	});
 });
 
 test("promotion_status AVAILABLE and every other value get distinct, non-inventive notes", () => {
