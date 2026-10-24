@@ -852,6 +852,37 @@ class IntegrationTestHandleTopicRealOrderRouting(IntegrationTestCase):
 
 		mocked_bump.assert_called_once_with(order.name, trigger_source="Shopify Webhook")
 
+	def test_orders_paid_uses_existing_import_then_debounce_routing(self):
+		account = make_shopify_account(
+			f"Orders Paid Routing Account {frappe.generate_hash(length=8)}",
+			connection=self.connection.name,
+		)
+		order = upsert_marketplace_order(
+			account.name,
+			{
+				"external_order_id": f"orders-paid-debounce-{frappe.generate_hash(length=6)}",
+				"latest_payload": {"order_id": "external-order"},
+				"items": [],
+			},
+		)
+		webhook_id = f"webhook-orders-paid-{frappe.generate_hash(length=6)}"
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with (
+			patch.object(webhooks_module, "import_order", return_value=order) as mocked_import,
+			patch.object(webhooks_module, "bump_sync_debounce") as mocked_bump,
+		):
+			process_shopify_webhook(
+				self.connection.name,
+				"ORDERS_PAID",
+				webhook_id,
+				self.connection.shop_domain,
+				order_gid="gid://shopify/Order/12345",
+			)
+		mocked_import.assert_called_once()
+		mocked_bump.assert_called_once_with(order.name, trigger_source="Shopify Webhook")
+
 	def test_no_resolvable_account_does_not_bump_sync_debounce(self):
 		# #109 decision 5 edge case 2 (no resolvable account) must remain a
 		# pure no-op - bump_sync_debounce() is only reachable past a

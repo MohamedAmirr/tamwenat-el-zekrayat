@@ -44,8 +44,10 @@ def get_account(account_name):
 	if not account.enabled:
 		frappe.throw(_("Marketplace Account {0} is disabled.").format(account.name))
 
+	# Trusted read: Talabat Connection is System Manager only, but the caller already passed the
+	# doc-level check on this Talabat account above. The connection is the account's own and is
+	# used server-side only; its Password fields are never returned to the client.
 	connection = frappe.get_doc("Talabat Connection", account.connection)
-	connection.check_permission("read")
 	if not connection.enabled:
 		frappe.throw(_("Talabat Connection {0} is disabled.").format(connection.name))
 

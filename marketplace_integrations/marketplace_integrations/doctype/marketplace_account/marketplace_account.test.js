@@ -20,6 +20,8 @@ const {
 	configure_shopify_inventory,
 	reconcile_shopify_inventory,
 	RECONCILE_INVENTORY_LABEL,
+	LOAD_SHOPIFY_GATEWAYS_LABEL,
+	show_shopify_gateway_picker,
 	configure_view_shortcuts,
 } = require("./marketplace_account.js");
 
@@ -221,6 +223,114 @@ test("Load Shopify Locations button is removed when connection is cleared, even 
 	configure_shopify_location(frm);
 
 	assert.deepEqual(frm.buttons, []);
+});
+
+test("Load Shopify Payment Gateways is Shopify-only, permission-gated, and saved-account-only", () => {
+	global.frappe = { model: { can_write: () => true } };
+	const frm = make_frm({ platform: "Shopify", connection: "Shopify Connection", name: "MKTACC-1" });
+	configure_shopify_location(frm);
+	assert.ok(frm.buttons.includes(LOAD_SHOPIFY_GATEWAYS_LABEL));
+
+	const new_frm = make_frm({ platform: "Shopify", connection: "Shopify Connection" }, { is_new: true });
+	configure_shopify_location(new_frm);
+	assert.ok(!new_frm.buttons.includes(LOAD_SHOPIFY_GATEWAYS_LABEL));
+
+	global.frappe.model.can_write = () => false;
+	const read_only_frm = make_frm({ platform: "Shopify", connection: "Shopify Connection", name: "MKTACC-2" });
+	configure_shopify_location(read_only_frm);
+	assert.ok(!read_only_frm.buttons.includes(LOAD_SHOPIFY_GATEWAYS_LABEL));
+});
+
+test("gateway picker adds selected exact unmapped names without saving or showing formatted labels", async () => {
+	let dialog_options;
+	let selected_indices = [1];
+	global.frappe = {
+		call: () =>
+			Promise.resolve({
+				message: [
+					{ gateway: "Kashier", orders_count: 2, mapped: true },
+					{ gateway: "Paymob", orders_count: 3, mapped: false, formatted_gateway: "Pretty label" },
+					{ gateway: "<script>", orders_count: 1, mapped: false },
+				],
+		}),
+		utils: { escape_html: (value) => String(value).replace(/</g, "&lt;").replace(/>/g, "&gt;") },
+		msgprint() {},
+		ui: {
+			Dialog: class {
+				constructor(options) {
+					dialog_options = options;
+					this.$wrapper = {
+						find: () => ({
+							map: (callback) => ({
+								get: () =>
+									selected_indices
+										.map((index) => callback(index, { dataset: { gatewayIndex: String(index) } }))
+										.filter(Boolean),
+							}),
+						}),
+					};
+				}
+				show() {}
+				hide() {}
+			},
+		},
+	};
+	const frm = make_frm({ name: "MKTACC-1", shopify_payment_gateways: [] });
+	frm.add_child = (fieldname, value) => frm.doc[fieldname].push(value);
+	let refreshed = false;
+	frm.refresh_field = (fieldname) => {
+		if (fieldname === "shopify_payment_gateways") refreshed = true;
+	};
+	await show_shopify_gateway_picker(frm);
+	const html = dialog_options.fields[0].options;
+	assert.match(html, /Kashier/);
+	assert.match(html, /Already mapped/);
+	assert.match(html, /Used by/);
+	assert.doesNotMatch(html, /Pretty label/);
+	assert.match(html, /&lt;script&gt;/);
+	dialog_options.primary_action();
+	assert.deepEqual(frm.doc.shopify_payment_gateways, [{ shopify_gateway: "Paymob" }]);
+	assert.equal(refreshed, true);
+	assert.equal(typeof frm.save, "undefined");
+});
+
+test("gateway picker shows a scoped error and can be retried after the request fails", async () => {
+	let calls = 0;
+	let message;
+	let dialog_shown = false;
+	global.frappe = {
+		call() {
+			calls++;
+			return calls === 1
+				? Promise.reject(new Error("offline"))
+				: Promise.resolve({ message: [{ gateway: "Paymob", orders_count: 1, mapped: false }] });
+		},
+		msgprint(args) {
+			message = args;
+		},
+		utils: { escape_html: (value) => String(value) },
+		ui: {
+			Dialog: class {
+				constructor() {
+					this.$wrapper = { find: () => ({ map: () => ({ get: () => [] }) }) };
+				}
+				show() {
+					dialog_shown = true;
+				}
+				hide() {}
+			},
+		},
+	};
+
+	const frm = make_frm({ name: "MKTACC-1", shopify_payment_gateways: [] });
+	await show_shopify_gateway_picker(frm);
+	assert.equal(message.title, "Shopify Payment Gateways");
+	assert.match(message.message, /Could not load Shopify payment gateways/);
+	assert.equal(message.indicator, "red");
+
+	await show_shopify_gateway_picker(frm);
+	assert.equal(calls, 2);
+	assert.equal(dialog_shown, true);
 });
 
 test("Open sends no close fields and Close Until preserves the local DateTime value", () => {

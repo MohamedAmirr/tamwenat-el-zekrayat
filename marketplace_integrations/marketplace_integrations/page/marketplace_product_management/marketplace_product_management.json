@@ -3,7 +3,7 @@
  "creation": "2026-08-31 00:00:00.000000",
  "docstatus": 0,
  "doctype": "Page",
- "modified": "2026-08-31 00:00:00.000000",
+ "modified": "2026-10-23 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "marketplace-product-management",
@@ -12,6 +12,15 @@
  "roles": [
   {
    "role": "System Manager"
+  },
+  {
+   "role": "Talabat User"
+  },
+  {
+   "role": "Noon User"
+  },
+  {
+   "role": "Shopify User"
   }
  ],
  "script": null,

@@ -35,8 +35,10 @@ def get_account(account_name):
 		frappe.throw(_("Marketplace Account {0} is not a Talabat account.").format(account.name))
 	if account.connection_doctype != "Talabat Connection":
 		frappe.throw(_("Marketplace Account {0} does not use a Talabat Connection.").format(account.name))
+	# Trusted read: Talabat Connection is System Manager only, but the caller already passed the
+	# doc-level check on this Talabat account above. The connection is the account's own and is
+	# used server-side only; its Password fields are never returned to the client.
 	connection = frappe.get_doc("Talabat Connection", account.connection)
-	connection.check_permission("read")
 	return account, connection
 
 
@@ -61,6 +63,7 @@ def get_catalog_page(account_name, page=1, page_size=20):
 	if page_skus:
 		item_by_sku = {
 			row.external_reference: row.item
+			# Trusted read: get_account() and _require_mapping_permission() above authorized the caller.
 			for row in frappe.get_all(
 				"Marketplace Product Mapping",
 				filters={
@@ -92,6 +95,7 @@ def get_mapped_items(account_name):
 	_require_mapping_permission("read")
 	return {
 		row.external_reference: row.item
+		# Trusted read: get_account() and _require_mapping_permission() above already authorized the caller.
 		for row in frappe.get_all(
 			"Marketplace Product Mapping",
 			filters={"marketplace_account": account.name, "enabled": 1},

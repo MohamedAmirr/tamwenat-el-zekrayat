@@ -31,6 +31,7 @@ from marketplace_integrations.services.sales_order_sync import (
 	snapshot_hash,
 	sync_sales_order,
 )
+from marketplace_integrations.services import sales_order_sync as sales_order_sync_service
 
 _DEFAULT_VARIANT = object()
 # Shopify paymentTerms of an order staff recorded with payment "Due on receipt".
@@ -53,6 +54,33 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.item = self._make_item()
 		self.account = self._make_account()
 		self._make_mapping("SKU-UNIT", self.item.name)
+
+	def test_automatic_payment_step_runs_only_for_linked_submitted_shopify_orders(self):
+		with (
+			patch.object(
+				sales_order_sync_service.frappe.db,
+				"get_value",
+				side_effect=[frappe._dict(platform="Shopify", erpnext_sales_order="SO-1"), 1],
+			),
+			patch(
+				"marketplace_integrations.services.shopify_payments.mirror_shopify_payments"
+			) as mirror,
+		):
+			sales_order_sync_service._mirror_shopify_payments_independently("MKTORD-1", "Shopify Webhook")
+		mirror.assert_called_once_with("MKTORD-1", "Shopify Webhook")
+
+		with (
+			patch.object(
+				sales_order_sync_service.frappe.db,
+				"get_value",
+				return_value=frappe._dict(platform="Talabat", erpnext_sales_order="SO-1"),
+			),
+			patch(
+				"marketplace_integrations.services.shopify_payments.mirror_shopify_payments"
+			) as mirror,
+		):
+			sales_order_sync_service._mirror_shopify_payments_independently("MKTORD-2", "Manual")
+		mirror.assert_not_called()
 
 	def _make_item(self):
 		item = frappe.get_doc(
@@ -911,6 +939,21 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.reload()
 		return order, first["sales_order"]
 
+	def _closed_shopify_order_with_outbound_cancel(self):
+		"""A Shopify order whose accepted outbound cancel is confirmed by cancelledAt."""
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(account)
+		first = sync_sales_order(order.name)
+		frappe.db.set_value("Sales Order", first["sales_order"], "status", "Closed", update_modified=False)
+		frappe.db.set_value(
+			"Marketplace Order", order.name, "outbound_cancelled_on", now_datetime(), update_modified=False
+		)
+		order.reload()
+		order.cancelled_at = now_datetime()
+		order.save()
+		order.reload()
+		return order, first["sales_order"]
+
 	def test_outbound_cancel_echo_keeps_the_closed_order_closed_in_the_status_path(self):
 		order, sales_order = self._closed_order_with_outbound_cancel()
 
@@ -922,6 +965,26 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 	def test_outbound_cancel_echo_is_no_action_in_the_sync_path_and_nothing_is_reopened(self):
 		order, sales_order = self._closed_order_with_outbound_cancel()
+
+		with patch.object(SalesOrder, "update_status") as update_status:
+			result = sync_sales_order(order.name)
+
+		update_status.assert_not_called()
+		self.assertEqual(result["reconciliation"]["outcome"], "NO_ACTION")
+		self.assertNotIn("executed_action", result)
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "status"), "Closed")
+		self.assertEqual(self._reopen_comments(sales_order), [])
+
+	def test_shopify_outbound_cancel_echo_keeps_the_closed_order_closed_in_the_status_path(self):
+		order, sales_order = self._closed_shopify_order_with_outbound_cancel()
+
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(get_current_sync_status(order.name), "Synced")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "status"), "Closed")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 1)
+
+	def test_shopify_outbound_cancel_echo_is_no_action_in_the_sync_path(self):
+		order, sales_order = self._closed_shopify_order_with_outbound_cancel()
 
 		with patch.object(SalesOrder, "update_status") as update_status:
 			result = sync_sales_order(order.name)

@@ -1,16 +1,13 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-"""Bosta's city and district lists for the Create Bosta Shipment dialog (#245).
+"""Bosta's cities for the Create / Edit Bosta Shipment dialogs (#245) and their city codes (#318).
 
-Both lists come from Bosta's public ``GET /cities`` and ``GET /cities/{cityId}/districts``
-and are cached for 24 hours in the Frappe cache. Nothing is cached on failure, so a
-Bosta outage never poisons the cache and a refresh that fails keeps the previous lists.
-
-Response shapes follow docs/bosta-integration/docs.yaml (checked against its examples,
-not a live call): cities are ``data.list[]`` of ``{_id, name, nameAr, ...}``; districts
-are ``data[]`` of ``{zoneName, districtId, districtName, districtOtherName,
-dropOffAvailability, ...}``.
+The city list comes from Bosta's public ``GET /cities`` (``data.list[]`` of ``{_id, name,
+nameAr, ...}``, per docs/bosta-integration/docs.yaml) and the city codes from
+``GET /cities/getAllDistricts``. Both are cached for 24 hours in the Frappe cache. Nothing
+is cached on failure, so a Bosta outage never poisons the cache and a refresh that fails
+keeps the previous lists.
 """
 
 import frappe
@@ -25,16 +22,14 @@ from marketplace_integrations.integrations.bosta.client import (
 
 CACHE_TTL_SECONDS = 24 * 60 * 60
 CITIES_CACHE_KEY = "marketplace_integrations:bosta:cities"
-DISTRICTS_CACHE_KEY = "marketplace_integrations:bosta:districts:{city_id}"
 DIRECTORY_CACHE_KEY = "marketplace_integrations:bosta:directory"
 LOOKUP_FAILED_CACHE_KEY = "marketplace_integrations:bosta:lookup_failed"
 LOOKUP_FAILURE_TTL_SECONDS = 60
-PIN_CACHE_KEY = "marketplace_integrations:bosta:pin:{lat}:{lng}"
 
 
 def get_cities(refresh=False):
-	"""Bosta cities as ``[{id, name, name_ar}]``. ``refresh`` refetches the cities and
-	drops every cached district list (they hang off the cities)."""
+	"""Bosta cities as ``[{id, name, name_ar}]``. ``refresh`` refetches the cities and drops
+	the cached city codes too."""
 	cache = frappe.cache()
 	if not refresh:
 		cached = cache.get_value(CITIES_CACHE_KEY)
@@ -45,53 +40,51 @@ def get_cities(refresh=False):
 	response = client.get_cities()
 	cities = _parse_cities(_data_or_throw(client, response))
 	if refresh:
-		stale_ids = {city["id"] for city in cache.get_value(CITIES_CACHE_KEY) or []}
-		for city_id in stale_ids | {city["id"] for city in cities}:
-			cache.delete_value(DISTRICTS_CACHE_KEY.format(city_id=city_id))
-	if refresh:
 		cache.delete_value(DIRECTORY_CACHE_KEY)
 		frappe.local.bosta_directory = None
 	cache.set_value(CITIES_CACHE_KEY, cities, expires_in_sec=CACHE_TTL_SECONDS)
 	return cities
 
 
-def get_districts(city_id, refresh=False):
-	"""The city's districts that accept drop-offs, as ``[{id, name, name_ar, zone}]``."""
+def get_city(city_id):
+	"""``{id, name, code}`` of a Bosta city: the name ``GET /cities`` gives it (what the
+	shipment shows) and its code from the directory (what Bosta is sent). Throws for a city
+	that is not in Bosta's list or has no code, so a name is never sent in place of a code."""
 	city_id = cstr(city_id).strip()
 	if not city_id:
-		frappe.throw(_("A Bosta city ID is required."))
-	# Only ids from Bosta's own city list reach the HTTP path (and the cache).
-	if city_id not in {city["id"] for city in get_cities()}:
+		frappe.throw(_("Choose a Bosta city."))
+	city = next((city for city in get_cities() if city["id"] == city_id), None)
+	if not city:
 		frappe.throw(_("Unknown Bosta city. Refresh the Bosta lists and choose the city again."))
-	cache = frappe.cache()
-	key = DISTRICTS_CACHE_KEY.format(city_id=city_id)
-	if not refresh:
-		cached = cache.get_value(key)
-		if cached is not None:
-			return cached
-
-	client = BostaClient()
-	response = client.get_districts(city_id)
-	districts = _parse_districts(_data_or_throw(client, response))
-	cache.set_value(key, districts, expires_in_sec=CACHE_TTL_SECONDS)
-	return districts
+	try:
+		directory = get_directory()
+	except Exception:
+		frappe.clear_last_message()
+		frappe.throw(_("Could not load the Bosta city codes. Try again in a minute."))
+	code = next((entry["code"] for entry in directory if entry["id"] == city_id), "")
+	if not code:
+		frappe.throw(
+			_("Bosta has no city code for {0}. Refresh the Bosta lists and try again.").format(
+				escape_html(city["name"])
+			)
+		)
+	return {"id": city_id, "name": city["name"], "code": code}
 
 
 class BostaLookupUnavailable(Exception):
-	"""A Bosta district lookup failed a moment ago, so no further lookup is tried (fail fast)."""
+	"""A Bosta directory lookup failed a moment ago, so no further lookup is tried (fail fast)."""
 
 
 def reset_request_state():
 	"""Forget this request's memoized directory and fail-fast flag, and the shared failure marker."""
 	frappe.local.bosta_directory = None
-	frappe.local.bosta_name_index = None
 	frappe.local.bosta_lookup_failed = False
 	frappe.cache().delete_value(LOOKUP_FAILED_CACHE_KEY)
 
 
 def lookups_blocked():
-	"""True after a failed directory/pinLocation lookup in this request, or within the last
-	minute in any request: orders then simply fall back to review (#305)."""
+	"""True after a failed directory lookup in this request, or within the last minute in any
+	request: orders then simply fall back to review (#305)."""
 	return bool(
 		getattr(frappe.local, "bosta_lookup_failed", False)
 		or frappe.cache().get_value(LOOKUP_FAILED_CACHE_KEY)
@@ -104,8 +97,7 @@ def _mark_lookup_failed():
 
 
 def get_directory(refresh=False):
-	"""Every Bosta city with its drop-off-available districts, for district matching:
-	``[{id, name, name_ar, code, districts: [{id, name, name_ar}]}]``. Cached 24 hours (and
+	"""Every Bosta city with its code: ``[{id, name, name_ar, code}]``. Cached 24 hours (and
 	kept for the rest of the request); nothing is cached on failure. A failed fetch blocks
 	further lookups (``BostaLookupUnavailable``) for this request and for a minute."""
 	if not refresh and getattr(frappe.local, "bosta_directory", None):
@@ -132,7 +124,7 @@ def get_directory(refresh=False):
 
 def city_name_for(city_id, default):
 	"""The name ``GET /cities`` gives this city, else ``default`` (the directory's name), so the
-	automatic path sends the same city name as the dialog."""
+	prefilled city matches the dialog's list."""
 	try:
 		for city in get_cities():
 			if city["id"] == city_id:
@@ -140,50 +132,6 @@ def city_name_for(city_id, default):
 	except Exception:
 		frappe.clear_last_message()
 	return default
-
-
-def get_pin_districts(lat, lng):
-	"""Bosta's districts at a coordinate, as ``[{city_id, district_id, name}]`` (drop-off-capable
-	only), cached 24 hours per coordinate rounded to 4 decimals. Any failure logs a short Error
-	Log entry and returns ``[]``: a pin lookup only ever helps and never blocks (#305)."""
-	try:
-		lat, lng = round(float(lat), 4), round(float(lng), 4)
-	except (TypeError, ValueError):
-		return []
-	cache = frappe.cache()
-	key = PIN_CACHE_KEY.format(lat=lat, lng=lng)
-	cached = cache.get_value(key)
-	if cached is not None:
-		return cached
-	if lookups_blocked():
-		return []
-	try:
-		client = BostaClient()
-		data = _data_or_throw(client, client.pin_location(lat, lng))
-		items = data.get("list") if isinstance(data, dict) else data
-		if not isinstance(items, list):
-			raise ValueError("unrecognised pinLocation response")
-	except Exception:
-		_mark_lookup_failed()
-		frappe.clear_last_message()
-		frappe.log_error(frappe.get_traceback(with_context=False)[-500:], "Bosta pin location failed")
-		return []
-	rows = []
-	for item in items:
-		if not isinstance(item, dict) or item.get("dropOffAvailability") is False:
-			continue
-		city_id = cstr(item.get("cityId")).strip()
-		district_id = cstr(item.get("districtId")).strip()
-		if city_id and district_id:
-			rows.append(
-				{
-					"city_id": city_id,
-					"district_id": district_id,
-					"name": cstr(item.get("districtName")).strip(),
-				}
-			)
-	cache.set_value(key, rows, expires_in_sec=CACHE_TTL_SECONDS)
-	return rows
 
 
 def _data_or_throw(client, response):
@@ -213,32 +161,9 @@ def _parse_cities(data):
 	return cities
 
 
-def _parse_districts(data):
-	items = data.get("list") if isinstance(data, dict) else data
-	if not isinstance(items, list):
-		frappe.throw(_("Bosta returned the district list in an unrecognised format."))
-	districts = []
-	for item in items:
-		if not isinstance(item, dict) or item.get("dropOffAvailability") is False:
-			continue
-		district_id = cstr(item.get("districtId") or item.get("_id") or item.get("id")).strip()
-		name = cstr(item.get("districtName") or item.get("name")).strip()
-		if district_id and name:
-			districts.append(
-				{
-					"id": district_id,
-					"name": name,
-					"name_ar": cstr(item.get("districtOtherName") or item.get("nameAr")).strip(),
-					"zone": cstr(item.get("zoneName")).strip(),
-				}
-			)
-	return districts
-
-
 def _parse_directory(data):
 	"""``GET /cities/getAllDistricts``: ``data[]`` of ``{cityId, cityName, cityOtherName,
-	cityCode, districts: [{districtId, districtName, districtOtherName,
-	dropOffAvailability}]}``. Districts that do not accept drop-offs are left out."""
+	cityCode, districts: [...]}``. Only the city fields are kept."""
 	items = data.get("list") if isinstance(data, dict) else data
 	if not isinstance(items, list):
 		frappe.throw(_("Bosta returned the district directory in an unrecognised format."))
@@ -248,31 +173,15 @@ def _parse_directory(data):
 			continue
 		city_id = cstr(item.get("cityId")).strip()
 		city_name = cstr(item.get("cityName")).strip()
-		if not city_id or not city_name:
-			continue
-		districts = []
-		for district in item.get("districts") or []:
-			if not isinstance(district, dict) or district.get("dropOffAvailability") is False:
-				continue
-			district_id = cstr(district.get("districtId")).strip()
-			district_name = cstr(district.get("districtName")).strip()
-			if district_id and district_name:
-				districts.append(
-					{
-						"id": district_id,
-						"name": district_name,
-						"name_ar": cstr(district.get("districtOtherName")).strip(),
-					}
-				)
-		directory.append(
-			{
-				"id": city_id,
-				"name": city_name,
-				"name_ar": cstr(item.get("cityOtherName")).strip(),
-				"code": cstr(item.get("cityCode")).strip(),
-				"districts": districts,
-			}
-		)
+		if city_id and city_name:
+			directory.append(
+				{
+					"id": city_id,
+					"name": city_name,
+					"name_ar": cstr(item.get("cityOtherName")).strip(),
+					"code": cstr(item.get("cityCode")).strip(),
+				}
+			)
 	if not directory:
 		frappe.throw(_("Bosta returned no usable cities."))
 	return directory

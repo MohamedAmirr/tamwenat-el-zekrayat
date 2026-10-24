@@ -27,6 +27,7 @@ const {
 	get_order_indicator,
 	platform_status_text,
 	retry_erpnext_sync,
+	show_row_name_on_hover,
 	settle_with_concurrency,
 	show_refunded_orders,
 	summarize_retry_results,
@@ -221,4 +222,32 @@ test("retry action runs sync calls with a small concurrency limit and one summar
 	await retry_erpnext_sync(listview);
 	assert.ok(max_in_flight <= 3);
 	assert.match(summary.message, /Succeeded: 5/);
+});
+
+test("Marketplace Order list hides the docname column; the readable title is the subject (#324)", () => {
+	assert.equal(frappe.listview_settings["Marketplace Order"].hide_name_column, true);
+});
+
+test("Marketplace Order list attaches the shared row tooltip helper once it is loaded, and survives a load failure", async () => {
+	const attached = [];
+	global.frappe.require = () => Promise.resolve();
+	global.frappe.marketplace_integrations = { list_row_name: { attach_to_list: (lv) => attached.push(lv) } };
+	const listview = { $result: {} };
+	await show_row_name_on_hover(listview);
+	assert.deepEqual(attached, [listview]);
+
+	// Helper missing after the load: nothing happens, nothing throws.
+	global.frappe.marketplace_integrations = {};
+	await show_row_name_on_hover(listview);
+	assert.equal(attached.length, 1);
+
+	// Load failure is logged, not thrown.
+	const original = console.error;
+	console.error = () => {};
+	global.frappe.require = () => Promise.reject(new Error("offline"));
+	try {
+		await show_row_name_on_hover(listview);
+	} finally {
+		console.error = original;
+	}
 });

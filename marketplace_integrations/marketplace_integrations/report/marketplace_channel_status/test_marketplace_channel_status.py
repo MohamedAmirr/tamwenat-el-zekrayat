@@ -30,6 +30,7 @@ EXPECTED_FIELDNAMES = {
 	"product_sync_errors",
 	"import_errors",
 	"fulfillment_errors",
+	"payment_errors",
 	"last_checked",
 }
 

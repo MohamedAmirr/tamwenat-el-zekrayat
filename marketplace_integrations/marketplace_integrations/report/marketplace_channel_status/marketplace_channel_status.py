@@ -74,6 +74,12 @@ def get_columns():
 			"width": 130,
 		},
 		{
+			"label": _("Payment Issues"),
+			"fieldname": "payment_errors",
+			"fieldtype": "Int",
+			"width": 120,
+		},
+		{
 			"label": _("Last Checked"),
 			"fieldname": "last_checked",
 			"fieldtype": "Datetime",

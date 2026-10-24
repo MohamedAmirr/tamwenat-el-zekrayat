@@ -15,7 +15,7 @@ global.frappe = {
 	},
 };
 
-const { MARKETPLACE_ATTENTION_PROBLEM_TYPES, next_action_html } = require("./marketplace_needs_attention.js");
+const { MARKETPLACE_ATTENTION_PROBLEM_TYPES, next_action_html, reference_html } = require("./marketplace_needs_attention.js");
 
 const REPORT = () => frappe.query_reports["Marketplace Needs Attention"];
 
@@ -95,4 +95,22 @@ test("onload binds a namespaced click handler after clearing the previous one, s
 		["off", "click.attention"],
 		["on", "click.attention", "[data-attention-retry]", "function"],
 	]);
+});
+
+test("the reference shows the label with the docname in the tooltip, LTR-isolated and escaped", () => {
+	const html = reference_html({
+		reference_doctype: "Marketplace Order",
+		reference_name: "MKTORD-00001",
+		reference_label: "#1027<b>",
+	});
+	assert.match(html, /<bdi dir="ltr">#1027&lt;b&gt;<\/bdi>/);
+	assert.match(html, /title="MKTORD-00001"/);
+	assert.match(html, /href="\/app\/marketplace-order\/MKTORD-00001"/);
+});
+
+test("a reference without a label falls back to the docname", () => {
+	assert.match(
+		reference_html({ reference_doctype: "Bosta Shipment", reference_name: "BOSTA-SHP-00001" }),
+		/<bdi dir="ltr">BOSTA-SHP-00001<\/bdi>/
+	);
 });

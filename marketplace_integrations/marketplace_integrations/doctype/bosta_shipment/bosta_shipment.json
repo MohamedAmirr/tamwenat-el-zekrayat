@@ -6,7 +6,15 @@
  "engine": "InnoDB",
  "field_order": [
   "sales_order",
+  "company",
   "delivery_note",
+  "fulfillment_key",
+  "reservation_status",
+  "handover_status",
+  "handover_confirmed_by",
+  "handover_confirmed_on",
+  "stock_posting_status",
+  "shipment_items",
   "status",
   "receiver_section",
   "receiver_name",
@@ -15,6 +23,7 @@
   "city",
   "district_id",
   "city_id",
+  "city_code",
   "district_name",
   "address_first_line",
   "bosta_section",
@@ -24,6 +33,8 @@
   "bosta_status_section",
   "bosta_state_code",
   "bosta_state_value",
+  "shipment_fee",
+  "bosta_delivery_type",
   "last_bosta_event_timestamp",
   "bosta_exception_reason",
   "bosta_exception_code",
@@ -35,12 +46,14 @@
   "bosta_requested_on",
   "cod_amount",
   "bosta_terminated_on",
-  "active_sales_order"
+  "active_sales_order",
+  "external_delivery_identity_key"
  ],
  "fields": [
   {
    "fieldname": "sales_order",
    "fieldtype": "Link",
+   "in_list_view": 1,
    "label": "Sales Order",
    "options": "Sales Order",
    "reqd": 1,
@@ -55,10 +68,77 @@
    "read_only": 1
   },
   {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "fulfillment_key",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "ignore_xss_filter": 1,
+   "label": "Fulfillment Key",
+   "no_copy": 1,
+   "read_only": 1,
+   "unique": 1
+  },
+  {
+   "default": "Reserved",
+   "fieldname": "reservation_status",
+   "fieldtype": "Select",
+   "hidden": 1,
+   "label": "Reservation Status",
+   "options": "Reserved\nReleased\nFulfilled",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "default": "Awaiting Handover",
+   "fieldname": "handover_status",
+   "fieldtype": "Select",
+   "hidden": 0,
+   "label": "Physical Handover",
+   "options": "Awaiting Handover\nConfirmed\nReview Required",
+   "read_only": 1
+  },
+  {
+   "fieldname": "handover_confirmed_by",
+   "fieldtype": "Link",
+   "label": "Handover Confirmed By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "handover_confirmed_on",
+   "fieldtype": "Datetime",
+   "label": "Handover Confirmed On",
+   "read_only": 1
+  },
+  {
+   "default": "Not Posted",
+   "fieldname": "stock_posting_status",
+   "fieldtype": "Select",
+   "label": "Stock Posting",
+   "options": "Not Posted\nPosted\nFailed\nReview Required",
+   "read_only": 1
+  },
+  {
+   "fieldname": "shipment_items",
+   "fieldtype": "Table",
+   "label": "Shipment Items",
+   "options": "Bosta Shipment Item",
+   "read_only": 1
+  },
+  {
    "default": "Pending Bosta",
    "fieldname": "status",
    "fieldtype": "Select",
    "in_list_view": 1,
+   "in_standard_filter": 1,
    "label": "Status",
    "options": "Pending Bosta\nBosta Created\nDelivery Note Failed\nCompleted\nBosta Failed\nCanceled",
    "read_only": 1,
@@ -73,6 +153,7 @@
    "fieldname": "receiver_name",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
+   "in_list_view": 1,
    "label": "Receiver Name",
    "reqd": 1,
    "read_only_depends_on": "eval:doc.tracking_number"
@@ -88,7 +169,7 @@
   {
    "fieldname": "address_section",
    "fieldtype": "Section Break",
-   "label": "Required Delivery Address"
+   "label": "Delivery Address"
   },
   {
    "fieldname": "city",
@@ -99,26 +180,35 @@
    "read_only_depends_on": "eval:doc.tracking_number"
   },
   {
-   "description": "Use this, or enter both City ID and District Name.",
    "fieldname": "district_id",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
    "label": "District ID",
-   "read_only_depends_on": "eval:doc.tracking_number"
+   "read_only": 1,
+   "hidden": 1
   },
   {
    "fieldname": "city_id",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
-   "label": "City ID",
-   "read_only_depends_on": "eval:doc.tracking_number"
+   "label": "Bosta City ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "city_code",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Bosta City Code",
+   "read_only": 1,
+   "description": "Sent to Bosta with the address first line; Bosta resolves the district."
   },
   {
    "fieldname": "district_name",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
    "label": "District Name",
-   "read_only_depends_on": "eval:doc.tracking_number"
+   "read_only": 1,
+   "hidden": 1
   },
   {
    "fieldname": "address_first_line",
@@ -174,6 +264,20 @@
    "read_only": 1
   },
   {
+   "description": "Delivery fee reported by Bosta, in EGP. Display only; it does not affect accounting.",
+   "fieldname": "shipment_fee",
+   "fieldtype": "Currency",
+   "label": "Bosta Delivery Fee",
+   "read_only": 1
+  },
+  {
+   "fieldname": "bosta_delivery_type",
+   "fieldtype": "Data",
+   "ignore_xss_filter": 1,
+   "label": "Bosta Delivery Type",
+   "read_only": 1
+  },
+  {
    "description": "Bosta webhook timeStamp in milliseconds since the Unix epoch.",
    "fieldname": "last_bosta_event_timestamp",
    "fieldtype": "Data",
@@ -223,12 +327,21 @@
    "read_only": 1
   },
   {
-   "description": "Equals Sales Order while this shipment is active (not Canceled), otherwise empty. Its unique index allows only one active shipment per Sales Order.",
+   "description": "Legacy field retained for historical records; reservations are tracked by shipment items.",
    "fieldname": "active_sales_order",
    "fieldtype": "Data",
    "hidden": 1,
    "ignore_xss_filter": 1,
    "label": "Active Sales Order",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "external_delivery_identity_key",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "ignore_xss_filter": 1,
+   "label": "External Delivery Identity Key",
    "no_copy": 1,
    "read_only": 1,
    "unique": 1
@@ -263,7 +376,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-13 18:00:00.000000",
+ "modified": "2026-10-23 16:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Bosta Shipment",
@@ -307,9 +420,24 @@
    "read": 1,
    "report": 1,
    "role": "Sales User"
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Bosta User",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "Stock Manager"
   }
  ],
+ "search_fields": "tracking_number,receiver_name,sales_order",
  "sort_field": "modified",
  "sort_order": "DESC",
- "states": []
+ "states": [],
+ "title_field": "tracking_number"
 }

@@ -62,8 +62,13 @@ def read_erp_state(sales_order):
 		"per_delivered": flt(sales_order.per_delivered),
 		"per_billed": flt(sales_order.per_billed),
 		"advance_paid": flt(sales_order.advance_paid),
+		"grand_total": flt(sales_order.grand_total),
+		"rounded_total": flt(sales_order.rounded_total),
 		"precision": {
 			"qty": frappe.get_precision("Sales Order Item", "qty"),
+			"currency": frappe.get_precision(
+				"Sales Order", "rounded_total", currency=sales_order.currency
+			),
 			# Lines are compared by amount, at the precision the Sales Order's own
 			# currency gives the amount field (the rule `_verify_line_amounts()` uses).
 			"amount": frappe.get_precision("Sales Order Item", "amount", currency=sales_order.currency),
@@ -477,11 +482,45 @@ def plan(previous, current, evidence, erp_state):
 		named = [_documents(erp_state, "Delivery Note"), _documents(erp_state, "Sales Invoice")]
 		named = "; ".join(documents for documents in named if documents)
 		return _attention(f"{message} ({named})." if named else f"{message}.", changes)
+	projected_total = _projected_total_after_line_changes(previous, current, erp_state)
+	currency_precision = (erp_state.get("precision") or {}).get("currency", 2)
+	advance_paid = flt(erp_state.get("advance_paid"), currency_precision)
+	if projected_total is not None and projected_total < advance_paid:
+		return _attention(
+			_(
+				"This marketplace change would reduce the Sales Order total below its advance of {0}. "
+				"Reallocate or cancel the advance before updating the order."
+			).format(advance_paid),
+			changes,
+		)
 	return _result(
 		UPDATE_SUBMITTED_ORDER,
 		_("The submitted Sales Order changes are eligible for ERPNext validation."),
 		changes,
 	)
+
+
+def _projected_total_after_line_changes(previous, current, erp_state):
+	"""Estimate the new Sales Order total by applying snapshot line deltas to its current total."""
+	if erp_state.get("grand_total") is None:
+		return None
+	previous_items = _items_by_external_id(previous)
+	current_items = _items_by_external_id(current)
+	if previous_items is None or current_items is None or set(previous_items) != set(current_items):
+		return None
+	line_delta = 0.0
+	for external_item_id, line in current_items.items():
+		old_amount = previous_items[external_item_id].get("fulfilled_total_price")
+		new_amount = line.get("fulfilled_total_price")
+		if old_amount is None or new_amount is None:
+			return None
+		line_delta += flt(new_amount) - flt(old_amount)
+	# ERPNext allocates advances against rounded_total (falling back to
+	# grand_total). Project the changed grand total at that same currency
+	# precision so sub-cent float residue cannot block an otherwise valid update.
+	currency_precision = (erp_state.get("precision") or {}).get("currency", 2)
+	base_total = erp_state.get("rounded_total") or erp_state.get("grand_total")
+	return flt(flt(base_total) + line_delta, currency_precision)
 
 
 def _documents(erp_state, doctype):

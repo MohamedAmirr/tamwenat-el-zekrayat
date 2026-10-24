@@ -10,6 +10,7 @@ import frappe
 from frappe import _
 from frappe.utils import cstr, escape_html
 
+from marketplace_integrations.integrations.bosta import locations
 from marketplace_integrations.integrations.bosta.client import BostaClient, is_success_response
 from marketplace_integrations.integrations.bosta.deliveries import (
 	CREATOR_ROLES,
@@ -31,16 +32,18 @@ def _verify_hint():
 	return _("Nothing was changed in ERPNext. Check the delivery in Bosta before trying again.")
 
 
-def edit_bosta_shipment(shipment_name, receiver_phone, city, district_id, address_first_line):
+def edit_bosta_shipment(shipment_name, receiver_phone, city_id, address_first_line):
 	"""Send the new receiver phone and drop-off address to Bosta, then record them on the Bosta Shipment.
 
 	Creator roles only. Refused, without calling Bosta, unless the shipment has a tracking
 	number, is not Canceled and its stored state is one Bosta allows editing in. The body is
-	exactly ``receiver.phone`` and ``dropOffAddress`` (city name, districtId, firstLine).
-	A Bosta refusal or a network error changes nothing locally.
+	exactly ``receiver.phone`` and ``dropOffAddress`` (city code, firstLine); no district,
+	Bosta resolves it (#318). A Bosta refusal or a network error changes nothing locally.
 	"""
 	frappe.only_for(CREATOR_ROLES)
-	phone, city, district_id, first_line = _clean(receiver_phone, city, district_id, address_first_line)
+	phone, first_line = _clean(receiver_phone, address_first_line)
+	# Before the lock: this may call Bosta (cached lists).
+	city = locations.get_city(city_id)
 	shipment = frappe.get_doc("Bosta Shipment", shipment_name)
 	shipment.check_permission("read")
 	lock_and_load_sales_order(shipment.sales_order)
@@ -53,7 +56,7 @@ def edit_bosta_shipment(shipment_name, receiver_phone, city, district_id, addres
 
 	payload = {
 		"receiver": {"phone": phone},
-		"dropOffAddress": {"city": city, "districtId": district_id, "firstLine": first_line},
+		"dropOffAddress": {"city": city["code"], "firstLine": first_line},
 	}
 	try:
 		response = client.update_delivery(shipment.tracking_number, payload)
@@ -64,22 +67,18 @@ def edit_bosta_shipment(shipment_name, receiver_phone, city, district_id, addres
 		frappe.throw(_("Could not confirm that Bosta updated the delivery. {0}").format(_verify_hint()))
 	if not is_success_response(response):
 		frappe.throw(f"{escape_html(client.error_message(response))} {_verify_hint()}")
-	_record_on_shipment(shipment, phone, city, district_id, first_line)
+	_record_on_shipment(shipment, phone, city, first_line)
 
 
-def _clean(receiver_phone, city, district_id, address_first_line):
-	phone, city, district_id, first_line = (
-		cstr(value).strip() for value in (receiver_phone, city, district_id, address_first_line)
-	)
+def _clean(receiver_phone, address_first_line):
+	phone, first_line = (cstr(value).strip() for value in (receiver_phone, address_first_line))
 	if not phone:
 		frappe.throw(_("Enter the receiver phone."))
-	if not city or not district_id:
-		frappe.throw(_("Choose a Bosta city and district."))
 	if len(first_line) <= 5:
 		frappe.throw(_("Address First Line must be more than 5 characters."))
 	if len(first_line) > ADDRESS_LINE_MAX_LENGTH:
 		frappe.throw(_("Address First Line must be at most {0} characters.").format(ADDRESS_LINE_MAX_LENGTH))
-	return phone, city, district_id, first_line
+	return phone, first_line
 
 
 def _refuse_edit_locally(shipment):
@@ -97,7 +96,7 @@ def _refuse_edit_locally(shipment):
 		)
 
 
-def _record_on_shipment(shipment, phone, city, district_id, first_line):
+def _record_on_shipment(shipment, phone, city, first_line):
 	"""Bosta accepted the change: record it on the Bosta Shipment only. The Sales Order, its
 	address and any Marketplace Order are not changed."""
 	lock_and_load_sales_order(shipment.sales_order)
@@ -105,7 +104,7 @@ def _record_on_shipment(shipment, phone, city, district_id, first_line):
 		shipment.reload()
 		canceled = shipment.status == CANCELED
 		if not canceled:
-			_write_edit(shipment, phone, city, district_id, first_line)
+			_write_edit(shipment, phone, city, first_line)
 		frappe.db.commit()
 	except Exception:
 		frappe.db.rollback()
@@ -127,12 +126,13 @@ def _record_on_shipment(shipment, phone, city, district_id, first_line):
 		)
 
 
-def _write_edit(shipment, phone, city, district_id, first_line):
+def _write_edit(shipment, phone, city, first_line):
 	shipment.receiver_phone = phone
-	shipment.city = city
-	shipment.district_id = district_id
-	# The legacy City ID / District Name pair must not coexist with a district ID.
-	shipment.city_id = ""
+	shipment.city = city["name"]
+	shipment.city_id = city["id"]
+	shipment.city_code = city["code"]
+	# Bosta now resolves the district itself; a district stored by an older create is stale.
+	shipment.district_id = ""
 	shipment.district_name = ""
 	shipment.address_first_line = first_line
 	save_as_system(shipment)

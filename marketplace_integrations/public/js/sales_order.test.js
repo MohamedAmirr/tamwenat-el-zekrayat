@@ -21,6 +21,7 @@ function load({
 	bosta_read = true,
 	shipment = null,
 	shipment_fails = false,
+	defaults_fails = false,
 } = {}) {
 	const calls = [];
 	const bosta_calls = [];
@@ -71,6 +72,9 @@ function load({
 					? Promise.reject(new Error("boom"))
 					: Promise.resolve({ message: shipment });
 			}
+			if (opts.method.endsWith("get_create_defaults")) {
+				return defaults_fails ? Promise.reject(new Error("ineligible")) : Promise.resolve({ message: {} });
+			}
 			calls.push(opts);
 			if (opts.method.endsWith("get_platform_cancel_option")) {
 				return Promise.resolve({ message: option });
@@ -106,9 +110,13 @@ const eligible = (extra = {}) => ({
 function make_frm(doc, { close_sales_order } = {}) {
 	const buttons = [];
 	const indicators = [];
-	const tab = { html: "", handler: null };
+	const tab = { html: "", handler: null, visible: undefined, body_visible: undefined };
 	const frm = {
 		tab,
+		toggle_display: (field, visible) => {
+			if (field === "custom_bosta_delivery_tab") tab.visible = visible;
+			if (field === "custom_bosta_delivery_html") tab.body_visible = visible;
+		},
 		get_field: (name) =>
 			name === "custom_bosta_delivery_html"
 				? {
@@ -500,6 +508,8 @@ test("an active shipment shows status, tracking and a link, with a label button 
 	assert.match(frm.indicators[0].label, /<a href="\/app\/bosta-shipment\/BOSTA-SHP-00001">Bosta Shipment: Completed<\/a>/);
 	assert.match(frm.indicators[0].label, /Tracking: 77873113 \(Delivered\)/);
 	assert.deepEqual(labels(frm), ["print", "refresh", "cancel"]);
+	assert.equal(frm.tab.visible, true);
+	assert.equal(frm.tab.body_visible, true);
 });
 
 test("indicator colour follows the shipment status", async () => {
@@ -727,7 +737,7 @@ const detailed = (extra = {}) =>
 		receiver_name: "Mona",
 		receiver_phone: "0100",
 		city: "Cairo",
-		district_id: "d-1",
+		city_id: "c-cairo",
 		address_first_line: "12 Example Street",
 		cod_amount: 250,
 		delivery_note: "MAT-DN-1",
@@ -744,7 +754,7 @@ async function tab_for(shipment_extra, options = {}) {
 	return { frm, calls, html: frm.tab.html };
 }
 
-test("the tab shows every listed value, with the district as its ID", async () => {
+test("the tab shows every listed value and no district", async () => {
 	const { html } = await tab_for();
 	for (const expected of [
 		"Completed",
@@ -754,12 +764,37 @@ test("the tab shows every listed value, with the district as its ID", async () =
 		"EGP 250",
 		"Mona - 0100",
 		"12 Example Street, Cairo",
-		"District ID: d-1",
 		'href="/app/delivery-note/MAT-DN-1"',
 		"MAT-DN-1</a> (To Bill)",
 	]) {
 		assert.ok(html.includes(expected), expected);
 	}
+	assert.doesNotMatch(html, /District/);
+});
+
+test("multiple Bosta shipments are shown as collapsible history with separate handover and stock states", async () => {
+	global.format_currency = (value) => `EGP ${value}`;
+	const previous = detailed({ name: "BOSTA-OLD", tracking_number: "TRK-OLD", status: "Canceled", active: false, handover_status: "Review Required", stock_posting_status: "Review Required" });
+	const current = detailed({ name: "BOSTA-CURRENT", tracking_number: "TRK-CURRENT", handover_status: "Awaiting Handover", stock_posting_status: "Not Posted", allocations: [{ item_code: "ITEM-1", qty: 2, uom: "Nos", warehouse: "Main - TEZ", stock_qty: 2 }] });
+	const { handlers, module_exports } = load({ option: NO_PLATFORM, shipment: { ...current, shipments: [current, previous] } });
+	assert.doesNotThrow(() => module_exports.bosta_tab_html({ ...current, shipments: [current, previous] }, { create: true }));
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.match(frm.tab.html, /Bosta shipments: 2/);
+	assert.match(frm.tab.html, /BOSTA-CURRENT/);
+	assert.match(frm.tab.html, /BOSTA-OLD/);
+	assert.match(frm.tab.html, /Awaiting Handover/);
+	assert.match(frm.tab.html, /Not Posted/);
+	assert.match(frm.tab.html, /Main - TEZ/);
+	assert.deepEqual(labels(frm), ["print:BOSTA-CURRENT", "refresh:BOSTA-CURRENT", "cancel:BOSTA-CURRENT", "handover:BOSTA-CURRENT"]);
+});
+
+test("a Delivery Note Failed shipment shows its escaped error in red above the table", async () => {
+	const { html } = await tab_for({ status: "Delivery Note Failed", delivery_note_error: "<b>no stock" });
+	assert.match(html, /^<p class="text-danger">&lt;b&gt;no stock<\/p><table/);
+	const ok = await tab_for({ status: "Bosta Created", delivery_note_error: "old" });
+	assert.doesNotMatch(ok.html, /text-danger/);
 });
 
 test("a zero COD is shown as 0, and the Delivery Note status is only shown when given", async () => {
@@ -769,13 +804,20 @@ test("a zero COD is shown as 0, and the Delivery Note status is only shown when 
 	assert.match(html, /MAT-DN-1<\/a><\/td>/);
 });
 
+test("a Bosta delivery fee is shown in EGP only when stored", async () => {
+	const { html } = await tab_for({ shipment_fee: 87 });
+	assert.match(html, /Bosta Delivery Fee<\/th><td>EGP 87<\/td>/);
+	const without_fee = await tab_for({ shipment_fee: null });
+	assert.doesNotMatch(without_fee.html, /Bosta Delivery Fee/);
+});
+
 test("stored values render as text in the tab", async () => {
 	const evil = "<img src=x onerror=alert(1)>";
 	const { html } = await tab_for({
 		receiver_name: evil,
 		receiver_phone: evil,
 		city: evil,
-		district_id: evil,
+		city_id: evil,
 		address_first_line: evil,
 		tracking_number: evil,
 		bosta_state: evil,
@@ -793,13 +835,26 @@ test("with no shipment the tab says so and offers Create to creators only", asyn
 	await settle();
 	assert.match(frm.tab.html, /No Bosta shipment/);
 	assert.deepEqual(labels(frm), ["create"]);
+	assert.equal(frm.tab.visible, true);
+	assert.equal(frm.tab.body_visible, true);
 
 	const { handlers: h2 } = load({ option: NO_PLATFORM, shipment: null, bosta_creator: false });
 	const reader = make_frm({});
 	h2["Sales Order"].refresh(reader);
 	await settle();
-	assert.match(reader.tab.html, /No Bosta shipment/);
+	assert.equal(reader.tab.visible, false);
+	assert.equal(reader.tab.body_visible, false);
 	assert.deepEqual(labels(reader), []);
+});
+
+test("an ineligible order without a shipment hides the Bosta tab", async () => {
+	const { handlers } = load({ option: NO_PLATFORM, shipment: null, defaults_fails: true });
+	const frm = make_frm({});
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.equal(frm.tab.visible, false);
+	assert.equal(frm.tab.body_visible, false);
+	assert.deepEqual(labels(frm), []);
 });
 
 test("without read permission the tab stays empty and nothing is requested", async () => {
@@ -819,6 +874,7 @@ test("a failed read says so instead of 'No Bosta shipment'", async () => {
 	await settle();
 	assert.match(frm.tab.html, /Could not load the Bosta shipment/);
 	assert.doesNotMatch(frm.tab.html, /No Bosta shipment/);
+	assert.deepEqual(labels(frm), ["create"]);
 });
 
 test("Refresh from Bosta is creator-only, needs a tracking number and calls the server then reloads", async () => {
@@ -909,7 +965,8 @@ test("a Delivery Note failure after Bosta accepted the cancel is explained and t
 	confirms[0].on_yes();
 	await settle();
 	assert.equal(printed.length, 1);
-	assert.match(printed[0].message, /Needs Attention/);
+	assert.match(printed[0].message, /Bosta termination was confirmed/);
+	assert.match(printed[0].message, /No posted stock was reversed/);
 	assert.equal(frm.reloads, 1);
 });
 
@@ -988,19 +1045,12 @@ test("Draft and Cancelled-status orders get no Create button; drafts are not ask
 	assert.deepEqual(labels(cancelled), []);
 });
 
-// ---- Bosta create dialog: city / district dropdowns and address prefill (#245) ----
+// ---- Bosta create dialog: city picker and address prefill (#245, #318) ----
 
 const CITIES = [
 	{ id: "c-cairo", name: "Cairo", name_ar: "القاهرة" },
 	{ id: "c-alex", name: "Alexandria", name_ar: "" },
 ];
-const DISTRICTS = {
-	"c-cairo": [
-		{ id: "d-1", name: "Maadi", name_ar: "المعادي", zone: "Z1" },
-		{ id: "d-2", name: "Maadi", name_ar: "المعادي", zone: "Z2" },
-	],
-	"c-alex": [{ id: "d-9", name: "Smouha", name_ar: "", zone: "Z" }],
-};
 
 // Opens the Bosta dialog against scripted server answers. `server` maps a method suffix to
 // a function(args) returning the answer or throwing to simulate a failing call.
@@ -1010,7 +1060,6 @@ async function open_bosta_dialog(defaults, server = {}, open = (m, frm) => m.sho
 	const dialogs = [];
 	const answers = {
 		get_cities: () => CITIES,
-		get_districts: (args) => DISTRICTS[args.city_id] || [],
 		create_shipment: () => ({}),
 		...server,
 	};
@@ -1073,50 +1122,20 @@ test("the dialog lists Bosta cities by name (Arabic too) with the Bosta ID as th
 	assert.equal(dialog.df.city.fieldtype, "Autocomplete");
 	assert.equal(calls.filter((c) => c.method.endsWith("get_cities")).length, 1);
 	assert.equal(dialog.primary.disabled, false);
-	// The old free-text ID fields are gone.
-	["district_id", "city_id", "district_name"].forEach((name) => assert.equal(dialog.df[name], undefined));
+	// No district field exists: Bosta resolves the district from the city and the address (#318).
+	["district", "district_id", "district_name", "city_id"].forEach((name) => assert.equal(dialog.df[name], undefined));
 });
 
-test("choosing a city loads only its districts and changing the city clears the district", async () => {
+test("choosing a city only sets the city: no district picker and no other server call", async () => {
 	const { dialog, calls } = await open_bosta_dialog({});
 	await dialog.set_value("city", "c-cairo");
 	await settle();
+	assert.equal(dialog.values.city, "c-cairo");
+	assert.equal(dialog.data.district, undefined);
 	assert.deepEqual(
-		dialog.data.district.map((d) => d.value),
-		["d-1", "d-2"]
+		calls.map((c) => c.method.split(".").pop()),
+		["get_cities"]
 	);
-	// Identical names are told apart by zone.
-	assert.deepEqual(
-		dialog.data.district.map((d) => d.label),
-		["Maadi - المعادي (Z1)", "Maadi - المعادي (Z2)"]
-	);
-	await dialog.set_value("district", "d-1");
-	await dialog.set_value("city", "c-alex");
-	await settle();
-	assert.equal(dialog.values.district, "");
-	assert.deepEqual(dialog.data.district, [{ value: "d-9", label: "Smouha" }]);
-	assert.deepEqual(
-		calls.filter((c) => c.method.endsWith("get_districts")).map((c) => c.args.city_id),
-		["c-cairo", "c-alex"]
-	);
-});
-
-test("a late district answer for a previous city is ignored", async () => {
-	let release;
-	const slow = new Promise((resolve) => (release = resolve));
-	const { dialog } = await open_bosta_dialog(
-		{},
-		{
-			get_districts: (args) => (args.city_id === "c-cairo" ? slow : DISTRICTS[args.city_id]),
-		}
-	);
-	// The scripted server returns a promise as "message" for the slow city.
-	await dialog.set_value("city", "c-cairo");
-	await dialog.set_value("city", "c-alex");
-	await settle();
-	release([{ id: "late", name: "Late" }]);
-	await settle();
-	assert.deepEqual(dialog.data.district, [{ value: "d-9", label: "Smouha" }]);
 });
 
 test("remote names cannot inject markup, and an ampersand stays readable", async () => {
@@ -1130,14 +1149,14 @@ test("remote names cannot inject markup, and an ampersand stays readable", async
 	assert.equal(options[1].value, "bosta-id-7"); // the stored value stays the Bosta ID
 });
 
-test("creating sends the district ID, the city NAME and the shown COD", async () => {
+test("creating sends the city ID, the receiver, the address and the entered COD, and no district", async () => {
 	const { dialog, calls, frm } = await open_bosta_dialog({ cod_amount: 300 });
 	await dialog.set_value("city", "c-cairo");
 	await settle();
 	Object.assign(dialog.values, {
+		cod_amount: 125.75,
 		receiver_name: "Ahmed",
 		receiver_phone: "0100",
-		district: "d-1",
 		address_first_line: "12 Example Street",
 	});
 	dialog.config.primary_action(dialog.values);
@@ -1147,10 +1166,10 @@ test("creating sends the district ID, the city NAME and the shown COD", async ()
 		sales_order: "SAL-ORD-1",
 		receiver_name: "Ahmed",
 		receiver_phone: "0100",
-		city: "Cairo",
-		district_id: "d-1",
+		city_id: "c-cairo",
 		address_first_line: "12 Example Street",
 		expected_cod: 300,
+		cod_amount: 125.75,
 	});
 	assert.equal(frm.reloads, 1);
 });
@@ -1179,28 +1198,7 @@ test("when Bosta cannot be reached the dialog shows an error, blocks submit, and
 	assert.equal(calls.filter((c) => c.method.endsWith("get_cities")).length, 2);
 });
 
-test("a district load failure also blocks submit until retried", async () => {
-	let healthy = false;
-	const { dialog } = await open_bosta_dialog(
-		{},
-		{
-			get_districts: (args) => {
-				if (!healthy) throw new Error("down");
-				return DISTRICTS[args.city_id];
-			},
-		}
-	);
-	await dialog.set_value("city", "c-cairo");
-	await settle();
-	assert.equal(dialog.primary.disabled, true);
-	assert.match(dialog.df.lists_error.options, /Bosta districts/);
-	healthy = true;
-	await dialog.df.retry_lists.click();
-	await settle();
-	assert.equal(dialog.primary.disabled, false);
-});
-
-test("Refresh Bosta Lists asks the server to refresh and keeps the chosen city", async () => {
+test("Refresh Bosta Lists asks the server to refresh the cities and keeps the chosen city", async () => {
 	const { dialog, calls } = await open_bosta_dialog({});
 	await dialog.set_value("city", "c-cairo");
 	await settle();
@@ -1208,27 +1206,34 @@ test("Refresh Bosta Lists asks the server to refresh and keeps the chosen city",
 	await dialog.config.secondary_action();
 	await settle();
 	const refreshes = calls.filter((c) => c.args && c.args.refresh === 1).map((c) => c.method.split(".").pop());
-	assert.deepEqual(refreshes, ["get_cities", "get_districts"]);
+	assert.deepEqual(refreshes, ["get_cities"]);
 	assert.equal(dialog.values.city, "c-cairo");
 });
 
-test("a Bosta city matching the shipping address city is preselected; the district never is", async () => {
+test("a Bosta city matching the shipping address city is preselected", async () => {
 	const { dialog } = await open_bosta_dialog({
 		address_first_line: "12 Example Street, Floor 3",
 		address_city: "  cAiRo ",
 	});
 	assert.equal(dialog.values.city, "c-cairo");
-	assert.equal(dialog.values.district, "");
 	assert.equal(dialog.df.address_first_line.default, "12 Example Street, Floor 3");
-	assert.equal(dialog.data.district.length, 2); // listed for the choice, none chosen
 });
 
 test("a non-matching, partial or empty source city leaves the City dropdown empty", async () => {
 	for (const address_city of ["Giza", "Cai", "", undefined]) {
 		const { dialog } = await open_bosta_dialog({ address_city });
 		assert.equal(dialog.values.city, "", `city ${address_city}`);
-		assert.equal(dialog.values.district, "");
 	}
+});
+
+test("a resolved city ID opens the dialog with that city selected", async () => {
+	const { dialog } = await open_bosta_dialog({ city_id: "c-alex", city_name: "Alexandria", address_city: "Cairo" });
+	assert.equal(dialog.values.city, "c-alex");
+});
+
+test("a city ID the Bosta list no longer has is not preselected", async () => {
+	const { dialog } = await open_bosta_dialog({ city_id: "c-gone", city_name: "Gone", address_city: "" });
+	assert.equal(dialog.values.city, "");
 });
 
 test("without any address source the address fields stay blank and editable", async () => {
@@ -1241,7 +1246,7 @@ test("without any address source the address fields stay blank and editable", as
 // ---- Edit Bosta Shipment (#273) ----
 
 const editable = (extra = {}) =>
-	detailed({ bosta_state_code: 24, city: "Cairo", district_id: "d-2", receiver_phone: "0100", ...extra });
+	detailed({ bosta_state_code: 24, city: "Cairo", city_id: "c-cairo", receiver_phone: "0100", ...extra });
 
 const open_edit = (shipment, server) =>
 	open_bosta_dialog({}, server, (m, frm) => m.show_bosta_edit_dialog(frm, shipment));
@@ -1284,11 +1289,11 @@ test("the Edit button opens the edit dialog", async () => {
 	assert.equal(dialogs[0].config.title, "Edit Bosta Shipment");
 });
 
-test("the edit dialog has only the receiver phone, the pickers and the address, prefilled from the shipment", async () => {
+test("the edit dialog has only the receiver phone, the city picker and the address, prefilled from the shipment", async () => {
 	const { dialog } = await open_edit(editable());
 	assert.deepEqual(
 		dialog.config.fields.map((f) => f.fieldname),
-		["edit_note", "lists_error", "retry_lists", "receiver_phone", "city", "district", "address_first_line"]
+		["edit_note", "lists_error", "retry_lists", "receiver_phone", "city", "address_first_line"]
 	);
 	assert.equal(dialog.values.receiver_phone, "0100");
 	assert.equal(dialog.values.address_first_line, "12 Example Street");
@@ -1296,16 +1301,15 @@ test("the edit dialog has only the receiver phone, the pickers and the address, 
 	assert.match(dialog.config.fields[0].options, /Sales Order address and Shopify are not changed/);
 });
 
-test("the edit dialog preselects the shipment's city and district, and clearing is left to a city change", async () => {
-	const { dialog } = await open_edit(editable({ city: "Cairo", district_id: "d-2" }));
-	assert.equal(dialog.values.city, "c-cairo");
-	assert.equal(dialog.values.district, "d-2");
-	// A district that is not in the city is not guessed.
-	const other = await open_edit(editable({ city: "Cairo", district_id: "unknown" }));
-	assert.equal(other.dialog.values.district, "");
+test("the edit dialog preselects the shipment's city by its Bosta ID and does not guess a stale one", async () => {
+	const { dialog } = await open_edit(editable({ city: "Alexandria", city_id: "c-alex" }));
+	assert.equal(dialog.values.city, "c-alex");
+	// A stored city ID that Bosta no longer lists, with a name that matches nothing, is not guessed.
+	const stale = await open_edit(editable({ city: "Giza", city_id: "c-gone" }));
+	assert.equal(stale.dialog.values.city, "");
 });
 
-test("the edit dialog sends nothing until the confirm is accepted, then sends only phone and address", async () => {
+test("the edit dialog sends nothing until the confirm is accepted, then sends only phone, city ID and address", async () => {
 	const { dialog, calls, frm } = await open_edit(editable(), { edit_shipment: () => ({}) });
 	const confirms = with_confirm();
 	global.frappe.show_alert = () => {};
@@ -1313,7 +1317,6 @@ test("the edit dialog sends nothing until the confirm is accepted, then sends on
 	dialog.config.primary_action({
 		receiver_phone: "0111",
 		city: "c-alex",
-		district: "d-9",
 		address_first_line: "7 New Street",
 	});
 	assert.equal(calls.length, before);
@@ -1328,8 +1331,7 @@ test("the edit dialog sends nothing until the confirm is accepted, then sends on
 	assert.deepEqual(request.args, {
 		shipment: "BOSTA-SHP-00001",
 		receiver_phone: "0111",
-		city: "Alexandria",
-		district_id: "d-9",
+		city_id: "c-alex",
 		address_first_line: "7 New Street",
 	});
 	assert.equal(dialog.hidden, true);
@@ -1343,7 +1345,7 @@ test("a server error on edit does not reload the form", async () => {
 		},
 	});
 	const confirms = with_confirm();
-	dialog.config.primary_action({ receiver_phone: "0111", city: "c-cairo", district: "d-1", address_first_line: "7 New Street" });
+	dialog.config.primary_action({ receiver_phone: "0111", city: "c-cairo", address_first_line: "7 New Street" });
 	confirms[0].on_yes();
 	await settle();
 	assert.equal(frm.reloads, 0);
@@ -1354,46 +1356,18 @@ test("the confirm text escapes the tracking number and the dialog never renders 
 	const shipment = editable({ tracking_number: evil, receiver_phone: evil, address_first_line: evil });
 	const { dialog } = await open_edit(shipment);
 	const confirms = with_confirm();
-	dialog.config.primary_action({ receiver_phone: "0111", city: "c-cairo", district: "d-1", address_first_line: "7 New Street" });
+	dialog.config.primary_action({ receiver_phone: "0111", city: "c-cairo", address_first_line: "7 New Street" });
 	assert.doesNotMatch(confirms[0].message, /<img/);
 	assert.match(confirms[0].message, /&lt;img/);
 	// Stored text is only ever a field default, never an HTML option.
 	assert.doesNotMatch(dialog.config.fields[0].options, /<img/);
 });
 
-test("the create dialog is unchanged: it keeps the receiver name, the COD note and no district default", async () => {
+test("the create dialog keeps the receiver name, the COD note and no district field", async () => {
 	const { dialog } = await open_bosta_dialog({ cod_amount: 100, receiver_name: "Mona", receiver_phone: "010" });
 	assert.deepEqual(
 		dialog.config.fields.map((f) => f.fieldname),
-		["cod_note", "lists_error", "retry_lists", "receiver_name", "receiver_phone", "city", "district", "address_first_line"]
+		["cod_note", "lists_error", "retry_lists", "receiver_name", "receiver_phone", "city", "address_first_line"]
 	);
-	assert.equal(dialog.values.district, "");
 	assert.equal(dialog.config.primary_action_label, "Create Shipment");
-});
-
-test("a resolved city and district candidates open the dialog with only those districts", async () => {
-	const { dialog, calls } = await open_bosta_dialog({ city_id: "c-cairo", city_name: "Cairo", district_candidates: ["d-2"] });
-	assert.equal(dialog.values.city, "c-cairo");
-	assert.deepEqual(dialog.data.district, [{ value: "d-2", label: "Maadi - المعادي" }]);
-	// A single candidate starts selected.
-	assert.equal(dialog.values.district, "d-2");
-	// Changing the city (and back) loads the full list.
-	await dialog.set_value("city", "c-alex");
-	await settle();
-	await dialog.set_value("city", "c-cairo");
-	await settle();
-	assert.equal(dialog.data.district.length, 2);
-	assert.equal(calls.filter((c) => c.method.endsWith("get_districts")).length, 3);
-});
-
-test("several district candidates are listed with none selected", async () => {
-	const { dialog } = await open_bosta_dialog({ city_id: "c-cairo", city_name: "Cairo", district_candidates: ["d-1", "d-2"] });
-	assert.equal(dialog.data.district.length, 2);
-	assert.equal(dialog.values.district, "");
-});
-
-test("a matched district is selected in its resolved city", async () => {
-	const { dialog } = await open_bosta_dialog({ city_id: "c-cairo", city_name: "Cairo", district_id: "d-1" });
-	assert.equal(dialog.values.city, "c-cairo");
-	assert.equal(dialog.values.district, "d-1");
 });

@@ -944,6 +944,7 @@ def _mappings_for_sync(account_name, mapping_names):
 		filters["enabled"] = 1
 	else:
 		filters["name"] = ["in", list(mapping_names)]
+	# Trusted read: the push entry points authorize the account and every named mapping first.
 	return frappe.get_all(
 		MAPPING_DOCTYPE,
 		filters=filters,
@@ -957,6 +958,7 @@ def _fetch_items(item_names):
 	every Item in ONE query."""
 	if not item_names:
 		return {}
+	# Trusted read: only Item names already reached through authorized mappings.
 	rows = frappe.get_all(
 		"Item",
 		filters={"name": ["in", list(item_names)]},

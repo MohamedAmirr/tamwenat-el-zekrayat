@@ -3,6 +3,7 @@
 
 """Canonical Shopify order retrieval and persistence (#109)."""
 
+import time
 from datetime import UTC
 
 import frappe
@@ -101,7 +102,7 @@ query ShopifyOrder($id: ID!, $lineItemsFirst: Int!, $transactionsFirst: Int!, $r
     currentTotalDutiesSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }
     currentTotalPriceSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }
     transactions(first: $transactionsFirst) {
-      id kind status gateway manualPaymentGateway amountSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } } createdAt processedAt
+      id kind status gateway formattedGateway manualPaymentGateway amountSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } } createdAt processedAt
     }
     refunds(first: $refundsFirst) {
       id createdAt note totalRefundedSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }
@@ -135,6 +136,42 @@ query ShopifyOrderIds($first: Int!, $after: String, $query: String!) {
   }
 }
 """
+
+
+# Admin GraphQL OrderCancelReason values (Shopify, fetched 2026-10-08; see
+# docs/shopify/README.md and issue #182).
+SHOPIFY_ORDER_CANCEL_REASONS = (
+	"CUSTOMER",
+	"DECLINED",
+	"FRAUD",
+	"INVENTORY",
+	"OTHER",
+	"STAFF",
+)
+
+_ORDER_CANCEL_MUTATION = """
+mutation ShopifyOrderCancel($orderId: ID!, $reason: OrderCancelReason!, $restock: Boolean!, $notifyCustomer: Boolean!) {
+  orderCancel(orderId: $orderId, reason: $reason, restock: $restock, notifyCustomer: $notifyCustomer) {
+    jobResult { id }
+    orderCancelUserErrors { field message }
+  }
+}
+"""
+
+_ORDER_CANCEL_JOB_QUERY = """
+query ShopifyOrderCancelJob($id: ID!) {
+  node(id: $id) {
+    ... on OrderCancelJobResult {
+      id
+      done
+      status
+      errors { field message code }
+    }
+  }
+}
+"""
+ORDER_CANCEL_JOB_POLL_ATTEMPTS = 3
+ORDER_CANCEL_JOB_POLL_INTERVAL_SECONDS = 2
 
 
 def account_for_connection(connection_name):
@@ -199,6 +236,69 @@ def import_order(account, order_gid):
 			return False
 
 	return upsert_marketplace_order(account.name, normalized, is_stale=is_stale)
+
+
+def cancel_order(account, order_gid, reason):
+	"""Ask Shopify to cancel an order, without restocking or notifying the customer.
+
+	Shopify's ``orderCancel`` returns an asynchronous OrderCancelJobResult rather
+	than an Order. The caller owns the durable outbound marker and post-accept refresh.
+	"""
+	if isinstance(account, str):
+		account = frappe.get_doc("Marketplace Account", account)
+	if account.platform != "Shopify" or account.connection_doctype != "Shopify Connection":
+		frappe.throw(_("Marketplace Account {0} is not a Shopify account.").format(account.name))
+	order_gid = cstr(order_gid).strip()
+	if not order_gid:
+		frappe.throw(_("Shopify order GID is required."))
+	if reason not in SHOPIFY_ORDER_CANCEL_REASONS:
+		frappe.throw(_("A valid Shopify cancellation reason is required."))
+
+	data = ShopifyClient(account.connection).execute(
+		_ORDER_CANCEL_MUTATION,
+		{
+			"orderId": order_gid,
+			"reason": reason,
+			"restock": False,
+			"notifyCustomer": False,
+		},
+	)
+	result = (data or {}).get("orderCancel")
+	if not isinstance(result, dict):
+		frappe.throw(_("Shopify did not return an order cancellation result."))
+	user_errors = result.get("orderCancelUserErrors") or result.get("userErrors") or []
+	if user_errors:
+		messages = [cstr(error.get("message")).strip() for error in user_errors if isinstance(error, dict)]
+		frappe.throw(" ".join(message for message in messages if message) or _("Shopify rejected the cancellation."))
+	job_result = result.get("jobResult")
+	if not isinstance(job_result, dict) or not cstr(job_result.get("id")).strip():
+		frappe.throw(_("Shopify accepted no cancellation job."))
+	return {"job_id": cstr(job_result.get("id")).strip()}
+
+
+def poll_order_cancel_job(account, job_id):
+	"""Poll an accepted Shopify cancellation job a bounded number of times.
+
+	Returns its terminal result, or ``None`` when still running/unknown after the
+	bounded wait. GraphQL top-level errors propagate to the caller; after mutation
+	acceptance callers must retain the marker because the outcome is uncertain.
+	"""
+	if isinstance(account, str):
+		account = frappe.get_doc("Marketplace Account", account)
+	job_id = cstr(job_id).strip()
+	if not job_id:
+		frappe.throw(_("Shopify cancellation job ID is required."))
+	client = ShopifyClient(account.connection)
+	for attempt in range(ORDER_CANCEL_JOB_POLL_ATTEMPTS):
+		data = client.execute(_ORDER_CANCEL_JOB_QUERY, {"id": job_id})
+		node = (data or {}).get("node")
+		if isinstance(node, dict):
+			status = cstr(node.get("status")).strip().upper()
+			if status in {"FAILED", "SUCCEEDED"}:
+				return node
+		if attempt + 1 < ORDER_CANCEL_JOB_POLL_ATTEMPTS:
+			time.sleep(ORDER_CANCEL_JOB_POLL_INTERVAL_SECONDS)
+	return None
 
 
 def list_order_ids_updated_since(client, since, until=None):

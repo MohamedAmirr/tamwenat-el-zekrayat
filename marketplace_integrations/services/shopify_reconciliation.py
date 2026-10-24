@@ -16,11 +16,11 @@ evidence) and its backing get_refund_evidence_gaps() were removed entirely
 in favor of a "Show Refunded Orders" Marketplace Order list view filter -
 see docs/marketplace-integrations/shopify-reconciliation-dashboard.md.
 
-The underlying doctype (``Marketplace Sync Log``) restricts ``read`` to the
-System Manager role only (see its own DocType permissions) - these functions
-require the same role explicitly, matching ``Marketplace Sync
-Log.resync()``'s ``frappe.only_for("System Manager")``, rather than relying
-solely on ``frappe.get_all()``'s own permission enforcement.
+Authorization (#323): every function calls ``require_shopify_reader()``
+(System Manager or Shopify User) and reads through ``frappe.get_list``, so
+the session user's DocPerm and the platform row filter from
+``permissions.py`` still apply on top of the role check. Order, mapping and
+log reads are limited to Shopify accounts explicitly.
 """
 
 import frappe
@@ -33,6 +33,25 @@ from marketplace_integrations.integrations.shopify.webhooks import (
 from marketplace_integrations.services.marketplace_attention import get_resolved_import_failures
 
 ORDER_IMPORT_FAILURES_LIMIT = 50
+SHOPIFY_READER_ROLES = ("System Manager", "Shopify User")
+
+
+def require_shopify_reader():
+	"""Shopify reconciliation data is for System Manager and Shopify User only."""
+	frappe.only_for(SHOPIFY_READER_ROLES)
+
+
+def _shopify_accounts():
+	"""Names of the Shopify Marketplace Accounts the session user may read."""
+	return frappe.get_list(
+		"Marketplace Account", filters={"platform": "Shopify"}, pluck="name", limit_page_length=0
+	)
+
+
+def _count(doctype, filters):
+	"""Permission-aware row count (``frappe.db.count`` ignores permissions)."""
+	rows = frappe.get_list(doctype, filters=filters, fields=[{"COUNT": "name", "as": "total"}])
+	return rows[0].total if rows else 0
 
 
 def get_order_import_failures(limit=ORDER_IMPORT_FAILURES_LIMIT):
@@ -40,11 +59,11 @@ def get_order_import_failures(limit=ORDER_IMPORT_FAILURES_LIMIT):
 	(#139 section 4), most recent first. Other platforms' Order Import
 	failures are excluded, and so are failures a later import of the same
 	order already resolved (same rule as the Needs Attention report)."""
-	frappe.only_for("System Manager")
-	shopify_accounts = frappe.get_all("Marketplace Account", filters={"platform": "Shopify"}, pluck="name")
+	require_shopify_reader()
+	shopify_accounts = _shopify_accounts()
 	if not shopify_accounts:
 		return []
-	rows = frappe.get_all(
+	rows = frappe.get_list(
 		"Marketplace Sync Log",
 		filters={
 			"sync_type": "Order Import",
@@ -96,37 +115,54 @@ def _date_range_filters(fieldname, from_date=None, to_date=None):
 	return conditions
 
 
+def _mapping_count(filters):
+	"""Count of Shopify Product Mapping rows only: a mapping carries no platform
+	of its own, so it is limited to the Shopify accounts the user can read."""
+	accounts = _shopify_accounts()
+	if not accounts:
+		return 0
+	return _count("Marketplace Product Mapping", {**filters, "marketplace_account": ["in", accounts]})
+
+
 def get_catalog_push_error_count():
 	"""Current-state count of ``Marketplace Product Mapping`` rows stuck at
 	``sync_status = Error`` (#139 Number Card "Shopify Catalog Push Errors",
 	now superseded by this function). Not date-ranged - this mirrors the
 	Number Card's own current-state semantics exactly."""
-	frappe.only_for("System Manager")
-	return frappe.db.count("Marketplace Product Mapping", {"sync_status": "Error"})
+	require_shopify_reader()
+	return _mapping_count({"sync_status": "Error"})
 
 
 def get_inventory_sync_error_count():
 	"""Current-state count of ``Marketplace Product Mapping`` rows stuck at
 	``inventory_sync_status = Error`` (#139 Number Card "Shopify Inventory
 	Sync Errors"). Not date-ranged."""
-	frappe.only_for("System Manager")
-	return frappe.db.count("Marketplace Product Mapping", {"inventory_sync_status": "Error"})
+	require_shopify_reader()
+	return _mapping_count({"inventory_sync_status": "Error"})
 
 
 def get_order_sync_error_count():
 	"""Current-state count of ``Marketplace Order`` rows at
 	``erpnext_sync_status = Sync Error`` (#139 Number Card "Marketplace
-	Orders: Sync Error"). Not date-ranged."""
-	frappe.only_for("System Manager")
-	return frappe.db.count("Marketplace Order", {"erpnext_sync_status": "Sync Error"})
+	Orders: Sync Error", now "Shopify Orders: Sync Error"). Not date-ranged.
+	Limited to orders of the Shopify accounts the user can read (by the account's
+	platform, like the mapping counts), not the stored ``Order.platform``."""
+	require_shopify_reader()
+	accounts = _shopify_accounts()
+	if not accounts:
+		return 0
+	return _count(
+		"Marketplace Order",
+		{"marketplace_account": ["in", accounts], "erpnext_sync_status": "Sync Error"},
+	)
 
 
 def get_webhook_delivery_error_count():
 	"""Current-state count of ``Shopify Webhook Delivery`` rows at
 	``status = Error`` (#139 Number Card "Shopify Webhook Deliveries: Error").
 	Not date-ranged."""
-	frappe.only_for("System Manager")
-	return frappe.db.count("Shopify Webhook Delivery", {"status": "Error"})
+	require_shopify_reader()
+	return _count("Shopify Webhook Delivery", {"status": "Error"})
 
 
 def get_webhook_delivery_exhausted_retry_count():
@@ -135,8 +171,8 @@ def get_webhook_delivery_exhausted_retry_count():
 	(#139 Number Card "Shopify Webhook Deliveries: Exhausted Retries") - these
 	will never self-heal via the hourly retry sweep, which excludes them by
 	the same threshold. Not date-ranged."""
-	frappe.only_for("System Manager")
-	return frappe.db.count(
+	require_shopify_reader()
+	return _count(
 		"Shopify Webhook Delivery",
 		{"status": "Error", "attempt_count": [">=", MAX_WEBHOOK_DELIVERY_ATTEMPTS]},
 	)
@@ -145,9 +181,9 @@ def get_webhook_delivery_exhausted_retry_count():
 def get_orders_received_count_in_range(from_date=None, to_date=None):
 	"""Count of Shopify ``Marketplace Order`` rows whose ``received_on``
 	(the original order date) falls in the given date range."""
-	frappe.only_for("System Manager")
+	require_shopify_reader()
 	filters = [["platform", "=", "Shopify"], *_date_range_filters("received_on", from_date, to_date)]
-	return frappe.db.count("Marketplace Order", filters)
+	return _count("Marketplace Order", filters)
 
 
 def get_total_order_value_in_range(from_date=None, to_date=None):
@@ -167,13 +203,14 @@ def get_total_order_value_in_range(from_date=None, to_date=None):
 	Returns ``{"total": float | None, "currency": str | None,
 	"breakdown": {currency: float}, "is_mixed": bool}``.
 	"""
-	frappe.only_for("System Manager")
+	require_shopify_reader()
 	filters = [["platform", "=", "Shopify"], *_date_range_filters("received_on", from_date, to_date)]
-	rows = frappe.get_all(
+	rows = frappe.get_list(
 		"Marketplace Order",
 		filters=filters,
 		fields=["shop_currency", {"SUM": "order_total", "as": "total"}],
 		group_by="shop_currency",
+		limit_page_length=0,
 	)
 
 	breakdown = {}
@@ -204,9 +241,9 @@ def get_sales_order_sync_success_rate_in_range(from_date=None, to_date=None):
 	``rate`` is ``None`` (not a ZeroDivisionError) when no orders were
 	received in range.
 	"""
-	frappe.only_for("System Manager")
+	require_shopify_reader()
 	filters = [["platform", "=", "Shopify"], *_date_range_filters("received_on", from_date, to_date)]
-	rows = frappe.get_all("Marketplace Order", filters=filters, fields=["erpnext_sync_status"])
+	rows = frappe.get_list("Marketplace Order", filters=filters, fields=["erpnext_sync_status"], limit_page_length=0)
 	denominator = len(rows)
 	numerator = sum(1 for row in rows if row.erpnext_sync_status == "Synced")
 	rate = (numerator / denominator * 100) if denominator else None
@@ -231,7 +268,7 @@ def get_total_refunded_amount_in_range(from_date=None, to_date=None):
 	Returns ``{"total": float | None, "currency": str | None,
 	"breakdown": {currency: float}, "is_mixed": bool}``.
 	"""
-	frappe.only_for("System Manager")
+	require_shopify_reader()
 	filters = [
 		["platform", "=", "Shopify"],
 		["refunds", "is", "set"],
@@ -239,7 +276,7 @@ def get_total_refunded_amount_in_range(from_date=None, to_date=None):
 		["refunds", "!=", "[]"],
 		*_date_range_filters("last_platform_update_on", from_date, to_date),
 	]
-	rows = frappe.get_all("Marketplace Order", filters=filters, fields=["refunds"])
+	rows = frappe.get_list("Marketplace Order", filters=filters, fields=["refunds"], limit_page_length=0)
 
 	breakdown = {}
 	for row in rows:
@@ -276,9 +313,9 @@ def get_webhook_processing_success_rate_in_range(from_date=None, to_date=None):
 	``rate`` is ``None`` (not a ZeroDivisionError) when no deliveries were
 	received in range.
 	"""
-	frappe.only_for("System Manager")
+	require_shopify_reader()
 	filters = _date_range_filters("received_at", from_date, to_date)
-	rows = frappe.get_all("Shopify Webhook Delivery", filters=filters, fields=["status"])
+	rows = frappe.get_list("Shopify Webhook Delivery", filters=filters, fields=["status"], limit_page_length=0)
 	denominator = len(rows)
 	numerator = sum(1 for row in rows if row.status == "Processed")
 	rate = (numerator / denominator * 100) if denominator else None
@@ -301,7 +338,7 @@ def get_reconciliation_summary(from_date=None, to_date=None):
 	Returns a list of ``{"metric": str, "value": int | float | None,
 	"detail": str}`` dicts, one per metric, in the order listed above.
 	"""
-	frappe.only_for("System Manager")
+	require_shopify_reader()
 
 	rows = [
 		{
@@ -315,7 +352,7 @@ def get_reconciliation_summary(from_date=None, to_date=None):
 			"detail": "",
 		},
 		{
-			"metric": _("Marketplace Orders: Sync Error (current)"),
+			"metric": _("Shopify Orders: Sync Error (current)"),
 			"value": get_order_sync_error_count(),
 			"detail": "",
 		},

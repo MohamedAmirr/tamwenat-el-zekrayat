@@ -15,6 +15,9 @@ from marketplace_integrations.integrations.bosta.deliveries import (
 	check_bosta_shipment as _check_bosta_shipment,
 )
 from marketplace_integrations.integrations.bosta.deliveries import (
+	confirm_physical_handover as _confirm_physical_handover,
+)
+from marketplace_integrations.integrations.bosta.deliveries import (
 	create_bosta_shipment as _create_bosta_shipment,
 )
 from marketplace_integrations.integrations.bosta.deliveries import (
@@ -51,30 +54,23 @@ def get_cities(refresh: int = 0):
 
 
 @frappe.whitelist(methods=["POST"])
-def get_districts(city_id: str, refresh: int = 0):
-	"""A Bosta city's drop-off-capable districts (cached 24h); ``refresh`` refetches them."""
-	frappe.only_for(CREATOR_ROLES)
-	return locations.get_districts(city_id, refresh=bool(cint(refresh)))
-
-
-@frappe.whitelist(methods=["POST"])
 def create_shipment(
 	sales_order: str,
 	receiver_name: str,
 	receiver_phone: str,
-	city: str,
-	district_id: str = "",
+	city_id: str,
 	address_first_line: str = "",
 	expected_cod: float | None = None,
+	cod_amount: float | None = None,
 ):
 	return _create_bosta_shipment(
 		sales_order,
 		receiver_name,
 		receiver_phone,
-		city,
-		district_id,
+		city_id,
 		address_first_line,
 		expected_cod,
+		cod_amount,
 	)
 
 
@@ -104,6 +100,12 @@ def check_shipment(shipment: str):
 
 
 @frappe.whitelist(methods=["POST"])
+def confirm_physical_handover(shipment: str):
+	"""Record authorized physical handover and post the reserved Delivery Note."""
+	return _confirm_physical_handover(shipment)
+
+
+@frappe.whitelist(methods=["POST"])
 def refresh_shipment(shipment: str):
 	"""Read the shipment's current state from Bosta and apply it (creator roles only)."""
 	return _refresh_shipment_state(shipment)
@@ -119,12 +121,11 @@ def cancel_shipment(shipment: str):
 def edit_shipment(
 	shipment: str,
 	receiver_phone: str,
-	city: str,
-	district_id: str,
+	city_id: str,
 	address_first_line: str,
 ):
 	"""Update the delivery's receiver phone and drop-off address in Bosta and ERPNext."""
-	return _edit_bosta_shipment(shipment, receiver_phone, city, district_id, address_first_line)
+	return _edit_bosta_shipment(shipment, receiver_phone, city_id, address_first_line)
 
 
 @frappe.whitelist(methods=["POST"])

@@ -11,10 +11,11 @@ whatever Marketplace Account / Marketplace Order / Marketplace Product
 Mapping / Marketplace Sync Log / Shopify Connection rows the calling user may
 read, rather than a hand-rolled permission check layered on top.
 
-The order/import attention counts come from services/marketplace_attention.py
-(#169) - the one definition of "needs attention" shared with the Marketplace
-Needs Attention report. Only the product-mapping sync error count is computed
-here, since mapping errors are not part of that definition.
+The order/import/fulfillment/payment attention counts come from
+services/marketplace_attention.py (#169) - the one definition of "needs
+attention" shared with the Marketplace Needs Attention report. Only the
+product-mapping sync error count is computed here, since mapping errors are
+not part of that definition.
 """
 
 import frappe
@@ -30,6 +31,7 @@ EMPTY_COUNTS = {
 	"product_sync_errors": 0,
 	"import_errors": 0,
 	"fulfillment_errors": 0,
+	"payment_errors": 0,
 }
 
 
@@ -83,6 +85,7 @@ def get_channel_status():
 			"product_sync_errors": counts["product_sync_errors"],
 			"import_errors": counts["import_errors"],
 			"fulfillment_errors": counts["fulfillment_errors"],
+			"payment_errors": counts["payment_errors"],
 			"last_checked": account.external_status_checked_on if account.platform == "Talabat" else None,
 			# Talabat
 			"external_status": account.external_status,
@@ -115,7 +118,10 @@ def get_channel_status():
 def _bosta_rows():
 	"""One carrier row for Bosta (not a Marketplace Account): shown when it is enabled or
 	has shipments whose Delivery Note action failed. ``orders_needing_attention`` counts
-	those shipments."""
+	those shipments. Only for users who may read Bosta Shipment (#323): a platform user
+	without it gets no carrier row, not even the enabled flag."""
+	if not frappe.has_permission("Bosta Shipment", "read"):
+		return []
 	enabled = frappe.db.get_single_value("Bosta Settings", "enabled")
 	failed = {item["reference_name"] for item in get_attention_items({"platform": BOSTA_PLATFORM})}
 	if not enabled and not failed:
@@ -158,7 +164,7 @@ def _get_shopify_connection_health(accounts):
 def get_account_counts(account_names):
 	"""Per-account counts keyed by Marketplace Account name: the attention
 	counts (``orders_needing_attention``, ``import_errors`` = Order Import
-	errors only, ``fulfillment_errors``) from
+	errors only, ``fulfillment_errors``, ``payment_errors``) from
 	services/marketplace_attention.py, plus ``product_sync_errors``: Marketplace
 	Product Mapping rows whose ``sync_status`` or ``inventory_sync_status`` is
 	Error (one grouped query, never a per-account loop).
@@ -192,6 +198,7 @@ def _compute_level(account, row, connection_health):
 		or row["product_sync_errors"]
 		or row["import_errors"]
 		or row["fulfillment_errors"]
+		or row["payment_errors"]
 	)
 
 	if account.platform == "Talabat":

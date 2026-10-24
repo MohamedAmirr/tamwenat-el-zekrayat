@@ -20,11 +20,9 @@ from marketplace_integrations.integrations.bosta.constants import (
 	BOSTA_AWB_MAX_TRACKING_NUMBERS,
 	BOSTA_CITIES_PATH,
 	BOSTA_CREATE_DELIVERY_PATH,
-	BOSTA_DISTRICTS_PATH,
 	BOSTA_GET_DELIVERY_PATH,
 	BOSTA_MASS_AWB_PATH,
 	BOSTA_PICKUP_LOCATIONS_PATH,
-	BOSTA_PIN_LOCATION_PATH,
 	BOSTA_SEARCH_DELIVERIES_PATH,
 	BOSTA_TERMINATE_DELIVERY_PATH,
 	BOSTA_UPDATE_DELIVERY_PATH,
@@ -160,21 +158,9 @@ class BostaClient:
 		"""Bosta's documented ``GET /cities`` (public endpoint; the key is sent anyway)."""
 		return self.request("GET", BOSTA_CITIES_PATH)
 
-	def get_districts(self, city_id):
-		"""Bosta's documented ``GET /cities/{cityId}/districts``."""
-		city_id = str(city_id or "").strip()
-		if not city_id:
-			frappe.throw(_("A Bosta city ID is required."))
-		return self.request("GET", BOSTA_DISTRICTS_PATH.format(city_id=quote(city_id, safe="")))
-
 	def get_all_districts(self):
-		"""Bosta's documented ``GET /cities/getAllDistricts`` (every city with its districts)."""
+		"""Bosta's documented ``GET /cities/getAllDistricts`` (every city with its code and districts)."""
 		return self.request("GET", BOSTA_ALL_DISTRICTS_PATH)
-
-	def pin_location(self, lat, lng):
-		"""``GET /cities/pinLocation?lat=&lng=``: the Bosta districts at a coordinate. Not
-		documented by Bosta (verified live 2026-10-19, may change)."""
-		return self.request("GET", BOSTA_PIN_LOCATION_PATH, params={"lat": lat, "lng": lng})
 
 	def get_pickup_locations(self):
 		"""Every raw pickup location of the business from ``GET /pickup-locations``.

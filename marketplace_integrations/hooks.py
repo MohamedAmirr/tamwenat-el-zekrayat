@@ -13,26 +13,15 @@ app_license = "mit"
 
 required_apps = ["erpnext"]
 
-# Each item in the list will be shown as an app in the apps page
-# The logo is the existing solid desktop-icon tile (a standalone rounded SVG).
-# The route is /desk/<workspace name, lower-cased, spaces -> hyphens>.
+# No add_to_apps_screen: the app has no apps-screen tile of its own. Its Marketplaces and Bosta
+# entries are mounted on ERPNext's rail by dock/marketplace_integrations/ (#326).
 app_logo_url = "/assets/marketplace_integrations/icons/desktop_icons/solid/tamwenat_marketplaces.svg"
-
-add_to_apps_screen = [
-	{
-		"name": app_name,
-		"logo": app_logo_url,
-		"title": app_title,
-		"route": "/desk/tamwenat-marketplaces",
-		"has_permission": "marketplace_integrations.api.permission.has_app_permission",
-	}
-]
 
 # Includes in <head>
 # ------------------
 
 # include js, css files in header of desk.html
-# app_include_css = "/assets/marketplace_integrations/css/marketplace_integrations.css"
+app_include_css = "/assets/marketplace_integrations/css/bosta_state.css"
 # app_include_js = "/assets/marketplace_integrations/js/marketplace_integrations.js"
 
 # include js, css files in header of web template
@@ -142,13 +131,20 @@ doctype_list_js = {"Sales Order": "public/js/sales_order_list.js"}
 # -----------
 # Permissions evaluated in scripted ways
 
-# permission_query_conditions = {
-# 	"Event": "frappe.desk.doctype.event.event.get_permission_query_conditions",
-# }
-#
-# has_permission = {
-# 	"Event": "frappe.desk.doctype.event.event.has_permission",
-# }
+# Platform row filtering (#322): see permissions.py. System Manager/Administrator bypass.
+permission_query_conditions = {
+	"Marketplace Account": "marketplace_integrations.permissions.marketplace_account_query_conditions",
+	"Marketplace Order": "marketplace_integrations.permissions.marketplace_order_query_conditions",
+	"Marketplace Product Mapping": "marketplace_integrations.permissions.marketplace_product_mapping_query_conditions",
+	"Marketplace Sync Log": "marketplace_integrations.permissions.marketplace_sync_log_query_conditions",
+}
+
+has_permission = {
+	"Marketplace Account": "marketplace_integrations.permissions.marketplace_account_has_permission",
+	"Marketplace Order": "marketplace_integrations.permissions.marketplace_order_has_permission",
+	"Marketplace Product Mapping": "marketplace_integrations.permissions.marketplace_product_mapping_has_permission",
+	"Marketplace Sync Log": "marketplace_integrations.permissions.marketplace_sync_log_has_permission",
+}
 
 # Document Events
 # ---------------
@@ -290,6 +286,12 @@ scheduler_events["cron"].setdefault(NOON_INVENTORY_SWEEP_CRON, []).append(
 # purely server-side `.insert()`/`.save()`, so no separate assignment is
 # needed for it).
 fixtures = [
+	# #322: the four platform roles (fixtures/role.json). The doctype permission rows that
+	# use them ship in each doctype's JSON.
+	{
+		"dt": "Role",
+		"filters": [["name", "in", ["Talabat User", "Noon User", "Shopify User", "Bosta User"]]],
+	},
 	{
 		"dt": "Property Setter",
 		"filters": [
@@ -307,7 +309,7 @@ fixtures = [
 	},
 	{
 		"dt": "Notification",
-		"filters": [["name", "in", ["Refund Detected on Marketplace Order"]]],
+		"filters": [["name", "in", ["Refund Detected on Marketplace Order", "Bosta Awaiting Your Action"]]],
 	},
 	{
 		"dt": "Custom Field",
@@ -318,8 +320,10 @@ fixtures = [
 				[
 					"Sales Order-custom_marketplace_order",
 					"Sales Order-custom_marketplace_platform",
+					"Sales Order-custom_marketplace_external_order_id",
 					"Sales Order-custom_bosta_delivery_tab",
 					"Sales Order-custom_bosta_delivery_html",
+					"Sales Order-custom_bosta_delivery_status",
 					"Payment Entry-custom_marketplace_order",
 					"Payment Entry-custom_marketplace_transaction_id",
 				],

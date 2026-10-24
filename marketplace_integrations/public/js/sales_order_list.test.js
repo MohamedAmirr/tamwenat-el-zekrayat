@@ -6,18 +6,33 @@ global.__ = (message, args) => {
 	return message.replace(/\{(\d+)\}/g, (_, index) => args[index]);
 };
 
-function load({ creator = true, original_onload = null, defaults = null, defaults_fail = false } = {}) {
+function load({ creator = true, original_onload = null, original_formatters = {}, defaults = null, defaults_fail = false } = {}) {
 	const msgprints = [];
 	const calls = [];
 	const dialogs = [];
+	const created_cards = [];
+	const attached = [];
 	global.frappe = {
 		user: { has_role: () => creator },
 		utils: { escape_html: (value) => String(value).replace(/</g, "&lt;") },
-		listview_settings: { "Sales Order": original_onload ? { onload: original_onload } : {} },
+		listview_settings: {
+			"Sales Order": {
+				...(original_onload ? { onload: original_onload } : {}),
+				formatters: original_formatters,
+			},
+		},
 		msgprint: (message) => msgprints.push(message),
 		// Loading sales_order.js is what exports the creator roles.
 		require: () => {
-			global.frappe.marketplace_integrations = { BOSTA_CREATOR_ROLES: ["Sales Manager"] };
+			global.frappe.marketplace_integrations = {
+				BOSTA_CREATOR_ROLES: ["Sales Manager"],
+				order_hover_card: {
+					create: (opts) => {
+						created_cards.push(opts);
+						return { attach_to_list: (view) => attached.push(view) };
+					},
+				},
+			};
 			return Promise.resolve();
 		},
 		call: (opts) => {
@@ -44,7 +59,7 @@ function load({ creator = true, original_onload = null, defaults = null, default
 	const path = require.resolve("./sales_order_list.js");
 	delete require.cache[path];
 	const module_exports = require(path);
-	return { calls, msgprints, dialogs, module_exports, settings: global.frappe.listview_settings["Sales Order"] };
+	return { calls, msgprints, dialogs, created_cards, attached, module_exports, settings: global.frappe.listview_settings["Sales Order"] };
 }
 
 function listview(names = []) {
@@ -98,33 +113,66 @@ const USED = {
 	sales_order: "SO-1",
 	receiver_name: "Ahmed",
 	receiver_phone: "0100",
-	city: "Cairo",
-	district_id: "d-1",
+	city_id: "c-cairo",
 	address_first_line: "12 Example Street",
 	expected_cod: 150,
 };
 
+test("the bulk send maps a ready order to its city ID and sends no district", async () => {
+	const { module_exports, calls } = load();
+	// The queued job opens a status panel; only its constructor matters here.
+	global.frappe.ui.ShopifyCatalogPushStatus = class {};
+	global.frappe.ui.ShopifyCatalogPushStatus.BOSTA_BULK_OPTIONS = {};
+	await module_exports.review_and_send(listview(), {
+		ready: [
+			{
+				sales_order: "SO-1",
+				defaults: {
+					receiver_name: "Ahmed",
+					receiver_phone: "0100",
+					city_id: "c-cairo",
+					address_first_line: "12 Example Street",
+					cod_amount: 150,
+				},
+			},
+		],
+		review: [],
+		skipped: [],
+	});
+	const queued = calls.find((c) => c.method.endsWith("queue_bulk_create"));
+	assert.deepEqual(queued.args.orders, [
+		{
+			sales_order: "SO-1",
+			receiver_name: "Ahmed",
+			receiver_phone: "0100",
+			city_id: "c-cairo",
+			address_first_line: "12 Example Street",
+			expected_cod: 150,
+		},
+	]);
+});
+
 test("a retry entry re-reads the server defaults and keeps the values already used", async () => {
-	const fresh = { cod_amount: 175, city_id: "c-cairo", city_name: "Cairo", district_candidates: ["d-1", "d-2"], receiver_name: "Other", address_first_line: "changed" };
+	const fresh = {
+		cod_amount: 175,
+		city_id: "c-alex",
+		city_name: "Alexandria",
+		address_city: "Cairo",
+		receiver_name: "Other",
+		address_first_line: "changed",
+	};
 	const { module_exports, calls } = load({ defaults: fresh });
 	const entry = await module_exports.retry_entry(USED);
 	assert.equal(calls[0].args.sales_order, "SO-1");
 	assert.equal(entry.defaults.cod_amount, 175);
+	assert.equal(entry.defaults.address_city, "Cairo");
+	// The city and the receiver stay as used, not as the server resolves them now.
 	assert.equal(entry.defaults.city_id, "c-cairo");
-	assert.deepEqual(entry.defaults.district_candidates, ["d-1", "d-2", "d-1"]);
-	assert.equal(entry.defaults.district_id, "d-1");
 	assert.equal(entry.defaults.receiver_name, "Ahmed");
 	assert.equal(entry.defaults.receiver_phone, "0100");
 	assert.equal(entry.defaults.address_first_line, "12 Example Street");
-});
-
-test("a retry entry drops the resolved city when it is not the city used", async () => {
-	const { module_exports } = load({ defaults: { cod_amount: 175, city_id: "c-giza", city_name: "Giza", district_candidates: ["g-1"] } });
-	const entry = await module_exports.retry_entry(USED);
-	assert.equal(entry.defaults.city_id, undefined);
-	assert.equal(entry.defaults.district_candidates, undefined);
-	assert.equal(entry.defaults.address_city, "Cairo");
-	assert.equal(entry.defaults.district_id, "d-1");
+	assert.equal("district_id" in entry.defaults, false);
+	assert.equal("district_candidates" in entry.defaults, false);
 });
 
 test("a retry entry falls back to the used values when the defaults cannot be read", async () => {
@@ -133,9 +181,79 @@ test("a retry entry falls back to the used values when the defaults cannot be re
 	assert.deepEqual(entry.defaults, {
 		receiver_name: "Ahmed",
 		receiver_phone: "0100",
-		address_city: "Cairo",
-		district_id: "d-1",
+		city_id: "c-cairo",
 		address_first_line: "12 Example Street",
 		cod_amount: 150,
 	});
+});
+
+test("onload attaches the order hover card to the list next to the bulk action", async () => {
+	let erpnext_ran = false;
+	const { settings, created_cards, attached } = load({ original_onload: () => (erpnext_ran = true) });
+	const view = listview();
+	settings.onload(view);
+	await new Promise((resolve) => setTimeout(resolve, 5));
+	assert.ok(erpnext_ran);
+	assert.deepEqual(created_cards, [
+		{ method: "marketplace_integrations.api.order_hover_card.get_sales_order_card", arg: "sales_order" },
+	]);
+	assert.deepEqual(attached, [view]);
+});
+
+test("users without a creator role still get the hover card", async () => {
+	const { settings, attached } = load({ creator: false });
+	settings.onload(listview());
+	await new Promise((resolve) => setTimeout(resolve, 5));
+	assert.equal(attached.length, 1);
+});
+
+test("a hover card that fails to load does not break the list", async () => {
+	const { settings } = load();
+	const view = listview();
+	const original_error = console.error;
+	const errors = [];
+	console.error = (...args) => errors.push(args);
+	const original_require = global.frappe.require;
+	global.frappe.require = (asset) =>
+		asset.endsWith("order_hover_card.js") ? Promise.reject(new Error("offline")) : original_require(asset);
+	try {
+		settings.onload(view);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	} finally {
+		console.error = original_error;
+	}
+	assert.equal(errors.length, 1);
+	// The bulk action does not depend on the card: it was still added.
+	assert.deepEqual(view.items.map((item) => item.label), ["Create Bosta Shipments"]);
+});
+
+test("loading the list script again does not wrap onload a second time", async () => {
+	let erpnext_runs = 0;
+	const { settings, module_exports } = load({ original_onload: () => erpnext_runs++ });
+	const wrapped = settings.onload;
+	const path = require.resolve("./sales_order_list.js");
+	delete require.cache[path];
+	require(path);
+	assert.equal(global.frappe.listview_settings["Sales Order"].onload, wrapped);
+	const view = listview();
+	settings.onload(view);
+	await new Promise((resolve) => setTimeout(resolve, 5));
+	assert.equal(erpnext_runs, 1);
+	assert.equal(view.items.length, 1);
+	assert.ok(module_exports);
+});
+
+test("Bosta delivery status renders as a translated, escaped color pill and preserves ERPNext formatters", () => {
+	const existing = () => "existing";
+	const { settings } = load({ original_formatters: { another_field: existing } });
+	assert.equal(settings.formatters.another_field, existing);
+	assert.equal(
+		settings.formatters.custom_bosta_delivery_status("Delivered"),
+		'<span class="indicator-pill green">Delivered</span>'
+	);
+	assert.equal(
+		settings.formatters.custom_bosta_delivery_status("<unsafe>"),
+		'<span class="indicator-pill grey">&lt;unsafe></span>'
+	);
+	assert.equal(settings.formatters.custom_bosta_delivery_status(""), "");
 });

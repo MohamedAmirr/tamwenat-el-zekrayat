@@ -130,6 +130,7 @@ def _evaluate_rows(file_url: str):
 		if values["marketplace_account"] and values["external_reference"]:
 			identities.append((values["marketplace_account"], values["external_reference"]))
 
+	readable_accounts = _readable_accounts(entry["values"]["marketplace_account"] for entry in parsed)
 	duplicate_identities = {identity for identity, count in Counter(identities).items() if count > 1}
 	existing = _fetch_existing_mappings(
 		[account for account, reference in identities if (account, reference) not in duplicate_identities],
@@ -153,7 +154,13 @@ def _evaluate_rows(file_url: str):
 			)
 			continue
 		results.append(
-			_evaluate_row(entry["row"], entry["values"], existing.get(identity), entry["parse_errors"])
+			_evaluate_row(
+				entry["row"],
+				entry["values"],
+				existing.get(identity),
+				entry["parse_errors"],
+				readable_accounts,
+			)
 		)
 	return results
 
@@ -231,10 +238,26 @@ def _require_mapping_read_permission():
 		frappe.throw(_("Not permitted to read Marketplace Product Mappings."), frappe.PermissionError)
 
 
-def _evaluate_row(row_number, values, existing, parse_errors):
+def _readable_accounts(account_names):
+	"""Names, among ``account_names``, of the Marketplace Accounts the user may read (#323).
+
+	One permission-aware list query (DocPerm, platform row filter, User Permissions) followed by
+	the document-level check for each account, so preview and apply refuse another platform's
+	account the same way and never confirm that such an account exists.
+	"""
+	names = list(dict.fromkeys(name for name in account_names if name))
+	if not names or not frappe.has_permission("Marketplace Account", "read"):
+		return set()
+	listed = frappe.get_list(
+		"Marketplace Account", filters={"name": ["in", names]}, pluck="name", limit_page_length=0
+	)
+	return {name for name in listed if frappe.has_permission("Marketplace Account", "read", doc=name)}
+
+
+def _evaluate_row(row_number, values, existing, parse_errors, readable_accounts=frozenset()):
 	account = values["marketplace_account"]
 	reference = values["external_reference"]
-	errors = list(parse_errors) + _validate_mandatory_and_links(values)
+	errors = list(parse_errors) + _validate_mandatory_and_links(values, readable_accounts)
 	if existing:
 		if not frappe.has_permission("Marketplace Product Mapping", "write", doc=existing.name):
 			errors.append(_("Not permitted to update Marketplace Product Mapping {0}.").format(existing.name))
@@ -274,13 +297,18 @@ def _evaluate_row(row_number, values, existing, parse_errors):
 	}
 
 
-def _validate_mandatory_and_links(values):
+def _validate_mandatory_and_links(values, readable_accounts):
 	errors = []
 	for field in ("marketplace_account", "item", "external_reference"):
 		if not values[field]:
 			errors.append(_("{0} is mandatory.").format(field))
+	account = values["marketplace_account"]
+	if account and account not in readable_accounts:
+		errors.append(_("Marketplace Account '{0}' does not exist or is not permitted.").format(account))
 	for field, doctype in LINK_FIELDS.items():
 		value = values[field]
+		if field == "marketplace_account":
+			continue
 		if value and not frappe.db.exists(doctype, value):
 			errors.append(_("{0} '{1}' does not exist as a {2}.").format(field, value, doctype))
 	return errors

@@ -9,6 +9,9 @@
 // until the review is finished; closing a dialog cancels the whole run. Then one background job
 // creates the shipments and the shared status dialog shows Created / Failed / Skipped per order.
 //
+// Also adds the order details hover card to every row (#325, order_hover_card.js): the helper is
+// loaded with frappe.require, the card is a convenience and failing to load it changes nothing else.
+//
 // Wrapped in a function: doctype_list_js files share one scope with ERPNext's own list script.
 (function () {
 	const PLAN_METHOD = "marketplace_integrations.api.bosta_shipments.get_bulk_create_plan";
@@ -16,7 +19,46 @@
 	const QUEUE_METHOD = "marketplace_integrations.api.bosta_shipments.queue_bulk_create";
 	const FORM_ASSET = "/assets/marketplace_integrations/js/sales_order.js";
 	const STATUS_ASSET = "/assets/marketplace_integrations/js/shopify_catalog_push_status.js";
+	const CARD_METHOD = "marketplace_integrations.api.order_hover_card.get_sales_order_card";
+	const CARD_ASSET = "/assets/marketplace_integrations/js/order_hover_card.js";
 	const MAX_ORDERS = 50;
+	const BOSTA_STATUS_COLORS = {
+		Delivered: "green",
+		Completed: "green",
+		Fulfilled: "green",
+		Canceled: "grey",
+		Archived: "grey",
+		"Bosta Created": "blue",
+		"Pending Bosta": "orange",
+		"Delivery Note Failed": "red",
+		"Bosta Failed": "red",
+		"Pickup requested": "orange",
+		"Waiting for route": "orange",
+		"Route Assigned": "blue",
+		"Picked up": "blue",
+		"Picked up from business": "blue",
+		"Picking up from consignee": "blue",
+		"Picked up from consignee": "blue",
+		"Received at warehouse": "blue",
+		"In transit between Hubs": "blue",
+		"Picking up": "blue",
+		"Returned to business": "orange",
+		"Returned to stock": "orange",
+		Exception: "red",
+		Terminated: "red",
+		Lost: "red",
+		Damaged: "red",
+		Investigation: "red",
+		"Awaiting your action": "red",
+		"On hold": "orange",
+	};
+
+	function format_bosta_delivery_status(value) {
+		const status = String(value || "").trim();
+		if (!status) return "";
+		const label = frappe.utils.escape_html(__(status));
+		return `<span class="indicator-pill ${BOSTA_STATUS_COLORS[status] || "grey"}">${label}</span>`;
+	}
 
 	// The creator roles come from sales_order.js, so they are known once it has loaded.
 	function add_bulk_action(listview) {
@@ -25,6 +67,17 @@
 			if (!(frappe.user && frappe.user.has_role(roles))) return;
 			listview.page.add_actions_menu_item(__("Create Bosta Shipments"), () => start(listview));
 		});
+	}
+
+	function add_hover_card(listview) {
+		return frappe
+			.require(CARD_ASSET)
+			.then(() => {
+				frappe.marketplace_integrations.order_hover_card
+					.create({ method: CARD_METHOD, arg: "sales_order" })
+					.attach_to_list(listview);
+			})
+			.catch((error) => console.error("Order hover card failed to load (#325).", error));
 	}
 
 	function start(listview) {
@@ -86,8 +139,7 @@
 			sales_order: entry.sales_order,
 			receiver_name: defaults.receiver_name,
 			receiver_phone: defaults.receiver_phone,
-			city: defaults.city_name,
-			district_id: defaults.district_id,
+			city_id: defaults.city_id,
 			address_first_line: defaults.address_first_line,
 			expected_cod: defaults.cod_amount,
 		};
@@ -111,10 +163,10 @@
 							sales_order: entry.sales_order,
 							receiver_name: values.receiver_name,
 							receiver_phone: values.receiver_phone,
-							city: city.name,
-							district_id: values.district,
+							city_id: city.id,
 							address_first_line: values.address_first_line,
 							expected_cod: entry.defaults.cod_amount,
+							cod_amount: values.cod_amount,
 						},
 					});
 					dialog.hide();
@@ -215,60 +267,58 @@
 		});
 	}
 
-	// Fresh server defaults (COD, resolved city and district candidates) under the values the
-	// operator already used. If the defaults can no longer be read, the used values stand alone.
+	// Fresh server defaults (COD) under the values the operator already used, including the
+	// city. If the defaults can no longer be read, the used values stand alone.
 	function retry_entry(order) {
 		const used = {
 			receiver_name: order.receiver_name,
 			receiver_phone: order.receiver_phone,
 			address_first_line: order.address_first_line,
+			city_id: order.city_id,
+			cod_amount: order.cod_amount,
 		};
+		const retry_cod = order.cod_amount ?? order.expected_cod;
 		const fallback = {
 			sales_order: order.sales_order,
-			defaults: {
-				...used,
-				address_city: order.city,
-				district_id: order.district_id,
-				cod_amount: order.expected_cod,
-			},
+			defaults: { ...used, cod_amount: retry_cod, retry_cod_amount: retry_cod, currency: "EGP" },
 		};
 		return frappe
 			.call({ method: DEFAULTS_METHOD, type: "POST", silent: true, args: { sales_order: order.sales_order } })
-			.then((r) => {
-				const fresh = r.message || {};
-				const same_city =
-					fresh.city_id && String(fresh.city_name || "").trim().toLowerCase() === String(order.city || "").trim().toLowerCase();
-				const defaults = { ...fresh, ...used, address_city: order.city };
-				if (same_city) {
-					// The resolved city is the one used: keep its candidates and select the used district.
-					defaults.district_id = order.district_id || fresh.district_id;
-					if (fresh.district_candidates && order.district_id) {
-						defaults.district_candidates = [...fresh.district_candidates, order.district_id];
-					}
-				} else {
-					delete defaults.city_id;
-					delete defaults.district_candidates;
-					defaults.district_id = order.district_id;
-				}
-				return { sales_order: order.sales_order, defaults };
-			})
+			.then((r) => ({ sales_order: order.sales_order, defaults: { ...(r.message || {}), ...used } }))
 			.catch(() => fallback);
 	}
 
 	// Add the action to ERPNext's own Sales Order list settings instead of replacing them.
 	if (typeof frappe !== "undefined" && frappe.listview_settings) {
 		const settings = (frappe.listview_settings["Sales Order"] = frappe.listview_settings["Sales Order"] || {});
-		if (!settings.__mi_bosta_bulk) {
+		settings.formatters = {
+			...(settings.formatters || {}),
+			custom_bosta_delivery_status: format_bosta_delivery_status,
+		};
+		// Marks the settings as already extended (bulk action and hover card), so loading this file
+		// again (route revisit, asset reload) never wraps onload twice.
+		if (!settings.__mi_list_extended) {
 			const original_onload = settings.onload;
 			settings.onload = function (listview) {
 				if (original_onload) original_onload.call(this, listview);
 				add_bulk_action(listview);
+				add_hover_card(listview);
 			};
-			settings.__mi_bosta_bulk = true;
+			settings.__mi_list_extended = true;
 		}
 	}
 
 	if (typeof module !== "undefined") {
-		module.exports = { add_bulk_action, start, confirm_plan, review_and_send, send, offer_retry, retry_entry };
+		module.exports = {
+			add_hover_card,
+			add_bulk_action,
+			format_bosta_delivery_status,
+			start,
+			confirm_plan,
+			review_and_send,
+			send,
+			offer_retry,
+			retry_entry,
+		};
 	}
 })();

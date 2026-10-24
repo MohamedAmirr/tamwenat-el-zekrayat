@@ -1,0 +1,30 @@
+[
+ {
+  "desk_access": 1,
+  "disabled": 0,
+  "doctype": "Role",
+  "name": "Talabat User",
+  "role_name": "Talabat User"
+ },
+ {
+  "desk_access": 1,
+  "disabled": 0,
+  "doctype": "Role",
+  "name": "Noon User",
+  "role_name": "Noon User"
+ },
+ {
+  "desk_access": 1,
+  "disabled": 0,
+  "doctype": "Role",
+  "name": "Shopify User",
+  "role_name": "Shopify User"
+ },
+ {
+  "desk_access": 1,
+  "disabled": 0,
+  "doctype": "Role",
+  "name": "Bosta User",
+  "role_name": "Bosta User"
+ }
+]
