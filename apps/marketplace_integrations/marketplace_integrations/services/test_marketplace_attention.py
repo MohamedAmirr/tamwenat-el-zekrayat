@@ -122,28 +122,15 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 						custom_marketplace_transaction_id="TX-1", modified=now_datetime(),
 					)
 				],
-				[],
 			],
-		):
+		) as get_list:
 			cancelled = marketplace_attention._collect_cancelled_payment_entries({account.name: account})
 		self.assertEqual(cancelled[0]["problem_type"], PAYMENT_ENTRY_CANCELLED)
-		with patch.object(
-			marketplace_attention.frappe,
-			"get_list",
-			side_effect=[
-				[frappe._dict(name="MKTORD-1", marketplace_account=account.name)],
-				[
-					frappe._dict(
-						name="PE-CANCELLED", custom_marketplace_order="MKTORD-1",
-						custom_marketplace_transaction_id="TX-1", modified=now_datetime(),
-					)
-				],
-				[frappe._dict(amended_from="PE-CANCELLED")],
-			],
-		):
-			self.assertEqual(
-				marketplace_attention._collect_cancelled_payment_entries({account.name: account}), []
-			)
+		self.assertIn("record the payment manually", cancelled[0]["explanation"])
+		# A submitted amendment cannot retain the unique transaction id, and is
+		# not a supported resolution signal. The collector needs only the order
+		# and cancelled-entry reads and leaves the item visible.
+		self.assertEqual(get_list.call_count, 2)
 
 	def test_all_three_payment_attention_types_are_counted(self):
 		account_name = f"MKTACC-{self.suffix}"

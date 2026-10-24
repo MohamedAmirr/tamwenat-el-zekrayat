@@ -594,6 +594,15 @@ function show_shopify_gateway_picker(frm) {
 				},
 			});
 			dialog.show();
+		})
+		.catch(() => {
+			frappe.msgprint({
+				title: __("Shopify Payment Gateways"),
+				message: __(
+					"Could not load Shopify payment gateways. Check your permissions and try again."
+				),
+				indicator: "red",
+			});
 		});
 }
 

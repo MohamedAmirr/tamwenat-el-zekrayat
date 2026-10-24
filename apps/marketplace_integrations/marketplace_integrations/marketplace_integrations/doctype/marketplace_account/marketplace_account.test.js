@@ -294,6 +294,45 @@ test("gateway picker adds selected exact unmapped names without saving or showin
 	assert.equal(typeof frm.save, "undefined");
 });
 
+test("gateway picker shows a scoped error and can be retried after the request fails", async () => {
+	let calls = 0;
+	let message;
+	let dialog_shown = false;
+	global.frappe = {
+		call() {
+			calls++;
+			return calls === 1
+				? Promise.reject(new Error("offline"))
+				: Promise.resolve({ message: [{ gateway: "Paymob", orders_count: 1, mapped: false }] });
+		},
+		msgprint(args) {
+			message = args;
+		},
+		utils: { escape_html: (value) => String(value) },
+		ui: {
+			Dialog: class {
+				constructor() {
+					this.$wrapper = { find: () => ({ map: () => ({ get: () => [] }) }) };
+				}
+				show() {
+					dialog_shown = true;
+				}
+				hide() {}
+			},
+		},
+	};
+
+	const frm = make_frm({ name: "MKTACC-1", shopify_payment_gateways: [] });
+	await show_shopify_gateway_picker(frm);
+	assert.equal(message.title, "Shopify Payment Gateways");
+	assert.match(message.message, /Could not load Shopify payment gateways/);
+	assert.equal(message.indicator, "red");
+
+	await show_shopify_gateway_picker(frm);
+	assert.equal(calls, 2);
+	assert.equal(dialog_shown, true);
+});
+
 test("Open sends no close fields and Close Until preserves the local DateTime value", () => {
 	assert.deepEqual(build_outlet_status_args("OPEN"), { status: "OPEN" });
 	assert.deepEqual(build_outlet_status_args("CLOSED_TODAY", "OTHER"), {

@@ -42,7 +42,10 @@ class TestShopifyPaymentGatewayPicker(IntegrationTestCase):
 		)
 		self.assertEqual(get_list.call_args.args[0], "Marketplace Order")
 		self.assertEqual(get_list.call_args.kwargs["limit_page_length"], 500)
+		self.assertNotIn("start", get_list.call_args.kwargs)
+		get_list.assert_called_once()
 		self.assertEqual(get_list.call_args.kwargs["filters"]["marketplace_account"], account.name)
+		self.assertNotIn("payment_transactions", get_list.call_args.kwargs["filters"])
 
 	def test_endpoint_rejects_missing_marketplace_order_read_permission(self):
 		account = frappe._dict(
@@ -55,11 +58,13 @@ class TestShopifyPaymentGatewayPicker(IntegrationTestCase):
 		with (
 			patch.object(gateway_api.frappe, "get_doc", return_value=account),
 			patch.object(gateway_api.frappe, "has_permission", return_value=False),
-			patch.object(gateway_api.frappe, "get_list") as get_list,
+			patch.object(gateway_api.frappe, "get_list", wraps=frappe.get_list) as get_list,
 			self.assertRaises(frappe.PermissionError),
 		):
 			gateway_api.list_recent_successful_gateways(account.name)
-		get_list.assert_not_called()
+		self.assertFalse(
+			any(call.args and call.args[0] == "Marketplace Order" for call in get_list.call_args_list)
+		)
 
 	def test_only_successful_sale_and_capture_exact_trimmed_gateways_are_returned(self):
 		orders = [

@@ -93,6 +93,23 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
 		self.assertIn("advance of 60", result["message"])
 
+	def test_currency_precision_rounding_matches_advance_allocation_boundary(self):
+		current = self._current()
+		current["items"][0]["fulfilled_total_price"] = 99.999
+		self.previous["items"][0]["fulfilled_total_price"] = 100
+		self.erp_state.update(
+			{
+				"grand_total": 100.004,
+				"rounded_total": 100,
+				"advance_paid": 100,
+				"precision": {"currency": 2},
+			}
+		)
+
+		result = plan(self.previous, current, {}, self.erp_state)
+
+		self.assertEqual(result["outcome"], UPDATE_SUBMITTED_ORDER)
+
 	def test_requested_quantity_below_delivered_quantity_needs_attention(self):
 		current = self._current()
 		current["items"][0]["qty"] = 1

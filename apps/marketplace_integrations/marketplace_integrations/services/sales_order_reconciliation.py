@@ -63,8 +63,12 @@ def read_erp_state(sales_order):
 		"per_billed": flt(sales_order.per_billed),
 		"advance_paid": flt(sales_order.advance_paid),
 		"grand_total": flt(sales_order.grand_total),
+		"rounded_total": flt(sales_order.rounded_total),
 		"precision": {
 			"qty": frappe.get_precision("Sales Order Item", "qty"),
+			"currency": frappe.get_precision(
+				"Sales Order", "rounded_total", currency=sales_order.currency
+			),
 			# Lines are compared by amount, at the precision the Sales Order's own
 			# currency gives the amount field (the rule `_verify_line_amounts()` uses).
 			"amount": frappe.get_precision("Sales Order Item", "amount", currency=sales_order.currency),
@@ -479,7 +483,8 @@ def plan(previous, current, evidence, erp_state):
 		named = "; ".join(documents for documents in named if documents)
 		return _attention(f"{message} ({named})." if named else f"{message}.", changes)
 	projected_total = _projected_total_after_line_changes(previous, current, erp_state)
-	advance_paid = flt(erp_state.get("advance_paid"))
+	currency_precision = (erp_state.get("precision") or {}).get("currency", 2)
+	advance_paid = flt(erp_state.get("advance_paid"), currency_precision)
 	if projected_total is not None and projected_total < advance_paid:
 		return _attention(
 			_(
@@ -510,7 +515,12 @@ def _projected_total_after_line_changes(previous, current, erp_state):
 		if old_amount is None or new_amount is None:
 			return None
 		line_delta += flt(new_amount) - flt(old_amount)
-	return flt(erp_state.get("grand_total")) + line_delta
+	# ERPNext allocates advances against rounded_total (falling back to
+	# grand_total). Project the changed grand total at that same currency
+	# precision so sub-cent float residue cannot block an otherwise valid update.
+	currency_precision = (erp_state.get("precision") or {}).get("currency", 2)
+	base_total = erp_state.get("rounded_total") or erp_state.get("grand_total")
+	return flt(flt(base_total) + line_delta, currency_precision)
 
 
 def _documents(erp_state, doctype):

@@ -24,28 +24,17 @@ def list_recent_successful_gateways(account: str):
 	if account.platform != "Shopify" or account.connection_doctype != "Shopify Connection":
 		frappe.throw(_("Choose a Shopify Marketplace Account."))
 
-	orders = []
-	start = 0
-	while len(orders) < 500:
-		batch = frappe.get_list(
-			"Marketplace Order",
-			filters={
-				"marketplace_account": account.name,
-				"platform": "Shopify",
-				"payment_transactions": ["is", "set"],
-			},
-			fields=["payment_transactions"],
-			order_by="modified desc",
-			limit_page_length=500,
-			start=start,
-		)
-		if not batch:
-			break
-		start += len(batch)
-		orders.extend(row for row in batch if _has_transactions(row.payment_transactions))
-		if len(batch) < 500:
-			break
-	orders = orders[:500]
+	orders = frappe.get_list(
+		"Marketplace Order",
+		filters={
+			"marketplace_account": account.name,
+			"platform": "Shopify",
+		},
+		fields=["payment_transactions"],
+		order_by="modified desc",
+		limit_page_length=500,
+	)
+	orders = [row for row in orders if _has_transactions(row.payment_transactions)]
 	mapped = {
 		cstr(row.shopify_gateway).strip()
 		for row in account.get("shopify_payment_gateways") or []

@@ -52,7 +52,6 @@ global concurrency cap - debounce is strictly per Marketplace Order.
 
 import hashlib
 import json
-import json
 
 import frappe
 from frappe.utils import add_to_date, cstr, flt, getdate, now_datetime
@@ -158,7 +157,7 @@ def order_evidence_fingerprint(order):
 		],
 		"presentment_currency": cstr(order.get("presentment_currency")),
 		"refund_ids": sorted(refund_ids(order)),
-		"successful_payment_transaction_ids": _successful_shopify_payment_ids(order),
+		"successful_payment_transactions": _successful_shopify_payment_details(order),
 		"items": sorted(items),
 		"shipments": sorted(
 			[cstr(row.integration_shipment_nr), cstr(row.status)] for row in order.get("noon_shipments") or []
@@ -171,8 +170,8 @@ def order_evidence_fingerprint(order):
 	return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-def _successful_shopify_payment_ids(order):
-	"""Sorted ids of successful SALE/CAPTURE transactions (#231)."""
+def _successful_shopify_payment_details(order):
+	"""Sorted relevant details of successful SALE/CAPTURE transactions (#231)."""
 	if order.platform != "Shopify":
 		return []
 	transactions = order.get("payment_transactions")
@@ -185,7 +184,7 @@ def _successful_shopify_payment_ids(order):
 		transactions = transactions.get("nodes") or []
 	if not isinstance(transactions, list):
 		return []
-	ids = set()
+	transactions_by_id = {}
 	for txn in transactions:
 		if (
 			not isinstance(txn, dict)
@@ -195,8 +194,17 @@ def _successful_shopify_payment_ids(order):
 			continue
 		transaction_id = cstr(txn.get("id")).strip()
 		if transaction_id:
-			ids.add(transaction_id)
-	return sorted(ids)
+			money = (txn.get("amountSet") or {}).get("shopMoney") or {}
+			transactions_by_id[transaction_id] = [
+				transaction_id,
+				# None and an empty gateway are distinct source values; preserve both.
+				txn.get("gateway"),
+				money.get("amount"),
+				money.get("currencyCode"),
+				txn.get("processedAt"),
+				txn.get("createdAt"),
+			]
+	return [transactions_by_id[key] for key in sorted(transactions_by_id)]
 
 
 def linked_order_fingerprint(marketplace_account, external_order_id):

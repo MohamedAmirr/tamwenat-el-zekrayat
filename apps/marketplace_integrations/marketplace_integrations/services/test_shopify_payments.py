@@ -16,6 +16,7 @@ from marketplace_integrations.marketplace_integrations.doctype.marketplace_accou
 	clearing_account_problem,
 )
 from marketplace_integrations.services import test_sales_order_sync
+from marketplace_integrations.services.marketplace_attention import _collect_payment_errors
 from marketplace_integrations.services.sales_order_sync import sync_sales_order
 from marketplace_integrations.services.shopify_payments import mirror_shopify_payments
 from marketplace_integrations.tests.utils import make_role_user
@@ -94,10 +95,41 @@ class IntegrationTestShopifyPayments(IntegrationTestCase):
 			shipping_total=shipping_total,
 			payment_transactions=transactions,
 		)
-		result = sync_sales_order(order.name)
+		# These tests exercise the payment service explicitly below. Keep fixture
+		# creation focused on the Sales Order sync; production sync now also kicks
+		# off independent automatic payment mirroring after a successful submit.
+		with patch(
+			"marketplace_integrations.services.sales_order_sync._mirror_shopify_payments_independently"
+		):
+			result = sync_sales_order(order.name)
 		self.assertTrue(result["ok"], result.get("error"))
 		order.reload()
 		return account, order
+
+	def test_missing_payment_entry_permissions_are_logged_as_payment_errors(self):
+		_account, order = self._make_synced_order([])
+		frappe.db.set_value(
+			"Marketplace Order",
+			order.name,
+			"payment_transactions",
+			frappe.as_json([transaction(self.tid(1), amount=100)]),
+		)
+		email, _role = make_role_user(self, "Payment Read Only", {"Payment Entry": ["read"]})
+		previous_user = frappe.session.user
+		try:
+			frappe.set_user(email)
+			results = mirror_shopify_payments(order.name, "Shopify Webhook")
+		finally:
+			frappe.set_user(previous_user)
+		self.assertEqual(frappe.session.user, previous_user)
+
+		self.assertEqual([row["status"] for row in results], ["Invalid"])
+		self.assertIn("Create and Submit permission", results[0]["message"])
+		logs = self._logs(order)
+		self.assertEqual([row.status for row in logs], ["Invalid"])
+		self.assertIn("Create and Submit permission", logs[0].response_data)
+		attention = _collect_payment_errors({_account.name: _account})
+		self.assertEqual([row["problem_type"] for row in attention], ["Payment Error"])
 
 	def _payment_entries(self, order):
 		return frappe.get_all(
@@ -111,7 +143,7 @@ class IntegrationTestShopifyPayments(IntegrationTestCase):
 		return frappe.get_all(
 			"Marketplace Sync Log",
 			filters={"marketplace_order": order.name, "sync_type": "Payment"},
-			fields=["status", "request_data", "response_data"],
+			fields=["status", "marketplace_account", "request_data", "response_data"],
 			order_by="creation asc",
 		)
 
@@ -718,12 +750,11 @@ class IntegrationTestShopifyPayments(IntegrationTestCase):
 
 
 class IntegrationTestShopifyPaymentsPermissions(IntegrationTestCase):
-	"""Needs no order: the permission check runs before the order is read.  make_role_user commits and
-	cleans up after itself."""
+	"""The order is loaded before work/permissions are known; role users are cleaned up."""
 
-	def test_create_without_submit_is_refused_before_the_order_is_read(self):
+	def test_create_without_submit_requires_an_existing_order_before_permission_check(self):
 		email, _role = make_role_user(self, "Payment Creator", {"Payment Entry": ["create"]})
-		with as_user(email), self.assertRaises(frappe.PermissionError):
+		with as_user(email), self.assertRaises(frappe.DoesNotExistError):
 			mirror_shopify_payments("MKTORD-DOES-NOT-EXIST", "Manual")
 
 	def test_create_and_submit_pass_the_permission_check(self):
@@ -731,7 +762,7 @@ class IntegrationTestShopifyPaymentsPermissions(IntegrationTestCase):
 		with as_user(email), self.assertRaises(frappe.DoesNotExistError):
 			mirror_shopify_payments("MKTORD-DOES-NOT-EXIST", "Manual")
 
-	def test_submit_without_create_is_refused(self):
+	def test_submit_without_create_requires_an_existing_order_before_permission_check(self):
 		email, _role = make_role_user(self, "Payment Submit Only", {"Payment Entry": ["submit"]})
-		with as_user(email), self.assertRaises(frappe.PermissionError):
+		with as_user(email), self.assertRaises(frappe.DoesNotExistError):
 			mirror_shopify_payments("MKTORD-DOES-NOT-EXIST", "Manual")

@@ -55,10 +55,24 @@ def mirror_shopify_payments(marketplace_order, trigger_source):
 	if not pending or not order.erpnext_sales_order:
 		return []
 	# Check only when there is actual work; empty/non-Shopify imports do not need
-	# Payment Entry permissions. This runs before the transaction savepoints.
+	# Payment Entry permissions. A role user can still sync the Sales Order, so
+	# record this as a per-transaction Payment Error instead of letting the
+	# automatic-mirroring isolation wrapper swallow a PermissionError.
 	for ptype in ("create", "submit"):
 		if not frappe.has_permission("Payment Entry", ptype=ptype):
-			frappe.throw(_("Not permitted"), frappe.PermissionError)
+			message = _(
+				"Your user needs Create and Submit permission on Payment Entry to mirror Shopify payments."
+			)
+			results = []
+			for txn in pending:
+				result = {
+					"transaction_id": cstr(txn.get("id")).strip(),
+					"status": "Invalid",
+					"message": message,
+				}
+				_create_payment_log(order, trigger_source, result)
+				results.append(result)
+			return results
 
 	account = frappe.get_doc("Marketplace Account", order.marketplace_account)
 	results = []

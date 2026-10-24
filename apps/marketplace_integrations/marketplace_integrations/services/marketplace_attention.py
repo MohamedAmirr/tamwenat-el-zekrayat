@@ -57,8 +57,8 @@ Problem sources (``problem_type``):
   transaction, hidden by a later Success for the same pair.
 - Payment Excess: submitted mirrored Payment Entries with a positive
   unallocated amount.
-- Payment Entry Cancelled: cancelled mirrored Payment Entries without a
-  submitted amendment.
+- Payment Entry Cancelled: cancelled mirrored Payment Entries remain visible
+  for manual review; amendments cannot preserve the unique transaction id.
 """
 
 import json
@@ -835,27 +835,23 @@ def _collect_cancelled_payment_entries(accounts):
 	)
 	if not entries:
 		return []
-	amendments = frappe.get_list(
-		"Payment Entry",
-		filters={"docstatus": 1, "amended_from": ["in", [row.name for row in entries]]},
-		fields=["amended_from"],
-		limit_page_length=0,
-	)
-	amended = {row.amended_from for row in amendments}
 	return [
 		_item(
 			PAYMENT_ENTRY_CANCELLED,
 			accounts[order_accounts[entry.custom_marketplace_order]],
 			"Payment Entry",
 			entry.name,
-			_("Mirrored payment transaction {0} was cancelled without a submitted amendment.").format(
+			_(
+				"Mirrored payment transaction {0} was cancelled. Review the entry and record the payment "
+				"manually if needed."
+			).format(
 				entry.custom_marketplace_transaction_id
 			),
 			entry.modified,
 			NEXT_OPEN_PAYMENT,
 		)
 		for entry in entries
-		if entry.custom_marketplace_order in order_accounts and entry.name not in amended
+		if entry.custom_marketplace_order in order_accounts
 	]
 
 

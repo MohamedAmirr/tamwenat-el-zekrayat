@@ -357,6 +357,37 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 		order.reload()
 		self.assertNotEqual(before, debounce.order_evidence_fingerprint(order))
 
+	def test_shopify_successful_transaction_gateway_amount_and_date_changes_fingerprint(self):
+		order = self._make_order()
+		frappe.db.set_value("Marketplace Order", order.name, "platform", "Shopify")
+		self._link(order)
+		base = {
+			"id": "gid://shopify/OrderTransaction/123",
+			"kind": "SALE",
+			"status": "SUCCESS",
+			"gateway": None,
+			"amountSet": {"shopMoney": {"amount": "25.00", "currencyCode": "EGP"}},
+			"processedAt": "2026-10-23T10:00:00Z",
+			"createdAt": "2026-10-23T09:00:00Z",
+		}
+		frappe.db.set_value("Marketplace Order", order.name, "payment_transactions", frappe.as_json([base]))
+		order.reload()
+		for field, value in (
+			("gateway", "Kashier"),
+			("amountSet", {"shopMoney": {"amount": "26.00", "currencyCode": "EGP"}}),
+			("processedAt", "2026-10-23T11:00:00Z"),
+			("createdAt", "2026-10-23T08:00:00Z"),
+		):
+			before = self._fingerprint_before(order)
+			changed = {**base, field: value}
+			frappe.db.set_value(
+				"Marketplace Order", order.name, "payment_transactions", frappe.as_json([changed])
+			)
+			order.reload()
+			self.assertTrue(
+				debounce.bump_if_linked_order_changed(order.name, before, "Shopify Order Import"), field
+			)
+
 	def test_unlinked_order_never_bumps(self):
 		order = self._make_order()
 		before = self._fingerprint_before(order)
