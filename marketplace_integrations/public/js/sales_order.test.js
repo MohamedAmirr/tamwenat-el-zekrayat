@@ -22,8 +22,10 @@ function load({
 	shipment = null,
 	shipment_fails = false,
 	defaults_fails = false,
+	marketplace_summary = { name: "MO-1", platform: "Shopify", reference: "#SHOP-1", erpnext_sync_status: "Not Synced", erpnext_sales_order: "" },
 } = {}) {
 	const calls = [];
+	const marketplace_calls = [];
 	const bosta_calls = [];
 	const alerts = [];
 	const msgprints = [];
@@ -66,6 +68,10 @@ function load({
 			},
 		},
 		call(opts) {
+			if (opts.method.endsWith("get_marketplace_order_summary")) {
+				marketplace_calls.push(opts);
+				return Promise.resolve({ message: marketplace_summary });
+			}
 			if (opts.method.endsWith("get_sales_order_shipment")) {
 				bosta_calls.push(opts);
 				return shipment_fails
@@ -89,7 +95,7 @@ function load({
 	const path = require.resolve("./sales_order.js");
 	delete require.cache[path];
 	const module_exports = require(path);
-	return { calls, bosta_calls, alerts, msgprints, dialogs, handlers, module_exports };
+	return { calls, marketplace_calls, bosta_calls, alerts, msgprints, dialogs, handlers, module_exports };
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
@@ -111,30 +117,28 @@ function make_frm(doc, { close_sales_order } = {}) {
 	const buttons = [];
 	const indicators = [];
 	const tab = { html: "", handler: null, visible: undefined, body_visible: undefined };
+	const marketplace_tab = { html: "", handler: null, visible: undefined, body_visible: undefined };
 	const frm = {
 		tab,
+		marketplace_tab,
 		toggle_display: (field, visible) => {
+			if (field === "custom_marketplace_order_tab") marketplace_tab.visible = visible;
+			if (field === "custom_marketplace_order_html") marketplace_tab.body_visible = visible;
 			if (field === "custom_bosta_delivery_tab") tab.visible = visible;
 			if (field === "custom_bosta_delivery_html") tab.body_visible = visible;
 		},
-		get_field: (name) =>
-			name === "custom_bosta_delivery_html"
-				? {
-						$wrapper: {
-							html(value) {
-								tab.html = value;
-								return this;
-							},
-							off() {
-								return this;
-							},
-							on(_event, _selector, handler) {
-								tab.handler = handler;
-								return this;
-							},
-						},
-				  }
-				: null,
+		get_field: (name) => {
+			const target = name === "custom_marketplace_order_html" ? marketplace_tab : name === "custom_bosta_delivery_html" ? tab : null;
+			if (!target) return null;
+			return {
+				$wrapper: {
+					html(value) { target.html = value; return this; },
+					append(value) { target.html += value; return this; },
+					off() { return this; },
+					on(_event, _selector, handler) { target.handler = handler; return this; },
+				},
+			};
+		},
 		doc: {
 			name: "SAL-ORD-1",
 			custom_marketplace_order: "MO-1",
@@ -161,6 +165,59 @@ test("registers refresh and after_cancel on the Sales Order form", () => {
 	const { handlers } = load();
 	assert.equal(typeof handlers["Sales Order"].refresh, "function");
 	assert.equal(typeof handlers["Sales Order"].after_cancel, "function");
+});
+
+test("linked Sales Orders load the marketplace summary and render escaped values", async () => {
+	const { handlers, marketplace_calls } = load({
+		marketplace_summary: {
+			name: "MO-1", platform: "Shopify", reference: "<img src=x onerror=alert(1)>",
+			erpnext_sync_status: "Not Synced", erpnext_sales_order: "",
+			payment_transactions: [{ kind: "SALE", status: "FAILURE", gateway: "<script>bad</script>", amount: "12" }],
+			amounts: { order_total: 12, presentment_currency: "EGP" },
+		},
+	});
+	const frm = make_frm({ docstatus: 0 });
+	await handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.equal(marketplace_calls.length, 1);
+	assert.equal(frm.marketplace_tab.visible, true);
+	assert.match(frm.marketplace_tab.html, /&lt;img/);
+	assert.match(frm.marketplace_tab.html, /&lt;script&gt;bad/);
+	assert.doesNotMatch(frm.marketplace_tab.html, /<img|<script>/);
+	assert.match(frm.marketplace_tab.html, /Send to ERPNext/);
+});
+
+test("unlinked Sales Orders hide and clear the marketplace tab", async () => {
+	const { handlers, marketplace_calls } = load();
+	const frm = make_frm({ custom_marketplace_order: "" });
+	frm.marketplace_tab.html = "stale";
+	await handlers["Sales Order"].refresh(frm);
+	assert.equal(frm.marketplace_tab.visible, false);
+	assert.equal(frm.marketplace_tab.html, "");
+	assert.equal(marketplace_calls.length, 0);
+});
+
+test("linked Sales Orders keep the tab visible without exposing an unreadable order", async () => {
+	const { handlers } = load({ marketplace_summary: null });
+	const frm = make_frm({ docstatus: 0 });
+	await handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.equal(frm.marketplace_tab.visible, true);
+	assert.match(frm.marketplace_tab.html, /Marketplace Order summary unavailable/);
+	assert.doesNotMatch(frm.marketplace_tab.html, /MO-1|#SHOP-1/);
+});
+
+test("marketplace sync action uses the existing endpoint and reloads the Sales Order", async () => {
+	const { handlers, calls } = load({
+		marketplace_summary: { name: "MO-1", platform: "Talabat", erpnext_sync_status: "Modified After Sync", erpnext_sales_order: "SAL-ORD-1" },
+	});
+	const frm = make_frm({ docstatus: 0 });
+	await handlers["Sales Order"].refresh(frm);
+	await settle();
+	frm.marketplace_tab.handler({ currentTarget: { getAttribute: () => "sync" } });
+	await settle();
+	assert.equal(calls.at(-1).method, "marketplace_integrations.api.marketplace_orders.sync_to_erpnext");
+	assert.equal(frm.reloads, 1);
 });
 
 test("the Sales Order form still has close_sales_order in the installed ERPNext", (t) => {
@@ -1007,6 +1064,7 @@ test("a reload refresh re-adds the indicator and buttons once, not twice", async
 });
 
 test("a slow reply that lands after a newer refresh is dropped", async () => {
+	global.format_currency = (value) => `EGP ${value}`;
 	const { handlers } = load({ option: NO_PLATFORM, shipment: shipment_summary() });
 	const replies = [];
 	global.frappe.call = (opts) => {
@@ -1016,6 +1074,10 @@ test("a slow reply that lands after a newer refresh is dropped", async () => {
 	const frm = make_frm({});
 	handlers["Sales Order"].refresh(frm);
 	handlers["Sales Order"].refresh(frm);
+	// The Marketplace summary request now runs before Bosta's `frappe.require` continuation.
+	// Let both Bosta requests enter flight before resolving either delayed response.
+	await settle();
+	assert.equal(replies.length, 2);
 	replies.forEach((resolve) => resolve({ message: shipment_summary() }));
 	await settle();
 	assert.equal(frm.indicators.length, 1);
@@ -1367,7 +1429,12 @@ test("the create dialog keeps the receiver name, the COD note and no district fi
 	const { dialog } = await open_bosta_dialog({ cod_amount: 100, receiver_name: "Mona", receiver_phone: "010" });
 	assert.deepEqual(
 		dialog.config.fields.map((f) => f.fieldname),
-		["cod_note", "lists_error", "retry_lists", "receiver_name", "receiver_phone", "city", "address_first_line"]
+		["cod_note", "lists_error", "retry_lists", "currency", "cod_amount", "receiver_name", "receiver_phone", "city", "address_first_line"]
 	);
+	assert.equal(dialog.df.currency.hidden, 1);
+	assert.equal(dialog.df.cod_amount.fieldtype, "Currency");
+	assert.equal(dialog.df.cod_amount.default, 100);
+	assert.equal(dialog.df.cod_amount.options, "currency");
+	assert.equal(dialog.df.cod_amount.reqd, 1);
 	assert.equal(dialog.config.primary_action_label, "Create Shipment");
 });

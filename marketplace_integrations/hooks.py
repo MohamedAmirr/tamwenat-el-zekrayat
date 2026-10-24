@@ -321,6 +321,8 @@ fixtures = [
 					"Sales Order-custom_marketplace_order",
 					"Sales Order-custom_marketplace_platform",
 					"Sales Order-custom_marketplace_external_order_id",
+					"Sales Order-custom_marketplace_order_tab",
+					"Sales Order-custom_marketplace_order_html",
 					"Sales Order-custom_bosta_delivery_tab",
 					"Sales Order-custom_bosta_delivery_html",
 					"Sales Order-custom_bosta_delivery_status",
