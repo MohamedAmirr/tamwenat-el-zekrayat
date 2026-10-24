@@ -3,7 +3,7 @@
  "creation": "2026-08-30 00:00:00.000000",
  "docstatus": 0,
  "doctype": "Page",
- "modified": "2026-08-30 00:00:00.000000",
+ "modified": "2026-10-23 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "marketplace-talabat-catalog-mapping",
@@ -12,6 +12,9 @@
  "roles": [
   {
    "role": "System Manager"
+  },
+  {
+   "role": "Talabat User"
   }
  ],
  "script": null,

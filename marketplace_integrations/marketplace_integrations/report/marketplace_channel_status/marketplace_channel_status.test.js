@@ -108,3 +108,15 @@ test("formatter links a non-zero Fulfillment Errors count to the Needs Attention
 	);
 	assert.match(linked, /^<a href="\/app\/query-report\/Marketplace%20Needs%20Attention\?account=MKTACC-4"/);
 });
+
+test("formatter links a non-zero Payment Issues count to the account's Needs Attention report", () => {
+	const formatter = frappe.query_reports["Marketplace Channel Status"].formatter;
+	const result = formatter(
+		2,
+		{},
+		{ fieldname: "payment_errors" },
+		{ account: "MKTACC-4", payment_errors: 2 },
+		(value) => value
+	);
+	assert.match(result, /Marketplace%20Needs%20Attention\?account=MKTACC-4/);
+});

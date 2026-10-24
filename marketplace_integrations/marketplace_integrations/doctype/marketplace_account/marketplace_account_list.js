@@ -24,10 +24,26 @@ function marketplace_account_get_indicator(doc) {
 
 if (typeof frappe !== "undefined") {
 	frappe.listview_settings["Marketplace Account"] = {
+		// #324: the readable account name is the subject; the docname (ID) column is hidden.
+		hide_name_column: true,
 		get_indicator: marketplace_account_get_indicator,
+		onload: show_row_name_on_hover,
 	};
 }
 
 if (typeof module !== "undefined") {
-	module.exports = { marketplace_account_get_indicator };
+	module.exports = { marketplace_account_get_indicator, show_row_name_on_hover };
+}
+
+// #324: loads the shared row tooltip helper (public/js/list_row_name.js). The tooltip is a
+// convenience: if the helper cannot load, the list works the same without it. (No top-level const:
+// list scripts share one global scope, so a repeated const name would break the other lists.)
+function show_row_name_on_hover(listview) {
+	return frappe
+		.require("/assets/marketplace_integrations/js/list_row_name.js")
+		.then(() => {
+			const helper = frappe.marketplace_integrations && frappe.marketplace_integrations.list_row_name;
+			if (helper) helper.attach_to_list(listview);
+		})
+		.catch((error) => console.error("List row name helper failed to load (#324).", error));
 }

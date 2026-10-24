@@ -43,6 +43,10 @@ frappe.query_reports["Marketplace Channel Status"] = {
 			return wrap_count_link(value, needs_attention_url(data.account));
 		}
 
+		if (column.fieldname === "payment_errors" && data.payment_errors) {
+			return wrap_count_link(value, needs_attention_url(data.account));
+		}
+
 		return value;
 	},
 };

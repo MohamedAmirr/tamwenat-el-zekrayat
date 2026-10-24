@@ -15,7 +15,7 @@ today's timestamp), so a live date-range query for "today" is not a reliable
 way to test the currency-grouping and success-rate arithmetic in isolation -
 a same-day assertion would be polluted by unrelated rows already in the
 database. Those specific cases (mixed-currency flagging, exact rate math)
-mock ``frappe.get_all`` to control exactly what rows the function under test
+mock ``frappe.get_list`` to control exactly what rows the function under test
 sees, same as this project's other pure-computation unit tests; the
 DB-backed tests (execute() end to end, date filter presence/absence, refund
 JSON extraction) still hit the real database."""
@@ -43,7 +43,7 @@ EXPECTED_FIELDNAMES = {"metric", "value", "detail"}
 CURRENT_STATE_METRICS = {
 	"Shopify Catalog Push Errors (current)",
 	"Shopify Inventory Sync Errors (current)",
-	"Marketplace Orders: Sync Error (current)",
+	"Shopify Orders: Sync Error (current)",
 	"Shopify Webhook Deliveries: Error (current)",
 	"Shopify Webhook Deliveries: Exhausted Retries (current)",
 }
@@ -161,10 +161,10 @@ class IntegrationTestShopifyReconciliationSummaryReport(IntegrationTestCase):
 		rows = [
 			frappe._dict({"shop_currency": "EGP", "total": 150.0}),
 		]
-		with patch("frappe.get_all", return_value=rows) as mocked_get_all:
+		with patch("frappe.get_list", return_value=rows) as mocked_get_list:
 			result = get_total_order_value_in_range(from_date="2020-01-01", to_date="2020-01-31")
 
-		mocked_get_all.assert_called_once()
+		mocked_get_list.assert_called_once()
 		self.assertFalse(result["is_mixed"])
 		self.assertEqual(result["currency"], "EGP")
 		self.assertEqual(result["total"], 150.0)
@@ -174,7 +174,7 @@ class IntegrationTestShopifyReconciliationSummaryReport(IntegrationTestCase):
 			frappe._dict({"shop_currency": "EGP", "total": 100.0}),
 			frappe._dict({"shop_currency": "USD", "total": 10.0}),
 		]
-		with patch("frappe.get_all", return_value=rows):
+		with patch("frappe.get_list", return_value=rows):
 			result = get_total_order_value_in_range(from_date="2020-01-01", to_date="2020-01-31")
 
 		self.assertTrue(result["is_mixed"])
@@ -186,7 +186,7 @@ class IntegrationTestShopifyReconciliationSummaryReport(IntegrationTestCase):
 			frappe._dict({"erpnext_sync_status": "Synced"}),
 			frappe._dict({"erpnext_sync_status": "Sync Error"}),
 		]
-		with patch("frappe.get_all", return_value=rows):
+		with patch("frappe.get_list", return_value=rows):
 			result = get_sales_order_sync_success_rate_in_range(
 				from_date="2020-01-01", to_date="2020-01-31"
 			)
@@ -285,7 +285,7 @@ class IntegrationTestShopifyReconciliationSummaryReport(IntegrationTestCase):
 			frappe._dict({"status": "Error"}),
 			frappe._dict({"status": "Received"}),
 		]
-		with patch("frappe.get_all", return_value=rows):
+		with patch("frappe.get_list", return_value=rows):
 			result = get_webhook_processing_success_rate_in_range(
 				from_date="2020-01-01", to_date="2020-01-31"
 			)

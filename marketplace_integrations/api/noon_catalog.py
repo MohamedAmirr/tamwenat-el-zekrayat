@@ -19,6 +19,9 @@ def list_warehouses(connection: str):
 		raise frappe.PermissionError
 	if not frappe.db.exists("Noon Connection", connection):
 		frappe.throw(frappe._("Noon Connection {0} does not exist.").format(connection))
+	# The doc-less Marketplace Account check above passes for any platform user (#322); the
+	# outbound call uses this Connection's credentials, so the caller must be able to read it.
+	frappe.has_permission("Noon Connection", "read", doc=connection, throw=True)
 	return discover_warehouses(connection)
 
 

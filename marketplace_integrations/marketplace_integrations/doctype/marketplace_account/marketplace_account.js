@@ -19,6 +19,7 @@ const TALABAT_OUTLET_FIELDS = [
 ];
 
 const RECONCILE_INVENTORY_LABEL = "Reconcile Shopify Inventory";
+const LOAD_SHOPIFY_GATEWAYS_LABEL = "Load Shopify Payment Gateways";
 
 const SHOPIFY_LOCATION_FIELDS = ["shopify_location_section", "shopify_location_gid", "shopify_location_name"];
 const NOON_FIELDS = ["noon_warehouse_section", "noon_warehouse_code", "noon_country_code"];
@@ -164,6 +165,7 @@ function should_show_outlet_management(platform) {
 }
 
 function configure_shopify_location(frm) {
+	frm.remove_custom_button(__(LOAD_SHOPIFY_GATEWAYS_LABEL));
 	const is_shopify = should_show_shopify_location(frm.doc.platform);
 	for (const fieldname of SHOPIFY_LOCATION_FIELDS) {
 		frm.toggle_display(fieldname, is_shopify);
@@ -190,6 +192,14 @@ function configure_shopify_location(frm) {
 	}
 
 	frm.add_custom_button(__("Load Shopify Locations"), () => show_shopify_location_picker(frm));
+	if (
+		!frm.is_new() &&
+		typeof frappe !== "undefined" &&
+		frappe.model &&
+		frappe.model.can_write("Marketplace Account")
+	) {
+		frm.add_custom_button(__(LOAD_SHOPIFY_GATEWAYS_LABEL), () => show_shopify_gateway_picker(frm));
+	}
 }
 
 function should_show_shopify_location(platform) {
@@ -521,6 +531,81 @@ function show_shopify_location_picker(frm) {
 		});
 }
 
+function show_shopify_gateway_picker(frm) {
+	return frappe
+		.call({
+			method: "marketplace_integrations.api.shopify_payment_gateways.list_recent_successful_gateways",
+			args: { account: frm.doc.name },
+			freeze: true,
+			freeze_message: __("Loading Shopify payment gateways..."),
+		})
+		.then((r) => {
+			const gateways = (r.message || [])
+				.map((row) => ({
+					gateway: String(row.gateway || "").trim(),
+					orders_count: Number(row.orders_count || 0),
+					mapped: Boolean(row.mapped),
+				}))
+				.filter((row) => row.gateway);
+			if (!gateways.length) {
+				frappe.msgprint({
+					title: __("Shopify Payment Gateways"),
+					message: __("No successful SALE or CAPTURE gateways were found in the newest 500 local Shopify orders."),
+					indicator: "orange",
+				});
+				return;
+			}
+			const html = gateways
+				.map((row, index) => {
+					const name = frappe.utils.escape_html(row.gateway);
+					const usage = __("Used by {0} orders", [row.orders_count]);
+					if (row.mapped) {
+						return `<div class="margin-bottom"><span><bdi dir="ltr">${name}</bdi></span> <span class="text-muted">(${frappe.utils.escape_html(__("Already mapped"))})</span> <span class="text-muted">${frappe.utils.escape_html(usage)}</span></div>`;
+					}
+					return `<div class="checkbox"><label><input type="checkbox" data-gateway-index="${index}"> <bdi dir="ltr">${name}</bdi> <span class="text-muted">${frappe.utils.escape_html(usage)}</span></label></div>`;
+				})
+				.join("");
+			const dialog = new frappe.ui.Dialog({
+				title: __("Select Shopify Payment Gateways"),
+				fields: [
+					{
+						fieldname: "gateway_options",
+						fieldtype: "HTML",
+						options: `<div class="shopify-payment-gateway-picker">${html}</div>`,
+					},
+				],
+				primary_action_label: __("Add Selected Gateways"),
+				primary_action() {
+					const selected = dialog.$wrapper
+						.find("input[data-gateway-index]:checked")
+						.map((_, input) => gateways[Number(input.dataset.gatewayIndex)])
+						.get();
+					for (const row of selected) {
+						if (row.mapped) continue;
+						const exists = (frm.doc.shopify_payment_gateways || []).some(
+							(mapping) => String(mapping.shopify_gateway || "").trim() === row.gateway
+						);
+						if (!exists) {
+							frm.add_child("shopify_payment_gateways", { shopify_gateway: row.gateway });
+						}
+					}
+					if (selected.length) frm.refresh_field("shopify_payment_gateways");
+					dialog.hide();
+				},
+			});
+			dialog.show();
+		})
+		.catch(() => {
+			frappe.msgprint({
+				title: __("Shopify Payment Gateways"),
+				message: __(
+					"Could not load Shopify payment gateways. Check your permissions and try again."
+				),
+				indicator: "red",
+			});
+		});
+}
+
 function outlet_actions_for_status(status) {
 	if (status === "OPEN") return ["close_today", "close_until"];
 	if (["CLOSED", "CLOSED_TODAY", "CLOSED_UNTIL"].includes(status)) {
@@ -635,6 +720,8 @@ if (typeof module !== "undefined") {
 		configure_shopify_inventory,
 		reconcile_shopify_inventory,
 		RECONCILE_INVENTORY_LABEL,
+		LOAD_SHOPIFY_GATEWAYS_LABEL,
+		show_shopify_gateway_picker,
 		configure_view_shortcuts,
 	};
 }

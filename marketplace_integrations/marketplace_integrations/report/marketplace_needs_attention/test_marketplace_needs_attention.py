@@ -20,6 +20,7 @@ from marketplace_integrations.marketplace_integrations.doctype.marketplace_order
 	compute_order_identity_key,
 )
 from marketplace_integrations.marketplace_integrations.report.marketplace_needs_attention.marketplace_needs_attention import (
+	add_reference_labels,
 	execute,
 )
 
@@ -64,6 +65,7 @@ class IntegrationTestMarketplaceNeedsAttentionReport(IntegrationTestCase):
 		self.order.insert()
 
 	def tearDown(self):
+		frappe.set_user("Administrator")
 		frappe.delete_doc("Marketplace Order", self.order.name, force=True)
 		frappe.delete_doc("Marketplace Account", self.account.name, force=True)
 
@@ -83,6 +85,36 @@ class IntegrationTestMarketplaceNeedsAttentionReport(IntegrationTestCase):
 		_columns, filtered = execute({"account": self.account.name, "problem_type": "Unmapped Items"})
 		self.assertEqual(filtered, [])
 
-	def test_report_is_restricted_to_system_manager(self):
+	def test_report_roles_are_system_manager_and_the_three_platform_roles(self):
+		# #323: widened to the platform roles (rows stay account-scoped by the #322 row filters);
+		# Bosta User is deliberately excluded.
 		report = frappe.get_doc("Report", "Marketplace Needs Attention")
-		self.assertEqual([row.role for row in report.roles], ["System Manager"])
+		roles = {row.role for row in report.roles}
+		self.assertEqual(roles, {"System Manager", "Talabat User", "Noon User", "Shopify User"})
+		self.assertNotIn("Bosta User", roles)
+
+	def test_rows_carry_the_order_title_for_the_dynamic_link_column(self):
+		# #324: Frappe sends link titles for Link columns only, so the report adds
+		# `reference_label` for the Dynamic Link `reference_name` column.
+		_columns, data = execute({"account": self.account.name})
+
+		self.assertEqual(data[0]["reference_name"], self.order.name)
+		self.assertEqual(data[0]["reference_label"], self.order.platform_order_reference)
+		self.assertNotEqual(data[0]["reference_label"], self.order.name)
+
+	def test_a_user_without_read_permission_gets_rows_without_labels_and_no_error(self):
+		# #324: the label lookup is skipped for a doctype the user cannot read.
+		_columns, data = execute({"account": self.account.name})
+		rows = [{key: row[key] for key in ("reference_doctype", "reference_name")} for row in data]
+		self.assertTrue(rows)
+
+		original_user = frappe.session.user
+		frappe.set_user("Guest")
+		try:
+			self.assertFalse(frappe.has_permission("Marketplace Order", "read"))
+			add_reference_labels(rows)
+		finally:
+			frappe.set_user(original_user)
+
+		self.assertEqual([row["reference_label"] for row in rows], [None] * len(rows))
+		self.assertEqual([row["reference_name"] for row in rows], [self.order.name] * len(rows))

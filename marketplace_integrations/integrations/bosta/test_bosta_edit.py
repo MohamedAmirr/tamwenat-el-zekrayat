@@ -17,8 +17,7 @@ from marketplace_integrations.tests.bosta_fixtures import BostaFixtureMixin, Fak
 
 NEW = {
 	"receiver_phone": "01099999999",
-	"city": "Giza",
-	"district_id": "new-district",
+	"city_id": "city-giza",
 	"address_first_line": "99 New Street, Dokki",
 }
 
@@ -49,8 +48,8 @@ class IntegrationTestBostaEdit(BostaFixtureMixin, IntegrationTestCase):
 	def _unchanged(self, order, shipment):
 		shipment.reload()
 		self.assertEqual(
-			(shipment.receiver_phone, shipment.city, shipment.district_id, shipment.address_first_line),
-			("01000000000", "Cairo", "district-id", "12 Example Street"),
+			(shipment.receiver_phone, shipment.city, shipment.city_id, shipment.address_first_line),
+			("01000000000", "Cairo", "city-cairo", "12 Example Street"),
 		)
 		self.assertEqual(self._addresses(order), [])
 		self.assertFalse(frappe.db.get_value("Sales Order", order.name, "shipping_address_name"))
@@ -68,11 +67,7 @@ class IntegrationTestBostaEdit(BostaFixtureMixin, IntegrationTestCase):
 			[
 				{
 					"receiver": {"phone": "01099999999"},
-					"dropOffAddress": {
-						"city": "Giza",
-						"districtId": "new-district",
-						"firstLine": "99 New Street, Dokki",
-					},
+					"dropOffAddress": {"city": "EG-25", "firstLine": "99 New Street, Dokki"},
 				}
 			],
 		)
@@ -111,8 +106,8 @@ class IntegrationTestBostaEdit(BostaFixtureMixin, IntegrationTestCase):
 		order, shipment = self._live()
 		for overrides in (
 			{"receiver_phone": " "},
-			{"city": ""},
-			{"district_id": ""},
+			{"city_id": ""},
+			{"city_id": "city-nowhere"},
 			{"address_first_line": "12345"},
 			{"address_first_line": "x" * 241},
 		):
@@ -212,13 +207,14 @@ class IntegrationTestBostaEdit(BostaFixtureMixin, IntegrationTestCase):
 			(
 				shipment.receiver_phone,
 				shipment.city,
-				shipment.district_id,
+				shipment.city_id,
+				shipment.city_code,
 				shipment.address_first_line,
 				shipment.receiver_name,
 			),
-			("01099999999", "Giza", "new-district", "99 New Street, Dokki", self._receiver()),
+			("01099999999", "Giza", "city-giza", "EG-25", "99 New Street, Dokki", self._receiver()),
 		)
-		self.assertFalse(shipment.city_id or shipment.district_name)
+		self.assertFalse(shipment.district_id or shipment.district_name)
 		# The Sales Order (address fields, timestamp), Addresses and Delivery Note are untouched.
 		self.assertEqual(
 			frappe.db.get_value(
@@ -244,7 +240,8 @@ class IntegrationTestBostaEdit(BostaFixtureMixin, IntegrationTestCase):
 			("receiver_name", "Someone Else"),
 			("receiver_phone", "0100"),
 			("city", "Giza"),
-			("district_id", "other"),
+			("city_id", "city-giza"),
+			("city_code", "EG-99"),
 			("address_first_line", "Changed Street 99"),
 		):
 			for user in ("Administrator", manager):
@@ -286,13 +283,11 @@ class IntegrationTestBostaEdit(BostaFixtureMixin, IntegrationTestCase):
 
 	def test_the_form_fields_are_read_only_once_there_is_a_tracking_number(self):
 		meta = frappe.get_meta("Bosta Shipment")
-		for fieldname in (
-			"receiver_name",
-			"receiver_phone",
-			"city",
-			"district_id",
-			"city_id",
-			"district_name",
-			"address_first_line",
-		):
+		for fieldname in ("receiver_name", "receiver_phone", "city", "address_first_line"):
 			self.assertEqual(meta.get_field(fieldname).read_only_depends_on, "eval:doc.tracking_number")
+		# The city code and ID are always read-only; the legacy district fields are hidden.
+		for fieldname in ("city_id", "city_code"):
+			self.assertTrue(meta.get_field(fieldname).read_only)
+		for fieldname in ("district_id", "district_name"):
+			self.assertTrue(meta.get_field(fieldname).hidden)
+			self.assertTrue(meta.get_field(fieldname).read_only)
