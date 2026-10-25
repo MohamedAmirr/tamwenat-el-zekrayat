@@ -1738,3 +1738,22 @@ Open Payment Entry,فتح قيد الدفع
 Shopify payment {0} could not be recorded: {1},تعذر تسجيل دفعة Shopify {0}: {1}
 Payment exceeds the order by {0}.,تتجاوز الدفعة قيمة الطلب بمقدار {0}.
 Mirrored payment transaction {0} was cancelled. Review the entry and record the payment manually if needed.,أُلغيت معاملة الدفع المنسوخة {0}. راجع القيد وسجّل الدفعة يدويًا إذا لزم الأمر.
+Pull Shopify Inventory to Draft Stock Reconciliation,سحب مخزون Shopify إلى مسودة تسوية مخزون
+"Read Shopify inventory once and create ONE draft Stock Reconciliation in ERPNext? Nothing is sent to Shopify and nothing is submitted. All rows are created with valuation rate 0, so submitting the draft will set valuation to 0 for the Items it contains.",هل تريد قراءة مخزون Shopify مرة واحدة وإنشاء مسودة تسوية مخزون واحدة في ERPNext؟ لن يُرسل شيء إلى Shopify ولن يُعتمد شيء. تُنشأ جميع الصفوف بمعدل تقييم 0، لذا فإن اعتماد المسودة سيضبط التقييم على 0 للعناصر التي تتضمنها.
+A draft created by this action already exists for this warehouse:,توجد بالفعل مسودة أنشأها هذا الإجراء لهذا المستودع:
+Queuing Shopify inventory pull...,جارٍ جدولة سحب مخزون Shopify...
+Shopify inventory pull queued. You will be notified when it finishes.,تمت جدولة سحب مخزون Shopify. سيتم إشعارك عند الانتهاء.
+An inventory pull is already running for this Marketplace Account.,يوجد سحب مخزون قيد التشغيل بالفعل لحساب السوق هذا.
+Shopify inventory pull failed. See the Error Log for details.,فشل سحب مخزون Shopify. راجع سجل الأخطاء للتفاصيل.
+Company {0} has no default Stock Adjustment Account.,الشركة {0} ليس لها حساب تسوية مخزون افتراضي.
+Item does not exist.,العنصر غير موجود.
+Item uses batches or serial numbers.,العنصر يستخدم دفعات أو أرقامًا تسلسلية.
+Item is mapped to more than one Shopify variant.,العنصر مربوط بأكثر من متغير واحد في Shopify.
+Shopify variant was not found.,لم يتم العثور على متغير Shopify.
+Inventory is not tracked in Shopify.,المخزون غير متتبَّع في Shopify.
+No Shopify inventory level at the account's Location.,لا يوجد مستوى مخزون في Shopify عند موقع الحساب.
+Draft Stock Reconciliation {0} created with {1} Item(s). Valuation rate is 0 on every row.,أُنشئت مسودة تسوية المخزون {0} بعدد {1} عنصر. معدل التقييم 0 في كل صف.
+No difference between Shopify and ERPNext stock: no Stock Reconciliation was created.,لا يوجد اختلاف بين مخزون Shopify وERPNext: لم يتم إنشاء تسوية مخزون.
+Unchanged Items: {0},عناصر دون تغيير: {0}
+Skipped Items: {0},عناصر متخطاة: {0}
+Shopify Inventory Pull,سحب مخزون Shopify
