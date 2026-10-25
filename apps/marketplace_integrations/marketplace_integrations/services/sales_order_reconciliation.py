@@ -251,6 +251,12 @@ def plan(previous, current, evidence, erp_state):
 	- ``outbound_cancel_requested``: ERPNext already asked the marketplace to cancel the
 	  order (#181); with ``cancellation == "full"`` on a Closed order with no delivery or
 	  billing this is the echo of that request (``NO_ACTION``, no reopen).
+	- ``outbound_edit_requested``: ERPNext's item edit (#356) was accepted by the marketplace
+	  but the order's snapshot does not reflect it yet; while the marketplace quantities
+	  still equal the baseline this is ``NO_ACTION`` so the newer ERP quantities are not
+	  reverted.  ``outbound_edit_in_flight``: the edit's outcome is unknown; in the same
+	  situation the order needs attention, never ``NO_ACTION``.  Both are judged only after the
+	  inactive-order and cancellation branches.
 	- ``inactive_order_instruction``: merchant-readable text appended to the "no longer an
 	  active submitted document" advisory (what to do on the marketplace).
 	- ``source``: where the evidence comes from (e.g. ``"marketplace"``); informational.
@@ -369,6 +375,29 @@ def plan(previous, current, evidence, erp_state):
 		return _attention(
 			_("A submitted Sales Order has structural commercial changes."), header_changes + changes
 		)
+	if (
+		(evidence.get("outbound_edit_requested") or evidence.get("outbound_edit_in_flight"))
+		and evidence.get("cancellation") != "full"
+		and "items" in current
+		and {key: flt(line.get("qty")) for key, line in previous_items.items()}
+		== {key: flt(line.get("qty")) for key, line in current_items.items()}
+	):
+		# ERPNext sent its item edit to the marketplace (#356) but the marketplace order has not
+		# caught up yet, so it still shows the old quantities.  Once the echo (or the refresh)
+		# brings the new quantities, this no longer matches and the normal comparison runs.
+		if evidence.get("outbound_edit_requested"):
+			# Accepted by the marketplace: ERPNext holds the newer state, do not revert it.
+			return _result(
+				NO_ACTION,
+				_("ERPNext's item edit was sent to the marketplace; waiting for it to be confirmed."),
+			)
+		return _attention(
+			_(
+				"ERPNext's item edit may not have reached the marketplace (the outcome is unknown); "
+				"check the order in the marketplace."
+			)
+		)
+
 	structural_kinds = {"item_added"} if all_zero else {"item_added", "item_removed"}
 	if any(change["kind"] in structural_kinds for change in changes):
 		return _attention(_("A submitted Sales Order has structural line changes."), changes)

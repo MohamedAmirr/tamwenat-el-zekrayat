@@ -15,6 +15,10 @@
 		"marketplace_integrations.api.marketplace_outbound.get_platform_cancel_option";
 	const REQUEST_METHOD =
 		"marketplace_integrations.api.marketplace_outbound.request_platform_cancel";
+	const SHOPIFY_EDIT_PREVIEW_METHOD =
+		"marketplace_integrations.api.marketplace_outbound.get_shopify_order_edit_preview";
+	const SHOPIFY_EDIT_SEND_METHOD =
+		"marketplace_integrations.api.marketplace_outbound.send_shopify_order_edit";
 	const BOSTA_DEFAULTS_METHOD = "marketplace_integrations.api.bosta_shipments.get_create_defaults";
 	const BOSTA_CITIES_METHOD = "marketplace_integrations.api.bosta_shipments.get_cities";
 	const BOSTA_CREATE_METHOD = "marketplace_integrations.api.bosta_shipments.create_shipment";
@@ -958,6 +962,120 @@
 		});
 	}
 
+	function show_shopify_edit_dialog(frm, preview) {
+		const rows = (preview.changes || [])
+			.map((change) => {
+				const quantity = change.quantity === 0 ? __("Remove") : change.quantity;
+				return `<li>${frappe.utils.escape_html(change.label || "")} — ${frappe.utils.escape_html(
+					String(change.old_quantity)
+				)} → ${frappe.utils.escape_html(String(quantity))}</li>`;
+			})
+			.join("");
+		const dialog = new frappe.ui.Dialog({
+			title: __("Send item changes to Shopify"),
+			fields: [
+				{
+					fieldtype: "HTML",
+					fieldname: "preview",
+					options: `<p>${frappe.utils.escape_html(
+						__("Shopify will update these item quantities. The customer will not be notified.")
+					)}</p><ul>${rows}</ul><p>${frappe.utils.escape_html(
+						__("Items and shipping total, before tax: {0} → {1}", [
+							format_currency(preview.old_total, frm.doc.currency),
+							format_currency(preview.new_total, frm.doc.currency),
+						])
+					)}</p>`,
+				},
+			],
+			primary_action_label: __("Send to Shopify"),
+			primary_action() {
+				dialog.hide();
+				frappe
+					.call({
+						method: SHOPIFY_EDIT_SEND_METHOD,
+						type: "POST",
+						args: { sales_order: frm.doc.name, fingerprint: preview.fingerprint },
+						freeze: true,
+						freeze_message: __("Sending item changes to Shopify..."),
+					})
+					.then((r) => {
+						frappe.show_alert(shopify_edit_alert(r.message || {}));
+						return frm.reload_doc();
+					})
+					.catch(() => {});
+			},
+			secondary_action_label: __("Not now"),
+			secondary_action() {
+				dialog.hide();
+			},
+		});
+		dialog.show();
+	}
+
+	function show_shopify_edit_blocked(preview) {
+		const reasons = (preview.reasons || [])
+			.map((reason) => `<li>${frappe.utils.escape_html(reason)}</li>`)
+			.join("");
+		frappe.msgprint({
+			title: __("Item changes cannot be sent to Shopify"),
+			indicator: "orange",
+			message: `<ul>${reasons}</ul>`,
+		});
+	}
+
+	// Shopify accepted the edit; only the local refresh can be missing.  That is a warning,
+	// not a success: the Marketplace Order still shows the old lines until the next refresh.
+	function shopify_edit_alert(result) {
+		if (result.refreshed === false) {
+			return {
+				message: __(
+					"Item changes were sent to Shopify, but the order could not be refreshed. Use Refresh from Shopify on the order."
+				),
+				indicator: "orange",
+			};
+		}
+		return { message: __("Item changes sent to Shopify."), indicator: "green" };
+	}
+
+	// Only a submitted, open Sales Order of a Shopify order the user may change; a call the
+	// user is not permitted to make would open Frappe's "Not permitted" popup.
+	function can_offer_shopify_edit(frm) {
+		const doc = frm.doc;
+		if (!doc || !doc.custom_marketplace_order || doc.docstatus !== 1) return false;
+		if (is_closed_or_cancelled(doc)) return false;
+		if (doc.custom_marketplace_platform && doc.custom_marketplace_platform !== "Shopify") return false;
+		return Boolean(
+			frappe.model.can_write("Sales Order") &&
+				frappe.model.can_read("Marketplace Order") &&
+				frappe.model.can_write("Marketplace Order")
+		);
+	}
+
+	function add_shopify_edit_button(frm) {
+		if (!can_offer_shopify_edit(frm)) return;
+		const name = frm.doc.name;
+		return frappe
+			.call({ method: SHOPIFY_EDIT_PREVIEW_METHOD, type: "POST", args: { sales_order: name } })
+			.then((r) => {
+				// The form may have moved to another document while the call was in flight.
+				if (frm.doc.name !== name) return;
+				const preview = r.message;
+				if (!preview) return;
+				if (preview.state === "eligible") {
+					frm.add_custom_button(__("Send item changes to Shopify"), () =>
+						show_shopify_edit_dialog(frm, preview)
+					);
+				} else if (preview.state === "blocked" && (preview.changes || []).length) {
+					// Staff changed items, so say why Shopify will not get them.  With no
+					// changes there is nothing to explain and the form stays silent.
+					frm.add_custom_button(__("Item changes blocked"), () =>
+						show_shopify_edit_blocked(preview)
+					);
+				}
+			})
+			.catch(() => {});
+	}
+
 	function add_cancel_button(frm, option) {
 		frm.add_custom_button(
 			__("Cancel on {0}", [frappe.utils.escape_html(option.platform)]),
@@ -1010,6 +1128,7 @@
 		}
 		const closed_by_click = consume_close_request(frm);
 		if (!is_marketplace_sales_order(frm.doc)) return;
+		add_shopify_edit_button(frm);
 		if (closed_by_click || is_closed_or_cancelled(frm.doc)) {
 			load_platform_option(frm, { prompt: closed_by_click, button: true });
 		}
@@ -1039,6 +1158,11 @@
 		module.exports = {
 			add_marketplace_order_tab,
 			add_bosta_shipment_ux,
+			add_shopify_edit_button,
+			can_offer_shopify_edit,
+			shopify_edit_alert,
+			show_shopify_edit_blocked,
+			show_shopify_edit_dialog,
 			bosta_cod_note_html,
 			bosta_indicator_html,
 			bosta_tab_html,

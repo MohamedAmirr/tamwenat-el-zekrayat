@@ -1571,6 +1571,15 @@ def _reconciliation_evidence(order):
 	# the status path (form load / save) see them.  The marker survives sync-log cleanup.
 	if getattr(order, "outbound_cancelled_on", None):
 		evidence = {**evidence, "outbound_cancel_requested": True}
+	if getattr(order, "outbound_edit_fingerprint", None):
+		# Shopify item edit (#356): only a confirmed ("completed") edit lets the planner keep
+		# the newer ERP quantities; an unconfirmed one (any other state) needs a person.
+		key = (
+			"outbound_edit_requested"
+			if getattr(order, "outbound_edit_state", None) == "completed"
+			else "outbound_edit_in_flight"
+		)
+		evidence = {**evidence, key: True}
 	if getattr(order, "erpnext_sales_order", None):
 		instruction = platform_instruction(order)
 		if instruction:
@@ -1601,6 +1610,72 @@ def _advance_baseline(order, previous, current_snapshot):
 	advanced["refund_ids"] = current_refund_ids
 	order.last_synced_hash = current_hash
 	order.last_synced_snapshot = frappe.as_json(advanced)
+	if _line_quantities(advanced) != _line_quantities(previous):
+		# The marketplace now shows different quantities and ERPNext matches them, so the edit
+		# marker has done its job.  Unchanged quantities mean it may still be pending (the
+		# planner's NO_ACTION can be the marker's own guard): keep it.
+		release_outbound_edit_marker(order)
+
+
+def _line_quantities(snapshot):
+	return {
+		cstr(line.get("external_item_id")).strip(): flt(line.get("qty"))
+		for line in snapshot.get("items") or []
+	}
+
+
+def release_outbound_edit_marker(order):
+	"""Clear the Shopify item-edit marker (#356) in memory, for the save already in progress.
+
+	Called wherever the baseline moves, because the marker only exists to protect the ERP
+	quantities until the baseline catches up.  ``Marketplace Order.before_save`` otherwise
+	restores the marker from the stored copy.
+	"""
+	if order.get("outbound_edit_fingerprint"):
+		order.outbound_edit_fingerprint = None
+		order.outbound_edit_state = None
+		order.flags.clear_outbound_edit_marker = True
+
+
+def rebaseline_after_outbound_edit(order, sales_order):
+	"""Make the refreshed Shopify order the baseline after ERPNext's item edit (#356).
+
+	``order`` is the freshly imported Marketplace Order, ``sales_order`` the current
+	Sales Order.  The refreshed snapshot is paired with the Sales Order's rows (a line added
+	by the edit has a new Shopify line id, so the old baseline cannot judge it) and accepted
+	only when the planner, run with that paired snapshot as the baseline and without the edit
+	marker, says ERPNext equals what Shopify now shows (``NO_ACTION``).  Anything else sets
+	Modified After Sync for staff to review.  Saves ``order``; does not commit.
+	"""
+	order.flags.skip_sync_status_update = True
+	evidence = _reconciliation_evidence(order)
+	evidence.pop("outbound_edit_requested", None)
+	evidence.pop("outbound_edit_in_flight", None)
+	try:
+		snapshot = build_sales_order_snapshot(order, for_submitted_order=sales_order.docstatus != 0)
+		paired = snapshot_with_sales_order_item_names(snapshot, sales_order, refund_ids=_refund_ids(order))
+	except SalesOrderLinesMismatch:
+		return _modified_after_outbound_edit(
+			order, _("ERPNext's items do not match the order Shopify now shows; review the order.")
+		)
+	except SyncBlocker as exc:
+		return _modified_after_outbound_edit(order, cstr(exc).strip()[:500] or _modified_after_sync_message())
+	reconciliation_plan = plan(paired, snapshot, evidence, read_erp_state(sales_order))
+	if reconciliation_plan["outcome"] == NO_ACTION:
+		release_outbound_edit_marker(order)
+		return _save_success(order, snapshot_hash(snapshot), sales_order, True, snapshot)
+	release_outbound_edit_marker(order)
+	_apply_reconciliation_status(order, reconciliation_plan)
+	order.save()
+	return {"ok": False}
+
+
+def _modified_after_outbound_edit(order, message):
+	release_outbound_edit_marker(order)
+	order.erpnext_sync_status = "Modified After Sync"
+	order.last_sync_error = message[:500]
+	order.save()
+	return {"ok": False}
 
 
 def _reconcile_submitted_order(order, sales_order, snapshot, evidence, trigger_source):
@@ -1655,6 +1730,7 @@ def _execute_reconciliation_plan(
 			order.last_synced_snapshot = frappe.as_json(
 				snapshot_with_line_rows(snapshot, executed["line_rows"], refund_ids=_refund_ids(order))
 			)
+			release_outbound_edit_marker(order)
 		order.last_erpnext_sync_on = now_datetime()
 		order.erpnext_sync_status = "Synced"
 		order.last_sync_error = None
