@@ -17,6 +17,9 @@ function load({
 	request_result = { ok: true, refreshed: true },
 	request_fails = false,
 	can_read = true,
+	can_write = true,
+	shopify_preview = null,
+	shopify_send_result = { ok: true, refreshed: true },
 	bosta_creator = true,
 	bosta_read = true,
 	shipment = null,
@@ -25,6 +28,7 @@ function load({
 	marketplace_summary = { name: "MO-1", platform: "Shopify", reference: "#SHOP-1", erpnext_sync_status: "Not Synced", erpnext_sales_order: "" },
 } = {}) {
 	const calls = [];
+	const edit_calls = [];
 	const marketplace_calls = [];
 	const bosta_calls = [];
 	const alerts = [];
@@ -38,6 +42,7 @@ function load({
 		model: {
 			can_read: (doctype) =>
 				doctype === "Bosta Shipment" ? bosta_read : can_read && doctype === "Marketplace Order",
+			can_write: () => can_write,
 		},
 		ui: {
 			form: {
@@ -68,6 +73,14 @@ function load({
 			},
 		},
 		call(opts) {
+			if (opts.method.endsWith("get_shopify_order_edit_preview")) {
+				edit_calls.push(opts);
+				return Promise.resolve({ message: shopify_preview });
+			}
+			if (opts.method.endsWith("send_shopify_order_edit")) {
+				edit_calls.push(opts);
+				return Promise.resolve({ message: shopify_send_result });
+			}
 			if (opts.method.endsWith("get_marketplace_order_summary")) {
 				marketplace_calls.push(opts);
 				return Promise.resolve({ message: marketplace_summary });
@@ -92,10 +105,11 @@ function load({
 		show_alert: (alert) => alerts.push(alert),
 		msgprint: (message) => msgprints.push(message),
 	};
+	global.format_currency = (value, currency) => `${currency || "EGP"} ${value}`;
 	const path = require.resolve("./sales_order.js");
 	delete require.cache[path];
 	const module_exports = require(path);
-	return { calls, marketplace_calls, bosta_calls, alerts, msgprints, dialogs, handlers, module_exports };
+	return { calls, edit_calls, marketplace_calls, bosta_calls, alerts, msgprints, dialogs, handlers, module_exports };
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
@@ -144,6 +158,7 @@ function make_frm(doc, { close_sales_order } = {}) {
 			custom_marketplace_order: "MO-1",
 			docstatus: 1,
 			status: "To Deliver and Bill",
+			currency: "EGP",
 			...doc,
 		},
 		cscript: {},
@@ -1437,4 +1452,120 @@ test("the create dialog keeps the receiver name, the COD note and no district fi
 	assert.equal(dialog.df.cod_amount.options, "currency");
 	assert.equal(dialog.df.cod_amount.reqd, 1);
 	assert.equal(dialog.config.primary_action_label, "Create Shipment");
+});
+
+const shopify_preview_result = (extra = {}) => ({
+	state: "eligible",
+	changes: [{ kind: "set_quantity", label: "<b>Tea</b>", quantity: 3, old_quantity: 2 }],
+	reasons: [],
+	fingerprint: "abc123",
+	old_total: 20,
+	new_total: 30,
+	...extra,
+});
+
+test("the Shopify edit button needs an eligible preview, write permission and an open submitted Shopify order", async () => {
+	const cases = [
+		["eligible preview", {}, {}, 1, 1],
+		["blocked preview", { shopify_preview: shopify_preview_result({ state: "blocked" }) }, {}, 0, 1],
+		["not applicable preview", { shopify_preview: { state: "not_applicable", changes: [], reasons: [] } }, {}, 0, 1],
+		["no Sales Order write permission", { can_write: false }, {}, 0, 0],
+		["no Marketplace Order read permission", { can_read: false }, {}, 0, 0],
+		["draft Sales Order", {}, { docstatus: 0 }, 0, 0],
+		["closed Sales Order", {}, { status: "Closed" }, 0, 0],
+		["Talabat order", {}, { custom_marketplace_platform: "Talabat" }, 0, 0],
+	];
+	for (const [name, options, doc, buttons, fetches] of cases) {
+		const { handlers, edit_calls } = load({ shopify_preview: shopify_preview_result(), ...options });
+		const frm = make_frm(doc);
+		await handlers["Sales Order"].refresh(frm);
+		await settle();
+		const labels = frm.buttons.filter((b) => b.label === "Send item changes to Shopify");
+		assert.equal(labels.length, buttons, name);
+		assert.equal(edit_calls.length, fetches, name);
+	}
+});
+
+test("a preview that arrives after the form moved to another document adds no button", async () => {
+	const { handlers } = load({ shopify_preview: shopify_preview_result() });
+	const frm = make_frm({});
+	const pending = handlers["Sales Order"].refresh(frm);
+	frm.doc.name = "SAL-ORD-2";
+	await pending;
+	await settle();
+	assert.equal(frm.buttons.length, 0);
+});
+
+test("the Shopify edit dialog escapes labels, shows like-for-like totals and sends the previewed fingerprint", async () => {
+	const { handlers, edit_calls, dialogs, alerts } = load({ shopify_preview: shopify_preview_result() });
+	const frm = make_frm({ currency: "SAR" });
+	await handlers["Sales Order"].refresh(frm);
+	await settle();
+	frm.buttons[0].action();
+	const html = dialogs[0].config.fields[0].options;
+	assert.match(html, /&lt;b&gt;Tea&lt;\/b&gt;/);
+	assert.doesNotMatch(html, /<b>/);
+	assert.match(html, /Items and shipping total, before tax: SAR 20 → SAR 30/);
+	dialogs[0].config.primary_action();
+	await settle();
+	const send = edit_calls.find((c) => c.method.endsWith("send_shopify_order_edit"));
+	assert.deepEqual(send.args, { sales_order: "SAL-ORD-1", fingerprint: "abc123" });
+	assert.equal(alerts[0].indicator, "green");
+	assert.equal(frm.reloads, 1);
+});
+
+test("a Shopify edit whose refresh failed shows a distinct warning, not a success", async () => {
+	const { handlers, dialogs, alerts } = load({
+		shopify_preview: shopify_preview_result(),
+		shopify_send_result: { ok: true, refreshed: false },
+	});
+	const frm = make_frm({});
+	await handlers["Sales Order"].refresh(frm);
+	await settle();
+	frm.buttons[0].action();
+	dialogs[0].config.primary_action();
+	await settle();
+	assert.equal(alerts[0].indicator, "orange");
+	assert.match(alerts[0].message, /could not be refreshed/);
+});
+
+test("a blocked preview with changes shows a blocked button that lists the escaped reasons", async () => {
+	const blocked = shopify_preview_result({
+		state: "blocked",
+		reasons: ["An item edit was already sent to Shopify; refresh the order to confirm it before sending another.", "<b>x</b>"],
+	});
+	const { handlers, msgprints } = load({ shopify_preview: blocked });
+	const frm = make_frm({});
+	await handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.deepEqual(frm.buttons.map((b) => b.label), ["Item changes blocked"]);
+	frm.buttons[0].action();
+	assert.equal(msgprints[0].indicator, "orange");
+	assert.match(msgprints[0].message, /already sent to Shopify; refresh the order/);
+	assert.match(msgprints[0].message, /&lt;b&gt;x&lt;\/b&gt;/);
+	assert.doesNotMatch(msgprints[0].message, /<b>/);
+});
+
+test("a blocked preview without changes stays silent", async () => {
+	const { handlers, msgprints } = load({
+		shopify_preview: shopify_preview_result({ state: "blocked", changes: [], reasons: ["There are no item changes to send to Shopify."] }),
+	});
+	const frm = make_frm({});
+	await handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.equal(frm.buttons.length, 0);
+	assert.equal(msgprints.length, 0);
+});
+
+test("Not now and closing the Shopify edit dialog make no send call", async () => {
+	const { handlers, edit_calls, dialogs } = load({ shopify_preview: shopify_preview_result() });
+	const frm = make_frm({});
+	await handlers["Sales Order"].refresh(frm);
+	await settle();
+	frm.buttons[0].action();
+	dialogs[0].config.secondary_action();
+	await settle();
+	assert.equal(dialogs[0].hidden, true);
+	assert.equal(edit_calls.filter((call) => call.method.endsWith("send_shopify_order_edit")).length, 0);
+	assert.equal(frm.reloads || 0, 0);
 });

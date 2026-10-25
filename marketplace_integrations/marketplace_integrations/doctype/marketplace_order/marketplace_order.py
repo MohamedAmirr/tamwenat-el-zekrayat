@@ -51,6 +51,17 @@ class MarketplaceOrder(Document):
 		before = self.get_doc_before_save()
 		if before and before.get("outbound_cancelled_on") and not self.outbound_cancelled_on:
 			self.outbound_cancelled_on = before.outbound_cancelled_on
+		# Same one-way rule for the Shopify item-edit marker (#356): a stale copy must not
+		# blank it.  Only the re-baseline (sales_order_sync.release_outbound_edit_marker) clears
+		# it on a document, by setting flags.clear_outbound_edit_marker.
+		if (
+			before
+			and before.get("outbound_edit_fingerprint")
+			and not self.outbound_edit_fingerprint
+			and not self.flags.clear_outbound_edit_marker
+		):
+			self.outbound_edit_fingerprint = before.outbound_edit_fingerprint
+			self.outbound_edit_state = before.outbound_edit_state
 		if not self.flags.skip_sync_status_update:
 			from marketplace_integrations.services.sales_order_sync import (
 				set_sync_status_from_current_snapshot,

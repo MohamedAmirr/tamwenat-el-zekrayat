@@ -109,6 +109,7 @@ class IntegrationTestMarketplaceOutbound(IntegrationTestCase):
 				"marketplace_account",
 				"traceback",
 			],
+			order_by="creation asc",
 		)
 
 	# -- option: Talabat lifecycle boundary ---------------------------------

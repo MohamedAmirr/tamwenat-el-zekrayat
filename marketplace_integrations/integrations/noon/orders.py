@@ -649,6 +649,28 @@ def _run_import_for_account(account_name, trigger_source):
 	imported, errors = import_orders_created_between(
 		account, created_after, created_before, trigger_source=trigger_source
 	)
+	if trigger_source == "Scheduled Reconciliation":
+		from frappe.utils import get_datetime, now_datetime
+
+		from marketplace_integrations.services.sales_order_sync_debounce import bump_sync_debounce
+
+		for candidate in frappe.get_all(
+			"Marketplace Order",
+			filters={
+				"marketplace_account": account.name,
+				"platform": "Noon",
+				"erpnext_sales_order": ["is", "not set"],
+				"erpnext_sync_status": ["!=", "Cancelled"],
+			},
+			fields=["name", "sync_debounce_until", "pending_sync_trigger_source"],
+		):
+			if (
+				candidate.pending_sync_trigger_source == trigger_source
+				and candidate.sync_debounce_until
+				and get_datetime(candidate.sync_debounce_until) > now_datetime()
+			):
+				continue
+			bump_sync_debounce(candidate.name, trigger_source)
 	if errors:
 		frappe.log_error(title="Noon order import: per-order failures", message=frappe.as_json(errors))
 	return {"imported": len(imported), "errors": len(errors)}

@@ -18,6 +18,9 @@ const {
 	configure_outlet_management,
 	configure_shopify_location,
 	configure_shopify_inventory,
+	configure_shopify_inventory_pull,
+	pull_shopify_inventory,
+	PULL_INVENTORY_LABEL,
 	reconcile_shopify_inventory,
 	RECONCILE_INVENTORY_LABEL,
 	LOAD_SHOPIFY_GATEWAYS_LABEL,
@@ -478,4 +481,66 @@ test("reconcile_shopify_inventory shows the skipped account's real reason, escap
 	for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve));
 
 	assert.match(msgprint_args.message, /Warehouse &lt;b>x&lt;\/b>/);
+});
+
+test("Pull Shopify Inventory appears only on a saved, enabled Shopify account with write permission", () => {
+	global.frappe = { model: { can_write: () => true } };
+	let frm = make_frm({ platform: "Shopify", enabled: 1 });
+	configure_shopify_inventory_pull(frm);
+	assert.deepEqual(frm.buttons, [PULL_INVENTORY_LABEL]);
+
+	frm = make_frm({ platform: "Shopify", enabled: 1 }, { is_new: true });
+	configure_shopify_inventory_pull(frm);
+	assert.deepEqual(frm.buttons, []);
+
+	frm = make_frm({ platform: "Talabat", enabled: 1 });
+	configure_shopify_inventory_pull(frm);
+	assert.deepEqual(frm.buttons, []);
+
+	global.frappe = { model: { can_write: () => false } };
+	frm = make_frm({ platform: "Shopify", enabled: 1 });
+	configure_shopify_inventory_pull(frm);
+	assert.deepEqual(frm.buttons, []);
+});
+
+test("pull_shopify_inventory warns about existing drafts, confirms, then queues", async () => {
+	const calls = [];
+	let confirm_message;
+	global.frappe = {
+		confirm(message, on_yes) {
+			confirm_message = message;
+			on_yes();
+		},
+		call(options) {
+			calls.push(options);
+			return Promise.resolve({ message: options.method.endsWith("get_inventory_pull_drafts") ? ["MAT-RECO-1"] : { queued: true } });
+		},
+		show_alert() {},
+		utils: { escape_html: (value) => String(value) },
+	};
+
+	await pull_shopify_inventory({ doc: { name: "MKTACC-1" } });
+	for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve));
+
+	assert.match(confirm_message, /valuation rate 0/);
+	assert.match(confirm_message, /MAT-RECO-1/);
+	assert.equal(calls.length, 2);
+	assert.equal(calls[1].method, "marketplace_integrations.api.shopify_inventory.queue_inventory_pull");
+	assert.deepEqual(calls[1].args, { account: "MKTACC-1" });
+});
+
+test("pull_shopify_inventory queues nothing when the confirmation is declined", async () => {
+	const calls = [];
+	global.frappe = {
+		confirm() {},
+		call(options) {
+			calls.push(options);
+			return Promise.resolve({ message: [] });
+		},
+		utils: { escape_html: (value) => String(value) },
+	};
+
+	await pull_shopify_inventory({ doc: { name: "MKTACC-1" } });
+
+	assert.equal(calls.length, 1);
 });
