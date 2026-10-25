@@ -50,7 +50,39 @@ if (typeof frappe !== "undefined") {
 			frm.set_df_property("external_status", "read_only", 1);
 			frm.set_df_property("transport_type", "read_only", 1);
 			apply_platform_gating(frm);
+			add_clear_edit_marker_button(frm);
 		},
+	});
+}
+
+// #356: recovery for a Shopify item edit marker (hidden field) that blocks further edits,
+// e.g. after an ambiguous commit failure.  System Manager only, and only while a marker is
+// set; the server checks the role too.
+const CLEAR_EDIT_MARKER_METHOD = "marketplace_integrations.api.marketplace_outbound.clear_shopify_edit_marker";
+
+function add_clear_edit_marker_button(frm) {
+	if (!frm.doc.outbound_edit_fingerprint) return;
+	if (!(frappe.user && frappe.user.has_role("System Manager"))) return;
+	frm.add_custom_button(__("Clear edit marker"), () => {
+		frappe.confirm(
+			__(
+				"Clear the marker of the item edit sent to Shopify? Do this only after you checked in Shopify what happened to that edit."
+			),
+			() => {
+				frappe
+					.call({
+						method: CLEAR_EDIT_MARKER_METHOD,
+						type: "POST",
+						args: { marketplace_order: frm.doc.name },
+						freeze: true,
+					})
+					.then(() => {
+						frappe.show_alert({ message: __("Edit marker cleared."), indicator: "green" });
+						return frm.reload_doc();
+					})
+					.catch(() => {});
+			}
+		);
 	});
 }
 
@@ -924,6 +956,7 @@ const ERPNEXT_SYNC_STATUS_COLORS = {
 	Synced: "green",
 	"Modified After Sync": "orange",
 	"Sync Error": "red",
+	Cancelled: "gray",
 };
 
 function get_status_indicator(status, color_by_status) {
@@ -1177,6 +1210,7 @@ function build_cart_update_items(rows, values) {
 
 if (typeof module !== "undefined") {
 	module.exports = {
+		add_clear_edit_marker_button,
 		add_order_actions,
 		build_cart_update_items,
 		cancel_order,

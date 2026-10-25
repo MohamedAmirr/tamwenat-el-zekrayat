@@ -377,7 +377,10 @@ def _collect_unmapped_items(accounts):
 
 	orders = _get_orders(
 		enabled_accounts,
-		{"erpnext_sync_status": ["!=", "Synced"], "cancelled_at": ["is", "not set"]},
+		{
+			"erpnext_sync_status": ["not in", ["Synced", "Cancelled"]],
+			"cancelled_at": ["is", "not set"],
+		},
 		["name", "marketplace_account", "received_on", "creation"],
 	)
 	if not orders:

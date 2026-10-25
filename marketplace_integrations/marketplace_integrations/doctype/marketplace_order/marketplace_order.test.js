@@ -35,6 +35,7 @@ global.frappe = {
 };
 
 const {
+	add_clear_edit_marker_button,
 	add_order_actions,
 	build_cart_update_items,
 	cancel_order,
@@ -146,6 +147,10 @@ test("Talabat and ERPNext status indicators use the agreed standard colors", () 
 	assert.deepEqual(get_status_indicator("Sync Error", ERPNEXT_SYNC_STATUS_COLORS), {
 		label: "Sync Error",
 		color: "red",
+	});
+	assert.deepEqual(get_status_indicator("Cancelled", ERPNEXT_SYNC_STATUS_COLORS), {
+		label: "Cancelled",
+		color: "gray",
 	});
 });
 
@@ -704,4 +709,52 @@ test("Shopify item presentation shows Unmapped, a null variant label, mapped nam
 			"gid://shopify/ProductVariant/4: <img onerror=1>",
 		]
 	);
+});
+
+test("Clear edit marker is offered only to a System Manager while a marker is set, behind a confirm", async () => {
+	const original = { user: global.frappe.user, confirm: global.frappe.confirm, call: global.frappe.call, show_alert: global.frappe.show_alert };
+	const calls = [];
+	const alerts = [];
+	let confirm_message;
+	let confirm_yes;
+	global.frappe.confirm = (message, yes) => {
+		confirm_message = message;
+		confirm_yes = yes;
+	};
+	global.frappe.show_alert = (alert) => alerts.push(alert);
+	global.frappe.call = (opts) => {
+		calls.push(opts);
+		return Promise.resolve({ message: { ok: true } });
+	};
+	const buttons = [];
+	const make = (doc) => ({
+		doc,
+		add_custom_button: (label, action) => buttons.push({ label, action }),
+		reload_doc: () => Promise.resolve(),
+	});
+	try {
+		global.frappe.user = { has_role: (role) => role === "System Manager" };
+		add_clear_edit_marker_button(make({ name: "MO-1" }));
+		assert.equal(buttons.length, 0, "no marker, no button");
+
+		global.frappe.user = { has_role: () => false };
+		add_clear_edit_marker_button(make({ name: "MO-1", outbound_edit_fingerprint: "abc" }));
+		assert.equal(buttons.length, 0, "not a System Manager, no button");
+
+		global.frappe.user = { has_role: (role) => role === "System Manager" };
+		add_clear_edit_marker_button(make({ name: "MO-1", outbound_edit_fingerprint: "abc" }));
+		assert.deepEqual(buttons.map((b) => b.label), ["Clear edit marker"]);
+
+		buttons[0].action();
+		assert.match(confirm_message, /Clear the marker/);
+		assert.equal(calls.length, 0, "nothing is sent before the confirm");
+		confirm_yes();
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		assert.equal(calls.length, 1);
+		assert.match(calls[0].method, /clear_shopify_edit_marker$/);
+		assert.deepEqual(calls[0].args, { marketplace_order: "MO-1" });
+		assert.equal(alerts[0].indicator, "green");
+	} finally {
+		Object.assign(global.frappe, original);
+	}
 });
