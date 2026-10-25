@@ -202,6 +202,51 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 		self.assertEqual(result["outcome"], CANCEL_ORDER)
 		self.assertTrue(result["reopen"])
 
+	def test_unechoed_outbound_edit_does_not_revert_newer_erp_quantities(self):
+		# ERP holds the edited quantity (3); the marketplace snapshot still shows the old one (2).
+		self.erp_state["lines"][0].update({"qty": 3, "amount": 150})
+		self.assertNotEqual(plan(self.previous, self._current(), {}, self.erp_state)["outcome"], NO_ACTION)
+		result = plan(self.previous, self._current(), {"outbound_edit_requested": True}, self.erp_state)
+		self.assertEqual(result["outcome"], NO_ACTION)
+
+	def test_unconfirmed_outbound_edit_needs_attention_and_never_synced(self):
+		self.erp_state["lines"][0].update({"qty": 3, "amount": 150})
+		result = plan(self.previous, self._current(), {"outbound_edit_in_flight": True}, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertIn("outcome is unknown", result["message"])
+
+	def test_outbound_edit_guard_is_judged_below_the_inactive_order_and_cancellation_branches(self):
+		self.erp_state["lines"][0].update({"qty": 3, "amount": 150})
+		for evidence_key in ("outbound_edit_requested", "outbound_edit_in_flight"):
+			with self.subTest(evidence_key, case="cancelled Sales Order"):
+				erp_state = {**self.erp_state, "docstatus": 2, "status": "Cancelled"}
+				result = plan(self.previous, self._current(), {evidence_key: True}, erp_state)
+				self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+				self.assertIn("no longer an active submitted document", result["message"])
+			with self.subTest(evidence_key, case="marketplace cancellation"):
+				evidence = {evidence_key: True, "cancellation": "full"}
+				unedited = deepcopy(self.erp_state)
+				unedited["lines"][0].update({"qty": 2, "amount": 100})
+				result = plan(self.previous, self._current(), evidence, unedited)
+				self.assertEqual(result["outcome"], CANCEL_ORDER, result["message"])
+
+	def test_outbound_edit_guard_does_not_hide_a_header_change(self):
+		current = self._current()
+		current["shipping"] = 9
+		result = plan(self.previous, current, {"outbound_edit_requested": True}, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+
+	def test_outbound_edit_marker_yields_to_the_normal_comparison_once_the_marketplace_changed(self):
+		current = self._current()
+		current["items"][0].update({"qty": 3, "fulfilled_total_price": 150})
+		self.erp_state["lines"][0].update({"qty": 3, "amount": 150})
+		result = plan(self.previous, current, {"outbound_edit_requested": True}, self.erp_state)
+		self.assertEqual(result["outcome"], NO_ACTION)
+		# A later, different marketplace change is judged normally, not swallowed by the marker.
+		current["items"][0].update({"qty": 4, "fulfilled_total_price": 200})
+		result = plan(self.previous, current, {"outbound_edit_requested": True}, self.erp_state)
+		self.assertEqual(result["outcome"], UPDATE_SUBMITTED_ORDER)
+
 	def test_echo_of_an_outbound_cancel_on_a_closed_order_is_no_action_and_not_reopened(self):
 		self.erp_state.update({"status": "Closed"})
 		evidence = {"cancellation": "full", "outbound_cancel_requested": True}

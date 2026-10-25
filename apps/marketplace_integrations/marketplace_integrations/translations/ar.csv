@@ -1738,6 +1738,57 @@ Open Payment Entry,فتح قيد الدفع
 Shopify payment {0} could not be recorded: {1},تعذر تسجيل دفعة Shopify {0}: {1}
 Payment exceeds the order by {0}.,تتجاوز الدفعة قيمة الطلب بمقدار {0}.
 Mirrored payment transaction {0} was cancelled. Review the entry and record the payment manually if needed.,أُلغيت معاملة الدفع المنسوخة {0}. راجع القيد وسجّل الدفعة يدويًا إذا لزم الأمر.
+The Shopify order is cancelled and its items cannot be edited.,تم إلغاء طلب Shopify ولا يمكن تعديل عناصره.
+The Shopify order is refunded and its items cannot be edited.,تم رد قيمة طلب Shopify ولا يمكن تعديل عناصره.
+The Sales Order currency does not match the Shopify shop currency.,عملة أمر البيع لا تطابق عملة متجر Shopify.
+No synced Shopify line baseline is available for this Sales Order.,لا توجد مرجعية لسطور Shopify المتزامنة لأمر البيع هذا.
+Item {0} needs exactly one enabled Shopify variant mapping.,يحتاج الصنف {0} إلى تعيين واحد ومفعل فقط لمتغير Shopify.
+Item {0} must use a sales UOM conversion of 1.,يجب أن يستخدم الصنف {0} معامل تحويل وحدة بيع يساوي 1.
+Shopify item quantities must be whole non-negative numbers.,يجب أن تكون كميات عناصر Shopify أعدادًا صحيحة غير سالبة.
+There are no item changes to send to Shopify.,لا توجد تغييرات على العناصر لإرسالها إلى Shopify.
+The Shopify fulfillment state for a changed line is unknown; refresh it first.,حالة تنفيذ Shopify لأحد السطور المعدلة غير معروفة؛ حدّث الطلب أولاً.
+A changed Shopify line is fulfilled or has an unknown fulfillment state.,تم تنفيذ سطر Shopify معدل أو أن حالة تنفيذه غير معروفة.
+A changed line already has delivered quantity or a billed amount.,يحتوي سطر معدل بالفعل على كمية مسلّمة أو مبلغ مفوتر.
+Send item changes to Shopify,إرسال تغييرات العناصر إلى Shopify
+Remove,إزالة
+Shopify will update these item quantities. The customer will not be notified.,سيحدّث Shopify كميات هذه العناصر. لن يتم إشعار العميل.
+Send to Shopify,إرسال إلى Shopify
+Sending item changes to Shopify...,جارٍ إرسال تغييرات العناصر إلى Shopify...
+Item changes sent to Shopify.,تم إرسال تغييرات العناصر إلى Shopify.
+No Shopify item changes are ready to send.,لا توجد تغييرات عناصر جاهزة للإرسال إلى Shopify.
+Shopify returned no order after committing the item changes.,لم يُرجع Shopify طلبًا بعد اعتماد تغييرات العناصر.
+Item changes sent from ERPNext Sales Order {0}.,تم إرسال تغييرات العناصر من أمر بيع ERPNext {0}.
+The synced Shopify baseline does not identify every Sales Order line; synchronize the order again before editing.,مرجعية Shopify المتزامنة لا تحدد كل سطر في أمر البيع؛ زامن الطلب مرة أخرى قبل التعديل.
+An item or unit of measure was changed on a synced line; it cannot be swapped on Shopify.,تم تغيير الصنف أو وحدة القياس في سطر متزامن؛ لا يمكن استبداله في Shopify.
+A changed line is on a draft Delivery Note; submit or delete it first.,السطر المعدل موجود في إذن تسليم مسودة؛ اعتمده أو احذفه أولاً.
+Marketplace order {0} is not a Shopify order.,طلب السوق {0} ليس طلب Shopify.
+The item changes are not the ones you reviewed. Review them again.,تغييرات العناصر ليست التي راجعتها. راجعها مرة أخرى.
+Marketplace outbound Shopify edit: refreshing the order failed,تعديل Shopify الصادر للسوق: فشل تحديث الطلب
+"Item changes were sent to Shopify, but the order could not be refreshed. Use Refresh from Shopify on the order.","أُرسلت تغييرات العناصر إلى Shopify، لكن تعذّر تحديث الطلب. استخدم ""تحديث من Shopify"" في الطلب."
+ERPNext's item edit was sent to the marketplace; waiting for it to be confirmed.,أُرسل تعديل العناصر من ERPNext إلى السوق؛ بانتظار تأكيده.
+The Shopify order has too many lines to edit from ERPNext.,طلب Shopify يحتوي على عدد كبير من السطور لا يمكن تعديله من ERPNext.
+Shopify's edit session does not contain line {0} with quantity {1}; refresh the order and try again.,جلسة تعديل Shopify لا تحتوي على السطر {0} بالكمية {1}؛ حدّث الطلب وحاول مرة أخرى.
+Shopify did not confirm the item changes; check the order in Shopify before retrying.,لم يؤكد Shopify تغييرات العناصر؛ راجع الطلب في Shopify قبل إعادة المحاولة.
+Shopify rejected the order edit.,رفض Shopify تعديل الطلب.
+Shopify returned no calculated order.,لم يُرجع Shopify طلبًا محسوبًا.
+Shopify returned no committed order.,لم يُرجع Shopify طلبًا معتمدًا.
+Platform Edit Fingerprint,بصمة تعديل المنصة
+Platform Edit State,حالة تعديل المنصة
+"Only a submitted Sales Order that is not Closed, On Hold or Cancelled can be sent to Shopify.",يمكن إرسال أمر البيع إلى Shopify فقط إذا كان معتمدًا وغير مغلق وغير معلق وغير ملغى.
+An item edit was already sent to Shopify; refresh the order to confirm it before sending another.,أُرسل تعديل للعناصر إلى Shopify بالفعل؛ حدّث الطلب لتأكيده قبل إرسال تعديل آخر.
+"An earlier item edit may or may not have reached Shopify; check the order in Shopify, then ask a System Manager to clear the edit marker on the Marketplace Order.",قد يكون تعديل العناصر السابق قد وصل إلى Shopify أو لم يصل؛ راجع الطلب في Shopify، ثم اطلب من System Manager مسح علامة التعديل في طلب السوق.
+"The Shopify order has discounts on its items; Shopify recalculates them when items change, so edit this order in Shopify.",يحتوي طلب Shopify على خصومات على عناصره، ويعيد Shopify حسابها عند تغيير العناصر؛ لذا عدّل هذا الطلب في Shopify.
+This Marketplace Order has no Shopify item edit marker to clear.,لا توجد علامة تعديل عناصر Shopify لمسحها في طلب السوق هذا.
+{0} cleared the Shopify item edit marker (state: {1}).,مسح {0} علامة تعديل عناصر Shopify (الحالة: {1}).
+ERPNext's item edit may not have reached the marketplace (the outcome is unknown); check the order in the marketplace.,قد لا يكون تعديل العناصر من ERPNext قد وصل إلى السوق (النتيجة غير معروفة)؛ راجع الطلب في السوق.
+ERPNext's items do not match the order Shopify now shows; review the order.,عناصر ERPNext لا تطابق الطلب الذي يعرضه Shopify الآن؛ راجع الطلب.
+"Items and shipping total, before tax: {0} → {1}",إجمالي العناصر والشحن قبل الضريبة: {0} → {1}
+Item changes blocked,تغييرات العناصر محظورة
+Item changes cannot be sent to Shopify,لا يمكن إرسال تغييرات العناصر إلى Shopify
+Clear edit marker,مسح علامة التعديل
+Clear the marker of the item edit sent to Shopify? Do this only after you checked in Shopify what happened to that edit.,هل تريد مسح علامة تعديل العناصر المرسل إلى Shopify؟ افعل ذلك فقط بعد التحقق في Shopify مما حدث لهذا التعديل.
+Edit marker cleared.,تم مسح علامة التعديل.
+Marketplace outbound action: failed to write failure log,إجراء صادر للسوق: فشلت كتابة سجل الفشل
 Pull Shopify Inventory to Draft Stock Reconciliation,سحب مخزون Shopify إلى مسودة تسوية مخزون
 "Read Shopify inventory once and create ONE draft Stock Reconciliation in ERPNext? Nothing is sent to Shopify and nothing is submitted. All rows are created with valuation rate 0, so submitting the draft will set valuation to 0 for the Items it contains.",هل تريد قراءة مخزون Shopify مرة واحدة وإنشاء مسودة تسوية مخزون واحدة في ERPNext؟ لن يُرسل شيء إلى Shopify ولن يُعتمد شيء. تُنشأ جميع الصفوف بمعدل تقييم 0، لذا فإن اعتماد المسودة سيضبط التقييم على 0 للعناصر التي تتضمنها.
 A draft created by this action already exists for this warehouse:,توجد بالفعل مسودة أنشأها هذا الإجراء لهذا المستودع:
