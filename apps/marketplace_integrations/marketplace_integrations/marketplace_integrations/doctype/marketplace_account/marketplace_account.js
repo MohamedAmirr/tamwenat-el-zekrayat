@@ -19,6 +19,7 @@ const TALABAT_OUTLET_FIELDS = [
 ];
 
 const RECONCILE_INVENTORY_LABEL = "Reconcile Shopify Inventory";
+const PULL_INVENTORY_LABEL = "Pull Shopify Inventory to Draft Stock Reconciliation";
 const LOAD_SHOPIFY_GATEWAYS_LABEL = "Load Shopify Payment Gateways";
 
 const SHOPIFY_LOCATION_FIELDS = ["shopify_location_section", "shopify_location_gid", "shopify_location_name"];
@@ -52,6 +53,7 @@ if (typeof frappe !== "undefined") {
 			configure_outlet_management(frm);
 			configure_shopify_location(frm);
 			configure_shopify_inventory(frm);
+			configure_shopify_inventory_pull(frm);
 			configure_noon(frm);
 			configure_view_shortcuts(frm);
 		},
@@ -60,6 +62,7 @@ if (typeof frappe !== "undefined") {
 			configure_outlet_management(frm);
 			configure_shopify_location(frm);
 			configure_shopify_inventory(frm);
+			configure_shopify_inventory_pull(frm);
 			configure_noon(frm);
 		},
 		connection(frm) {
@@ -458,6 +461,53 @@ function reconcile_shopify_inventory(frm) {
 	);
 }
 
+// One-time setup helper: read Shopify quantities into ONE draft Stock
+// Reconciliation. Same visibility as the reconcile button above.
+function configure_shopify_inventory_pull(frm) {
+	frm.remove_custom_button(__(PULL_INVENTORY_LABEL));
+	if (frm.is_new()) return;
+	if (!should_show_shopify_location(frm.doc.platform) || !frm.doc.enabled) return;
+	if (!frappe.model.can_write("Marketplace Account")) return;
+	frm.add_custom_button(__(PULL_INVENTORY_LABEL), () => pull_shopify_inventory(frm));
+}
+
+// Looks up existing drafts first so the confirmation can warn about them.
+function pull_shopify_inventory(frm) {
+	return frappe
+		.call({
+			method: "marketplace_integrations.api.shopify_inventory.get_inventory_pull_drafts",
+			args: { account: frm.doc.name },
+		})
+		.then((response) => {
+			const drafts = response.message || [];
+			let message = __(
+				"Read Shopify inventory once and create ONE draft Stock Reconciliation in ERPNext? Nothing is sent to Shopify and nothing is submitted. All rows are created with valuation rate 0, so submitting the draft will set valuation to 0 for the Items it contains."
+			);
+			if (drafts.length) {
+				message +=
+					"<br><br>" +
+					__("A draft created by this action already exists for this warehouse:") +
+					" " +
+					drafts.map((name) => frappe.utils.escape_html(name)).join(", ");
+			}
+			frappe.confirm(message, () => {
+				frappe
+					.call({
+						method: "marketplace_integrations.api.shopify_inventory.queue_inventory_pull",
+						args: { account: frm.doc.name },
+						freeze: true,
+						freeze_message: __("Queuing Shopify inventory pull..."),
+					})
+					.then(() => {
+						frappe.show_alert({
+							message: __("Shopify inventory pull queued. You will be notified when it finishes."),
+							indicator: "green",
+						});
+					});
+			});
+		});
+}
+
 // #167: a pure-navigation "View" button group - no new business logic, just
 // routes to the existing Marketplace Order / Marketplace Product Mapping /
 // Marketplace Sync Log lists, each filtered to this one Marketplace Account.
@@ -718,6 +768,9 @@ if (typeof module !== "undefined") {
 		configure_outlet_management,
 		configure_shopify_location,
 		configure_shopify_inventory,
+		configure_shopify_inventory_pull,
+		pull_shopify_inventory,
+		PULL_INVENTORY_LABEL,
 		reconcile_shopify_inventory,
 		RECONCILE_INVENTORY_LABEL,
 		LOAD_SHOPIFY_GATEWAYS_LABEL,
