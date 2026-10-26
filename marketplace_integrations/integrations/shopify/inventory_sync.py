@@ -325,11 +325,10 @@ def validate_inventory_account(account):
 	return account_doc, connection
 
 
-def _validate_inventory_account_local(account, require_push_enabled=True):
+def _validate_inventory_account_local(account):
 	"""Return ``(account_doc, connection)`` checking only local platform /
 	connection / enabled / Location-set / Warehouse configuration - no
-	network call. ``require_push_enabled=False`` is for read-only callers
-	(``inventory_pull.py``) that must work with the push switch off."""
+	network call."""
 	account_doc = _as_account(account)
 	if account_doc.platform != "Shopify":
 		frappe.throw(_("Marketplace Account {0} is not a Shopify account.").format(account_doc.name))
@@ -337,7 +336,7 @@ def _validate_inventory_account_local(account, require_push_enabled=True):
 		frappe.throw(_("Marketplace Account {0} does not use a Shopify Connection.").format(account_doc.name))
 	if not account_doc.enabled:
 		frappe.throw(_("Marketplace Account {0} is disabled.").format(account_doc.name))
-	if require_push_enabled and not account_doc.shopify_inventory_push_enabled:
+	if not account_doc.shopify_inventory_push_enabled:
 		frappe.throw(_push_paused_message())
 	if not cstr(account_doc.shopify_location_gid).strip():
 		frappe.throw(
