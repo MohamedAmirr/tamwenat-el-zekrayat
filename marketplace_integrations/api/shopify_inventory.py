@@ -8,7 +8,7 @@ actual permission checks and business logic.
 
 import frappe
 
-from marketplace_integrations.integrations.shopify import inventory_pull, inventory_sync
+from marketplace_integrations.integrations.shopify import inventory_sync
 
 
 @frappe.whitelist(methods=["POST"])
@@ -26,20 +26,6 @@ def queue_account_reconciliation(account: str):
 	Account. Local checks only in this request. See
 	integrations/shopify/inventory_sync.py::queue_account_reconciliation()."""
 	return inventory_sync.queue_account_reconciliation(account)
-
-
-@frappe.whitelist(methods=["POST"])
-def queue_inventory_pull(account: str):
-	"""Authorize and enqueue the one-time "Pull Shopify Inventory to Draft Stock
-	Reconciliation" job. See integrations/shopify/inventory_pull.py."""
-	return inventory_pull.queue_inventory_pull(account)
-
-
-@frappe.whitelist()
-def get_inventory_pull_drafts(account: str):
-	"""Existing draft Stock Reconciliations made by the pull for this account's
-	warehouse (shown as a warning before queuing another)."""
-	return inventory_pull.find_existing_drafts(account)
 
 
 @frappe.whitelist()
