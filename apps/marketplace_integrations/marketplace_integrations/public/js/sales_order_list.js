@@ -268,23 +268,35 @@
 	}
 
 	// Fresh server defaults (COD) under the values the operator already used, including the
-	// city. If the defaults can no longer be read, the used values stand alone.
+	// city. The server's COD stays the default (cod_amount); the amount the operator sent is
+	// carried separately as retry_cod_amount (the server's own stored retry amount wins). If the
+	// defaults can no longer be read, the used values stand alone.
 	function retry_entry(order) {
-		const used = {
+		const defined = (values) =>
+			Object.fromEntries(Object.entries(values).filter(([, value]) => value !== undefined && value !== null));
+		const used = defined({
 			receiver_name: order.receiver_name,
 			receiver_phone: order.receiver_phone,
 			address_first_line: order.address_first_line,
 			city_id: order.city_id,
-			cod_amount: order.cod_amount,
-		};
-		const retry_cod = order.cod_amount ?? order.expected_cod;
+		});
 		const fallback = {
 			sales_order: order.sales_order,
-			defaults: { ...used, cod_amount: retry_cod, retry_cod_amount: retry_cod, currency: "EGP" },
+			defaults: defined({ ...used, cod_amount: order.cod_amount ?? order.expected_cod }),
 		};
 		return frappe
 			.call({ method: DEFAULTS_METHOD, type: "POST", silent: true, args: { sales_order: order.sales_order } })
-			.then((r) => ({ sales_order: order.sales_order, defaults: { ...(r.message || {}), ...used } }))
+			.then((r) => {
+				const server = r.message || {};
+				return {
+					sales_order: order.sales_order,
+					defaults: {
+						...server,
+						...used,
+						...defined({ retry_cod_amount: server.retry_cod_amount ?? order.cod_amount }),
+					},
+				};
+			})
 			.catch(() => fallback);
 	}
 

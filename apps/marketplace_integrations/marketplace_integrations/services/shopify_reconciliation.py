@@ -235,15 +235,22 @@ def get_total_order_value_in_range(from_date=None, to_date=None):
 def get_sales_order_sync_success_rate_in_range(from_date=None, to_date=None):
 	"""Of the Shopify orders received in the given date range, what fraction
 	have ``erpnext_sync_status = Synced`` (as opposed to ``Sync Error``,
-	``Not Synced``, or ``Modified After Sync``).
+	``Not Synced``, or ``Modified After Sync``). ``Cancelled`` orders (cancelled
+	before any Sales Order was needed, #353) are left out of the denominator.
 
 	Returns ``{"rate": float | None, "numerator": int, "denominator": int}``.
 	``rate`` is ``None`` (not a ZeroDivisionError) when no orders were
 	received in range.
 	"""
 	require_shopify_reader()
-	filters = [["platform", "=", "Shopify"], *_date_range_filters("received_on", from_date, to_date)]
-	rows = frappe.get_list("Marketplace Order", filters=filters, fields=["erpnext_sync_status"], limit_page_length=0)
+	filters = [
+		["platform", "=", "Shopify"],
+		["erpnext_sync_status", "!=", "Cancelled"],
+		*_date_range_filters("received_on", from_date, to_date),
+	]
+	rows = frappe.get_list(
+		"Marketplace Order", filters=filters, fields=["erpnext_sync_status"], limit_page_length=0
+	)
 	denominator = len(rows)
 	numerator = sum(1 for row in rows if row.erpnext_sync_status == "Synced")
 	rate = (numerator / denominator * 100) if denominator else None

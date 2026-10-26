@@ -93,6 +93,40 @@
 		return content ? `<h5>${frappe.utils.escape_html(__(title))}</h5><table class="table table-bordered"><tbody>${content}</tbody></table>` : "";
 	}
 
+	// Which amounts each platform stores; zero rows are dropped except the always-shown ones.
+	// Shopify amounts are stored in the shop currency (shopMoney). Talabat's payload carries no
+	// currency and Noon stores no order amounts, so no currency is claimed for those.
+	const MARKETPLACE_AMOUNTS = {
+		Shopify: [
+			["sub_total", "Subtotal"], ["discount", "Discount"], ["shipping_total", "Shipping Total"],
+			["total_taxes", "Total Taxes"], ["duties_total", "Duties Total"], ["order_total", "Order Total", true],
+		],
+		Talabat: [
+			["sub_total", "Subtotal"], ["discount", "Discount"], ["delivery_fee", "Delivery Fee"],
+			["service_fee", "Service Fee"], ["container_charge", "Container Charge"],
+			["difference_to_minimum", "Difference to Minimum"], ["total_taxes", "Total Taxes"],
+			["order_total", "Order Total", true],
+			["collect_at_pickup", "Cash Talabat says should be collected at delivery", true],
+		],
+	};
+	const PAYMENT_ENTRY_STATUS = { 0: "Draft", 1: "Submitted", 2: "Cancelled" };
+
+	function marketplace_amount(value, currency) {
+		const number = Number(value || 0);
+		if (currency && typeof format_currency === "function") return format_currency(number, currency);
+		return typeof format_number === "function" ? format_number(number, null, 2) : String(number);
+	}
+
+	function marketplace_datetime(value) {
+		return value && frappe.datetime && frappe.datetime.str_to_user ? frappe.datetime.str_to_user(value) : value;
+	}
+
+	// The same rule as the Marketplace Order form's add_erpnext_sync_action
+	// (marketplace_order.js); marketplace_order.test.js asserts the two stay in step.
+	function should_offer_erpnext_sync(order) {
+		return !(order.erpnext_sales_order && order.erpnext_sync_status === "Synced");
+	}
+
 	function marketplace_summary_html(summary) {
 		const escape = frappe.utils.escape_html;
 		const href = `/app/marketplace-order/${encodeURIComponent(summary.name)}`;
@@ -103,36 +137,36 @@
 			marketplace_row("Order Status", summary.status),
 			marketplace_row("Financial Status", summary.financial_status),
 			marketplace_row("Fulfillment Status", summary.fulfillment_status),
+			marketplace_row("Cancelled At", marketplace_datetime(summary.cancelled_at)),
+			marketplace_row("Cancellation Reason", summary.cancellation_reason),
+			marketplace_row("Received On", marketplace_datetime(summary.received_on)),
+			marketplace_row("Last Platform Update On", marketplace_datetime(summary.last_platform_update_on)),
 		]);
 		const customer = marketplace_section("Customer and Delivery", [
 			marketplace_row("Customer", summary.customer), marketplace_row("Phone", summary.phone),
 			marketplace_row("Email", summary.email), marketplace_row("Delivery Address", summary.address),
 			marketplace_row("City", summary.city),
 		]);
-		const amount_labels = {
-			sub_total: "Subtotal", discount: "Discount", order_total: "Order Total", total_taxes: "Total Taxes",
-			shipping_total: "Shipping Total", duties_total: "Duties Total", delivery_fee: "Delivery Fee",
-			service_fee: "Service Fee", container_charge: "Container Charge", difference_to_minimum: "Difference to Minimum",
-		};
 		const amounts = summary.amounts || {};
-		const amount_rows = Object.entries(amount_labels).map(([key, label]) =>
-			marketplace_row(label, `${amounts[key] ?? 0} ${amounts.presentment_currency || amounts.shop_currency || ""}`)
-		);
-		if (summary.platform === "Talabat") amount_rows.push(marketplace_row("Cash Talabat says should be collected at delivery", `${amounts.collect_at_pickup ?? 0} ${amounts.shop_currency || ""}`));
+		const amount_rows = (MARKETPLACE_AMOUNTS[summary.platform] || [])
+			.filter(([key, , always]) => always || Number(amounts[key] || 0) !== 0)
+			.map(([key, label]) => marketplace_row(label, marketplace_amount(amounts[key], amounts.currency)));
 		const payment_rows = [];
 		if (summary.platform === "Talabat") payment_rows.push(marketplace_row("Talabat Payment Type", summary.payment_type));
 		if (summary.platform === "Shopify") for (const transaction of summary.payment_transactions || []) {
 			payment_rows.push(marketplace_row("Transaction", [transaction.kind, transaction.status, transaction.gateway, transaction.amount, transaction.currency, transaction.errorCode].filter(Boolean).join(" · ")));
 		}
 		if (summary.platform === "Shopify") for (const entry of summary.mirrored_entries || []) {
-			payment_rows.push(marketplace_row("Mirrored Payment Entry", [entry.name, entry.docstatus === 1 ? __("Submitted") : __("Draft"), entry.paid_amount, entry.custom_marketplace_transaction_id].filter(Boolean).join(" · ")));
+			payment_rows.push(marketplace_row("Mirrored Payment Entry", [entry.name, __(PAYMENT_ENTRY_STATUS[entry.docstatus] || "Draft"), entry.paid_amount, entry.custom_marketplace_transaction_id].filter(Boolean).join(" · ")));
 		}
 		if (summary.platform === "Shopify" && summary.latest_payment_log) {
-			payment_rows.push(marketplace_row("Latest Payment Sync", [summary.latest_payment_log.status, summary.latest_payment_log.attempted_at, summary.latest_payment_log.response_data].filter(Boolean).join(" · ")));
+			const log = summary.latest_payment_log;
+			payment_rows.push(marketplace_row("Latest Payment Sync", [__(log.status), marketplace_datetime(log.attempted_at), log.message].filter(Boolean).join(" · ")));
 		}
 		const payment = marketplace_section("Payment", payment_rows);
 		const sync = marketplace_section("ERPNext Synchronization", [
 			marketplace_row("ERPNext Sync Status", summary.erpnext_sync_status),
+			marketplace_row("Last ERPNext Sync On", marketplace_datetime(summary.last_erpnext_sync_on)),
 			marketplace_row("Last Sync Error", summary.last_sync_error),
 		]);
 		return `${identity}${customer}${marketplace_section("Amounts", amount_rows)}${payment}${sync}<p><a class="btn btn-default" href="${escape(href)}">${escape(__("Open Marketplace Order"))}</a></p>`;
@@ -165,7 +199,7 @@
 				if (refresh) {
 					field.$wrapper.append(`<p><button class="btn btn-default" data-marketplace-action="refresh">${frappe.utils.escape_html(__(refresh[1]))}</button></p>`);
 				}
-				if (!(summary.erpnext_sales_order && summary.erpnext_sync_status === "Synced")) {
+				if (should_offer_erpnext_sync(summary)) {
 					const label = summary.erpnext_sales_order ? "Update ERPNext Order" : "Send to ERPNext";
 					field.$wrapper.append(`<p><button class="btn btn-primary" data-marketplace-action="sync">${frappe.utils.escape_html(__(label))}</button></p>`);
 				}
@@ -648,6 +682,8 @@
 					label: __("COD Amount"),
 					reqd: 1,
 					default: defaults.retry_cod_amount ?? defaults.cod_amount,
+					// A retry resumes the existing shipment, which keeps the COD already used.
+					read_only: defaults.retry_cod_amount === undefined || defaults.retry_cod_amount === null ? 0 : 1,
 					options: "currency",
 					description: __(
 						"Enter an amount from 0 to {0} in the company currency.",
@@ -803,6 +839,15 @@
 				"COD is the Sales Order total minus advance payments recorded on the Sales Order. Payments made against a Sales Invoice are not seen, and a partly delivered order still uses the whole-order amount."
 			)
 		)}</p>`;
+		const retry_cod = defaults.retry_cod_amount;
+		if (retry_cod !== undefined && retry_cod !== null && Number(retry_cod) !== Number(defaults.cod_amount || 0)) {
+			html += `<p><b>${escape(
+				__("This retry sends the COD entered earlier, {0}, not the current outstanding amount, {1}.", [
+					format_currency(retry_cod),
+					format_currency(defaults.cod_amount || 0),
+				])
+			)}</b></p>`;
+		}
 		if (defaults.advance_paid) {
 			html += `<p>${escape(
 				__("Order total {0}, less payments already received {1}.", [
@@ -1180,6 +1225,7 @@
 			load_platform_option,
 			needs_no_dialog,
 			marketplace_summary_html,
+			should_offer_erpnext_sync,
 			on_after_cancel,
 			on_refresh,
 			reason_field,

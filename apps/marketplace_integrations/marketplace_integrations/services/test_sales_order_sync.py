@@ -2370,7 +2370,10 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 	def test_shopify_order_cancelled_before_a_sales_order_is_a_terminal_skip(self):
 		account = self._make_shopify_account()
-		order, _mapping = self._make_shopify_order(account, cancelled_at=now_datetime())
+		# Unpaid: a cancelled order that is still PAID is a Sync Error asking for a refund (#353).
+		order, _mapping = self._make_shopify_order(
+			account, cancelled_at=now_datetime(), financial_status="VOIDED"
+		)
 
 		result = sync_sales_order(order.name)
 		order.reload()

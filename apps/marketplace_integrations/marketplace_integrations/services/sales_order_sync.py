@@ -56,6 +56,11 @@ from marketplace_integrations.marketplace_integrations.doctype.marketplace_produ
 )
 from marketplace_integrations.services.account_warehouse import validate_account_warehouse
 from marketplace_integrations.services.mappings import resolve_mapping_and_item
+from marketplace_integrations.services.marketplace_order_reconciliation import (
+	CANCELLED_PAID_ERROR,
+	CANCELLED_PAID_STATUSES,
+	CANCELLED_UNPAID_STATUSES,
+)
 from marketplace_integrations.services.marketplace_outbound import platform_instruction
 from marketplace_integrations.services.sales_order_reconciliation import (
 	CANCEL_ORDER,
@@ -328,17 +333,7 @@ def _skip_cancelled_before_sync(order, trigger_source):
 	financial statuses are left untouched for manual review. No Sales Order,
 	customer, or Payment Entry is created on this path.
 	"""
-	known_statuses = {
-		"PENDING",
-		"VOIDED",
-		"EXPIRED",
-		"AUTHORIZED",
-		"REFUNDED",
-		"PAID",
-		"PARTIALLY_PAID",
-		"PARTIALLY_REFUNDED",
-	}
-	if order.external_financial_status not in known_statuses:
+	if order.external_financial_status not in CANCELLED_UNPAID_STATUSES | CANCELLED_PAID_STATUSES:
 		result = {
 			"ok": False,
 			"status": order.erpnext_sync_status,
@@ -346,12 +341,9 @@ def _skip_cancelled_before_sync(order, trigger_source):
 		}
 		_create_sync_log(order, trigger_source, "Invalid", None, result)
 		return result
-	paid_statuses = {"PAID", "PARTIALLY_PAID", "PARTIALLY_REFUNDED"}
-	if order.external_financial_status in paid_statuses:
+	if order.external_financial_status in CANCELLED_PAID_STATUSES:
 		status = "Sync Error"
-		error = _(
-			"Cancelled in Shopify but the payment was not fully refunded; refund it in Shopify"
-		)
+		error = _(CANCELLED_PAID_ERROR)
 	else:
 		status = "Cancelled"
 		error = None

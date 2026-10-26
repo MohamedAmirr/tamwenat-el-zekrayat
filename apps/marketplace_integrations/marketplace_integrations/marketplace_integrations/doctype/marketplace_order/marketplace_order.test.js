@@ -36,6 +36,7 @@ global.frappe = {
 
 const {
 	add_clear_edit_marker_button,
+	should_offer_erpnext_sync,
 	add_order_actions,
 	build_cart_update_items,
 	cancel_order,
@@ -756,5 +757,19 @@ test("Clear edit marker is offered only to a System Manager while a marker is se
 		assert.equal(alerts[0].indicator, "green");
 	} finally {
 		Object.assign(global.frappe, original);
+	}
+});
+
+test("the Marketplace Order form and the Sales Order tab offer the ERPNext sync under the same rule", () => {
+	const sales_order_rule = require("../../../public/js/sales_order.js").should_offer_erpnext_sync;
+	for (const order of [
+		{ erpnext_sales_order: "", erpnext_sync_status: "Not Synced" },
+		{ erpnext_sales_order: "SO-1", erpnext_sync_status: "Synced" },
+		{ erpnext_sales_order: "SO-1", erpnext_sync_status: "Modified After Sync" },
+		{ erpnext_sales_order: "", erpnext_sync_status: "Synced" },
+		{ erpnext_sales_order: "SO-1", erpnext_sync_status: "Sync Error" },
+		{ erpnext_sales_order: "", erpnext_sync_status: "Cancelled" },
+	]) {
+		assert.equal(should_offer_erpnext_sync(order), sales_order_rule(order), JSON.stringify(order));
 	}
 });

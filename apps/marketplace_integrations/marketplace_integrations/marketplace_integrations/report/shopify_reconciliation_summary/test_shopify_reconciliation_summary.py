@@ -212,6 +212,17 @@ class IntegrationTestShopifyReconciliationSummaryReport(IntegrationTestCase):
 		self.assertGreaterEqual(result["numerator"], 1)
 		self.assertTrue(order.name)
 
+	def test_sales_order_sync_success_rate_leaves_cancelled_orders_out_of_the_denominator(self):
+		received_on = "2001-01-01 10:00:00"
+		make_shopify_order(self.account.name, received_on=received_on, erpnext_sync_status="Synced")
+		make_shopify_order(self.account.name, received_on=received_on, erpnext_sync_status="Cancelled")
+
+		result = get_sales_order_sync_success_rate_in_range(from_date="2001-01-01", to_date="2001-01-02")
+
+		self.assertEqual(result["denominator"], 1)
+		self.assertEqual(result["numerator"], 1)
+		self.assertEqual(result["rate"], 100.0)
+
 	def test_sales_order_sync_success_rate_zero_denominator_does_not_crash(self):
 		result = get_sales_order_sync_success_rate_in_range(
 			from_date="2000-01-01", to_date="2000-01-02"

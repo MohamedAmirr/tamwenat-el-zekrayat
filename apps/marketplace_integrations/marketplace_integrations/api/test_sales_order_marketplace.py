@@ -71,14 +71,84 @@ class IntegrationTestSalesOrderMarketplaceSummary(IntegrationTestCase):
 				"trigger_source": "Manual",
 				"status": "Error",
 				"attempted_at": frappe.utils.now_datetime(),
-				"response_data": '{"error":"gateway declined"}',
+				"response_data": '{"status":"Invalid","message":"gateway declined"}',
 			}
 		).insert(ignore_permissions=True)
 
 		log = self._call_as("Administrator")["latest_payment_log"]
 
 		self.assertEqual(log["status"], "Error")
-		self.assertIn("gateway declined", log["response_data"])
+		self.assertEqual(log["message"], "gateway declined")
+		self.assertNotIn("response_data", log)
+
+	def test_shopify_amounts_use_the_shop_currency_and_the_timeline_fields_are_returned(self):
+		frappe.db.set_value(
+			"Marketplace Order",
+			self.order.name,
+			{
+				"presentment_currency": "USD",
+				"cancelled_at": "2026-10-01 09:00:00",
+				"cancellation_reason": "customer",
+				"received_on": "2026-09-30 08:00:00",
+				"last_platform_update_on": "2026-10-02 10:00:00",
+				"last_erpnext_sync_on": "2026-10-02 11:00:00",
+			},
+		)
+
+		summary = self._call_as("Administrator")
+
+		self.assertEqual(summary["amounts"]["currency"], "EGP")
+		self.assertEqual(summary["cancellation_reason"], "customer")
+		for key in ("cancelled_at", "received_on", "last_platform_update_on", "last_erpnext_sync_on"):
+			self.assertTrue(summary[key], key)
+
+	def test_talabat_and_noon_summaries_claim_no_currency(self):
+		frappe.db.set_value(
+			"Marketplace Order",
+			self.order.name,
+			{"platform": "Talabat", "payment_type": "CASH", "collect_at_pickup": 80, "shop_currency": "EGP"},
+		)
+		talabat = self._call_as("Administrator")
+		self.assertEqual(talabat["platform"], "Talabat")
+		self.assertEqual(talabat["payment_type"], "CASH")
+		self.assertEqual(talabat["amounts"]["collect_at_pickup"], 80)
+		self.assertEqual(talabat["amounts"]["currency"], "")
+
+		frappe.db.set_value("Marketplace Order", self.order.name, "platform", "Noon")
+		noon = self._call_as("Administrator")
+		self.assertEqual(noon["platform"], "Noon")
+		self.assertEqual(noon["amounts"]["currency"], "")
+
+	def test_the_kashier_example_returns_all_three_transactions_in_order(self):
+		frappe.db.set_value(
+			"Marketplace Order",
+			self.order.name,
+			"payment_transactions",
+			frappe.as_json(
+				[
+					{"id": "1", "kind": "SALE", "status": "ERROR", "gateway": "Paymob"},
+					{"id": "2", "kind": "SALE", "status": "FAILURE", "gateway": "Kashier"},
+					{"id": "3", "kind": "SALE", "status": "SUCCESS", "gateway": "Kashier"},
+				]
+			),
+		)
+
+		transactions = self._call_as("Administrator")["payment_transactions"]
+
+		self.assertEqual([t["status"] for t in transactions], ["ERROR", "FAILURE", "SUCCESS"])
+		self.assertEqual([t["gateway"] for t in transactions], ["Paymob", "Kashier", "Kashier"])
+
+	def test_platform_role_filter_applies_to_the_summary(self):
+		perms = {"Sales Order": ["read"], "Marketplace Order": ["read"]}
+		shopify_user, _role = make_role_user(self, "SO Summary Shopify", perms)
+		noon_user, _role = make_role_user(self, "SO Summary Noon", perms)
+		frappe.get_doc("User", shopify_user).add_roles("Shopify User")
+		frappe.get_doc("User", noon_user).add_roles("Noon User")
+		frappe.clear_cache(user=shopify_user)
+		frappe.clear_cache(user=noon_user)
+
+		self.assertEqual(self._call_as(shopify_user)["name"], self.order.name)
+		self.assertIsNone(self._call_as(noon_user))
 
 	def test_sales_order_reader_without_marketplace_read_gets_no_marketplace_data(self):
 		email, _role = make_role_user(self, "SO Summary No MO", {"Sales Order": ["read"]})

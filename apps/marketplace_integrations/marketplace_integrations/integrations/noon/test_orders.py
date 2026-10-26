@@ -1683,10 +1683,107 @@ class IntegrationTestNoonPoll(IntegrationTestCase):
 
 	def tearDown(self):
 		frappe.db.delete("Marketplace Order", filters={"marketplace_account": self.account.name})
+		frappe.db.delete("Marketplace Sync Log", filters={"marketplace_account": self.account.name})
 		frappe.db.delete("Marketplace Product Mapping", filters={"marketplace_account": self.account.name})
 		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
 		frappe.delete_doc("Noon Connection", self.account.connection, ignore_permissions=True, force=True)
 		frappe.db.commit()
+
+	def _unlinked_order(self, fbpi_order_nr):
+		with patch("marketplace_integrations.integrations.noon.orders.NoonClient"):
+			order, _unmapped = import_order(self.account, _order_payload(fbpi_order_nr=fbpi_order_nr))
+		# The import itself may schedule the first sync; start each test from none pending.
+		frappe.db.set_value(
+			"Marketplace Order",
+			order.name,
+			{"sync_debounce_until": None, "pending_sync_trigger_source": None},
+			update_modified=False,
+		)
+		return order.name
+
+	def _debounce(self, name):
+		return frappe.db.get_value(
+			"Marketplace Order", name, ["sync_debounce_until", "pending_sync_trigger_source"], as_dict=True
+		)
+
+	def _run(self, trigger_source, catch_up_unlinked, import_result=([], [])):
+		from marketplace_integrations.integrations.noon.orders import run_order_import
+
+		base = "marketplace_integrations.integrations.noon.orders"
+		with (
+			patch(f"{base}.validate_connection_enabled"),
+			patch(f"{base}._validate_order_import_setup"),
+			patch(f"{base}.import_orders_created_between", return_value=import_result),
+		):
+			return run_order_import(
+				self.account.name, trigger_source, catch_up_unlinked=catch_up_unlinked
+			)
+
+	def test_hourly_poll_does_not_run_the_catch_up(self):
+		name = self._unlinked_order("ORD-HOURLY")
+
+		result = self._run("Scheduled Reconciliation", catch_up_unlinked=False)
+
+		self.assertEqual(result["scheduled"], 0)
+		self.assertIsNone(self._debounce(name).sync_debounce_until)
+		self.assertFalse(
+			frappe.db.exists(
+				"Marketplace Sync Log",
+				{"marketplace_account": self.account.name, "trigger_source": "Scheduled Reconciliation"},
+			)
+		)
+
+	def test_catch_up_schedules_unlinked_orders_skips_cancelled_and_linked_and_logs_a_summary(self):
+		unlinked = self._unlinked_order("ORD-UNLINKED")
+		cancelled = self._unlinked_order("ORD-CANCELLED")
+		frappe.db.set_value("Marketplace Order", cancelled, "erpnext_sync_status", "Cancelled")
+		linked = self._unlinked_order("ORD-LINKED")
+		fixture = LinkedSalesOrderFixture()
+		self.addCleanup(fixture.cleanup)
+		fixture.link(linked)
+
+		result = self._run("Scheduled Reconciliation", catch_up_unlinked=True, import_result=([1, 2], [3]))
+
+		self.assertEqual(result, {"imported": 2, "errors": 1, "scheduled": 1})
+		state = self._debounce(unlinked)
+		self.assertIsNotNone(state.sync_debounce_until)
+		self.assertEqual(state.pending_sync_trigger_source, "Scheduled Reconciliation")
+		self.assertIsNone(self._debounce(cancelled).sync_debounce_until)
+		self.assertIsNone(self._debounce(linked).sync_debounce_until)
+		log = frappe.get_all(
+			"Marketplace Sync Log",
+			filters={"marketplace_account": self.account.name, "trigger_source": "Scheduled Reconciliation"},
+			fields=["status", "response_data"],
+		)
+		self.assertEqual(len(log), 1)
+		self.assertEqual(log[0].status, "Error")
+		self.assertEqual(
+			frappe.parse_json(log[0].response_data),
+			{"imported": 2, "first_syncs_scheduled": 1, "failures": 1},
+		)
+
+	def test_catch_up_run_twice_does_not_push_the_pending_window_forward(self):
+		name = self._unlinked_order("ORD-TWICE")
+
+		self._run("Scheduled Reconciliation", catch_up_unlinked=True)
+		first = self._debounce(name).sync_debounce_until
+		self._run("Scheduled Reconciliation", catch_up_unlinked=True)
+
+		self.assertEqual(self._debounce(name).sync_debounce_until, first)
+
+	def test_catch_up_has_its_own_job_id_so_it_is_not_deduplicated_against_the_hourly_job(self):
+		from marketplace_integrations.integrations.noon.orders import enqueue_order_import
+
+		with patch("marketplace_integrations.integrations.noon.orders.frappe.enqueue") as enqueue:
+			enqueue_order_import(self.account.name, trigger_source="Scheduled Reconciliation")
+			enqueue_order_import(
+				self.account.name, trigger_source="Scheduled Reconciliation", catch_up_unlinked=True
+			)
+
+		hourly, nightly = (call.kwargs for call in enqueue.call_args_list)
+		self.assertNotEqual(hourly["job_id"], nightly["job_id"])
+		self.assertFalse(hourly["catch_up_unlinked"])
+		self.assertTrue(nightly["catch_up_unlinked"])
 
 	def test_poll_all_accounts_enqueues_one_deduplicated_job_per_account(self):
 		"""poll_all_accounts() is lightweight (post-#145-review fix): it never
@@ -1721,6 +1818,7 @@ class IntegrationTestNoonPoll(IntegrationTestCase):
 			deduplicate=True,
 			account_name=self.account.name,
 			trigger_source="Scheduled Reconciliation",
+			catch_up_unlinked=False,
 		)
 		# Result contains the count of all enabled accounts queued (including
 		# stale ones from prior test runs), so just verify it's present and >= 1

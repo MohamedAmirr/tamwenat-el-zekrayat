@@ -54,7 +54,7 @@ import hashlib
 import json
 
 import frappe
-from frappe.utils import add_to_date, cstr, flt, getdate, now_datetime
+from frappe.utils import add_to_date, cstr, flt, get_datetime, getdate, now_datetime
 
 from marketplace_integrations.integrations.shopify.order_reconciliation import refund_ids
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_order.marketplace_order import (
@@ -92,6 +92,21 @@ def bump_sync_debounce(
 		},
 		update_modified=False,
 	)
+
+
+def bump_sync_debounce_unless_pending(order_row, trigger_source):
+	"""Like ``bump_sync_debounce()``, but leave an order alone when a window set by the
+	same ``trigger_source`` is still pending, so a re-run does not push it forward.
+	``order_row`` needs ``name``, ``sync_debounce_until`` and ``pending_sync_trigger_source``.
+	Returns True when the window was bumped."""
+	if (
+		order_row.pending_sync_trigger_source == trigger_source
+		and order_row.sync_debounce_until
+		and get_datetime(order_row.sync_debounce_until) > now_datetime()
+	):
+		return False
+	bump_sync_debounce(order_row.name, trigger_source)
+	return True
 
 
 _FINGERPRINT_ITEM_FIELDS = (

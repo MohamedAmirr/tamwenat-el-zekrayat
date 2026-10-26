@@ -188,7 +188,7 @@ test("linked Sales Orders load the marketplace summary and render escaped values
 			name: "MO-1", platform: "Shopify", reference: "<img src=x onerror=alert(1)>",
 			erpnext_sync_status: "Not Synced", erpnext_sales_order: "",
 			payment_transactions: [{ kind: "SALE", status: "FAILURE", gateway: "<script>bad</script>", amount: "12" }],
-			amounts: { order_total: 12, presentment_currency: "EGP" },
+			amounts: { order_total: 12, currency: "EGP" },
 		},
 	});
 	const frm = make_frm({ docstatus: 0 });
@@ -1568,4 +1568,99 @@ test("Not now and closing the Shopify edit dialog make no send call", async () =
 	assert.equal(dialogs[0].hidden, true);
 	assert.equal(edit_calls.filter((call) => call.method.endsWith("send_shopify_order_edit")).length, 0);
 	assert.equal(frm.reloads || 0, 0);
+});
+
+test("a retry locks the COD field and the note names the amount entered earlier when it differs", async () => {
+	global.format_currency = (value) => `EGP ${value}`;
+	const { module_exports } = load({ option: eligible() });
+	const note = module_exports.bosta_cod_note_html({ cod_amount: 500, retry_cod_amount: 300 });
+	assert.match(note, /sends the COD entered earlier, EGP 300, not the current outstanding amount, EGP 500/);
+	assert.doesNotMatch(
+		module_exports.bosta_cod_note_html({ cod_amount: 500, retry_cod_amount: 500 }),
+		/entered earlier/
+	);
+
+	const { dialog } = await open_bosta_dialog({ cod_amount: 500, retry_cod_amount: 300 });
+	assert.equal(dialog.df.cod_amount.default, 300);
+	assert.equal(dialog.df.cod_amount.read_only, 1);
+	const { dialog: fresh } = await open_bosta_dialog({ cod_amount: 500 });
+	assert.equal(fresh.df.cod_amount.read_only, 0);
+});
+
+const render_summary = (summary) => {
+	const { module_exports } = load();
+	return module_exports.marketplace_summary_html(summary);
+};
+
+test("mirrored Payment Entries show Draft, Submitted and Cancelled by docstatus", () => {
+	global.format_currency = (value, currency) => `${currency} ${value}`;
+	const html = render_summary({
+		name: "MO-1", platform: "Shopify",
+		mirrored_entries: [
+			{ name: "PE-0", docstatus: 0 }, { name: "PE-1", docstatus: 1 }, { name: "PE-2", docstatus: 2 },
+		],
+	});
+	assert.match(html, /PE-0 · Draft/);
+	assert.match(html, /PE-1 · Submitted/);
+	assert.match(html, /PE-2 · Cancelled/);
+});
+
+test("Shopify amounts drop zero rows and use the shop currency", () => {
+	global.format_currency = (value, currency) => `${currency} ${value}`;
+	const html = render_summary({
+		name: "MO-1", platform: "Shopify",
+		amounts: { currency: "EGP", sub_total: 100, discount: 0, shipping_total: 20, total_taxes: 0, order_total: 120, delivery_fee: 5 },
+	});
+	assert.match(html, /Subtotal<\/th><td>EGP 100</);
+	assert.match(html, /Order Total<\/th><td>EGP 120</);
+	assert.doesNotMatch(html, /Discount|Total Taxes|Delivery Fee|Duties Total/);
+});
+
+test("Talabat shows its own amounts and the cash to collect even when zero, without a currency", () => {
+	delete global.format_currency;
+	const html = render_summary({
+		name: "MO-2", platform: "Talabat", payment_type: "CASH",
+		amounts: { currency: "", sub_total: 50, delivery_fee: 10, service_fee: 0, order_total: 60, collect_at_pickup: 0, shipping_total: 7 },
+	});
+	assert.match(html, /Delivery Fee/);
+	assert.match(html, /Cash Talabat says should be collected at delivery<\/th><td>0</);
+	assert.doesNotMatch(html, /Service Fee|Shipping Total|EGP/);
+	assert.match(html, /Talabat Payment Type/);
+});
+
+test("Noon summary shows identity values and no Amounts section or Shopify payment rows", () => {
+	const html = render_summary({
+		name: "MO-3", platform: "Noon", reference: "NOON-1", erpnext_sync_status: "Synced",
+		payment_transactions: [{ kind: "SALE", status: "SUCCESS" }], amounts: { order_total: 99 },
+	});
+	assert.match(html, /NOON-1/);
+	assert.doesNotMatch(html, /Amounts|Transaction|Order Total/);
+});
+
+test("the Kashier example lists all three transactions and the latest sync shows its message, not JSON", () => {
+	const html = render_summary({
+		name: "MO-4", platform: "Shopify",
+		payment_transactions: [
+			{ kind: "SALE", status: "ERROR", gateway: "Paymob" },
+			{ kind: "SALE", status: "FAILURE", gateway: "Kashier" },
+			{ kind: "SALE", status: "SUCCESS", gateway: "Kashier" },
+		],
+		latest_payment_log: { status: "Invalid", attempted_at: "2026-10-24 10:00:00", message: "Gateway is not mapped" },
+	});
+	assert.equal((html.match(/<th>Transaction<\/th>/g) || []).length, 3);
+	assert.match(html, /SALE · ERROR · Paymob/);
+	assert.match(html, /SALE · SUCCESS · Kashier/);
+	assert.match(html, /Latest Payment Sync<\/th><td>Invalid · user:2026-10-24 10:00:00 · Gateway is not mapped/);
+	assert.doesNotMatch(html, /\{"/);
+});
+
+test("the tab shows cancellation, received, last update and last sync values", () => {
+	const html = render_summary({
+		name: "MO-5", platform: "Shopify", cancelled_at: "2026-10-01 09:00:00", cancellation_reason: "customer",
+		received_on: "2026-09-30 08:00:00", last_platform_update_on: "2026-10-02 10:00:00",
+		last_erpnext_sync_on: "2026-10-02 11:00:00", last_sync_error: "boom",
+	});
+	for (const text of ["Cancelled At", "user:2026-10-01 09:00:00", "customer", "Received On", "Last Platform Update On", "Last ERPNext Sync On", "boom"]) {
+		assert.ok(html.includes(text), text);
+	}
 });

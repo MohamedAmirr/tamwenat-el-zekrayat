@@ -629,6 +629,7 @@ class IntegrationTestReconcileAllAccountsOrders(IntegrationTestCase):
 		# revert-on-delete gotcha, see that tearDown's comment).
 		for account_name in (self.account_a.name, self.account_b.name):
 			frappe.db.delete("Marketplace Order", filters={"marketplace_account": account_name})
+			frappe.db.delete("Marketplace Sync Log", filters={"marketplace_account": account_name})
 		frappe.delete_doc("Marketplace Account", self.account_a.name, ignore_permissions=True, force=True)
 		frappe.delete_doc("Marketplace Account", self.account_b.name, ignore_permissions=True, force=True)
 		frappe.delete_doc(
@@ -683,6 +684,99 @@ class IntegrationTestReconcileAllAccountsOrders(IntegrationTestCase):
 		for call in mocked.call_args_list:
 			self.assertIs(call.kwargs.get("bump_linked_changes"), True)
 			self.assertIs(call.kwargs.get("bump_unlinked"), False)
+
+	# Nightly catch-up (#354): catch_up_unlinked=True schedules the first sync of every
+	# unlinked, non-terminal order of the account and re-checks cancelled-but-paid ones.
+
+	def _order(self, account, **values):
+		from marketplace_integrations.integrations.shopify.order_mapper import normalize_order
+		from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
+
+		gid = _order_gid(frappe.generate_hash(length=8))
+		order = upsert_marketplace_order(account.name, normalize_order(make_order_payload(gid)))
+		if values:
+			frappe.db.set_value("Marketplace Order", order.name, values, update_modified=False)
+		return order.name
+
+	def _debounce(self, name):
+		return frappe.db.get_value(
+			"Marketplace Order", name, ["sync_debounce_until", "pending_sync_trigger_source"], as_dict=True
+		)
+
+	def _catch_up(self, side_effect=None):
+		with patch.object(
+			orders, "import_orders_updated_between", side_effect=side_effect or (lambda *a, **k: ([], []))
+		):
+			orders.reconcile_all_accounts_orders(catch_up_unlinked=True)
+
+	def _summaries(self, account):
+		return frappe.get_all(
+			"Marketplace Sync Log",
+			filters={"marketplace_account": account.name, "trigger_source": "Scheduled Reconciliation"},
+			fields=["status", "response_data", "traceback"],
+		)
+
+	def test_catch_up_schedules_unlinked_and_rechecks_cancelled_but_paid_orders(self):
+		unlinked = self._order(self.account_b)
+		paid_cancel = self._order(
+			self.account_b, cancelled_at="2026-09-27 10:00:00", erpnext_sync_status="Sync Error"
+		)
+		cancelled_not_paid = self._order(self.account_b, cancelled_at="2026-09-27 10:00:00")
+		terminal = self._order(self.account_b, erpnext_sync_status="Cancelled")
+		linked = self._order(self.account_b)
+		fixture = LinkedSalesOrderFixture()
+		self.addCleanup(fixture.cleanup)
+		fixture.link(linked)
+
+		self._catch_up()
+
+		for name in (unlinked, paid_cancel):
+			state = self._debounce(name)
+			self.assertIsNotNone(state.sync_debounce_until, name)
+			self.assertEqual(state.pending_sync_trigger_source, "Scheduled Reconciliation")
+		for name in (cancelled_not_paid, terminal, linked):
+			self.assertIsNone(self._debounce(name).sync_debounce_until, name)
+		summaries = self._summaries(self.account_b)
+		self.assertEqual(len(summaries), 1)
+		self.assertEqual(summaries[0].status, "Success")
+		self.assertEqual(
+			frappe.parse_json(summaries[0].response_data),
+			{"imported": 0, "first_syncs_scheduled": 2, "failures": 0},
+		)
+
+	def test_catch_up_run_twice_does_not_push_the_pending_window_forward(self):
+		name = self._order(self.account_b)
+
+		self._catch_up()
+		first = self._debounce(name).sync_debounce_until
+		self._catch_up()
+
+		self.assertEqual(self._debounce(name).sync_debounce_until, first)
+
+	def test_catch_up_failure_of_one_account_is_logged_and_does_not_stop_the_others(self):
+		name = self._order(self.account_b)
+
+		def flaky(account, *args, **kwargs):
+			if account.name == self.account_a.name:
+				raise frappe.ValidationError("boom: account A unreachable")
+			return [], []
+
+		self._catch_up(side_effect=flaky)
+
+		self.assertIsNotNone(self._debounce(name).sync_debounce_until)
+		(failed,) = self._summaries(self.account_a)
+		self.assertEqual(failed.status, "Error")
+		self.assertIn("boom: account A unreachable", failed.traceback)
+		self.assertEqual(self._summaries(self.account_b)[0].status, "Success")
+
+	def test_the_daily_sweep_without_catch_up_does_not_schedule_unlinked_orders(self):
+		name = self._order(self.account_b)
+
+		with patch.object(orders, "import_orders_updated_between", return_value=([], [])):
+			orders.reconcile_all_accounts_orders()
+
+		self.assertIsNone(self._debounce(name).sync_debounce_until)
+		self.assertEqual(self._summaries(self.account_b), [])
 
 
 class IntegrationTestQueueOrderImportDateRange(IntegrationTestCase):
