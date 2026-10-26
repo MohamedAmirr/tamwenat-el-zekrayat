@@ -184,6 +184,36 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 			)
 		)
 
+	def test_webhook_bumps_only_a_new_order_or_one_whose_evidence_changed(self):
+		payload = _payload(self.account, order_id=f"echo-{frappe.generate_hash(length=8)}")
+		filters = {"marketplace_account": self.account.name, "external_order_id": payload["order_id"]}
+
+		process_order_event(self.account.name, payload)
+		name = frappe.db.get_value("Marketplace Order", filters, "name")
+		self.assertEqual(frappe.db.get_value("Marketplace Order", name, "erpnext_sync_status"), "Syncing")
+		self.assertTrue(frappe.db.get_value("Marketplace Order", name, "sync_debounce_until"))
+
+		# The echo of our own action: the same state arrives again, nothing is queued.
+		frappe.db.set_value(
+			"Marketplace Order",
+			name,
+			{"sync_debounce_until": None, "pending_sync_trigger_source": None, "erpnext_sync_status": "Synced"},
+		)
+		process_order_event(self.account.name, payload)
+		values = frappe.db.get_value(
+			"Marketplace Order", name, ["erpnext_sync_status", "sync_debounce_until"], as_dict=True
+		)
+		self.assertEqual(values.erpnext_sync_status, "Synced")
+		self.assertFalse(values.sync_debounce_until)
+
+		# A real change is queued.
+		process_order_event(self.account.name, {**payload, "status": "CANCELLED"})
+		values = frappe.db.get_value(
+			"Marketplace Order", name, ["erpnext_sync_status", "sync_debounce_until"], as_dict=True
+		)
+		self.assertEqual(values.erpnext_sync_status, "Syncing")
+		self.assertTrue(values.sync_debounce_until)
+
 	def test_duplicate_redelivery_creates_one_marketplace_order(self):
 		payload = _payload(self.account, order_id=f"duplicate-{frappe.generate_hash(length=8)}")
 

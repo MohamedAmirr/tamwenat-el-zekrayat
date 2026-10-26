@@ -71,7 +71,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Trigger Source",
-   "options": "Manual\nManual Resync\nShopify Webhook\nTalabat Webhook\nScheduled Reconciliation\nNoon Order Import\nNoon Webhook\nScheduled Sweep",
+   "options": "Manual\nManual Resync\nShopify Webhook\nTalabat Webhook\nScheduled Reconciliation\nNoon Order Import\nNoon Webhook\nScheduled Sweep\nERPNext Document Change",
    "reqd": 1
   },
   {
@@ -112,7 +112,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-10-22 20:00:00.000000",
+ "modified": "2026-10-26 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Marketplace Sync Log",

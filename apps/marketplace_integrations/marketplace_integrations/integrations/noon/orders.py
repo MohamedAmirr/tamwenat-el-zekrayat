@@ -35,6 +35,7 @@ import frappe
 from frappe import _
 from frappe.utils import cstr, flt
 
+from marketplace_integrations.services.sync_status import CANCELLED
 from marketplace_integrations.integrations.noon.catalog import get_account, validate_connection_enabled
 from marketplace_integrations.integrations.noon.client import NoonClient
 from marketplace_integrations.integrations.noon.constants import (
@@ -660,7 +661,7 @@ def _run_import_for_account(account_name, trigger_source, catch_up_unlinked=Fals
 				"marketplace_account": account.name,
 				"platform": "Noon",
 				"erpnext_sales_order": ["is", "not set"],
-				"erpnext_sync_status": ["!=", "Cancelled"],
+				"erpnext_sync_status": ["!=", CANCELLED],
 			}
 		)
 	if errors:

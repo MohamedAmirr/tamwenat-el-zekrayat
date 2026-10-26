@@ -524,7 +524,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.save()
 		order.reload()
 
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Syncing")
+		self.assertTrue(order.sync_debounce_until)
 		second = sync_sales_order(order.name)
 		sales_order = frappe.get_doc("Sales Order", first["sales_order"])
 		order.reload()
@@ -555,7 +556,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.save()
 		order.reload()
 
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Syncing")
+		self.assertTrue(order.sync_debounce_until)
 		second = sync_sales_order(order.name)
 		sales_order = frappe.get_doc("Sales Order", first["sales_order"])
 		order.reload()
@@ -582,7 +584,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.save()
 		order.reload()
 
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Syncing")
+		self.assertTrue(order.sync_debounce_until)
 		second = sync_sales_order(order.name)
 		sales_order = frappe.get_doc("Sales Order", first["sales_order"])
 		order.reload()
@@ -835,7 +838,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 		self.assertIn("already rolled back; verify the Sales Order state", order.last_sync_error)
 
 	def test_failure_after_a_successful_reopen_rolls_the_reopen_back(self):
@@ -869,10 +872,10 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		result = sync_sales_order(order.name)
 		order.reload()
 
-		self.assertEqual(status, "Modified After Sync")
+		self.assertEqual(status, "Needs Action")
 		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
 		self.assertNotIn("reopen", result["reconciliation"])
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 		self.assertIn("still expects fulfillment", order.last_sync_error)
 		self.assertEqual(self._baseline(order), baseline)
 		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "status"), "Closed")
@@ -916,10 +919,10 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 		execute.assert_not_called()
 		update_status.assert_not_called()
-		self.assertEqual(status, "Modified After Sync")
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
-		self.assertIn("reopened", order.last_sync_error)
-		self.assertNotIn("not yet enabled", order.last_sync_error)
+		self.assertEqual(status, "Syncing")
+		self.assertEqual(order.erpnext_sync_status, "Syncing")
+		self.assertTrue(order.sync_debounce_until)
+		self.assertEqual(order.pending_sync_trigger_source, "Manual")
 		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "status"), "Closed")
 
 	# --- #181: echo of an outbound platform cancel ------------------------------
@@ -1043,7 +1046,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.reload()
 
 		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 		self.assertIn("no longer an active submitted document", order.last_sync_error)
 		self.assertIn("Cancel the order on Talabat", order.last_sync_error)
 
@@ -1057,7 +1060,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		result = sync_sales_order(order.name)
 		order.reload()
 
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 		self.assertIn("no longer an active submitted document", order.last_sync_error)
 		self.assertIn("can no longer be cancelled from ERPNext", order.last_sync_error)
 		self.assertNotIn("executed_action", result)
@@ -1271,7 +1274,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.items[0].fulfilled_unit_price = 499.5
 		order.save()
 		order.reload()
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Syncing")
+		self.assertTrue(order.sync_debounce_until)
 		frappe.db.set_value(
 			"Sales Order Item",
 			sales_order.items[0].name,
@@ -1325,7 +1329,9 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 		self.assertEqual(result["reconciliation"]["outcome"], "UNSUPPORTED_COMPENSATING_TRANSACTION")
 
-	def test_submitted_order_without_stored_snapshot_needs_attention(self):
+	def test_missing_baseline_is_adopted_when_marketplace_and_erpnext_match(self):
+		# #364 case 4: the stored baseline is gone but the current marketplace state and the
+		# submitted Sales Order are proven equivalent, so the baseline is adopted.
 		order = self._make_order()
 		self._sync_and_set_item_fields(order)
 		frappe.db.set_value("Marketplace Order", order.name, "last_synced_snapshot", None)
@@ -1333,9 +1339,27 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		result = sync_sales_order(order.name)
 		order.reload()
 
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["reconciliation"]["outcome"], "NO_ACTION")
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertTrue(order.last_synced_snapshot)
+		lines = frappe.parse_json(order.last_synced_snapshot)["items"]
+		self.assertTrue(all(line["sales_order_item"] for line in lines))
+
+	def test_missing_baseline_needs_action_when_erpnext_differs(self):
+		order = self._make_order()
+		sales_order = self._sync_and_set_item_fields(order)
+		frappe.db.set_value("Marketplace Order", order.name, "last_synced_snapshot", None)
+		frappe.db.set_value("Sales Order Item", sales_order.items[0].name, "qty", 5)
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
 		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
 		self.assertIn("No reconciled snapshot baseline", order.last_sync_error)
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
+		self.assertEqual(order.sync_reason_code, "NO_BASELINE")
+		self.assertFalse(order.last_synced_snapshot)
 
 	def test_backfill_patch_writes_matching_baselines_but_only_relabels_submitted_orders(self):
 		submitted = self._make_order()
@@ -1397,9 +1421,10 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.save()
 		order.reload()
 
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
-		self.assertNotIn("stale error", cstr(order.last_sync_error))
-		self.assertTrue(order.last_sync_error)
+		self.assertEqual(order.erpnext_sync_status, "Syncing")
+		self.assertTrue(order.sync_debounce_until)
+		# The stale error is gone once a new sync is queued.
+		self.assertFalse(order.last_sync_error)
 		frappe.db.set_value("Sales Order", sales_order.name, "docstatus", 1)
 
 	def test_current_status_does_not_hide_submitted_sales_order_erp_drift(self):
@@ -1415,7 +1440,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 					frappe.db.set_value("Sales Order", sales_order.name, field, value)
 				order.reload()
 
-				self.assertEqual(get_current_sync_status(order.name), "Modified After Sync")
+				self.assertEqual(get_current_sync_status(order.name), "Needs Action")
 				order.reload()
 				self.assertIn("ERPNext Sales Order", order.last_sync_error)
 				frappe.db.set_value("Sales Order", sales_order.name, "status", "To Deliver and Bill")
@@ -1474,7 +1499,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		execute.assert_not_called()
 		self.assertNotIn("executed_action", result)
 		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 		self.assertEqual(frappe.db.get_value("Sales Order", sales_order.name, "docstatus"), 1)
 
 	def test_permission_error_during_execution_becomes_sync_error(self):
@@ -1658,7 +1683,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 				update.assert_not_called()
 				self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
 				self.assertEqual(self._baseline(order), baseline)
-				self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+				self.assertEqual(order.erpnext_sync_status, "Needs Action")
 
 	def test_reduction_below_delivered_quantity_needs_attention_without_calling_erpnext(self):
 		order = self._synced_talabat_order()
@@ -1716,7 +1741,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
 		self.assertIn("cannot reproduce the marketplace amounts", result["error"])
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 		self.assertEqual(self._baseline(order), baseline)
 		row = frappe.db.get_value(
 			"Sales Order Item", {"parent": order.erpnext_sales_order}, ["qty", "amount"], as_dict=True
@@ -1957,7 +1982,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			order.save()
 			get_current_sync_status(order.name)
 		update.assert_not_called()
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Syncing")
+		self.assertTrue(order.sync_debounce_until)
 		self.assertEqual(
 			frappe.db.get_value("Sales Order Item", {"parent": order.erpnext_sales_order}, "qty"), 2
 		)
@@ -1977,7 +2003,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 	def test_current_snapshot_sync_status_stays_plan_only_for_close_remainder(self):
 		order, sales_order = self._cancelled_talabat_order(delivered_qty=1)
 
-		self.assertEqual(get_current_sync_status(order.name), "Modified After Sync")
+		self.assertEqual(get_current_sync_status(order.name), "Syncing")
 		self.assertEqual(
 			frappe.db.get_value("Sales Order", sales_order.name, "status"), "To Deliver and Bill"
 		)
@@ -1990,14 +2016,14 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		frappe.db.set_value(
 			"Sales Order Item", sales_order.items[0].name, "amount", sales_order.items[0].amount + 1
 		)
-		self.assertEqual(get_current_sync_status(order.name), "Modified After Sync")
+		self.assertEqual(get_current_sync_status(order.name), "Needs Action")
 		order.reload()
 		rate_drift_reason = order.last_sync_error
 		self.assertIn("no longer represents", rate_drift_reason)
 
 		# Cancelled (not Closed: a Closed order is judged as the open order it would be, #180).
 		frappe.db.set_value("Sales Order", sales_order.name, "status", "Cancelled")
-		self.assertEqual(get_current_sync_status(order.name), "Modified After Sync")
+		self.assertEqual(get_current_sync_status(order.name), "Needs Action")
 		order.reload()
 
 		self.assertNotEqual(order.last_sync_error, rate_drift_reason)
@@ -2070,7 +2096,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.reload()
 
 		self.assertEqual(result["reconciliation"]["outcome"], "UNSUPPORTED_COMPENSATING_TRANSACTION")
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 
 	def test_submitted_shopify_refund_that_zeroes_every_undelivered_line_cancels_the_order(self):
 		account = self._make_shopify_account()
@@ -2141,7 +2167,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["reconciliation"]["outcome"], "UNSUPPORTED_COMPENSATING_TRANSACTION")
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 		self.assertIn("compensating", order.last_sync_error)
 		# The status check on every save/form load agrees.
 		order.customer_email = f"disabled-mapping-{self.suffix}@example.com"
@@ -2429,7 +2455,10 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.reload()
 
 		self.assertFalse(result["ok"])
-		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
+		self.assertEqual(order.sync_reason_code, "CANCELLED_PAID_REFUND_REQUIRED")
+		self.assertEqual(order.sync_remediation_mode, "manual")
+		self.assertEqual(order.sync_action_state, "Waiting for User")
 		self.assertEqual(
 			order.last_sync_error,
 			"Cancelled in Shopify but the payment was not fully refunded; refund it in Shopify",
@@ -2502,7 +2531,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 				self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
 				self.assertIn(status, result["error"])
-				self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+				self.assertEqual(order.erpnext_sync_status, "Needs Action")
 
 	def test_talabat_unchanged_order_after_pickup_status_stays_synced(self):
 		order = self._make_order()
@@ -3257,7 +3286,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 		self.assertEqual(frappe.db.count("Customer"), customer_count_before)
 		self.assertEqual(frappe.db.count("Address"), address_count_before)
-		self.assertEqual(status, "Modified After Sync")
+		self.assertEqual(status, "Needs Action")
 
 	def test_shopify_shipping_address_is_created_and_linked_to_buyer(self):
 		account = self._make_shopify_account()
@@ -3359,7 +3388,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order_doc.reload()
 
 		self.assertFalse(second["ok"])
-		self.assertEqual(order_doc.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order_doc.erpnext_sync_status, "Needs Action")
 		address = frappe.get_doc("Address", address_name)
 		self.assertEqual(address.address_line1, "Updated Billing Road")
 		self.assertEqual(address.address_type, "Billing")
@@ -3821,7 +3850,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 	def test_noon_submitted_order_unit_going_out_of_stock_sets_modified_after_sync(self):
 		"""Decision 8: after the Sales Order is auto-submitted (#131), a unit
-		later going OUT_OF_STOCK must surface as "Modified After Sync" - and
+		later going OUT_OF_STOCK must surface as "Needs Action" - and
 		must never amend/cancel the already-submitted Sales Order itself."""
 		account = self._make_noon_account()
 		order, _mapping = self._make_noon_order(account)
@@ -3836,7 +3865,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.save()
 
 		order.reload()
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Syncing")
+		self.assertTrue(order.sync_debounce_until)
 		self.assertEqual(order.erpnext_sales_order, so_name)
 		# The submitted Sales Order itself is never touched by this.
 		self.assertEqual(frappe.db.get_value("Sales Order", so_name, "docstatus"), 1)
@@ -3875,7 +3905,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		sync_sales_order(order.name)
 
 		order.reload()
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 		self.assertEqual(order.last_sync_error, self.COMPENSATING_MESSAGE)
 		self.assertEqual(
 			frappe.db.get_value("Sales Order", first["sales_order"], ["docstatus", "modified"], as_dict=True),
@@ -3895,7 +3925,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.reload()
 		self.assertTrue(order.erpnext_sales_order)
 		self.assertEqual(result["sales_order"], order.erpnext_sales_order)
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 		self.assertEqual(order.last_sync_error, self.COMPENSATING_MESSAGE)
 		self.assertEqual(frappe.db.get_value("Sales Order", order.erpnext_sales_order, "docstatus"), 1)
 
@@ -4175,7 +4205,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		frappe.db.set_value("Sales Order", order.erpnext_sales_order, "docstatus", 0, update_modified=False)
 		order.db_set({"total_taxes": 5.04, "order_total": 41.04})
 
-		self.assertEqual(get_current_sync_status(order.name), "Modified After Sync")
+		self.assertEqual(get_current_sync_status(order.name), "Sync Error")
 		again = sync_sales_order(order.name)
 
 		self.assertFalse(again["ok"])
@@ -4229,7 +4259,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
 		self.assertIn("shipping", result["error"])
 		self.assertIn("shipping", [change["field"] for change in result["reconciliation"]["changes"]])
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 		self.assertEqual((order.last_synced_hash, order.last_synced_snapshot), baseline)
 		after = frappe.get_doc("Sales Order", first["sales_order"])
 		self.assertEqual((after.grand_total, len(after.taxes), after.modified), (494.21, 1, before.modified))
@@ -4312,7 +4342,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["reconciliation"]["outcome"], "UNSUPPORTED_COMPENSATING_TRANSACTION")
 		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 1)
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 
 	def test_fully_refunded_order_that_was_billed_or_has_an_advance_is_not_cancelled(self):
 		# Billing is execution, so the refund rule applies first; an advance is not.
@@ -4402,7 +4432,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
 		self.assertNotIn("executed_action", result)
 		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 1)
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 		self.assertIn("The Sales Order was not cancelled", order.last_sync_error)
 		self.assertLess(len(order.last_sync_error), 500)
 		for name in named:
@@ -4412,7 +4442,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			self._sync_log_count + 1,
 		)
 		# Opening the form re-plans from the same evidence and must keep the draft message.
-		self.assertEqual(get_current_sync_status(order.name), "Modified After Sync")
+		self.assertEqual(get_current_sync_status(order.name), "Needs Action")
 		order.reload()
 		self.assertIn("The Sales Order was not cancelled", order.last_sync_error)
 
@@ -4561,13 +4591,13 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["reconciliation"]["outcome"], "UNSUPPORTED_COMPENSATING_TRANSACTION")
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 		self.assertIn(delivery_note.name, order.last_sync_error)
 		self.assertIn(invoice.name, order.last_sync_error)
 		self.assertIn("compensating", order.last_sync_error)
 		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 1)
 		rows = {row["reference_name"]: row for row in get_attention_items({"account": account.name})}
-		self.assertEqual(rows[order.name]["problem_type"], "Modified After Sync")
+		self.assertEqual(rows[order.name]["problem_type"], "Needs Action")
 		self.assertIn(delivery_note.name, rows[order.name]["explanation"])
 		self.assertIn("review the order manually", rows[order.name]["explanation"])
 
@@ -4585,7 +4615,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.reload()
 
 		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 		self.assertIn(f"Sales Invoice {invoice.name} already bills it", order.last_sync_error)
 		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "docstatus"), 1)
 
@@ -4672,7 +4702,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual((order.last_synced_hash, order.last_synced_snapshot), baseline)
 		after = frappe.get_doc("Sales Order", first["sales_order"])
 		self.assertEqual((after.grand_total, len(after.taxes), after.modified), (74.99, 0, modified))
-		self.assertEqual(get_current_sync_status(order.name), "Modified After Sync")
+		self.assertEqual(get_current_sync_status(order.name), "Needs Action")
 
 	def test_shopify_shipping_without_a_shipping_account_blocks_with_an_actionable_message(self):
 		before = frappe.db.count("Sales Order")
@@ -4711,7 +4741,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		status = get_current_sync_status(order.name)
 		order.reload()
 
-		self.assertEqual(status, "Modified After Sync")
+		self.assertEqual(status, "Sync Error")
 		self.assertIn("Shipping Income Account", order.last_sync_error)
 
 	def test_shopify_total_that_disagrees_with_items_and_shipping_blocks_with_the_numbers(self):
@@ -5037,6 +5067,547 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self._assert_shopify_line(first["sales_order"], 20)
 		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "grand_total"), 40)
 		frappe.db.set_value("Sales Order", first["sales_order"], "docstatus", 1, update_modified=False)
+
+	# --- #364: sync status, reason codes, retry, row changes, Group C ------------------------
+
+	def _second_item_and_mapping(self, sku="SKU-TWO"):
+		item = frappe.get_doc(
+			{
+				"doctype": "Item",
+				"item_code": f"TEST-SO-SYNC-2-{self.suffix}",
+				"item_group": "Products",
+				"stock_uom": "Nos",
+				"is_stock_item": 0,
+			}
+		).insert()
+		self._make_mapping(sku, item.name)
+		return item
+
+	def _talabat_line(self, line_id, sku, quantity, total, status="IN_CART"):
+		return {
+			"external_item_id": line_id,
+			"external_sku": sku,
+			"external_status": status,
+			"pricing_type": "UNIT",
+			"fulfilled_quantity": quantity,
+			"fulfilled_unit_price": total / quantity,
+			"fulfilled_total_price": total,
+		}
+
+	def _reimport_talabat(self, order, lines):
+		upsert_marketplace_order(
+			self.account.name,
+			{
+				"external_order_id": order.external_order_id,
+				"latest_payload": {"order_id": "external-order"},
+				"external_status": "RECEIVED",
+				"received_on": nowdate(),
+				"promised_for": add_days(nowdate(), 1),
+				"customer_first_name": "Talabat Customer",
+				"customer_phone_number": "masked",
+				"order_total": 1200,
+				"items": lines,
+			},
+		)
+		order.reload()
+
+	def test_new_import_starts_syncing_and_a_bump_sets_syncing_in_the_same_write(self):
+		from marketplace_integrations.services.sales_order_sync_debounce import bump_sync_debounce
+
+		order = self._make_order()
+		self.assertEqual(order.erpnext_sync_status, "Syncing")
+		sync_sales_order(order.name)
+		self.assertEqual(frappe.db.get_value("Marketplace Order", order.name, "erpnext_sync_status"), "Synced")
+
+		bump_sync_debounce(order.name, "Talabat Webhook")
+
+		values = frappe.db.get_value(
+			"Marketplace Order",
+			order.name,
+			["erpnext_sync_status", "sync_debounce_until", "pending_sync_trigger_source"],
+			as_dict=True,
+		)
+		self.assertEqual(values.erpnext_sync_status, "Syncing")
+		self.assertTrue(values.sync_debounce_until)
+		self.assertEqual(values.pending_sync_trigger_source, "Talabat Webhook")
+
+	def test_row_added_line_is_added_to_the_submitted_sales_order(self):
+		self._second_item_and_mapping()
+		order = self._synced_talabat_order()
+		first = self._talabat_line("line-1", "SKU-UNIT", 2, 999)
+		self._reimport_talabat(order, [first, self._talabat_line("line-2", "SKU-TWO", 1, 50)])
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["reconciliation"]["outcome"], "UPDATE_SUBMITTED_ORDER")
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		self.assertEqual(sales_order.docstatus, 1)
+		self.assertEqual(len(sales_order.items), 2)
+		self.assertEqual(sorted(row.qty for row in sales_order.items), [1, 2])
+		lines = frappe.parse_json(order.last_synced_snapshot)["items"]
+		self.assertEqual(sorted(line["sales_order_item"] for line in lines), sorted(row.name for row in sales_order.items))
+		# Idempotent: nothing further to do.
+		self.assertEqual(sync_sales_order(order.name)["reconciliation"]["outcome"], "NO_ACTION")
+
+	def test_row_removed_line_drops_its_sales_order_row(self):
+		self._second_item_and_mapping()
+		order = self._make_order()
+		lines = [self._talabat_line("line-1", "SKU-UNIT", 2, 999), self._talabat_line("line-2", "SKU-TWO", 1, 50)]
+		self._reimport_talabat(order, lines)
+		self.assertTrue(sync_sales_order(order.name)["ok"])
+		self.assertEqual(len(frappe.get_doc("Sales Order", frappe.db.get_value("Marketplace Order", order.name, "erpnext_sales_order")).items), 2)
+		self._reimport_talabat(order, [lines[0], {**lines[1], "external_status": "NOT_FOUND"}])
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["reconciliation"]["outcome"], "UPDATE_SUBMITTED_ORDER")
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		self.assertEqual([row.qty for row in sales_order.items], [2])
+
+	def test_row_removal_of_a_delivered_line_needs_action_and_changes_nothing(self):
+		self._second_item_and_mapping()
+		order = self._make_order()
+		lines = [self._talabat_line("line-1", "SKU-UNIT", 2, 999), self._talabat_line("line-2", "SKU-TWO", 1, 50)]
+		self._reimport_talabat(order, lines)
+		sales_order = frappe.get_doc("Sales Order", sync_sales_order(order.name)["sales_order"])
+		second = next(row for row in sales_order.items if row.qty == 1)
+		frappe.db.set_value("Sales Order Item", second.name, "delivered_qty", 1)
+		self._reimport_talabat(order, [lines[0], {**lines[1], "external_status": "NOT_FOUND"}])
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
+		self.assertEqual(order.sync_reason_code, "QTY_BELOW_DELIVERED")
+		self.assertEqual(len(frappe.get_doc("Sales Order", sales_order.name).items), 2)
+
+	def test_row_change_erpnext_refuses_makes_the_whole_order_needs_action(self):
+		self._second_item_and_mapping()
+		order = self._synced_talabat_order()
+		self._reimport_talabat(
+			order,
+			[self._talabat_line("line-1", "SKU-UNIT", 2, 999), self._talabat_line("line-2", "SKU-TWO", 1, 50)],
+		)
+
+		with patch(
+			"erpnext.controllers.accounts_controller.update_child_qty_rate",
+			side_effect=frappe.ValidationError("Cannot add: the item is already ordered"),
+		):
+			result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
+		self.assertEqual(order.sync_reason_code, "ROW_CHANGE_REFUSED")
+		self.assertEqual(len(frappe.get_doc("Sales Order", order.erpnext_sales_order).items), 1)
+
+	def test_row_line_back_to_positive_quantity_stays_manual(self):
+		order = self._synced_talabat_order()
+		snapshot = frappe.parse_json(order.last_synced_snapshot)
+		snapshot["items"][0]["qty"] = 0
+		frappe.db.set_value("Marketplace Order", order.name, "last_synced_snapshot", frappe.as_json(snapshot))
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
+		self.assertEqual(order.sync_reason_code, "LINE_RESTORED_FROM_ZERO")
+
+	def test_missing_mapping_is_a_sync_error_and_saving_the_mapping_resyncs_automatically(self):
+		order = self._make_order(sku="SKU-LATER")
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertEqual(order.sync_reason_code, "MAPPING_MISSING")
+		self.assertEqual(order.sync_retry_count, 0)
+
+		self._make_mapping("SKU-LATER", self.item.name)
+
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Syncing")
+		self.assertTrue(order.sync_debounce_until)
+		self.assertEqual(order.pending_sync_trigger_source, "ERPNext Document Change")
+		self.assertTrue(sync_sales_order(order.name)["ok"])
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertFalse(order.sync_reason_code)
+
+	def test_a_disabled_mapping_does_not_resync_orders(self):
+		order = self._make_order(sku="SKU-OFF")
+		sync_sales_order(order.name)
+		mapping = frappe.get_doc(
+			{
+				"doctype": "Marketplace Product Mapping",
+				"marketplace_account": self.account.name,
+				"item": self.item.name,
+				"external_reference": "SKU-OFF",
+				"sales_uom": "Nos",
+				"enabled": 0,
+			}
+		).insert()
+
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertFalse(order.sync_debounce_until)
+		self.assertTrue(mapping.name)
+
+	def test_transient_failure_is_retried_at_one_five_and_fifteen_minutes_then_sync_error(self):
+		order = self._make_order()
+		for attempt, seconds in enumerate((60, 300, 900), start=1):
+			with patch.object(
+				sales_order_sync_service, "_build_order_lines", side_effect=frappe.QueryDeadlockError
+			):
+				result = sync_sales_order(order.name, trigger_source="Scheduled Sweep")
+			order.reload()
+			self.assertFalse(result["ok"])
+			self.assertTrue(result["retry_scheduled"])
+			self.assertEqual(order.erpnext_sync_status, "Syncing")
+			self.assertEqual(order.sync_reason_code, "TRANSIENT_RETRY_SCHEDULED")
+			self.assertEqual(order.sync_retry_count, attempt)
+			self.assertEqual(order.pending_sync_trigger_source, "Scheduled Sweep")
+			wait = (frappe.utils.get_datetime(order.sync_debounce_until) - now_datetime()).total_seconds()
+			self.assertAlmostEqual(wait, seconds, delta=30)
+
+		with patch.object(
+			sales_order_sync_service, "_build_order_lines", side_effect=frappe.QueryDeadlockError
+		):
+			result = sync_sales_order(order.name, trigger_source="Scheduled Sweep")
+		order.reload()
+		self.assertFalse(result["ok"])
+		self.assertNotIn("retry_scheduled", result)
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertEqual(order.sync_reason_code, "SYNC_RETRIES_EXHAUSTED")
+
+	def test_a_successful_sync_resets_the_retry_count(self):
+		order = self._make_order()
+		with patch.object(sales_order_sync_service, "_build_order_lines", side_effect=TimeoutError):
+			pass
+		with patch.object(
+			sales_order_sync_service, "_build_order_lines", side_effect=frappe.QueryTimeoutError
+		):
+			sync_sales_order(order.name, trigger_source="Scheduled Sweep")
+		order.reload()
+		self.assertEqual(order.sync_retry_count, 1)
+
+		result = sync_sales_order(order.name, trigger_source="Scheduled Sweep")
+		order.reload()
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(order.sync_retry_count, 0)
+
+	def test_a_validation_failure_is_not_retried(self):
+		order = self._make_order()
+		with patch.object(
+			sales_order_sync_service, "_build_order_lines", side_effect=frappe.ValidationError("bad data")
+		):
+			result = sync_sales_order(order.name, trigger_source="Scheduled Sweep")
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertNotIn("retry_scheduled", result)
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertEqual(order.sync_retry_count, 0)
+		self.assertFalse(order.sync_debounce_until)
+
+	def test_a_manual_retry_gets_a_fresh_transient_retry_budget(self):
+		order = self._make_order()
+		frappe.db.set_value("Marketplace Order", order.name, "sync_retry_count", 3)
+		with patch.object(
+			sales_order_sync_service, "_build_order_lines", side_effect=frappe.QueryDeadlockError
+		):
+			result = sync_sales_order(order.name, trigger_source="Manual")
+		order.reload()
+
+		self.assertTrue(result["retry_scheduled"])
+		self.assertEqual(order.sync_retry_count, 1)
+
+	# --- Group C: receipt gate and draft return ----------------------------------------
+
+	def _delivered_and_cancelled_order(self):
+		order = self._make_order()
+		first = sync_sales_order(order.name)
+		sales_order = frappe.get_doc("Sales Order", first["sales_order"])
+		delivery_note = self._deliver(sales_order.name)
+		order.reload()
+		order.external_status = "CANCELLED"
+		order.save()
+		return order, sales_order, delivery_note
+
+	def _return_notes(self, delivery_note_name):
+		return frappe.get_all(
+			"Delivery Note", filters={"return_against": delivery_note_name}, pluck="name"
+		)
+
+	def test_group_c_waits_for_receipt_and_creates_no_draft_before_it(self):
+		order, sales_order, delivery_note = self._delivered_and_cancelled_order()
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
+		self.assertEqual(order.sync_reason_code, "CANCELLED_FULLY_DELIVERED")
+		self.assertEqual(order.sync_remediation_mode, "auto_prepare")
+		self.assertEqual(order.sync_action_state, "Awaiting Receipt")
+		self.assertFalse(order.sync_prepared_document)
+		self.assertEqual(self._return_notes(delivery_note.name), [])
+		# A re-check keeps waiting and still creates nothing.
+		sync_sales_order(order.name)
+		self.assertEqual(self._return_notes(delivery_note.name), [])
+
+	def test_confirm_goods_received_prepares_exactly_one_draft_and_submits_nothing(self):
+		from marketplace_integrations.api.marketplace_orders import confirm_goods_received
+
+		order, sales_order, delivery_note = self._delivered_and_cancelled_order()
+		sync_sales_order(order.name)
+
+		first = confirm_goods_received(order.name)
+		second = confirm_goods_received(order.name)
+		order.reload()
+
+		returns = self._return_notes(delivery_note.name)
+		self.assertEqual(len(returns), 1)
+		self.assertEqual(first["prepared_document"], returns[0])
+		self.assertEqual(second["prepared_document"], returns[0])
+		self.assertEqual(frappe.db.get_value("Delivery Note", returns[0], "docstatus"), 0)
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order.name, "docstatus"), 1)
+		self.assertEqual(order.sync_action_state, "Draft Prepared")
+		self.assertEqual(order.sync_prepared_doctype, "Delivery Note")
+		self.assertEqual(order.sync_prepared_document, returns[0])
+		self.assertEqual(order.receipt_confirmed_by, frappe.session.user)
+		self.assertTrue(order.receipt_confirmed_on)
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
+		# A later re-check keeps the draft and does not create another.
+		sync_sales_order(order.name)
+		order.reload()
+		self.assertEqual(self._return_notes(delivery_note.name), returns)
+		self.assertEqual(order.sync_action_state, "Draft Prepared")
+
+	def test_confirm_goods_received_is_refused_on_the_server_without_the_role(self):
+		from marketplace_integrations.api.marketplace_orders import confirm_goods_received
+		from marketplace_integrations.tests.utils import make_role_user
+
+		order, sales_order, delivery_note = self._delivered_and_cancelled_order()
+		sync_sales_order(order.name)
+		email, _role = make_role_user(
+			self, "Receipt Refused", {"Marketplace Order": ["write"], "Delivery Note": ["create"]}
+		)
+		self.addCleanup(frappe.set_user, "Administrator")
+		frappe.set_user(email)
+
+		with self.assertRaises(frappe.PermissionError):
+			confirm_goods_received(order.name)
+
+		frappe.set_user("Administrator")
+		self.assertEqual(self._return_notes(delivery_note.name), [])
+
+	def test_confirm_goods_received_refuses_an_order_that_is_not_waiting_for_receipt(self):
+		order = self._synced_talabat_order()
+		with self.assertRaises(frappe.ValidationError):
+			sales_order_sync_service.confirm_goods_received(order.name)
+
+	def test_submitting_the_prepared_return_rechecks_and_closes_the_order(self):
+		from marketplace_integrations.api.marketplace_orders import confirm_goods_received
+
+		order, sales_order, delivery_note = self._delivered_and_cancelled_order()
+		sync_sales_order(order.name)
+		prepared = confirm_goods_received(order.name)["prepared_document"]
+
+		frappe.get_doc("Delivery Note", prepared).submit()
+		order.reload()
+
+		# The document event queued a re-check of the waiting order.
+		self.assertEqual(order.erpnext_sync_status, "Syncing")
+		self.assertEqual(order.sync_action_state, "Recheck Queued")
+		self.assertEqual(order.pending_sync_trigger_source, "ERPNext Document Change")
+		self.assertTrue(order.sync_debounce_until)
+
+		result = sync_sales_order(order.name, trigger_source="ERPNext Document Change")
+		order.reload()
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(order.sync_action_state, "Resolved")
+		self.assertFalse(order.sync_reason_code)
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order.name, "status"), "Closed")
+
+	# --- Auto-reconciliation after a human action ---------------------------------------
+
+	def test_document_event_queues_a_recheck_only_for_orders_that_need_one(self):
+		from marketplace_integrations.services.sales_order_recheck import bump_linked_orders
+
+		order = self._synced_talabat_order()
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+
+		bump_linked_orders(sales_order)
+		order.reload()
+		self.assertFalse(order.sync_debounce_until)  # Synced: nothing to recheck
+
+		frappe.db.set_value("Marketplace Order", order.name, "erpnext_sync_status", "Needs Action")
+		bump_linked_orders(sales_order)
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Syncing")
+		self.assertEqual(order.sync_action_state, "Recheck Queued")
+		self.assertEqual(order.pending_sync_trigger_source, "ERPNext Document Change")
+
+	def test_document_event_skips_the_order_whose_sync_is_running(self):
+		from marketplace_integrations.services.sales_order_recheck import bump_linked_orders
+
+		order = self._synced_talabat_order()
+		frappe.db.set_value("Marketplace Order", order.name, "erpnext_sync_status", "Sync Error")
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		self.addCleanup(frappe.flags.pop, "marketplace_syncing_orders", None)
+		frappe.flags.marketplace_syncing_orders = {order.name}
+
+		bump_linked_orders(sales_order)
+
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Sync Error")
+		self.assertFalse(order.sync_debounce_until)
+
+	def test_document_event_never_raises(self):
+		from marketplace_integrations.services.sales_order_recheck import bump_linked_orders
+
+		order = self._synced_talabat_order()
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		with patch(
+			"marketplace_integrations.services.sales_order_recheck.linked_marketplace_orders",
+			side_effect=frappe.QueryDeadlockError,
+		):
+			bump_linked_orders(sales_order)  # must not raise
+
+	def test_a_user_without_marketplace_order_permission_can_trigger_the_event(self):
+		from marketplace_integrations.services.sales_order_recheck import bump_linked_orders
+		from marketplace_integrations.tests.utils import make_role_user
+
+		order = self._synced_talabat_order()
+		frappe.db.set_value("Marketplace Order", order.name, "erpnext_sync_status", "Needs Action")
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		email, _role = make_role_user(self, "Stock Only", {"Delivery Note": ["read"]})
+		self.addCleanup(frappe.set_user, "Administrator")
+		frappe.set_user(email)
+		self.assertFalse(frappe.has_permission("Marketplace Order", "write"))
+
+		bump_linked_orders(sales_order)
+
+		frappe.set_user("Administrator")
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Syncing")
+		self.assertEqual(order.sync_action_state, "Recheck Queued")
+
+	def test_event_sweep_and_manual_retry_run_one_sync_per_order(self):
+		from marketplace_integrations.services.sales_order_recheck import bump_linked_orders
+		from marketplace_integrations.services.sales_order_sync_debounce import sweep_due_sales_order_syncs
+
+		order = self._synced_talabat_order()
+		frappe.db.set_value("Marketplace Order", order.name, "erpnext_sync_status", "Sync Error")
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		bump_linked_orders(sales_order)
+		bump_linked_orders(sales_order)
+		frappe.db.set_value(
+			"Marketplace Order", order.name, "sync_debounce_until", add_days(now_datetime(), -1)
+		)
+
+		with patch("marketplace_integrations.services.sales_order_sync_debounce.frappe.enqueue") as enqueue:
+			sweep_due_sales_order_syncs()
+
+		calls = [call for call in enqueue.call_args_list if call.kwargs.get("marketplace_order") == order.name]
+		self.assertEqual(len(calls), 1)
+		self.assertEqual(calls[0].kwargs["job_id"], f"marketplace-sync-{order.name}")
+		self.assertTrue(calls[0].kwargs["deduplicate"])
+
+	# --- #364 migration patch -------------------------------------------------------------
+
+	def _legacy_status(self, order, status):
+		frappe.db.set_value(
+			"Marketplace Order",
+			order.name,
+			{
+				"erpnext_sync_status": status,
+				"sync_debounce_until": None,
+				"pending_sync_trigger_source": None,
+				"last_sync_error": "old",
+			},
+		)
+
+	def _run_status_patch(self):
+		from marketplace_integrations.patches.v0_0 import migrate_modified_after_sync_status as patch
+
+		patch.execute()
+
+	def _row(self, order):
+		return frappe.db.get_value(
+			"Marketplace Order",
+			order.name,
+			[
+				"erpnext_sync_status",
+				"sync_reason_code",
+				"sync_action_state",
+				"sync_debounce_until",
+				"pending_sync_trigger_source",
+			],
+			as_dict=True,
+		)
+
+	def test_status_patch_assigns_each_legacy_row_its_real_condition_and_is_idempotent(self):
+		# Executable: the marketplace quantity changed, the sync can apply it.
+		executable = self._synced_talabat_order()
+		self._change_talabat_line(executable, 3, 1500)
+		self._legacy_status(executable, "Modified After Sync")
+		# Already matching: the debounced sync confirms Synced.
+		matching = self._synced_talabat_order()
+		self._legacy_status(matching, "Modified After Sync")
+		# Needs a person: quantity below what was delivered.
+		blocked = self._synced_talabat_order()
+		self._set_first_item_fields(blocked, delivered_qty=2)
+		self._change_talabat_line(blocked, 1, 500)
+		self._legacy_status(blocked, "Modified After Sync")
+		# Cannot be built: the mapping is gone.
+		gone = self._make_mapping("SKU-GONE", self.item.name)
+		unmapped = self._make_order(sku="SKU-GONE")
+		self.assertTrue(sync_sales_order(unmapped.name)["ok"])
+		unmapped.reload()
+		frappe.db.set_value("Marketplace Product Mapping", gone.name, "enabled", 0)
+		self._legacy_status(unmapped, "Modified After Sync")
+		fresh = self._make_order(sku="SKU-FRESH")
+		self._legacy_status(fresh, "Not Synced")
+		cancelled = self._make_order()
+		self._legacy_status(cancelled, "Cancelled")
+
+		self._run_status_patch()
+
+		self.assertEqual(self._row(executable).erpnext_sync_status, "Syncing")
+		self.assertTrue(self._row(executable).sync_debounce_until)
+		self.assertEqual(self._row(matching).erpnext_sync_status, "Syncing")
+		self.assertTrue(self._row(matching).sync_debounce_until)
+		blocked_row = self._row(blocked)
+		self.assertEqual(blocked_row.erpnext_sync_status, "Needs Action")
+		self.assertEqual(blocked_row.sync_reason_code, "QTY_BELOW_DELIVERED")
+		self.assertEqual(blocked_row.sync_action_state, "Waiting for User")
+		unmapped_row = self._row(unmapped)
+		self.assertEqual(unmapped_row.erpnext_sync_status, "Sync Error")
+		self.assertEqual(unmapped_row.sync_reason_code, "MAPPING_MISSING")
+		fresh_row = self._row(fresh)
+		self.assertEqual(fresh_row.erpnext_sync_status, "Syncing")
+		self.assertTrue(fresh_row.sync_debounce_until)
+		self.assertEqual(self._row(cancelled).erpnext_sync_status, "Cancelled")
+
+		orders = (executable, matching, blocked, unmapped, fresh, cancelled)
+		before = {order.name: self._row(order) for order in orders}
+		self._run_status_patch()
+		self.assertEqual(before, {order.name: self._row(order) for order in orders})
 
 
 class IntegrationTestShopifyDeliveryLeadDays(IntegrationTestCase):

@@ -35,7 +35,7 @@ def get_marketplace_order_summary(sales_order: str):
 			"service_fee", "container_charge", "difference_to_minimum", "collect_at_pickup",
 			"shop_currency", "erpnext_sales_order", "erpnext_sync_status", "last_sync_error",
 			"cancelled_at", "cancellation_reason", "received_on", "last_platform_update_on",
-			"last_erpnext_sync_on",
+			"last_erpnext_sync_on", "sync_action_state",
 		],
 		limit_page_length=1,
 	)
@@ -78,6 +78,7 @@ def get_marketplace_order_summary(sales_order: str):
 		"erpnext_sync_status": order.erpnext_sync_status or "",
 		"last_erpnext_sync_on": order.last_erpnext_sync_on,
 		"last_sync_error": cstr(order.last_sync_error),
+		"sync_action_state": order.sync_action_state or "",
 	}
 
 

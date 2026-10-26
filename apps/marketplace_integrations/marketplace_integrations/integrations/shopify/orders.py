@@ -10,6 +10,7 @@ import frappe
 from frappe import _
 from frappe.utils import add_to_date, cstr, escape_html, get_datetime, now_datetime
 
+from marketplace_integrations.services.sync_status import CANCELLED, NEEDS_ACTION
 from marketplace_integrations.integrations.shopify.client import ShopifyClient
 from marketplace_integrations.integrations.shopify.constants import (
 	SHOPIFY_ORDER_LINE_ITEMS_PAGE_SIZE,
@@ -365,7 +366,7 @@ def _import_order_isolated(
 			and order
 			and not order.erpnext_sales_order
 			and not order.cancelled_at
-			and order.erpnext_sync_status != "Cancelled"
+			and order.erpnext_sync_status != CANCELLED
 		):
 			bump_sync_debounce(order.name, trigger_source)
 	except Exception as exc:
@@ -548,7 +549,7 @@ def reconcile_all_accounts_orders(account_name=None, catch_up_unlinked=False):
 						"platform": "Shopify",
 						"cancelled_at": ["is", "not set"],
 						"erpnext_sales_order": ["is", "not set"],
-						"erpnext_sync_status": ["!=", "Cancelled"],
+						"erpnext_sync_status": ["!=", CANCELLED],
 					}
 				)
 				# Canceled-but-paid orders are intentionally outside the normal
@@ -559,7 +560,7 @@ def reconcile_all_accounts_orders(account_name=None, catch_up_unlinked=False):
 						"platform": "Shopify",
 						"cancelled_at": ["is", "set"],
 						"erpnext_sales_order": ["is", "not set"],
-						"erpnext_sync_status": "Sync Error",
+						"erpnext_sync_status": NEEDS_ACTION,
 					}
 				)
 			# Advance the watermark only after a successful run (decision 8) -

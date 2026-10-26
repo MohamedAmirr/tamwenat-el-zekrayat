@@ -11,7 +11,11 @@ from marketplace_integrations.services.marketplace_orders import (
 	rollback_to_savepoint,
 	upsert_marketplace_order,
 )
-from marketplace_integrations.services.sales_order_sync_debounce import bump_sync_debounce
+from marketplace_integrations.services.sales_order_sync_debounce import (
+	bump_sync_debounce,
+	existing_order_fingerprint,
+	order_evidence_fingerprint,
+)
 
 
 def process_order_event(marketplace_account, payload):
@@ -23,7 +27,14 @@ def process_order_event(marketplace_account, payload):
 	savepoint = "talabat_order_event_" + frappe.generate_hash(length=10)
 	frappe.db.savepoint(savepoint)
 	try:
-		order = upsert_marketplace_order(marketplace_account, normalize_order(payload))
+		normalized = normalize_order(payload)
+		# #364 echo guard: an order we already hold unchanged (typically the echo of our own
+		# PUT, whose response ``api/talabat_orders.py::update_order`` already stored) must not
+		# queue another sync.  ``None`` means a new order.
+		fingerprint_before = existing_order_fingerprint(
+			marketplace_account, normalized.get("external_order_id")
+		)
+		order = upsert_marketplace_order(marketplace_account, normalized)
 	except Exception as exc:
 		# Persist the failure for the Needs Attention report (#169), then
 		# re-raise so the RQ job still fails exactly as before (the worker
@@ -41,7 +52,8 @@ def process_order_event(marketplace_account, payload):
 	# order itself (#135); _run_debounced_sync() reads it back and threads it
 	# into sync_sales_order() so the Marketplace Sync Log row this eventually
 	# produces records the real origin, not "Manual".
-	bump_sync_debounce(order.name, trigger_source="Talabat Webhook")
+	if fingerprint_before is None or order_evidence_fingerprint(order) != fingerprint_before:
+		bump_sync_debounce(order.name, trigger_source="Talabat Webhook")
 	return order
 
 

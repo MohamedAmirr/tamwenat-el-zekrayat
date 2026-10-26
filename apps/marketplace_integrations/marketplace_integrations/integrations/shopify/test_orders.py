@@ -719,7 +719,7 @@ class IntegrationTestReconcileAllAccountsOrders(IntegrationTestCase):
 	def test_catch_up_schedules_unlinked_and_rechecks_cancelled_but_paid_orders(self):
 		unlinked = self._order(self.account_b)
 		paid_cancel = self._order(
-			self.account_b, cancelled_at="2026-09-27 10:00:00", erpnext_sync_status="Sync Error"
+			self.account_b, cancelled_at="2026-09-27 10:00:00", erpnext_sync_status="Needs Action"
 		)
 		cancelled_not_paid = self._order(self.account_b, cancelled_at="2026-09-27 10:00:00")
 		terminal = self._order(self.account_b, erpnext_sync_status="Cancelled")

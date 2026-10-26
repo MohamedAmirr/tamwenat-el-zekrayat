@@ -81,7 +81,7 @@ def send_shopify_order_edit(sales_order, fingerprint):
 	is re-baselined (``sales_order_sync.rebaseline_after_outbound_edit``) or by a System
 	Manager (``clear_edit_marker_manually``).  Only ``completed`` makes the planner keep
 	the ERP quantities (``plan()``, evidence ``outbound_edit_requested``); ``in_flight``
-	means the outcome is unknown and the order stays Modified After Sync.
+	means the outcome is unknown and the order stays Needs Action.
 
 	COMMITS the caller's open transaction (before the lock, before the platform call and
 	after it), like ``request_platform_cancel``.

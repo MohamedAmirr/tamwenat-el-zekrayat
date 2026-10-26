@@ -12,6 +12,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, cstr, flt
 
+from marketplace_integrations.services.sync_status import CANCELLED
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_order.marketplace_order import (
 	compute_order_identity_key,
 )
@@ -134,7 +135,7 @@ def upsert_marketplace_order(marketplace_account, normalized_order, is_stale=Non
 	keep_shopify_cancelled = bool(
 		name
 		and doc.platform == "Shopify"
-		and doc.erpnext_sync_status == "Cancelled"
+		and doc.erpnext_sync_status == CANCELLED
 		and not doc.erpnext_sales_order
 	)
 	doc.marketplace_account = marketplace_account
@@ -145,7 +146,7 @@ def upsert_marketplace_order(marketplace_account, normalized_order, is_stale=Non
 		from marketplace_integrations.integrations.shopify.order_reconciliation import build_evidence
 
 		if doc.cancelled_at or build_evidence(doc).get("cancellation") == "full":
-			doc.erpnext_sync_status = "Cancelled"
+			doc.erpnext_sync_status = CANCELLED
 			doc.last_sync_error = None
 
 	if doc.is_new():
