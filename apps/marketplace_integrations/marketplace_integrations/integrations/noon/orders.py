@@ -45,6 +45,10 @@ from marketplace_integrations.integrations.noon.order_mapper import normalize_or
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_order.marketplace_order import (
 	compute_order_identity_key,
 )
+from marketplace_integrations.services.marketplace_order_reconciliation import (
+	schedule_first_syncs,
+	write_catch_up_summary,
+)
 from marketplace_integrations.services.marketplace_orders import (
 	ITEM_FIELDS,
 	JSON_ITEM_FIELDS,
@@ -620,7 +624,7 @@ def _as_noon_timestamp(value):
 	return value.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _run_import_for_account(account_name, trigger_source):
+def _run_import_for_account(account_name, trigger_source, catch_up_unlinked=False):
 	"""Shared by ``run_order_import()`` (manual) and ``poll_all_accounts()``
 	(scheduled): resolve and validate the account, then re-list and import
 	the fixed lookback window (decision 18) - ``created_before`` is fixed at
@@ -649,34 +653,26 @@ def _run_import_for_account(account_name, trigger_source):
 	imported, errors = import_orders_created_between(
 		account, created_after, created_before, trigger_source=trigger_source
 	)
-	if trigger_source == "Scheduled Reconciliation":
-		from frappe.utils import get_datetime, now_datetime
-
-		from marketplace_integrations.services.sales_order_sync_debounce import bump_sync_debounce
-
-		for candidate in frappe.get_all(
-			"Marketplace Order",
-			filters={
+	scheduled = 0
+	if catch_up_unlinked:
+		scheduled = schedule_first_syncs(
+			{
 				"marketplace_account": account.name,
 				"platform": "Noon",
 				"erpnext_sales_order": ["is", "not set"],
 				"erpnext_sync_status": ["!=", "Cancelled"],
-			},
-			fields=["name", "sync_debounce_until", "pending_sync_trigger_source"],
-		):
-			if (
-				candidate.pending_sync_trigger_source == trigger_source
-				and candidate.sync_debounce_until
-				and get_datetime(candidate.sync_debounce_until) > now_datetime()
-			):
-				continue
-			bump_sync_debounce(candidate.name, trigger_source)
+			}
+		)
 	if errors:
 		frappe.log_error(title="Noon order import: per-order failures", message=frappe.as_json(errors))
-	return {"imported": len(imported), "errors": len(errors)}
+	if catch_up_unlinked:
+		write_catch_up_summary(
+			account.name, imported=len(imported), scheduled=scheduled, failures=len(errors)
+		)
+	return {"imported": len(imported), "errors": len(errors), "scheduled": scheduled}
 
 
-def enqueue_order_import(account_name, trigger_source="Manual"):
+def enqueue_order_import(account_name, trigger_source="Manual", catch_up_unlinked=False):
 	"""Shared enqueue helper for a per-account, deduplicated
 	``run_order_import`` job on the ``long`` queue (decision 12's job_id
 	scheme) - the one place ``queue_order_import()``, ``poll_all_accounts()``,
@@ -690,14 +686,18 @@ def enqueue_order_import(account_name, trigger_source="Manual"):
 	(e.g. Redis down) - callers that need per-call isolation from that
 	(``poll_all_accounts()``) catch it themselves.
 	"""
+	# The nightly catch-up has its own job id so it is not dropped as a duplicate of
+	# a running hourly/manual import (and vice versa); both are still one per account.
+	job_prefix = f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-catch-up" if catch_up_unlinked else _ORDER_IMPORT_RQ_JOB_PREFIX
 	return frappe.enqueue(
 		run_order_import,
 		queue="long",
 		timeout=3600,
-		job_id=f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{account_name}",
+		job_id=f"{job_prefix}-{account_name}",
 		deduplicate=True,
 		account_name=account_name,
 		trigger_source=trigger_source,
+		catch_up_unlinked=catch_up_unlinked,
 	)
 
 
@@ -714,7 +714,7 @@ def queue_order_import(account_name):
 	return {"queued": job is not None}
 
 
-def run_order_import(account_name, trigger_source="Manual"):
+def run_order_import(account_name, trigger_source="Manual", catch_up_unlinked=False):
 	"""The enqueued worker target for a manual order-import run.
 
 	Switches to Administrator (decision 12, matching Talabat's/Shopify's
@@ -722,7 +722,15 @@ def run_order_import(account_name, trigger_source="Manual"):
 	Desk session originally queued it.
 	"""
 	frappe.set_user("Administrator")
-	return _run_import_for_account(account_name, trigger_source)
+	if not catch_up_unlinked:
+		return _run_import_for_account(account_name, trigger_source)
+	try:
+		return _run_import_for_account(account_name, trigger_source, catch_up_unlinked=True)
+	except Exception:
+		error = frappe.get_traceback()
+		frappe.db.rollback()
+		write_catch_up_summary(account_name, error=error)
+		raise
 
 
 def refresh_order(marketplace_order_name):

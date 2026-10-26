@@ -1789,3 +1789,12 @@ Clear edit marker,مسح علامة التعديل
 Clear the marker of the item edit sent to Shopify? Do this only after you checked in Shopify what happened to that edit.,هل تريد مسح علامة تعديل العناصر المرسل إلى Shopify؟ افعل ذلك فقط بعد التحقق في Shopify مما حدث لهذا التعديل.
 Edit marker cleared.,تم مسح علامة التعديل.
 Marketplace outbound action: failed to write failure log,إجراء صادر للسوق: فشلت كتابة سجل الفشل
+Latest Bosta delivery state. Display only; it does not affect accounting.,أحدث حالة توصيل من Bosta. للعرض فقط ولا تؤثر على المحاسبة.
+"Delivery fee reported by Bosta, in EGP. Display only; it does not affect accounting.",رسوم التوصيل التي أبلغت عنها Bosta بالجنيه المصري. للعرض فقط ولا تؤثر على المحاسبة.
+Bosta exception,استثناء من Bosta
+Returned,مرتجع
+Received On,تاريخ الاستلام
+Invalid,غير صالح
+Bosta Delivery Fee Received On,تاريخ استلام رسوم توصيل Bosta
+"When Bosta first reported a delivery fee. A Currency column cannot tell an unset fee from a real 0, so the fee is shown and polling stops only once this is set.",وقت إبلاغ Bosta لأول مرة برسوم التوصيل. لا يميّز حقل العملة بين رسوم غير محددة وصفر حقيقي، لذلك تُعرض الرسوم ويتوقف الاستعلام عنها فقط بعد تعيين هذا الحقل.
+"This retry sends the COD entered earlier, {0}, not the current outstanding amount, {1}.",ستُرسل إعادة المحاولة هذه مبلغ الدفع عند الاستلام الذي أُدخل سابقًا، {0}، وليس المبلغ المستحق الحالي، {1}.

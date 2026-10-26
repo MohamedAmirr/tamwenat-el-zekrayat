@@ -57,8 +57,8 @@ Problem sources (``problem_type``):
   transaction, hidden by a later Success for the same pair.
 - Payment Excess: submitted mirrored Payment Entries with a positive
   unallocated amount.
-- Payment Entry Cancelled: cancelled mirrored Payment Entries remain visible
-  for manual review; amendments cannot preserve the unique transaction id.
+- Payment Entry Cancelled: cancelled mirrored Payment Entries without a
+  submitted amendment.
 """
 
 import json
@@ -97,7 +97,9 @@ PAYMENT_ERROR = "Payment Error"
 PAYMENT_EXCESS = "Payment Excess"
 PAYMENT_ENTRY_CANCELLED = "Payment Entry Cancelled"
 BOSTA_PLATFORM = "Bosta"
-BOSTA_PROBLEM_STATE_CODES = (47, 48, 49, 100, 101, 102, 103, 105)
+# #344: carrier exceptions. 48 and 49 are not listed (49 is a cancellation, which the poll
+# records as a Canceled shipment).
+BOSTA_PROBLEM_STATE_CODES = (47, 100, 101, 102, 103, 105)
 BOSTA_RETURN_STATE_CODES = (46, 60)
 BOSTA_STALE_DAYS = 5
 BOSTA_MAX_AGE_DAYS = 60
@@ -185,6 +187,8 @@ def get_attention_items(filters=None):
 		items.extend(collector(accounts))
 	shopify_accounts = {name: account for name, account in accounts.items() if account.platform == "Shopify"}
 	if shopify_accounts:
+		# Read once per attention load; every payment collector filters by these orders.
+		order_accounts = _shopify_order_accounts(shopify_accounts)
 		payment_collectors = [
 			({PAYMENT_ERROR}, _collect_payment_errors),
 			({PAYMENT_EXCESS}, _collect_payment_excess),
@@ -192,7 +196,7 @@ def get_attention_items(filters=None):
 		]
 		for types, collector in payment_collectors:
 			if not filters.problem_type or filters.problem_type in types:
-				items.extend(collector(shopify_accounts))
+				items.extend(collector(shopify_accounts, order_accounts))
 
 	if filters.problem_type:
 		items = [item for item in items if item["problem_type"] == filters.problem_type]
@@ -469,25 +473,58 @@ def _collect_bosta_items(problem_type=None):
 	if not frappe.has_permission("Bosta Shipment", "read"):
 		return []
 	carrier = frappe._dict(name="", platform=BOSTA_PLATFORM)
-	rows = frappe.get_list(
-		"Bosta Shipment",
-		fields=[
-			"name",
-			"status",
-			"tracking_number",
-			"bosta_state_code",
-			"bosta_state_value",
-			"bosta_delivery_type",
-			"bosta_exception_reason",
-			"delivery_note",
-			"delivery_note_error",
-			"delivery_note_error_at",
-			"last_bosta_status_on",
-			"creation",
-			"modified",
-		],
-		limit_page_length=0,
-	)
+	fields = [
+		"name",
+		"status",
+		"tracking_number",
+		"bosta_state_code",
+		"bosta_state_value",
+		"bosta_delivery_type",
+		"bosta_exception_reason",
+		"delivery_note",
+		"delivery_note_error",
+		"delivery_note_error_at",
+		"last_bosta_status_on",
+		"creation",
+		"modified",
+	]
+	# One narrow query per wanted type instead of reading every shipment; the checks in the
+	# loop below stay the authoritative rule (these only keep unrelated rows out of memory).
+	stale_cutoff = add_to_date(now_datetime(), days=-BOSTA_STALE_DAYS)
+	queries = []
+	if problem_type in (None, BOSTA_DELIVERY_NOTE):
+		queries.append(({"delivery_note_error": ["is", "set"]}, None))
+	if problem_type in (None, BOSTA_CARRIER_EXCEPTION):
+		queries.append(({"status": ["!=", "Canceled"], "bosta_state_code": ["in", BOSTA_PROBLEM_STATE_CODES]}, None))
+	if problem_type in (None, BOSTA_RETURN):
+		queries.append(({"bosta_state_code": ["in", BOSTA_RETURN_STATE_CODES]}, None))
+	if problem_type in (None, BOSTA_DELIVERED_WITHOUT_DELIVERY_NOTE):
+		queries.append(
+			({"status": ["!=", "Canceled"], "bosta_delivery_type": "SEND", "bosta_state_code": 45}, None)
+		)
+	if problem_type in (None, BOSTA_STATUS_STALE):
+		queries.append(
+			(
+				{
+					"status": ["!=", "Canceled"],
+					"tracking_number": ["is", "set"],
+					"bosta_state_code": ["not in", (45, 49)],
+					"creation": [">=", add_to_date(now_datetime(), days=-BOSTA_MAX_AGE_DAYS)],
+				},
+				[["last_bosta_status_on", "<=", stale_cutoff], ["last_bosta_status_on", "is", "not set"]],
+			)
+		)
+	rows_by_name = {}
+	for filters, or_filters in queries:
+		for row in frappe.get_list(
+			"Bosta Shipment",
+			filters=filters,
+			or_filters=or_filters,
+			fields=fields,
+			limit_page_length=0,
+		):
+			rows_by_name.setdefault(row.name, row)
+	rows = list(rows_by_name.values())
 	linked_delivery_notes = {row.delivery_note for row in rows if row.delivery_note}
 	submitted_delivery_notes = set()
 	if linked_delivery_notes:
@@ -527,7 +564,11 @@ def _collect_bosta_items(problem_type=None):
 					NEXT_OPEN_SHIPMENT,
 				)
 			)
-		if code in BOSTA_PROBLEM_STATE_CODES and problem_type in (None, BOSTA_CARRIER_EXCEPTION):
+		if (
+			row.status != "Canceled"
+			and code in BOSTA_PROBLEM_STATE_CODES
+			and problem_type in (None, BOSTA_CARRIER_EXCEPTION)
+		):
 			items.append(
 				_item(
 					BOSTA_CARRIER_EXCEPTION,
@@ -709,16 +750,10 @@ def _collect_import_errors(accounts):
 	return items
 
 
-def _collect_payment_errors(accounts):
+def _collect_payment_errors(accounts, order_accounts):
 	"""Latest unresolved payment mirroring failure per order and transaction."""
-	order_accounts = _shopify_order_accounts(accounts)
 	if not order_accounts:
 		return []
-	filters = {
-		"sync_type": "Payment",
-		"status": ["in", ["Error", "Invalid"]],
-		"marketplace_order": ["in", list(order_accounts)],
-	}
 	fields = [
 		"name",
 		"marketplace_account",
@@ -728,12 +763,29 @@ def _collect_payment_errors(accounts):
 		"attempted_at",
 		"creation",
 	]
-	errors = frappe.get_list(
-		"Marketplace Sync Log",
-		filters=filters,
-		fields=fields,
-		order_by="attempted_at desc, creation desc",
-		limit_page_length=0,
+	failed = {"sync_type": "Payment", "status": ["in", ["Error", "Invalid"]]}
+	# Rows carry their account; rows written before that was stored are found by order instead.
+	errors = {
+		log.name: log
+		for log in frappe.get_list(
+			"Marketplace Sync Log",
+			filters={**failed, "marketplace_account": ["in", list(accounts)]},
+			fields=fields,
+			limit_page_length=0,
+		)
+	}
+	for chunk in _chunks(order_accounts):
+		for log in frappe.get_list(
+			"Marketplace Sync Log",
+			filters={**failed, "marketplace_account": ["is", "not set"], "marketplace_order": ["in", chunk]},
+			fields=fields,
+			limit_page_length=0,
+		):
+			errors.setdefault(log.name, log)
+	errors = sorted(
+		(log for log in errors.values() if log.marketplace_order in order_accounts),
+		key=lambda log: (get_datetime(log.attempted_at or log.creation), log.name),
+		reverse=True,
 	)
 	if not errors:
 		return []
@@ -791,20 +843,30 @@ def _shopify_order_accounts(accounts):
 	return {row.name: row.marketplace_account for row in orders}
 
 
-def _collect_payment_excess(accounts):
-	order_accounts = _shopify_order_accounts(accounts)
+def _payment_entries(order_accounts, filters, fields):
+	"""Payment Entries of the given marketplace orders, the order list sent in chunks."""
+	entries = []
+	if not frappe.has_permission("Payment Entry", "read"):
+		return entries
+	for chunk in _chunks(order_accounts):
+		entries.extend(
+			frappe.get_list(
+				"Payment Entry",
+				filters={**filters, "custom_marketplace_order": ["in", chunk]},
+				fields=fields,
+				limit_page_length=0,
+			)
+		)
+	return sorted(entries, key=lambda entry: entry.modified, reverse=True)
+
+
+def _collect_payment_excess(accounts, order_accounts):
 	if not order_accounts:
 		return []
-	entries = frappe.get_list(
-		"Payment Entry",
-		filters={
-			"docstatus": 1,
-			"custom_marketplace_order": ["in", list(order_accounts)],
-			"unallocated_amount": [">", 0],
-		},
-		fields=["name", "custom_marketplace_order", "unallocated_amount", "modified"],
-		order_by="modified desc",
-		limit_page_length=0,
+	entries = _payment_entries(
+		order_accounts,
+		{"docstatus": 1, "unallocated_amount": [">", 0]},
+		["name", "custom_marketplace_order", "unallocated_amount", "modified"],
 	)
 	return [
 		_item(
@@ -821,23 +883,28 @@ def _collect_payment_excess(accounts):
 	]
 
 
-def _collect_cancelled_payment_entries(accounts):
-	order_accounts = _shopify_order_accounts(accounts)
+def _collect_cancelled_payment_entries(accounts, order_accounts):
 	if not order_accounts:
 		return []
-	entries = frappe.get_list(
-		"Payment Entry",
-		filters={
-			"docstatus": 2,
-			"custom_marketplace_order": ["in", list(order_accounts)],
-			"custom_marketplace_transaction_id": ["is", "set"],
-		},
-		fields=["name", "custom_marketplace_order", "custom_marketplace_transaction_id", "modified"],
-		order_by="modified desc",
-		limit_page_length=0,
+	entries = _payment_entries(
+		order_accounts,
+		{"docstatus": 2, "custom_marketplace_transaction_id": ["is", "set"]},
+		["name", "custom_marketplace_order", "custom_marketplace_transaction_id", "modified"],
 	)
 	if not entries:
 		return []
+	# A submitted amendment of a cancelled entry resolves it (#231).
+	amended = set()
+	for chunk in _chunks(entry.name for entry in entries):
+		amended.update(
+			row.amended_from
+			for row in frappe.get_list(
+				"Payment Entry",
+				filters={"docstatus": 1, "amended_from": ["in", chunk]},
+				fields=["amended_from"],
+				limit_page_length=0,
+			)
+		)
 	return [
 		_item(
 			PAYMENT_ENTRY_CANCELLED,
@@ -854,7 +921,7 @@ def _collect_cancelled_payment_entries(accounts):
 			NEXT_OPEN_PAYMENT,
 		)
 		for entry in entries
-		if entry.custom_marketplace_order in order_accounts
+		if entry.custom_marketplace_order in order_accounts and entry.name not in amended
 	]
 
 

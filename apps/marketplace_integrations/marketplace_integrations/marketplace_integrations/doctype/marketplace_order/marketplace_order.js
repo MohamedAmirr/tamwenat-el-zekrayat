@@ -896,8 +896,14 @@ function load_erpnext_sync_status(frm) {
 		});
 }
 
+// The same rule as the Sales Order form's Marketplace Order tab (sales_order.js);
+// marketplace_order.test.js asserts the two stay in step.
+function should_offer_erpnext_sync(order) {
+	return !(order.erpnext_sales_order && order.erpnext_sync_status === "Synced");
+}
+
 function add_erpnext_sync_action(frm) {
-	if (frm.doc.erpnext_sales_order && frm.doc.erpnext_sync_status === "Synced") return;
+	if (!should_offer_erpnext_sync(frm.doc)) return;
 	const label = frm.doc.erpnext_sales_order ? __("Update ERPNext Order") : __("Send to ERPNext");
 	frm.add_custom_button(label, () => {
 		frappe
@@ -1211,6 +1217,7 @@ function build_cart_update_items(rows, values) {
 if (typeof module !== "undefined") {
 	module.exports = {
 		add_clear_edit_marker_button,
+		should_offer_erpnext_sync,
 		add_order_actions,
 		build_cart_update_items,
 		cancel_order,

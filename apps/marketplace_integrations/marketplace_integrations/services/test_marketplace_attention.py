@@ -76,9 +76,13 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 			response_data=frappe.as_json({"message": "Gateway is not mapped"}),
 			attempted_at=stamp, creation=stamp, status="Invalid",
 		)
-		orders = [frappe._dict(name="MKTORD-1", marketplace_account=account.name)]
-		with patch.object(marketplace_attention.frappe, "get_list", side_effect=[orders, [failure], []]):
-			items = marketplace_attention._collect_payment_errors({account.name: account})
+		order_accounts = {"MKTORD-1": account.name}
+		accounts = {account.name: account}
+		# Reads: failures by stored account, failures of rows without an account, Success rows.
+		with patch.object(
+			marketplace_attention.frappe, "get_list", side_effect=[[failure], [], []]
+		):
+			items = marketplace_attention._collect_payment_errors(accounts, order_accounts)
 		self.assertEqual(len(items), 1)
 		self.assertEqual(items[0]["problem_type"], PAYMENT_ERROR)
 		self.assertIn("TX-1", items[0]["explanation"])
@@ -88,9 +92,26 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 			attempted_at=stamp + timedelta(seconds=1), creation=stamp + timedelta(seconds=1),
 		)
 		with patch.object(
-			marketplace_attention.frappe, "get_list", side_effect=[orders, [failure], [success]]
+			marketplace_attention.frappe, "get_list", side_effect=[[failure], [], [success]]
 		):
-			self.assertEqual(marketplace_attention._collect_payment_errors({account.name: account}), [])
+			self.assertEqual(marketplace_attention._collect_payment_errors(accounts, order_accounts), [])
+
+	def test_payment_error_of_a_log_without_an_account_is_found_by_its_order(self):
+		stamp = now_datetime()
+		account = frappe._dict(name="MKTACC-SHOPIFY", platform="Shopify")
+		old_row = frappe._dict(
+			name="LOG-OLD", marketplace_account=None, marketplace_order="MKTORD-1",
+			request_data=frappe.as_json({"transaction_id": "TX-9"}),
+			response_data=frappe.as_json({"message": "old"}),
+			attempted_at=stamp, creation=stamp, status="Error",
+		)
+		with patch.object(
+			marketplace_attention.frappe, "get_list", side_effect=[[], [old_row], []]
+		):
+			items = marketplace_attention._collect_payment_errors(
+				{account.name: account}, {"MKTORD-1": account.name}
+			)
+		self.assertEqual([item["reference_name"] for item in items], ["MKTORD-1"])
 
 	def test_payment_excess_and_cancelled_entry_are_listed_live(self):
 		account = frappe._dict(name="MKTACC-SHOPIFY", platform="Shopify")
@@ -98,7 +119,6 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 			marketplace_attention.frappe,
 			"get_list",
 			side_effect=[
-				[frappe._dict(name="MKTORD-1", marketplace_account=account.name)],
 				[
 					frappe._dict(
 						name="PE-EXCESS", custom_marketplace_order="MKTORD-1", unallocated_amount=12.5,
@@ -107,30 +127,45 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 				],
 			],
 		):
-			excess = marketplace_attention._collect_payment_excess({account.name: account})
+			excess = marketplace_attention._collect_payment_excess(
+				{account.name: account}, {"MKTORD-1": account.name}
+			)
 		self.assertEqual(excess[0]["problem_type"], PAYMENT_EXCESS)
 		self.assertIn("12.5", excess[0]["explanation"])
 
+		cancelled_entry = frappe._dict(
+			name="PE-CANCELLED", custom_marketplace_order="MKTORD-1",
+			custom_marketplace_transaction_id="TX-1", modified=now_datetime(),
+		)
+		accounts, order_accounts = {account.name: account}, {"MKTORD-1": account.name}
+		# Reads: the cancelled entries, then any submitted amendments of them.
+		with patch.object(
+			marketplace_attention.frappe, "get_list", side_effect=[[cancelled_entry], []]
+		):
+			cancelled = marketplace_attention._collect_cancelled_payment_entries(accounts, order_accounts)
+		self.assertEqual(cancelled[0]["problem_type"], PAYMENT_ENTRY_CANCELLED)
+		self.assertIn("record the payment manually", cancelled[0]["explanation"])
+
+		# Submitting the amendment clears the row (#231).
 		with patch.object(
 			marketplace_attention.frappe,
 			"get_list",
-			side_effect=[
-				[frappe._dict(name="MKTORD-1", marketplace_account=account.name)],
-				[
-					frappe._dict(
-						name="PE-CANCELLED", custom_marketplace_order="MKTORD-1",
-						custom_marketplace_transaction_id="TX-1", modified=now_datetime(),
-					)
-				],
-			],
-		) as get_list:
-			cancelled = marketplace_attention._collect_cancelled_payment_entries({account.name: account})
-		self.assertEqual(cancelled[0]["problem_type"], PAYMENT_ENTRY_CANCELLED)
-		self.assertIn("record the payment manually", cancelled[0]["explanation"])
-		# A submitted amendment cannot retain the unique transaction id, and is
-		# not a supported resolution signal. The collector needs only the order
-		# and cancelled-entry reads and leaves the item visible.
-		self.assertEqual(get_list.call_count, 2)
+			side_effect=[[cancelled_entry], [frappe._dict(amended_from="PE-CANCELLED")]],
+		):
+			self.assertEqual(
+				marketplace_attention._collect_cancelled_payment_entries(accounts, order_accounts), []
+			)
+
+	def test_shopify_order_accounts_are_read_once_for_all_payment_collectors(self):
+		account = frappe._dict(name="MKTACC-ONCE", platform="Shopify")
+		with (
+			patch.object(marketplace_attention, "_get_accounts", return_value={account.name: account}),
+			patch.object(
+				marketplace_attention, "_shopify_order_accounts", return_value={}
+			) as order_accounts,
+		):
+			marketplace_attention.get_attention_items()
+		self.assertEqual(order_accounts.call_count, 1)
 
 	def test_all_three_payment_attention_types_are_counted(self):
 		account_name = f"MKTACC-{self.suffix}"

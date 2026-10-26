@@ -4,14 +4,12 @@
 """Classify existing unlinked Shopify full cancellations after the prior cleanup patch."""
 
 import frappe
-from frappe import _
 
 from marketplace_integrations.integrations.shopify.order_reconciliation import build_evidence
-
-_UNPAID_STATUSES = {"PENDING", "VOIDED", "EXPIRED", "AUTHORIZED", "REFUNDED"}
-_PAID_STATUSES = {"PAID", "PARTIALLY_PAID", "PARTIALLY_REFUNDED"}
-_REFUND_ERROR = _(
-	"Cancelled in Shopify but the payment was not fully refunded; refund it in Shopify"
+from marketplace_integrations.services.marketplace_order_reconciliation import (
+	CANCELLED_PAID_ERROR,
+	CANCELLED_PAID_STATUSES,
+	CANCELLED_UNPAID_STATUSES,
 )
 
 
@@ -38,10 +36,10 @@ def execute():
 			continue
 
 		financial_status = order.external_financial_status
-		if financial_status in _UNPAID_STATUSES:
+		if financial_status in CANCELLED_UNPAID_STATUSES:
 			target = {"erpnext_sync_status": "Cancelled", "last_sync_error": None}
-		elif financial_status in _PAID_STATUSES:
-			target = {"erpnext_sync_status": "Sync Error", "last_sync_error": _REFUND_ERROR}
+		elif financial_status in CANCELLED_PAID_STATUSES:
+			target = {"erpnext_sync_status": "Sync Error", "last_sync_error": CANCELLED_PAID_ERROR}
 		else:
 			# Unknown future statuses remain unchanged for manual review.
 			continue

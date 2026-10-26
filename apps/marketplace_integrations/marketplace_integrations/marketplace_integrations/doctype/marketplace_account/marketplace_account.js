@@ -536,6 +536,8 @@ function show_shopify_gateway_picker(frm) {
 		.call({
 			method: "marketplace_integrations.api.shopify_payment_gateways.list_recent_successful_gateways",
 			args: { account: frm.doc.name },
+			// Silent: the catch below shows the one message (a 403/404 still opens Frappe's own dialog).
+			silent: true,
 			freeze: true,
 			freeze_message: __("Loading Shopify payment gateways..."),
 		})

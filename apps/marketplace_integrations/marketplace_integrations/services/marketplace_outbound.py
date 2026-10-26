@@ -36,7 +36,7 @@ import json
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, flt, now_datetime
+from frappe.utils import cstr, escape_html, flt, now_datetime
 
 from marketplace_integrations.integrations.talabat.orders import CANCELLATION_REASONS
 from marketplace_integrations.services.marketplace_orders import rollback_to_savepoint
@@ -542,7 +542,8 @@ def request_platform_cancel(sales_order, cancellation_reason=None):
 				order, sales_order.name, {"cancellation_reason": cancellation_reason}, error_text
 			)
 			frappe.db.commit()
-			frappe.throw(error_text)
+			# Desk renders a thrown message as HTML and the text is Shopify's, so escape it.
+			frappe.throw(escape_html(error_text))
 		if not isinstance(job_result, dict) or cstr(job_result.get("status")).strip().upper() != "SUCCEEDED":
 			return {
 				"ok": True,

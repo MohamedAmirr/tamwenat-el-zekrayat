@@ -111,6 +111,7 @@ def get_sales_order_shipment(sales_order_name):
 		"address_first_line",
 		"cod_amount",
 		"shipment_fee",
+		"shipment_fee_received_on",
 		"delivery_note",
 		"delivery_note_error",
 		"handover_status",
@@ -145,7 +146,8 @@ def get_sales_order_shipment(sales_order_name):
 			"city_id": row.city_id or "",
 			"address_first_line": row.address_first_line or "",
 			"cod_amount": flt(row.cod_amount),
-			"shipment_fee": flt(row.shipment_fee) if row.shipment_fee not in (None, "") else None,
+			# None until Bosta reported a fee: an unset Currency reads back as 0.
+			"shipment_fee": flt(row.shipment_fee) if row.shipment_fee_received_on else None,
 			"delivery_note": row.delivery_note or "",
 			"delivery_note_error": row.delivery_note_error or "",
 			"delivery_note_status": _readable_delivery_note_status(row.delivery_note),
