@@ -33,6 +33,9 @@ EXPECTED_FIELDNAMES = {
 	"explanation",
 	"detected_at",
 	"next_action",
+	"action_state",
+	"linked_doctype",
+	"linked_document",
 }
 
 

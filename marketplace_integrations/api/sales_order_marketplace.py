@@ -33,7 +33,9 @@ def get_marketplace_order_summary(sales_order: str):
 			"customer_city", "payment_type", "payment_transactions", "sub_total", "discount",
 			"order_total", "total_taxes", "shipping_total", "duties_total", "delivery_fee",
 			"service_fee", "container_charge", "difference_to_minimum", "collect_at_pickup",
-			"shop_currency", "presentment_currency", "erpnext_sales_order", "erpnext_sync_status", "last_sync_error",
+			"shop_currency", "erpnext_sales_order", "erpnext_sync_status", "last_sync_error",
+			"cancelled_at", "cancellation_reason", "received_on", "last_platform_update_on",
+			"last_erpnext_sync_on", "sync_action_state",
 		],
 		limit_page_length=1,
 	)
@@ -48,6 +50,10 @@ def get_marketplace_order_summary(sales_order: str):
 		"status": order.external_status or "",
 		"financial_status": order.external_financial_status or "",
 		"fulfillment_status": order.external_fulfillment_status or "",
+		"cancelled_at": order.cancelled_at,
+		"cancellation_reason": order.cancellation_reason or "",
+		"received_on": order.received_on,
+		"last_platform_update_on": order.last_platform_update_on,
 		"customer": " ".join(filter(None, [order.customer_first_name, order.customer_last_name])),
 		"phone": order.customer_phone_number or "",
 		"email": order.customer_email or "",
@@ -60,7 +66,9 @@ def get_marketplace_order_summary(sales_order: str):
 			"delivery_fee": flt(order.delivery_fee), "service_fee": flt(order.service_fee),
 			"container_charge": flt(order.container_charge), "difference_to_minimum": flt(order.difference_to_minimum),
 			"collect_at_pickup": flt(order.collect_at_pickup),
-			"shop_currency": order.shop_currency or "", "presentment_currency": order.presentment_currency or "",
+			# Shopify stores shopMoney amounts, so the shop currency is the right one. Talabat's
+			# payload has no currency and Noon stores no order amounts, so none is claimed for them.
+			"currency": (order.shop_currency or "") if order.platform == "Shopify" else "",
 		},
 		"payment_type": order.payment_type or "",
 		"payment_transactions": _json_list(order.payment_transactions),
@@ -68,7 +76,9 @@ def get_marketplace_order_summary(sales_order: str):
 		"latest_payment_log": _latest_payment_log(order.name),
 		"erpnext_sales_order": order.erpnext_sales_order or "",
 		"erpnext_sync_status": order.erpnext_sync_status or "",
+		"last_erpnext_sync_on": order.last_erpnext_sync_on,
 		"last_sync_error": cstr(order.last_sync_error),
+		"sync_action_state": order.sync_action_state or "",
 	}
 
 
@@ -107,4 +117,9 @@ def _latest_payment_log(marketplace_order):
 	if not rows:
 		return None
 	row = rows[0]
-	return {"status": row.status, "attempted_at": row.attempted_at, "response_data": cstr(row.response_data)}
+	try:
+		response = frappe.parse_json(row.response_data) if row.response_data else {}
+	except (TypeError, ValueError):
+		response = {}
+	message = response.get("message") if isinstance(response, dict) else None
+	return {"status": row.status, "attempted_at": row.attempted_at, "message": cstr(message)}

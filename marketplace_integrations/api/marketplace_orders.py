@@ -6,6 +6,9 @@
 import frappe
 
 from marketplace_integrations.services.sales_order_sync import (
+	confirm_goods_received as confirm_goods_received_service,
+)
+from marketplace_integrations.services.sales_order_sync import (
 	get_current_sync_status,
 	sync_sales_order,
 )
@@ -28,11 +31,25 @@ def get_erpnext_sync_status(marketplace_order: str):
 	status = get_current_sync_status(doc.name)
 	# get_current_sync_status() may have saved the order. Report whether it did so
 	# the form can reload; the client must never adopt `modified` itself.
-	last_sync_error, modified_after = frappe.db.get_value(
-		"Marketplace Order", doc.name, ["last_sync_error", "modified"]
+	last_sync_error, sync_action_state, modified_after = frappe.db.get_value(
+		"Marketplace Order", doc.name, ["last_sync_error", "sync_action_state", "modified"]
 	)
 	return {
 		"status": status,
 		"last_sync_error": last_sync_error,
+		"sync_action_state": sync_action_state,
 		"saved": modified_after != modified_before,
 	}
+
+
+@frappe.whitelist(methods=["POST"])
+def confirm_goods_received(marketplace_order: str):
+	"""Record that the returned goods were physically received and prepare the draft return (#364).
+
+	Only Stock Manager and System Manager may confirm receipt; the role is checked here,
+	on the server, whatever the form shows.  Nothing is submitted.
+	"""
+	frappe.only_for(("Stock Manager", "System Manager"))
+	doc = frappe.get_doc("Marketplace Order", marketplace_order)
+	doc.check_permission("write")
+	return confirm_goods_received_service(doc.name)

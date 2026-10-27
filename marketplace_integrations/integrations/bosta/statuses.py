@@ -105,7 +105,8 @@ def poll_incomplete_shipments():
 			"tracking_number": ["!=", ""],
 			"status": ["!=", CANCELED],
 			"bosta_state_code": DELIVERED_STATE_CODE,
-			"shipment_fee": ["is", "not set"],
+			# A Currency column stores an unset fee as 0, so "has a fee" is its own timestamp.
+			"shipment_fee_received_on": ["is", "not set"],
 			"creation": [">=", add_to_date(now_datetime(), days=-POLL_MAX_AGE_DAYS)],
 		},
 		fields=["name", "tracking_number"],
@@ -422,7 +423,9 @@ def apply_state(
 		return _skip("delivery id mismatch", tracking_number, delivery_id)
 	if _is_duplicate_or_older_event(shipment, timestamp):
 		return STALE
-	fee_changed = shipment_fee is not None and shipment.shipment_fee != shipment_fee
+	fee_changed = shipment_fee is not None and (
+		shipment.shipment_fee != shipment_fee or not shipment.shipment_fee_received_on
+	)
 	if skip_if_unchanged and shipment.bosta_state_code == state_code and not fee_changed:
 		return UNCHANGED
 
@@ -430,6 +433,7 @@ def apply_state(
 	shipment.bosta_state_value = BOSTA_STATE_NAMES[state_code]
 	if fee_changed:
 		shipment.shipment_fee = shipment_fee
+		shipment.shipment_fee_received_on = shipment.shipment_fee_received_on or now_datetime()
 	if delivery_type is not None:
 		shipment.bosta_delivery_type = delivery_type
 	shipment.last_bosta_event_timestamp = timestamp

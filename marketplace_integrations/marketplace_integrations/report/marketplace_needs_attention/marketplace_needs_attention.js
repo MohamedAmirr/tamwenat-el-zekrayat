@@ -9,7 +9,7 @@
 
 const MARKETPLACE_ATTENTION_PROBLEM_TYPES = [
 	"Sync Error",
-	"Modified After Sync",
+	"Needs Action",
 	"Unmapped Items",
 	"Order Import Error",
 	"Fulfillment Error",
@@ -66,10 +66,16 @@ if (typeof frappe !== "undefined") {
 				return next_action_html(data);
 			}
 			// Problem type and reference type are fixed English vocabularies: translate for display only.
-			if (column.fieldname === "problem_type" || column.fieldname === "reference_doctype") {
+			if (
+				column.fieldname === "problem_type" ||
+				column.fieldname === "reference_doctype" ||
+				column.fieldname === "action_state" ||
+				column.fieldname === "linked_doctype"
+			) {
 				return default_formatter(__(value || ""), row, column, data);
 			}
 			if (column.fieldname === "reference_name") return reference_html(data);
+			if (column.fieldname === "linked_document") return linked_document_html(data);
 			return default_formatter(value, row, column, data);
 		},
 	};
@@ -83,6 +89,15 @@ function reference_html(data) {
 	const label = frappe.utils.escape_html(data.reference_label || name);
 	const href = `/app/${to_slug(data.reference_doctype)}/${encodeURIComponent(name)}`;
 	return `<a href="${frappe.utils.escape_html(href)}" title="${frappe.utils.escape_html(name)}"><bdi dir="ltr">${label}</bdi></a>`;
+}
+
+// #364: the blocking or prepared document of a Needs Action row (a Delivery Note, Noon Return, ...).
+function linked_document_html(data) {
+	const name = data.linked_document || "";
+	if (!name || !data.linked_doctype) return "";
+	const href = `/app/${to_slug(data.linked_doctype)}/${encodeURIComponent(name)}`;
+	const label = frappe.utils.escape_html(name);
+	return `<a href="${frappe.utils.escape_html(href)}"><bdi dir="ltr">${label}</bdi></a>`;
 }
 
 function to_slug(doctype) {
@@ -144,5 +159,11 @@ function retry_order_sync(marketplace_order, report) {
 }
 
 if (typeof module !== "undefined") {
-	module.exports = { MARKETPLACE_ATTENTION_PROBLEM_TYPES, next_action_html, reference_html, to_slug };
+	module.exports = {
+		MARKETPLACE_ATTENTION_PROBLEM_TYPES,
+		linked_document_html,
+		next_action_html,
+		reference_html,
+		to_slug,
+	};
 }

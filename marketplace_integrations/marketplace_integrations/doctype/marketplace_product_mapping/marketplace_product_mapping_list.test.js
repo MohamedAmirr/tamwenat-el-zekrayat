@@ -357,19 +357,33 @@ test("Noon push reports already-queued pricing or stock as skipped, not as queue
 	]);
 });
 
-test("Noon push reports a paused pricing or stock switch as skipped", async () => {
+test("Noon push reports a manual run queued while the account switch is off", async () => {
 	install_frappe({
 		call() {
-			return Promise.resolve({ message: { pricing: { queued: false, paused: true }, stock: { queued: true } } });
+			return Promise.resolve({
+				message: { pricing: { queued: true, switch_off: true }, stock: { queued: true, switch_off: false } },
+			});
 		},
 	});
 
 	const items = await push_selected_to_noon("NOON-A", ["MPM-1"]);
 
 	assert.deepEqual(items, [
-		{ category: "skipped", platform: "Noon", text: "NOON-A: pricing push paused." },
+		{ category: "queued", platform: "Noon", text: "NOON-A: pricing queued as a manual run." },
 		{ category: "queued", platform: "Noon", text: "NOON-A: stock queued." },
 	]);
+});
+
+test("Noon stock push reports a manual run queued while the account switch is off", async () => {
+	install_frappe({
+		call() {
+			return Promise.resolve({ message: { queued: true, switch_off: true } });
+		},
+	});
+
+	const items = await push_selected_noon_stock("NOON-A", ["MPM-1"]);
+
+	assert.deepEqual(items, [{ category: "queued", platform: "Noon", text: "NOON-A: stock queued as a manual run." }]);
 });
 
 test("the inventory action reads INVENTORY_OPTIONS only after the status-dialog script has loaded", async () => {

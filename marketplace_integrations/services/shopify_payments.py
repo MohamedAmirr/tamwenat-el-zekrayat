@@ -70,7 +70,9 @@ def mirror_shopify_payments(marketplace_order, trigger_source):
 					"status": "Invalid",
 					"message": message,
 				}
-				_create_payment_log(order, trigger_source, result)
+				# Every sync by this user would add the same row again; keep one per problem.
+				if not _same_as_latest_payment_log(order, result):
+					_create_payment_log(order, trigger_source, result)
 				results.append(result)
 			return results
 
@@ -352,6 +354,27 @@ def _transaction_date(txn):
 		if value:
 			return getdate(convert_utc_to_system_timezone(get_datetime(value)))
 	raise SyncBlocker(_("The Shopify transaction has neither a processed nor a created date."))
+
+
+def _same_as_latest_payment_log(order, result):
+	"""Whether the order's latest Payment log for this transaction already says the same."""
+	latest = frappe.get_all(
+		"Marketplace Sync Log",
+		filters={
+			"marketplace_order": order.name,
+			"sync_type": "Payment",
+			"request_data": json.dumps({"transaction_id": result["transaction_id"]}),
+		},
+		fields=["status", "response_data"],
+		order_by="attempted_at desc, creation desc",
+		limit_page_length=1,
+	)
+	if not latest or latest[0].status != result["status"]:
+		return False
+	try:
+		return (json.loads(latest[0].response_data or "{}") or {}).get("message") == result.get("message")
+	except ValueError:
+		return False
 
 
 def _create_payment_log(order, trigger_source, result):

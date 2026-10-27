@@ -51,8 +51,24 @@ SYSTEM_FIELDS = (
 	"bosta_requested_on",
 	"cod_amount",
 	"shipment_fee",
+	"shipment_fee_received_on",
 	"bosta_terminated_on",
 )
+
+
+def sales_order_delivery_status(shipments):
+	"""The Sales Order's stored delivery status from its shipments, newest first: the latest
+	shipment that is not Canceled, else the latest Canceled one, else blank. A Canceled shipment
+	always shows "Canceled", whatever Bosta state it was in. Also used by the backfill patch."""
+	current = next((row for row in shipments if row.status != CANCELED), shipments[0] if shipments else None)
+	if not current:
+		return ""
+	if current.status == CANCELED:
+		return CANCELED
+	# Import lazily: statuses imports this controller for its CANCELED/save helpers.
+	from marketplace_integrations.integrations.bosta.statuses import BOSTA_STATE_NAMES
+
+	return BOSTA_STATE_NAMES.get(current.bosta_state_code) or current.status or ""
 
 
 def save_as_system(shipment, insert=False):
@@ -175,14 +191,7 @@ class BostaShipment(Document):
 			order_by="creation desc, name desc",
 			limit_page_length=0,
 		)
-		current = next((row for row in rows if row.status != CANCELED), rows[0] if rows else None)
-		if current:
-			# Import lazily: statuses imports this controller for its CANCELED/save helpers.
-			from marketplace_integrations.integrations.bosta.statuses import BOSTA_STATE_NAMES
-
-			state = BOSTA_STATE_NAMES.get(current.bosta_state_code) or current.status or ""
-		else:
-			state = ""
+		state = sales_order_delivery_status(rows)
 		if frappe.db.get_value("Sales Order", self.sales_order, "custom_bosta_delivery_status") != state:
 			# This is a derived display field; don't run Sales Order accounting or update modified.
 			frappe.db.set_value(

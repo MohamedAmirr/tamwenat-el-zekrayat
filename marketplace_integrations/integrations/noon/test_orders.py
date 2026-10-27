@@ -16,6 +16,9 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests import IntegrationTestCase, UnitTestCase
 
+from marketplace_integrations.integrations.noon.expected_change import (
+	record_out_of_stock as record_noon_out_of_stock,
+)
 from marketplace_integrations.integrations.noon.order_mapper import normalize_order
 from marketplace_integrations.integrations.noon.orders import (
 	_ORDER_IMPORT_RQ_JOB_PREFIX,
@@ -927,6 +930,101 @@ class IntegrationTestNoonOrderImport(IntegrationTestCase):
 		self.assertIsNotNone(state.sync_debounce_until)
 		self.assertEqual(state.pending_sync_trigger_source, "Manual")
 
+	def _new_order_sync_state(self, fbpi_order_nr, mp_status, integration_status):
+		from marketplace_integrations.services.sales_order_sync import sync_sales_order
+
+		units = [
+			{
+				"mp_item_nr": 1,
+				"partner_sku": "SKU-MAPPED",
+				"mp_status": mp_status,
+				"integration_status": integration_status,
+				"delivered_invoice_price": 50.0,
+			}
+		]
+		order, _ = import_order(self.account, _order_payload(fbpi_order_nr=fbpi_order_nr, items=units))
+
+		# Created Syncing, so the debounce must be set or it would sit there for ever.
+		self.assertEqual(frappe.db.get_value("Marketplace Order", order.name, "erpnext_sync_status"), "Syncing")
+		self.assertIsNotNone(self._debounce(order).sync_debounce_until)
+
+		result = sync_sales_order(order.name, trigger_source="Noon Order Import")
+		values = frappe.db.get_value(
+			"Marketplace Order",
+			order.name,
+			["erpnext_sync_status", "sync_reason_code", "erpnext_sales_order"],
+			as_dict=True,
+		)
+		return result, values
+
+	def test_new_order_with_every_unit_cancelled_becomes_terminal_cancelled(self):
+		result, values = self._new_order_sync_state(
+			"ORD-NEW-CANCELLED", "MP_ITEM_STATUS_CANCELLED", "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED"
+		)
+
+		self.assertTrue(result["ok"])
+		self.assertTrue(result["skipped"])
+		self.assertEqual(values.erpnext_sync_status, "Cancelled")
+		self.assertFalse(values.sync_reason_code)
+		self.assertFalse(values.erpnext_sales_order)
+
+	def test_new_order_with_units_out_of_stock_but_not_cancelled_ends_in_sync_error(self):
+		result, values = self._new_order_sync_state(
+			"ORD-NEW-OOS", "MP_ITEM_STATUS_CONFIRMED", "INTEGRATION_ITEM_STATUS_OUT_OF_STOCK"
+		)
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(values.erpnext_sync_status, "Sync Error")
+		self.assertTrue(values.sync_reason_code)
+
+	def test_import_matching_the_out_of_stock_marker_is_an_echo_that_queues_the_sync_after_commit(self):
+		order = self._linked_order("ORD-ECHO")
+		record_noon_out_of_stock(order.name, ["1"])
+		payload = _order_payload(
+			fbpi_order_nr="ORD-ECHO", items=self._item("INTEGRATION_ITEM_STATUS_OUT_OF_STOCK")
+		)
+
+		with (
+			patch("marketplace_integrations.services.echo_guard.is_job_enqueued", return_value=False),
+			patch("marketplace_integrations.services.echo_guard.frappe.enqueue") as enqueue,
+		):
+			import_order(self.account, payload)
+
+		kwargs = enqueue.call_args.kwargs
+		self.assertEqual(kwargs["marketplace_order"], order.name)
+		self.assertEqual(kwargs["trigger_source"], "Noon Order Import")
+		self.assertEqual(kwargs["job_id"], f"marketplace-echo-sync-{order.name}")
+		self.assertTrue(kwargs["enqueue_after_commit"])
+		self.assertTrue(kwargs["deduplicate"])
+		self.assertIsNone(self._debounce(order).sync_debounce_until)
+		self.assertFalse(frappe.db.get_value("Marketplace Order", order.name, "expected_change_hash"))
+
+	def test_import_differing_from_the_out_of_stock_marker_is_a_real_change(self):
+		order = self._linked_order("ORD-ECHO-DIFF")
+		record_noon_out_of_stock(order.name, ["1"])
+		payload = _order_payload(
+			fbpi_order_nr="ORD-ECHO-DIFF", items=self._item("INTEGRATION_ITEM_STATUS_SHIPPED")
+		)
+
+		with patch("marketplace_integrations.services.echo_guard.frappe.enqueue") as enqueue:
+			import_order(self.account, payload)
+
+		enqueue.assert_not_called()
+		self.assertIsNotNone(self._debounce(order).sync_debounce_until)
+		self.assertFalse(frappe.db.get_value("Marketplace Order", order.name, "expected_change_hash"))
+
+	def test_own_refresh_leaves_the_out_of_stock_marker_for_the_later_poll(self):
+		order = self._linked_order("ORD-ECHO-OWN")
+		record_noon_out_of_stock(order.name, ["1"])
+		payload = _order_payload(
+			fbpi_order_nr="ORD-ECHO-OWN", items=self._item("INTEGRATION_ITEM_STATUS_OUT_OF_STOCK")
+		)
+
+		import_order(self.account, payload, bump_trigger_source="Manual", echo_guard=False)
+
+		self.assertTrue(frappe.db.get_value("Marketplace Order", order.name, "expected_change_hash"))
+		self.assertIsNotNone(self._debounce(order).sync_debounce_until)
+
 	def test_unlinked_changed_order_only_bumps_on_first_eligibility(self):
 		order, _ = import_order(
 			self.account, _order_payload(fbpi_order_nr="ORD-UNLINKED", items=self._item())
@@ -1683,10 +1781,107 @@ class IntegrationTestNoonPoll(IntegrationTestCase):
 
 	def tearDown(self):
 		frappe.db.delete("Marketplace Order", filters={"marketplace_account": self.account.name})
+		frappe.db.delete("Marketplace Sync Log", filters={"marketplace_account": self.account.name})
 		frappe.db.delete("Marketplace Product Mapping", filters={"marketplace_account": self.account.name})
 		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
 		frappe.delete_doc("Noon Connection", self.account.connection, ignore_permissions=True, force=True)
 		frappe.db.commit()
+
+	def _unlinked_order(self, fbpi_order_nr):
+		with patch("marketplace_integrations.integrations.noon.orders.NoonClient"):
+			order, _unmapped = import_order(self.account, _order_payload(fbpi_order_nr=fbpi_order_nr))
+		# The import itself may schedule the first sync; start each test from none pending.
+		frappe.db.set_value(
+			"Marketplace Order",
+			order.name,
+			{"sync_debounce_until": None, "pending_sync_trigger_source": None},
+			update_modified=False,
+		)
+		return order.name
+
+	def _debounce(self, name):
+		return frappe.db.get_value(
+			"Marketplace Order", name, ["sync_debounce_until", "pending_sync_trigger_source"], as_dict=True
+		)
+
+	def _run(self, trigger_source, catch_up_unlinked, import_result=([], [])):
+		from marketplace_integrations.integrations.noon.orders import run_order_import
+
+		base = "marketplace_integrations.integrations.noon.orders"
+		with (
+			patch(f"{base}.validate_connection_enabled"),
+			patch(f"{base}._validate_order_import_setup"),
+			patch(f"{base}.import_orders_created_between", return_value=import_result),
+		):
+			return run_order_import(
+				self.account.name, trigger_source, catch_up_unlinked=catch_up_unlinked
+			)
+
+	def test_hourly_poll_does_not_run_the_catch_up(self):
+		name = self._unlinked_order("ORD-HOURLY")
+
+		result = self._run("Scheduled Reconciliation", catch_up_unlinked=False)
+
+		self.assertEqual(result["scheduled"], 0)
+		self.assertIsNone(self._debounce(name).sync_debounce_until)
+		self.assertFalse(
+			frappe.db.exists(
+				"Marketplace Sync Log",
+				{"marketplace_account": self.account.name, "trigger_source": "Scheduled Reconciliation"},
+			)
+		)
+
+	def test_catch_up_schedules_unlinked_orders_skips_cancelled_and_linked_and_logs_a_summary(self):
+		unlinked = self._unlinked_order("ORD-UNLINKED")
+		cancelled = self._unlinked_order("ORD-CANCELLED")
+		frappe.db.set_value("Marketplace Order", cancelled, "erpnext_sync_status", "Cancelled")
+		linked = self._unlinked_order("ORD-LINKED")
+		fixture = LinkedSalesOrderFixture()
+		self.addCleanup(fixture.cleanup)
+		fixture.link(linked)
+
+		result = self._run("Scheduled Reconciliation", catch_up_unlinked=True, import_result=([1, 2], [3]))
+
+		self.assertEqual(result, {"imported": 2, "errors": 1, "scheduled": 1})
+		state = self._debounce(unlinked)
+		self.assertIsNotNone(state.sync_debounce_until)
+		self.assertEqual(state.pending_sync_trigger_source, "Scheduled Reconciliation")
+		self.assertIsNone(self._debounce(cancelled).sync_debounce_until)
+		self.assertIsNone(self._debounce(linked).sync_debounce_until)
+		log = frappe.get_all(
+			"Marketplace Sync Log",
+			filters={"marketplace_account": self.account.name, "trigger_source": "Scheduled Reconciliation"},
+			fields=["status", "response_data"],
+		)
+		self.assertEqual(len(log), 1)
+		self.assertEqual(log[0].status, "Error")
+		self.assertEqual(
+			frappe.parse_json(log[0].response_data),
+			{"imported": 2, "first_syncs_scheduled": 1, "failures": 1},
+		)
+
+	def test_catch_up_run_twice_does_not_push_the_pending_window_forward(self):
+		name = self._unlinked_order("ORD-TWICE")
+
+		self._run("Scheduled Reconciliation", catch_up_unlinked=True)
+		first = self._debounce(name).sync_debounce_until
+		self._run("Scheduled Reconciliation", catch_up_unlinked=True)
+
+		self.assertEqual(self._debounce(name).sync_debounce_until, first)
+
+	def test_catch_up_has_its_own_job_id_so_it_is_not_deduplicated_against_the_hourly_job(self):
+		from marketplace_integrations.integrations.noon.orders import enqueue_order_import
+
+		with patch("marketplace_integrations.integrations.noon.orders.frappe.enqueue") as enqueue:
+			enqueue_order_import(self.account.name, trigger_source="Scheduled Reconciliation")
+			enqueue_order_import(
+				self.account.name, trigger_source="Scheduled Reconciliation", catch_up_unlinked=True
+			)
+
+		hourly, nightly = (call.kwargs for call in enqueue.call_args_list)
+		self.assertNotEqual(hourly["job_id"], nightly["job_id"])
+		self.assertFalse(hourly["catch_up_unlinked"])
+		self.assertTrue(nightly["catch_up_unlinked"])
 
 	def test_poll_all_accounts_enqueues_one_deduplicated_job_per_account(self):
 		"""poll_all_accounts() is lightweight (post-#145-review fix): it never
@@ -1721,6 +1916,7 @@ class IntegrationTestNoonPoll(IntegrationTestCase):
 			deduplicate=True,
 			account_name=self.account.name,
 			trigger_source="Scheduled Reconciliation",
+			catch_up_unlinked=False,
 		)
 		# Result contains the count of all enabled accounts queued (including
 		# stale ones from prior test runs), so just verify it's present and >= 1

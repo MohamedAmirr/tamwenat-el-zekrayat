@@ -97,7 +97,7 @@ class IntegrationTestMarketplaceChannels(IntegrationTestCase):
 		)
 
 		self.make_order(account_a, erpnext_sync_status="Sync Error")
-		self.make_order(account_a, erpnext_sync_status="Modified After Sync")
+		self.make_order(account_a, erpnext_sync_status="Needs Action")
 		self.make_order(account_a, erpnext_sync_status="Synced")
 		self.make_mapping(account_a, sync_status="Error")
 		self.make_sync_log(account_a)

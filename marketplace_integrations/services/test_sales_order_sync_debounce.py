@@ -482,6 +482,25 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 	# #180: sweep_stuck_sales_order_reconciliations()
 	# -------------------------------------------------------------------
 
+	def test_a_bump_never_reopens_an_order_cancelled_before_any_sales_order(self):
+		order = self._make_order()
+		frappe.db.set_value("Marketplace Order", order.name, "erpnext_sync_status", "Cancelled")
+
+		debounce.bump_sync_debounce(order.name, "Shopify Webhook")
+
+		values = frappe.db.get_value(
+			"Marketplace Order", order.name, ["erpnext_sync_status", "sync_debounce_until"], as_dict=True
+		)
+		self.assertEqual(values.erpnext_sync_status, "Cancelled")
+		self.assertTrue(values.sync_debounce_until)
+
+	def test_the_stuck_sweep_ignores_a_cancelled_order_but_picks_a_lost_syncing_one(self):
+		cancelled = self._stuck_order(status="Cancelled", platform="Shopify")
+		syncing = self._stuck_order(status="Syncing", platform="Shopify")
+		candidates = debounce._stuck_reconciliation_candidates(500)
+		self.assertNotIn(cancelled.name, candidates)
+		self.assertIn(syncing.name, candidates)
+
 	def _stuck_order(
 		self,
 		status="Synced",
@@ -535,7 +554,7 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 
 	def test_stuck_sweep_picks_closed_attention_orders_for_every_platform(self):
 		picked = [
-			self._stuck_order(status="Modified After Sync", platform="Talabat"),
+			self._stuck_order(status="Needs Action", platform="Talabat"),
 			self._stuck_order(status="Sync Error", platform="Shopify"),
 			self._stuck_order(so_closed=True, platform="Noon"),
 			self._stuck_order(so_closed=True, platform="Talabat"),
@@ -560,7 +579,7 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 			)
 			return order.name
 
-		lost = unlinked("Shopify", "Not Synced")
+		lost = unlinked("Shopify", "Syncing")
 		failed_long_ago = unlinked(
 			"Shopify",
 			"Sync Error",
@@ -571,8 +590,8 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 			"Sync Error",
 			last_reconciliation_check_on=add_to_date(now_datetime(), hours=-2),
 		)
-		cancelled = unlinked("Shopify", "Not Synced", cancelled_at=now_datetime())
-		other_platform = unlinked("Talabat", "Not Synced")
+		cancelled = unlinked("Shopify", "Syncing", cancelled_at=now_datetime())
+		other_platform = unlinked("Talabat", "Syncing")
 		names = self._candidates()
 		self.assertIn(lost, names)
 		self.assertIn(failed_long_ago, names)
@@ -589,7 +608,7 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 			self.assertIn(order.name, names)
 
 	def test_cancelled_and_closed_with_delivery_orders_back_off_for_24h(self):
-		status = "Modified After Sync"
+		status = "Needs Action"
 		recent_cancelled = self._stuck_order(status=status, so_cancelled=True, checked_hours_ago=20)
 		old_cancelled = self._stuck_order(status=status, so_cancelled=True, checked_hours_ago=25)
 		recent_delivered = self._stuck_order(
@@ -619,7 +638,7 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 			{"so_closed": True},
 			{"so_cancelled": True},
 			{"so_closed": True, "per_delivered": 50},
-			{"status": "Modified After Sync"},
+			{"status": "Needs Action"},
 		):
 			with self.subTest(**kwargs):
 				order = self._stuck_order(outbound_cancelled=True, **kwargs)
@@ -627,10 +646,10 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 
 	def test_shopify_outbound_cancel_marker_is_skipped_only_after_cancel_echo(self):
 		pending = self._stuck_order(
-			status="Modified After Sync", platform="Shopify", outbound_cancelled=True
+			status="Needs Action", platform="Shopify", outbound_cancelled=True
 		)
 		confirmed = self._stuck_order(
-			status="Modified After Sync",
+			status="Needs Action",
 			platform="Shopify",
 			outbound_cancelled=True,
 			cancelled_at=now_datetime(),
@@ -721,7 +740,7 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 
 	def test_stuck_sweep_backs_off_attention_and_closed_orders_for_24h(self):
 		recent_attention = self._stuck_order(status="Sync Error", checked_hours_ago=2)
-		old_attention = self._stuck_order(status="Modified After Sync", checked_hours_ago=25)
+		old_attention = self._stuck_order(status="Needs Action", checked_hours_ago=25)
 		recent_closed = self._stuck_order(so_closed=True, checked_hours_ago=20)
 		old_closed = self._stuck_order(so_closed=True, checked_hours_ago=25)
 		names = self._candidates()

@@ -54,19 +54,27 @@ import hashlib
 import json
 
 import frappe
-from frappe.utils import add_to_date, cstr, flt, getdate, now_datetime
+from frappe.utils import add_to_date, cstr, flt, get_datetime, getdate, now_datetime
 
 from marketplace_integrations.integrations.shopify.order_reconciliation import refund_ids
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_order.marketplace_order import (
 	compute_order_identity_key,
 )
 from marketplace_integrations.services.sales_order_sync import sync_sales_order
+from marketplace_integrations.services.sync_status import CANCELLED, NEEDS_ACTION, SYNC_ERROR, SYNCED, SYNCING
 
 ORDER_DOCTYPE = "Marketplace Order"
 
 # Kept easy to tune - see the module docstring for why actual latency is this
 # plus up to ~1 sweep interval, not an exact figure.
 SYNC_DEBOUNCE_SECONDS = 45
+
+# Transient-failure retries (#364): timeouts, lock/deadlock errors and HTTP 5xx/429 are retried
+# after 1, 5 and 15 minutes (``sync_retry_count`` counts them, the retry itself rides on
+# ``sync_debounce_until`` so the minute sweep and its ``job_id`` dedup run it).  After the last
+# one the order becomes Sync Error with SYNC_RETRIES_EXHAUSTED.  Terminal failures (missing
+# mapping or price, validation errors) are never retried.
+TRANSIENT_RETRY_DELAYS_SECONDS = (60, 300, 900)
 
 _SYNC_RQ_JOB_ID_PREFIX = "marketplace-sync"
 
@@ -75,23 +83,38 @@ def bump_sync_debounce(
 	marketplace_order, trigger_source, delay_seconds=SYNC_DEBOUNCE_SECONDS, extra_values=None
 ):
 	"""Push ``marketplace_order``'s sync debounce window forward to
-	``now + delay_seconds`` and record ``trigger_source`` as the pending sync's
-	origin (#135). Always pushes forward, even if a window is already pending -
+	``now + delay_seconds``, record ``trigger_source`` as the pending sync's
+	origin (#135) and set the order to Syncing in the same write (#364; an order
+	cancelled before any Sales Order exists stays Cancelled).
+	Always pushes forward, even if a window is already pending -
 	never enqueues anything itself. If a window is already pending when this
 	is called again (e.g. two webhooks touching the same order in quick
 	succession), the LATEST call's ``trigger_source`` simply overwrites the
 	previous one - no merge logic. ``extra_values`` are written in the same
 	``set_value`` call (one atomic write), e.g. the sweep's check time."""
-	frappe.db.set_value(
-		ORDER_DOCTYPE,
-		marketplace_order,
-		{
-			**(extra_values or {}),
-			"sync_debounce_until": add_to_date(now_datetime(), seconds=delay_seconds),
-			"pending_sync_trigger_source": trigger_source,
-		},
-		update_modified=False,
-	)
+	values = {
+		**(extra_values or {}),
+		"sync_debounce_until": add_to_date(now_datetime(), seconds=delay_seconds),
+		"pending_sync_trigger_source": trigger_source,
+	}
+	if frappe.db.get_value(ORDER_DOCTYPE, marketplace_order, "erpnext_sync_status") != CANCELLED:
+		values["erpnext_sync_status"] = SYNCING
+	frappe.db.set_value(ORDER_DOCTYPE, marketplace_order, values, update_modified=False)
+
+
+def bump_sync_debounce_unless_pending(order_row, trigger_source):
+	"""Like ``bump_sync_debounce()``, but leave an order alone when a window set by the
+	same ``trigger_source`` is still pending, so a re-run does not push it forward.
+	``order_row`` needs ``name``, ``sync_debounce_until`` and ``pending_sync_trigger_source``.
+	Returns True when the window was bumped."""
+	if (
+		order_row.pending_sync_trigger_source == trigger_source
+		and order_row.sync_debounce_until
+		and get_datetime(order_row.sync_debounce_until) > now_datetime()
+	):
+		return False
+	bump_sync_debounce(order_row.name, trigger_source)
+	return True
 
 
 _FINGERPRINT_ITEM_FIELDS = (
@@ -226,6 +249,22 @@ def linked_order_fingerprint(marketplace_account, external_order_id):
 	return order_evidence_fingerprint(frappe.get_doc(ORDER_DOCTYPE, name))
 
 
+def existing_order_fingerprint(marketplace_account, external_order_id):
+	"""Fingerprint of an existing Marketplace Order, linked or not, else ``None`` (a new order).
+
+	Unlike ``linked_order_fingerprint()`` this does not require a Sales Order: the Talabat
+	webhook uses it to bump only a new order or one whose evidence really changed (#364).
+	"""
+	name = frappe.db.get_value(
+		ORDER_DOCTYPE,
+		{"order_identity_key": compute_order_identity_key(marketplace_account, external_order_id)},
+		"name",
+	)
+	if not name:
+		return None
+	return order_evidence_fingerprint(frappe.get_doc(ORDER_DOCTYPE, name))
+
+
 def bump_if_linked_order_changed(order_name, before_fingerprint, trigger_source):
 	"""Bump the sync debounce when an import changed a linked order (#178).
 
@@ -328,11 +367,12 @@ def _run_debounced_sync(marketplace_order, expected_debounce_until):
 
 # #180 scheduled reconciliation sweep (platform-neutral).
 RECONCILIATION_SWEEP_BATCH = 200
-# A persistent Attention status (Modified After Sync / Sync Error) is re-evaluated at most daily.
+# A persistent Attention status (Needs Action / Sync Error, or a Syncing order whose window got
+# lost) is re-evaluated at most daily.
 ATTENTION_RECHECK_HOURS = 24
 # A Closed or Cancelled linked Sales Order whose order is otherwise Synced is re-checked at most every 24 hours (a converged one would otherwise be re-bumped forever).
 CLOSED_RECHECK_HOURS = 24
-_ATTENTION_STATUSES = ("Modified After Sync", "Sync Error")
+_ATTENTION_STATUSES = (NEEDS_ACTION, SYNC_ERROR, SYNCING)
 
 
 def _stuck_reconciliation_candidates(limit):
@@ -360,12 +400,12 @@ def _stuck_reconciliation_candidates(limit):
 		& backed_off
 	)
 	# ERPNext-Cancelled, or Closed after delivery/billing (#181): nothing for ERPNext to do, but
-	# the platform order may still be active, which the planner surfaces as Modified After Sync
-	# with the platform instruction (no Sales Order hook announces the cancel/close).
+	# the platform order may still be active, which the planner surfaces as Needs Action
+	# with the platform instruction (a Close/Reopen has no Sales Order hook here).
 	# An order already converged (Synced and checked at least once) is skipped: re-planning it
-	# daily would only append a no-change log row.  Modified After Sync / Sync Error / never
+	# daily would only append a no-change log row.  Needs Action / Sync Error / never
 	# checked still qualify.
-	converged = (order.erpnext_sync_status == "Synced") & checked.isnotnull()
+	converged = (order.erpnext_sync_status == SYNCED) & checked.isnotnull()
 	inactive_due = (
 		(so.docstatus == 2)
 		| ((so.docstatus == 1) & (so.status == "Closed") & ((so.per_delivered > 0) | (so.per_billed > 0)))
@@ -376,7 +416,7 @@ def _stuck_reconciliation_candidates(limit):
 	# sync it.  Never checked, or an old failure, qualifies; cancelled orders are skipped.
 	unlinked_due = (
 		(order.platform == "Shopify")
-		& order.erpnext_sync_status.isin(("Not Synced", "Sync Error"))
+		& order.erpnext_sync_status.isin((SYNCING, SYNC_ERROR, NEEDS_ACTION))
 		& order.cancelled_at.isnull()
 		& (checked.isnull() | (checked <= add_to_date(now, hours=-ATTENTION_RECHECK_HOURS)))
 	)
@@ -388,7 +428,7 @@ def _stuck_reconciliation_candidates(limit):
 		.where(order.sync_debounce_until.isnull())
 		# Talabat's accepted cancel response is already synchronous. For Shopify,
 		# skip only after its cancellation echo is persisted; an accepted async job
-		# that has not cancelled the order must still reach Modified After Sync.
+		# that has not cancelled the order must still reach Needs Action.
 		.where(
 			(order.outbound_cancelled_on.isnull())
 			| ((order.platform == "Shopify") & order.cancelled_at.isnull())
@@ -403,7 +443,7 @@ def _stuck_reconciliation_candidates(limit):
 
 def sweep_stuck_sales_order_reconciliations():
 	"""Hourly (``hooks.py`` ``scheduler_events["hourly"]``): find linked Marketplace Orders
-	stuck in Modified After Sync / Sync Error or whose Sales Order was Closed or Cancelled, and bump
+	stuck in Needs Action / Sync Error or whose Sales Order was Closed or Cancelled, and bump
 	their debounce with ``Scheduled Sweep``.  The minute job ``sweep_due_sales_order_syncs``
 	then runs the single sync path; this function never syncs or plans itself.  Idempotent:
 	a bumped order has a pending debounce (skipped) and a fresh check time (backed off)."""

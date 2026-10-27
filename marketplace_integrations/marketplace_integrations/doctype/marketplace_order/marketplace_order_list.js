@@ -55,14 +55,15 @@ function show_row_name_on_hover(listview) {
 // #169: one colour per ERPNext sync state so a merchant can scan the list for
 // problems without opening each order.
 const ORDER_SYNC_STATUS_COLORS = {
+	Syncing: "blue",
 	Synced: "green",
-	"Not Synced": "grey",
-	"Modified After Sync": "orange",
+	"Needs Action": "orange",
 	"Sync Error": "red",
+	Cancelled: "grey",
 };
 
 function get_order_indicator(doc) {
-	const status = doc.erpnext_sync_status || "Not Synced";
+	const status = doc.erpnext_sync_status || "Syncing";
 	return [__(status), ORDER_SYNC_STATUS_COLORS[status] || "grey", `erpnext_sync_status,=,${status}`];
 }
 

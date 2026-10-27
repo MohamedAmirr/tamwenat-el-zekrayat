@@ -36,4 +36,6 @@ class TestNightlyMarketplaceOrderReconciliation(TestCase):
 			account_name="Shopify A",
 			catch_up_unlinked=True,
 		)
-		enqueue_noon.assert_called_once_with("Noon A", trigger_source="Scheduled Reconciliation")
+		enqueue_noon.assert_called_once_with(
+			"Noon A", trigger_source="Scheduled Reconciliation", catch_up_unlinked=True
+		)

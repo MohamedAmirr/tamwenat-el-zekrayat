@@ -21,6 +21,7 @@ from frappe.utils import cint, cstr, flt
 from marketplace_integrations.integrations.talabat import orders as talabat_orders
 from marketplace_integrations.integrations.talabat.order_events import log_order_import_failure
 from marketplace_integrations.integrations.talabat.order_mapper import normalize_order
+from marketplace_integrations.services.echo_guard import record_talabat_update, upsert_talabat_order
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 
 
@@ -45,7 +46,7 @@ def refresh_order(marketplace_order: str):
 			).format(normalized["external_order_id"], doc.name, doc.external_order_id)
 		)
 
-	updated = upsert_marketplace_order(doc.marketplace_account, normalized)
+	updated, _echo = upsert_talabat_order(doc.marketplace_account, normalized, "Manual", bump=True)
 	return {"name": updated.name}
 
 
@@ -110,7 +111,7 @@ def import_vendor_orders(account: str, start: str, end: str):
 			frappe.db.savepoint(savepoint_name)
 			try:
 				normalized = normalize_order(raw_order)
-				updated = upsert_marketplace_order(account_doc.name, normalized)
+				updated, _echo = upsert_talabat_order(account_doc.name, normalized, "Manual", bump=True)
 			except (frappe.ValidationError, frappe.PermissionError, frappe.DuplicateEntryError) as exc:
 				frappe.db.rollback(save_point=savepoint_name)
 				errors.append({"order_id": order_id, "error": str(exc)})
@@ -144,6 +145,8 @@ def update_order(marketplace_order: str, status: str, cancellation_reason: str =
 			).format(doc.erpnext_sales_order)
 		)
 	raw_order = send_order_update(doc, status, cancellation_reason, items)
+	# The platform call and its expected-change marker are durable before the upsert can fail.
+	frappe.db.commit()
 	normalized = normalize_order(raw_order)
 	if normalized["external_order_id"] != cstr(doc.external_order_id).strip():
 		frappe.throw(_("Talabat returned a different order ID."))
@@ -184,7 +187,11 @@ def send_order_update(doc, status, cancellation_reason="", items=None):
 		payload["cancellation"] = {"reason": cstr(cancellation_reason).strip()}
 	talabat_orders.validate_order_update(payload)
 	_validate_current_item_updates(doc, items)
-	return talabat_orders.update_order(doc.marketplace_account, doc.external_order_id, payload)
+	result = talabat_orders.update_order(doc.marketplace_account, doc.external_order_id, payload)
+	# The platform accepted the update: record the expected-change marker before the caller
+	# upserts the returned order (services/echo_guard.py).
+	record_talabat_update(doc.name, payload)
+	return result
 
 
 def _item_update_payload(row):

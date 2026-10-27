@@ -15,7 +15,7 @@ global.frappe = {
 	},
 };
 
-const { MARKETPLACE_ATTENTION_PROBLEM_TYPES, next_action_html, reference_html } = require("./marketplace_needs_attention.js");
+const { MARKETPLACE_ATTENTION_PROBLEM_TYPES, linked_document_html, next_action_html, reference_html } = require("./marketplace_needs_attention.js");
 
 const REPORT = () => frappe.query_reports["Marketplace Needs Attention"];
 
@@ -112,5 +112,17 @@ test("a reference without a label falls back to the docname", () => {
 	assert.match(
 		reference_html({ reference_doctype: "Bosta Shipment", reference_name: "BOSTA-SHP-00001" }),
 		/<bdi dir="ltr">BOSTA-SHP-00001<\/bdi>/
+	);
+});
+
+test("a Needs Action row links its blocking or prepared document and escapes the name", () => {
+	assert.ok(MARKETPLACE_ATTENTION_PROBLEM_TYPES.includes("Needs Action"));
+	assert.ok(!MARKETPLACE_ATTENTION_PROBLEM_TYPES.includes("Modified After Sync"));
+	const html = linked_document_html({ linked_doctype: "Delivery Note", linked_document: "MAT-DN-1" });
+	assert.match(html, /href="\/app\/delivery-note\/MAT-DN-1"/);
+	assert.equal(linked_document_html({ linked_doctype: "Delivery Note" }), "");
+	assert.doesNotMatch(
+		linked_document_html({ linked_doctype: "Delivery Note", linked_document: "<img onerror=x>" }),
+		/<img/
 	);
 });

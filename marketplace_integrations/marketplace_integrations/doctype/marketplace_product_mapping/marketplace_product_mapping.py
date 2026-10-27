@@ -83,6 +83,14 @@ class MarketplaceProductMapping(Document):
 			self.marketplace_account, self.external_reference
 		)
 
+	def on_update(self):
+		# #364: a saved, enabled mapping re-syncs the account's orders stuck on a missing mapping.
+		# Service code, not a doc_events entry (the catalog guard test forbids one for this
+		# doctype); it only bumps the sync debounce and never raises.
+		from marketplace_integrations.services.sales_order_recheck import bump_orders_for_mapping
+
+		bump_orders_for_mapping(self)
+
 	def validate_unique_mapping_identity(self):
 		# mapping_identity_key isn't set yet at this point (before_save runs
 		# after validate) - compute the candidate directly for this friendly

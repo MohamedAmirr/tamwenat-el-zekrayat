@@ -27,6 +27,7 @@ import frappe
 from frappe import _
 from frappe.utils import flt, get_datetime, getdate
 
+from marketplace_integrations.services.sync_status import CANCELLED, SYNC_ERROR, SYNCED
 from marketplace_integrations.integrations.shopify.webhooks import (
 	MAX_WEBHOOK_DELIVERY_ATTEMPTS,
 )
@@ -153,7 +154,7 @@ def get_order_sync_error_count():
 		return 0
 	return _count(
 		"Marketplace Order",
-		{"marketplace_account": ["in", accounts], "erpnext_sync_status": "Sync Error"},
+		{"marketplace_account": ["in", accounts], "erpnext_sync_status": SYNC_ERROR},
 	)
 
 
@@ -234,18 +235,25 @@ def get_total_order_value_in_range(from_date=None, to_date=None):
 
 def get_sales_order_sync_success_rate_in_range(from_date=None, to_date=None):
 	"""Of the Shopify orders received in the given date range, what fraction
-	have ``erpnext_sync_status = Synced`` (as opposed to ``Sync Error``,
-	``Not Synced``, or ``Modified After Sync``).
+	have ``erpnext_sync_status = Synced`` (as opposed to ``Syncing``, ``Needs Action``
+	or ``Sync Error``). ``Cancelled`` orders (cancelled
+	before any Sales Order was needed, #353) are left out of the denominator.
 
 	Returns ``{"rate": float | None, "numerator": int, "denominator": int}``.
 	``rate`` is ``None`` (not a ZeroDivisionError) when no orders were
 	received in range.
 	"""
 	require_shopify_reader()
-	filters = [["platform", "=", "Shopify"], *_date_range_filters("received_on", from_date, to_date)]
-	rows = frappe.get_list("Marketplace Order", filters=filters, fields=["erpnext_sync_status"], limit_page_length=0)
+	filters = [
+		["platform", "=", "Shopify"],
+		["erpnext_sync_status", "!=", CANCELLED],
+		*_date_range_filters("received_on", from_date, to_date),
+	]
+	rows = frappe.get_list(
+		"Marketplace Order", filters=filters, fields=["erpnext_sync_status"], limit_page_length=0
+	)
 	denominator = len(rows)
-	numerator = sum(1 for row in rows if row.erpnext_sync_status == "Synced")
+	numerator = sum(1 for row in rows if row.erpnext_sync_status == SYNCED)
 	rate = (numerator / denominator * 100) if denominator else None
 	return {"rate": rate, "numerator": numerator, "denominator": denominator}
 

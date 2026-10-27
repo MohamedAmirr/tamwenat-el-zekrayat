@@ -10,6 +10,7 @@ real commit would make the fixture rows permanent on the shared test site (see
 guarantee (marker committed before the returned order is upserted) be asserted.
 """
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import frappe
@@ -109,6 +110,7 @@ class IntegrationTestMarketplaceOutbound(IntegrationTestCase):
 				"marketplace_account",
 				"traceback",
 			],
+			# get_all defaults to modified desc; the tests read the logs oldest first.
 			order_by="creation asc",
 		)
 
@@ -160,7 +162,12 @@ class IntegrationTestMarketplaceOutbound(IntegrationTestCase):
 		):
 			with self.subTest(fields=fields):
 				order = self._linked_order("RECEIVED", platform="Shopify")
-				frappe.db.set_value("Marketplace Order", order.name, fields)
+				# A JSON field takes its serialized text; set_value cannot store a Python list.
+				values = {
+					key: frappe.as_json(value) if isinstance(value, (list, dict)) else value
+					for key, value in fields.items()
+				}
+				frappe.db.set_value("Marketplace Order", order.name, values)
 				option = outbound.get_platform_cancel_option(self.fixture.name)
 				self.assertEqual(option["state"], outbound.BLOCKED)
 				self.assertTrue(option["reasons"])
@@ -175,7 +182,8 @@ class IntegrationTestMarketplaceOutbound(IntegrationTestCase):
 			(frappe._dict(fulfillment_quantities_known=0), "unknown"),
 		):
 			with self.subTest(expected=expected):
-				problem = _shopify_fulfillment_problem(frappe._dict(items=[item]))
+				# Not frappe._dict(items=...): its own .items method would shadow the row list.
+				problem = _shopify_fulfillment_problem(SimpleNamespace(items=[item]))
 				self.assertIn(expected, problem)
 
 	def test_a_sales_order_without_a_marketplace_order_is_not_applicable(self):
@@ -230,6 +238,40 @@ class IntegrationTestMarketplaceOutbound(IntegrationTestCase):
 		self.assertEqual(frappe.parse_json(logs[0].request_data)["action"], "platform_cancel")
 		self.assertEqual(frappe.parse_json(logs[0].request_data)["cancellation_reason"], "TOO_BUSY")
 
+	def test_talabat_request_stores_the_expected_change_marker_with_the_cancel_marker(self):
+		from marketplace_integrations.services import echo_guard
+
+		order = self._linked_order("RECEIVED")
+		raw = self._raw_cancelled_order(order)
+		with (
+			patch("marketplace_integrations.api.talabat_orders.talabat_orders.update_order", return_value=raw),
+			patch.object(frappe.db, "commit"),
+		):
+			outbound.request_platform_cancel(self.fixture.name, "TOO_BUSY")
+
+		values = frappe.db.get_value(
+			"Marketplace Order", order.name, ["expected_change_hash", "outbound_cancelled_on"], as_dict=True
+		)
+		self.assertEqual(
+			values.expected_change_hash,
+			echo_guard.talabat_sent_hash({"status": "CANCELLED", "cancellation": {"reason": "TOO_BUSY"}}),
+		)
+		self.assertIsNotNone(values.outbound_cancelled_on)
+
+	def test_talabat_request_leaves_no_expected_change_marker_when_the_platform_rejects(self):
+		order = self._linked_order("RECEIVED")
+		with (
+			patch(
+				"marketplace_integrations.api.talabat_orders.talabat_orders.update_order",
+				side_effect=frappe.ValidationError("rejected"),
+			),
+			patch.object(frappe.db, "commit"),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				outbound.request_platform_cancel(self.fixture.name, "TOO_BUSY")
+
+		self.assertFalse(frappe.db.get_value("Marketplace Order", order.name, "expected_change_hash"))
+
 	def test_shopify_request_commits_the_marker_then_refreshes_by_order_gid(self):
 		order = self._linked_order("RECEIVED", platform="Shopify")
 		job = {"job_id": "gid://shopify/Job/1"}
@@ -247,7 +289,10 @@ class IntegrationTestMarketplaceOutbound(IntegrationTestCase):
 		):
 			result = outbound.request_platform_cancel(self.fixture.name, "CUSTOMER")
 
-		send.assert_called_once_with(order, "CUSTOMER")
+		# The service reloads the order, so compare by name, not by Document identity.
+		send.assert_called_once()
+		self.assertEqual(send.call_args.args[0].name, order.name)
+		self.assertEqual(send.call_args.args[1:], ("CUSTOMER",))
 		refresh.assert_called_once_with(order.marketplace_account, order.external_order_id)
 		self.assertTrue(result["refreshed"])
 		self.assertEqual(result["job_id"], job["job_id"])
@@ -277,6 +322,39 @@ class IntegrationTestMarketplaceOutbound(IntegrationTestCase):
 		self.assertIsNone(self._marker(order))
 		self.assertEqual([row.status for row in self._action_logs(order)], ["Success", "Error"])
 		self.assertIn("active return", self._action_logs(order)[-1].traceback)
+
+	def test_shopify_job_failure_text_is_escaped_in_the_thrown_message_but_logged_as_is(self):
+		order = self._linked_order("RECEIVED", platform="Shopify")
+		text = "<img src=x onerror=alert(1)>"
+		with (
+			patch.object(outbound, "_send_cancel", return_value={"job_id": "gid://shopify/OrderCancelJobResult/1"}),
+			patch(
+				"marketplace_integrations.integrations.shopify.orders.poll_order_cancel_job",
+				return_value={"status": "FAILED", "done": True, "errors": [{"message": text}]},
+			),
+			patch.object(frappe.db, "commit"),
+		):
+			with self.assertRaises(frappe.ValidationError) as raised:
+				outbound.request_platform_cancel(self.fixture.name, "CUSTOMER")
+
+		self.assertNotIn("<img", str(raised.exception))
+		self.assertIn("&lt;img", str(raised.exception))
+		self.assertIn(text, self._action_logs(order)[-1].traceback)
+
+	def test_shopify_cancel_user_errors_are_escaped_in_the_thrown_message(self):
+		from marketplace_integrations.integrations.shopify import orders as shopify_orders
+
+		result = {"orderCancel": {"orderCancelUserErrors": [{"message": "<b>bad</b>"}]}}
+		account = SimpleNamespace(
+			name="A", platform="Shopify", connection_doctype="Shopify Connection", connection="C"
+		)
+		with patch.object(shopify_orders, "ShopifyClient") as client:
+			client.return_value.execute.return_value = result
+			with self.assertRaises(frappe.ValidationError) as raised:
+				shopify_orders.cancel_order(account, "gid://shopify/Order/1", "CUSTOMER")
+
+		self.assertNotIn("<b>", str(raised.exception))
+		self.assertIn("&lt;b&gt;bad", str(raised.exception))
 
 	def test_shopify_job_timeout_keeps_marker_and_skips_refresh(self):
 		order = self._linked_order("RECEIVED", platform="Shopify")

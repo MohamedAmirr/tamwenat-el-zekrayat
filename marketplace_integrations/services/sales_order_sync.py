@@ -45,7 +45,7 @@ from copy import deepcopy
 
 import frappe
 from frappe import _
-from frappe.utils import add_days, cint, cstr, flt, getdate, now_datetime, strip_html
+from frappe.utils import add_days, add_to_date, cint, cstr, flt, getdate, now_datetime, strip_html
 
 from marketplace_integrations.integrations.shopify.order_reconciliation import refund_ids as _refund_ids
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_account.marketplace_account import (
@@ -56,7 +56,14 @@ from marketplace_integrations.marketplace_integrations.doctype.marketplace_produ
 )
 from marketplace_integrations.services.account_warehouse import validate_account_warehouse
 from marketplace_integrations.services.mappings import resolve_mapping_and_item
+from marketplace_integrations.services.marketplace_order_reconciliation import (
+	CANCELLED_PAID_ERROR,
+	CANCELLED_PAID_STATUSES,
+	CANCELLED_UNPAID_STATUSES,
+)
 from marketplace_integrations.services.marketplace_outbound import platform_instruction
+from marketplace_integrations.services import sync_reason_codes as reasons
+from marketplace_integrations.services import sync_status
 from marketplace_integrations.services.sales_order_reconciliation import (
 	CANCEL_ORDER,
 	CLOSE_REMAINDER,
@@ -135,10 +142,35 @@ _EXECUTABLE_OUTCOMES = {CANCEL_ORDER, CLOSE_REMAINDER, UPDATE_SUBMITTED_ORDER}
 
 
 class SyncBlocker(frappe.ValidationError):
-	"""A user-actionable prerequisite that prevents Sales Order synchronization."""
+	"""A user-actionable prerequisite that prevents Sales Order synchronization.
+
+	``reason_code`` (``services/sync_reason_codes.py``) says why; a blocker raised without
+	one is the generic ``SYNC_BLOCKED``.  Mapping and price problems carry their own code so
+	fixing them can re-sync the order automatically (#364).
+	"""
+
+	def __init__(self, *args, reason_code=reasons.SYNC_BLOCKED):
+		super().__init__(*args)
+		self.reason_code = reason_code
 
 
 def sync_sales_order(marketplace_order, trigger_source="Manual"):
+	"""Create or update one Marketplace Order's linked Sales Order (see ``_sync_sales_order``).
+
+	The order is registered as "syncing now" for the duration, so the document-change recheck
+	(``services/sales_order_recheck.py``) ignores the Sales Order changes this very run makes.
+	"""
+	syncing = frappe.flags.setdefault("marketplace_syncing_orders", set())
+	already_registered = marketplace_order in syncing
+	syncing.add(marketplace_order)
+	try:
+		return _sync_sales_order(marketplace_order, trigger_source)
+	finally:
+		if not already_registered:
+			syncing.discard(marketplace_order)
+
+
+def _sync_sales_order(marketplace_order, trigger_source):
 	"""Create or update one Marketplace Order's linked Sales Order.
 
 	The Marketplace Order row is locked before it is reloaded, so concurrent
@@ -161,6 +193,9 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 	"""
 	frappe.db.get_value("Marketplace Order", marketplace_order, "name", for_update=True)
 	order = frappe.get_doc("Marketplace Order", marketplace_order)
+	if trigger_source in ("Manual", "Manual Resync") and cint(order.sync_retry_count):
+		# A person asking again gets a fresh transient-retry budget (#364).
+		order.sync_retry_count = 0
 
 	# Platform support is checked BEFORE the try/except SyncBlocker block
 	# below, deliberately: decision 7 forbids persisting a misleading "Sync
@@ -183,6 +218,8 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 		and _reconciliation_evidence(order).get("cancellation") == "full"
 	):
 		return _skip_cancelled_before_sync(order, trigger_source)
+	if order.platform == "Noon" and not order.erpnext_sales_order and _noon_fully_cancelled(order):
+		return _skip_noon_cancelled_before_sync(order, trigger_source)
 
 	snapshot = None
 	allow_payment_mirroring = False
@@ -268,12 +305,16 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 		return result
 	except (SyncBlocker, SalesOrderLinesMismatch) as exc:
 		# SalesOrderLinesMismatch carries a specific, user-actionable message.
-		result = _save_failure(order, str(exc))
+		result = _save_failure(
+			order, str(exc), getattr(exc, "reason_code", reasons.SNAPSHOT_LINE_MISMATCH)
+		)
 		_create_sync_log(order, trigger_source, "Invalid", snapshot, result)
 		return result
 	except frappe.PermissionError:
 		raise
-	except Exception:
+	except Exception as exc:
+		if is_transient_failure(exc):
+			return _handle_transient_failure(order, trigger_source, snapshot)
 		# Deliberately no `message=` kwarg: frappe.log_error() only calls
 		# frappe.get_traceback() itself when `message` is falsy - passing a
 		# static string there (as this used to) replaces the real traceback
@@ -289,6 +330,7 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 			_(
 				"ERPNext Sales Order synchronization failed. Please review the ERPNext configuration and try again."
 			),
+			reasons.SYNC_FAILED,
 		)
 		_create_sync_log(order, trigger_source, "Error", snapshot, result, traceback_text=traceback_text)
 		return result
@@ -297,6 +339,73 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 		# transaction. It must never change the outcome of the Sales Order sync.
 		if allow_payment_mirroring:
 			_mirror_shopify_payments_independently(order.name, trigger_source)
+
+
+def is_transient_failure(exc):
+	"""True for a failure worth retrying later: a timeout, a lock or deadlock error, an HTTP 5xx
+	or a 429 (#364).  Missing mapping or price, validation errors and permission errors are
+	terminal and never reach this: they have their own handlers or raise ``frappe.ValidationError``.
+	"""
+	import requests
+
+	if isinstance(exc, frappe.ValidationError | frappe.PermissionError):
+		return False
+	if isinstance(
+		exc,
+		frappe.QueryTimeoutError
+		| frappe.QueryDeadlockError
+		| frappe.DocumentLockedError
+		| requests.exceptions.Timeout
+		| requests.exceptions.ConnectionError,
+	):
+		return True
+	if isinstance(exc, requests.exceptions.HTTPError):
+		status = getattr(exc.response, "status_code", None)
+		return bool(status) and (status == 429 or status >= 500)
+	return False
+
+
+def _handle_transient_failure(order, trigger_source, snapshot):
+	"""Schedule the next transient retry, or give up with ``SYNC_RETRIES_EXHAUSTED``.
+
+	Up to ``len(TRANSIENT_RETRY_DELAYS_SECONDS)`` retries (1, 5 and 15 minutes), carried by
+	``sync_debounce_until`` (the minute sweep runs them) and ``sync_retry_count``.  The order
+	shows Syncing while a retry is pending.  Never holds a lock across the wait.
+	"""
+	from marketplace_integrations.services.sales_order_sync_debounce import TRANSIENT_RETRY_DELAYS_SECONDS
+
+	frappe.log_error(title=_("Marketplace Sales Order synchronization"))
+	traceback_text = frappe.get_traceback()
+	attempt = cint(order.sync_retry_count)
+	if attempt >= len(TRANSIENT_RETRY_DELAYS_SECONDS):
+		result = _save_failure(
+			order,
+			_("ERPNext Sales Order synchronization kept failing because of a temporary problem."),
+			reasons.SYNC_RETRIES_EXHAUSTED,
+		)
+		_create_sync_log(order, trigger_source, "Error", snapshot, result, traceback_text=traceback_text)
+		return result
+	order.sync_retry_count = attempt + 1
+	reasons.apply_sync_state(
+		order,
+		reasons.TRANSIENT_RETRY_SCHEDULED,
+		_("A temporary problem interrupted the sync; retry {0} of {1} is scheduled.").format(
+			attempt + 1, len(TRANSIENT_RETRY_DELAYS_SECONDS)
+		),
+	)
+	order.sync_retry_count = attempt + 1
+	order.sync_debounce_until = add_to_date(now_datetime(), seconds=TRANSIENT_RETRY_DELAYS_SECONDS[attempt])
+	order.pending_sync_trigger_source = trigger_source
+	order.flags.skip_sync_status_update = True
+	order.save()
+	result = {
+		"ok": False,
+		"status": order.erpnext_sync_status,
+		"error": order.last_sync_error,
+		"retry_scheduled": True,
+	}
+	_create_sync_log(order, trigger_source, "Error", snapshot, result, traceback_text=traceback_text)
+	return result
 
 
 def _mirror_shopify_payments_independently(marketplace_order, trigger_source):
@@ -323,44 +432,34 @@ def _skip_cancelled_before_sync(order, trigger_source):
 	"""Resolve a full Shopify cancellation before any Sales Order exists.
 
 	Unpaid or fully refunded cancellations become terminal ``Cancelled`` with a
-	Success log. Paid or partially refunded cancellations remain ``Sync Error``
+	Success log. Paid or partially refunded cancellations become ``Needs Action``
 	with an actionable refund instruction and an Invalid log. Unknown future
-	financial statuses are left untouched for manual review. No Sales Order,
-	customer, or Payment Entry is created on this path.
+	financial statuses become a ``Sync Error`` for manual review (a new import would
+	otherwise stay Syncing for ever). No Sales Order, customer, or Payment Entry is
+	created on this path.
 	"""
-	known_statuses = {
-		"PENDING",
-		"VOIDED",
-		"EXPIRED",
-		"AUTHORIZED",
-		"REFUNDED",
-		"PAID",
-		"PARTIALLY_PAID",
-		"PARTIALLY_REFUNDED",
-	}
-	if order.external_financial_status not in known_statuses:
-		result = {
-			"ok": False,
-			"status": order.erpnext_sync_status,
-			"error": _("Cancelled Shopify order has an unrecognized financial status; review it manually."),
-		}
+	if order.external_financial_status not in CANCELLED_UNPAID_STATUSES | CANCELLED_PAID_STATUSES:
+		message = _("Cancelled Shopify order has an unrecognized financial status; review it manually.")
+		result = _save_failure(order, message, reasons.SYNC_BLOCKED)
 		_create_sync_log(order, trigger_source, "Invalid", None, result)
 		return result
-	paid_statuses = {"PAID", "PARTIALLY_PAID", "PARTIALLY_REFUNDED"}
-	if order.external_financial_status in paid_statuses:
-		status = "Sync Error"
-		error = _(
-			"Cancelled in Shopify but the payment was not fully refunded; refund it in Shopify"
-		)
+	if order.external_financial_status in CANCELLED_PAID_STATUSES:
+		# A paid cancellation needs a person to refund the customer (#364: Needs Action).
+		status = sync_status.NEEDS_ACTION
+		error = _(CANCELLED_PAID_ERROR)
 	else:
-		status = "Cancelled"
+		status = sync_status.CANCELLED
 		error = None
 	if order.erpnext_sync_status != status or order.last_sync_error != error:
-		order.erpnext_sync_status = status
-		order.last_sync_error = error
+		if status == sync_status.NEEDS_ACTION:
+			reasons.apply_sync_state(order, reasons.CANCELLED_PAID_REFUND_REQUIRED, error)
+		else:
+			order.erpnext_sync_status = status
+			order.last_sync_error = error
+			reasons.clear_sync_state(order)
 		order.flags.skip_sync_status_update = True
 		order.save()
-	if status == "Cancelled":
+	if status == sync_status.CANCELLED:
 		result = {
 			"ok": True,
 			"skipped": True,
@@ -374,6 +473,38 @@ def _skip_cancelled_before_sync(order, trigger_source):
 	else:
 		result = {"ok": False, "status": status, "error": error}
 		_create_sync_log(order, trigger_source, "Invalid", None, result)
+	return result
+
+
+NOON_CANCELLED_EXTERNAL_STATUS = "CANCELLED"
+
+
+def _noon_fully_cancelled(order):
+	"""True when the Noon order has units and every one is CANCELLED (out-of-stock units that
+	are not cancelled keep the normal blocker path)."""
+	rows = order.items or []
+	return bool(rows) and all(row.external_status == NOON_CANCELLED_EXTERNAL_STATUS for row in rows)
+
+
+def _skip_noon_cancelled_before_sync(order, trigger_source):
+	"""Resolve a fully cancelled Noon order before any Sales Order exists: terminal ``Cancelled``
+	(#353), like the Shopify path above.  Nothing is created."""
+	if order.erpnext_sync_status != sync_status.CANCELLED or order.last_sync_error:
+		order.erpnext_sync_status = sync_status.CANCELLED
+		order.last_sync_error = None
+		reasons.clear_sync_state(order)
+		order.flags.skip_sync_status_update = True
+		order.save()
+	result = {
+		"ok": True,
+		"skipped": True,
+		"status": sync_status.CANCELLED,
+		"message": _(
+			"Every unit of the Noon order was cancelled before an ERPNext Sales Order was created; "
+			"no Sales Order is needed."
+		),
+	}
+	_create_sync_log(order, trigger_source, "Success", None, result)
 	return result
 
 
@@ -503,7 +634,8 @@ def _build_sales_order_lines(order, account):
 			raise SyncBlocker(
 				_("Talabat line {0} ({1}) has no fulfilled total price and cannot be synchronized.").format(
 					row.external_item_id, _line_identifier(row)
-				)
+				),
+				reason_code=reasons.PRICE_MISSING,
 			)
 		if flt(row.fulfilled_total_price) < 0:
 			raise SyncBlocker(
@@ -525,7 +657,8 @@ def _build_sales_order_lines(order, account):
 			raise SyncBlocker(
 				_("No enabled Marketplace Product Mapping exists for Talabat SKU {0} on line {1}.").format(
 					_line_identifier(row), row.external_item_id
-				)
+				),
+				reason_code=reasons.MAPPING_MISSING,
 			)
 		item_uom = mapping.sales_uom or frappe.get_cached_value("Item", mapping.item, "stock_uom")
 		fulfilled_total_price = flt(row.fulfilled_total_price)
@@ -619,7 +752,8 @@ def _build_noon_sales_order_lines(order, account, tolerate_zero_quantity=False):
 			raise SyncBlocker(
 				_("No enabled Marketplace Product Mapping exists for Noon SKU {0}.").format(
 					group["external_sku"] or _("blank")
-				)
+				),
+				reason_code=reasons.MAPPING_MISSING,
 			)
 		item_uom = resolved.get("sales_uom") or frappe.get_cached_value("Item", resolved["item"], "stock_uom")
 		amount = flt(group["amount"])
@@ -652,7 +786,7 @@ def _shopify_transactions(order):
 	return [row for row in raw if isinstance(row, dict)] if isinstance(raw, list) else []
 
 
-def _is_manual_payment_pending(order):
+def is_manual_payment_pending(order):
 	"""A PENDING Shopify order whose payment is a manual method (COD, bank deposit, custom),
 	or one staff created with payment terms ("Due on receipt") and no transaction yet.
 
@@ -719,7 +853,7 @@ def _build_shopify_sales_order_lines(order, account, tolerate_zero_quantity=Fals
 	eligible_statuses = {"PAID", "PARTIALLY_PAID"}
 	if tolerate_zero_quantity:
 		eligible_statuses |= {"REFUNDED", "PARTIALLY_REFUNDED"}
-	if order.external_financial_status not in eligible_statuses and not _is_manual_payment_pending(order):
+	if order.external_financial_status not in eligible_statuses and not is_manual_payment_pending(order):
 		raise SyncBlocker(
 			_("Shopify order {0} is not financially eligible for synchronization ({1}).{2}").format(
 				order.name,
@@ -751,7 +885,8 @@ def _build_shopify_sales_order_lines(order, account, tolerate_zero_quantity=Fals
 					row.product_name or row.external_item_id,
 					row.external_variant_id,
 					cstr(row.external_sku).strip() or _("blank"),
-				)
+				),
+				reason_code=reasons.MAPPING_MISSING,
 			)
 		if zero_quantity:
 			lines.append(
@@ -768,7 +903,10 @@ def _build_shopify_sales_order_lines(order, account, tolerate_zero_quantity=Fals
 			)
 			continue
 		if row.transaction_amount_missing or row.transaction_amount is None:
-			raise SyncBlocker(_("Shopify line {0} has no transaction amount.").format(row.external_item_id))
+			raise SyncBlocker(
+				_("Shopify line {0} has no transaction amount.").format(row.external_item_id),
+				reason_code=reasons.PRICE_MISSING,
+			)
 		transaction_amount = flt(row.transaction_amount)
 		if transaction_amount < 0:
 			raise SyncBlocker(
@@ -847,7 +985,7 @@ def _shopify_shipping_amount(order, account, block_taxes=True):
 	Sales Order is being created or a Draft one updated (``block_taxes``).  An order already linked
 	to a submitted Sales Order is left to the reconciliation planner: that document exists and is
 	never re-created from this snapshot, so "create it manually" would be wrong advice (legacy
-	synced orders that carry tax must not flip to Modified After Sync).  The income account is only
+	synced orders that carry tax must not flip to Needs Action).  The income account is only
 	required once there is a charge to post.
 	"""
 	if order.platform != "Shopify":
@@ -901,11 +1039,13 @@ def set_sync_status_from_current_snapshot(order, preserve_sync_error=False):
 	"""Set in-memory status while Marketplace Order is being saved.
 
 	A source-order save must never be blocked merely because a mapping or later
-	ERPNext configuration has changed.  A linked order with no longer-valid
-	commercial input is therefore visibly modified, not silently considered in
-	sync.
+	ERPNext configuration has changed.  A linked order whose marketplace state differs from
+	its Sales Order is therefore never silently considered in sync: when the change is one
+	the sync can apply itself the order becomes Syncing with the debounce bumped (#364);
+	anything a person has to decide becomes Needs Action, and input the sync cannot build
+	(unmapped item, missing price) a Sync Error.
 	"""
-	if preserve_sync_error and order.erpnext_sync_status == "Sync Error":
+	if preserve_sync_error and order.erpnext_sync_status == sync_status.SYNC_ERROR:
 		return
 	if not order.erpnext_sales_order or not order.last_synced_hash:
 		return
@@ -926,8 +1066,7 @@ def set_sync_status_from_current_snapshot(order, preserve_sync_error=False):
 				order, plan(_parse_last_synced_snapshot(order), {}, evidence, read_erp_state(sales_order))
 			)
 			return
-		order.erpnext_sync_status = "Modified After Sync"
-		order.last_sync_error = cstr(exc).strip()[:500] or _modified_after_sync_message()
+		reasons.apply_sync_state(order, exc.reason_code, cstr(exc))
 		return
 	if docstatus != 0:
 		reconciliation_plan = hold_cancel_for_draft_documents(
@@ -936,7 +1075,7 @@ def set_sync_status_from_current_snapshot(order, preserve_sync_error=False):
 			),
 			sales_order.name,
 		)
-		_apply_reconciliation_status(order, reconciliation_plan)
+		_apply_reconciliation_status(order, reconciliation_plan, queue_executable=True)
 		if reconciliation_plan["outcome"] == NO_ACTION:
 			# Runs inside Marketplace Order.before_save()/get_current_sync_status():
 			# in-memory only, persisted by the very save already in progress.
@@ -944,11 +1083,28 @@ def set_sync_status_from_current_snapshot(order, preserve_sync_error=False):
 		return
 	current_hash = snapshot_hash(current_snapshot)
 	if current_hash == order.last_synced_hash:
-		order.erpnext_sync_status = "Synced"
-		order.last_sync_error = None
+		reasons.apply_synced(order)
 	else:
-		order.erpnext_sync_status = "Modified After Sync"
-		order.last_sync_error = _modified_after_sync_message()
+		# A Draft Sales Order is updated in place by the next sync.
+		_queue_resync_in_memory(order)
+
+
+def _queue_resync_in_memory(order, trigger_source="Manual"):
+	"""Mark ``order`` Syncing and push its debounce, in memory, for the save already in progress.
+
+	``bump_sync_debounce()`` writes with ``frappe.db.set_value()``, which the surrounding
+	document save would overwrite; this is its in-memory twin.  An order that is already
+	Syncing keeps its window, so repeated form loads do not push it forward for ever.
+	"""
+	from marketplace_integrations.services.sales_order_sync_debounce import SYNC_DEBOUNCE_SECONDS
+
+	if order.erpnext_sync_status == sync_status.SYNCING and order.sync_debounce_until:
+		return
+	order.erpnext_sync_status = sync_status.SYNCING
+	# The earlier error or instruction is stale once a new sync is queued.
+	order.last_sync_error = None
+	order.sync_debounce_until = add_to_date(now_datetime(), seconds=SYNC_DEBOUNCE_SECONDS)
+	order.pending_sync_trigger_source = trigger_source
 
 
 def _compensating_plan_outranks_blocker(order, sales_order, evidence):
@@ -967,7 +1123,7 @@ def _compensating_plan_outranks_blocker(order, sales_order, evidence):
 
 
 def _flag_compensating_evidence_on_new_order(order, sales_order, snapshot):
-	"""Mark a just-created Sales Order Modified After Sync when return/refund evidence already exists.
+	"""Mark a just-created Sales Order Needs Action when return/refund evidence already exists.
 
 	Evidence recorded while the order had no Sales Order (e.g. a return linked during
 	Sync Error) bumped no re-plan, so the first sync must not report it Synced.  Only
@@ -985,10 +1141,6 @@ def _flag_compensating_evidence_on_new_order(order, sales_order, snapshot):
 	return _save_reconciliation_advisory(order, reconciliation_plan)
 
 
-def _modified_after_sync_message():
-	return _("The marketplace order changed after it was synced to ERPNext.")
-
-
 def _uses_stored_snapshot(docstatus, evidence):
 	"""A submitted Sales Order with full-cancellation evidence is judged against the stored baseline.
 
@@ -999,14 +1151,26 @@ def _uses_stored_snapshot(docstatus, evidence):
 	return docstatus != 0 and evidence.get("cancellation") == "full"
 
 
-def _apply_reconciliation_status(order, reconciliation_plan):
-	"""Map a reconciliation outcome to the in-memory sync status and message."""
-	if reconciliation_plan["outcome"] == NO_ACTION:
-		order.erpnext_sync_status = "Synced"
-		order.last_sync_error = None
+def _apply_reconciliation_status(order, reconciliation_plan, queue_executable=False):
+	"""Map a reconciliation outcome to the in-memory sync status, reason and message.
+
+	NO_ACTION is Synced.  An executable outcome (cancel, close, update) is only reached from
+	the form-load/save recompute (``queue_executable``): the sync applies it, so the order becomes
+	Syncing, except after an earlier execution of the same kind failed (re-queuing that would
+	only repeat the failure).  Every other outcome is Needs Action with its reason code.
+	"""
+	outcome = reconciliation_plan["outcome"]
+	if outcome == NO_ACTION:
+		reasons.apply_synced(order)
+	elif outcome in _EXECUTABLE_OUTCOMES and queue_executable:
+		if order.get("sync_reason_code") not in reasons.EXECUTION_FAILED_REASONS:
+			_queue_resync_in_memory(order)
 	else:
-		order.erpnext_sync_status = "Modified After Sync"
-		order.last_sync_error = cstr(reconciliation_plan["message"]).strip()[:500]
+		reasons.apply_sync_state(
+			order,
+			reconciliation_plan.get("reason_code") or reasons.ERP_STATE_DIVERGED,
+			reconciliation_plan["message"],
+		)
 
 
 def get_current_sync_status(marketplace_order):
@@ -1477,7 +1641,7 @@ def _fill_buyer_phone(sales_order, order):
 
 	``contact_mobile`` is staff-editable (Property Setter), so a typed value is never overwritten
 	by a later sync.  The phone is deliberately not in the snapshot, so it never feeds the hash or
-	"Modified After Sync".
+	marks the order as changed.
 	"""
 	phone = buyer_phone_for_sales_order(order)
 	if phone and not cstr(sales_order.contact_mobile).strip():
@@ -1584,7 +1748,22 @@ def _reconciliation_evidence(order):
 		instruction = platform_instruction(order)
 		if instruction:
 			evidence = {**evidence, "inactive_order_instruction": instruction}
+	if _prepared_return_submitted(order):
+		# The draft return this app prepared (#364) was submitted by a person: the compensating
+		# transaction exists, so the return/refund evidence no longer blocks.
+		evidence = {**evidence, "compensating_document_submitted": True}
 	return evidence
+
+
+def _prepared_return_submitted(order):
+	if getattr(order, "sync_prepared_doctype", None) != "Delivery Note" or not getattr(
+		order, "sync_prepared_document", None
+	):
+		return False
+	values = frappe.db.get_value(
+		"Delivery Note", order.sync_prepared_document, ["docstatus", "is_return"], as_dict=True
+	)
+	return bool(values and values.docstatus == 1 and values.is_return)
 
 
 def _advance_baseline(order, previous, current_snapshot):
@@ -1644,8 +1823,9 @@ def rebaseline_after_outbound_edit(order, sales_order):
 	Sales Order.  The refreshed snapshot is paired with the Sales Order's rows (a line added
 	by the edit has a new Shopify line id, so the old baseline cannot judge it) and accepted
 	only when the planner, run with that paired snapshot as the baseline and without the edit
-	marker, says ERPNext equals what Shopify now shows (``NO_ACTION``).  Anything else sets
-	Modified After Sync for staff to review.  Saves ``order``; does not commit.
+	marker, says ERPNext equals what Shopify now shows (``NO_ACTION``).  Anything else becomes
+	Needs Action for staff to review (Syncing when the sync can apply it itself).  Saves
+	``order``; does not commit.
 	"""
 	order.flags.skip_sync_status_update = True
 	evidence = _reconciliation_evidence(order)
@@ -1655,25 +1835,26 @@ def rebaseline_after_outbound_edit(order, sales_order):
 		snapshot = build_sales_order_snapshot(order, for_submitted_order=sales_order.docstatus != 0)
 		paired = snapshot_with_sales_order_item_names(snapshot, sales_order, refund_ids=_refund_ids(order))
 	except SalesOrderLinesMismatch:
-		return _modified_after_outbound_edit(
-			order, _("ERPNext's items do not match the order Shopify now shows; review the order.")
+		return _flag_after_outbound_edit(
+			order,
+			reasons.OUTBOUND_EDIT_MISMATCH,
+			_("ERPNext's items do not match the order Shopify now shows; review the order."),
 		)
 	except SyncBlocker as exc:
-		return _modified_after_outbound_edit(order, cstr(exc).strip()[:500] or _modified_after_sync_message())
+		return _flag_after_outbound_edit(order, exc.reason_code, cstr(exc))
 	reconciliation_plan = plan(paired, snapshot, evidence, read_erp_state(sales_order))
 	if reconciliation_plan["outcome"] == NO_ACTION:
 		release_outbound_edit_marker(order)
 		return _save_success(order, snapshot_hash(snapshot), sales_order, True, snapshot)
 	release_outbound_edit_marker(order)
-	_apply_reconciliation_status(order, reconciliation_plan)
+	_apply_reconciliation_status(order, reconciliation_plan, queue_executable=True)
 	order.save()
 	return {"ok": False}
 
 
-def _modified_after_outbound_edit(order, message):
+def _flag_after_outbound_edit(order, reason_code, message):
 	release_outbound_edit_marker(order)
-	order.erpnext_sync_status = "Modified After Sync"
-	order.last_sync_error = message[:500]
+	reasons.apply_sync_state(order, reason_code, message)
 	order.save()
 	return {"ok": False}
 
@@ -1682,6 +1863,10 @@ def _reconcile_submitted_order(order, sales_order, snapshot, evidence, trigger_s
 	"""Plan one submitted-order reconciliation; execute it if supported, else record an advisory."""
 	erp_state = read_erp_state(sales_order)
 	previous = _parse_last_synced_snapshot(order)
+	if not previous and snapshot:
+		# Case 4 (#364): a missing baseline is adopted only when the marketplace and ERPNext
+		# states are proven to match.
+		previous = _adopt_baseline_if_equivalent(order, sales_order, snapshot, evidence, erp_state)
 	reconciliation_plan = hold_cancel_for_draft_documents(
 		plan(previous, snapshot or {}, evidence, erp_state), sales_order.name
 	)
@@ -1703,6 +1888,35 @@ def _reconcile_submitted_order(order, sales_order, snapshot, evidence, trigger_s
 		erp_state=erp_state,
 	)
 	return result
+
+
+def _adopt_baseline_if_equivalent(order, sales_order, snapshot, evidence, erp_state):
+	"""Return a baseline for an order that has none (case 4), or ``None`` when equivalence is not proven.
+
+	The current snapshot is paired with the Sales Order's rows and judged by the planner against
+	itself: only NO_ACTION on an active submitted order, with no pending outbound edit, adopts it.
+	For Shopify the Sales Order total must also reproduce Shopify's order total (the header the
+	planner cannot see).  Anything else leaves the order without a baseline, which the planner
+	reports as ``NO_BASELINE`` (Needs Action).  The adopted baseline is saved with the result
+	by the caller's save; this function only sets it in memory.
+	"""
+	if (
+		erp_state.get("docstatus") != 1
+		or erp_state.get("status") in ("Cancelled", "Closed")
+		or evidence.get("outbound_edit_requested")
+		or evidence.get("outbound_edit_in_flight")
+	):
+		return None
+	try:
+		paired = snapshot_with_sales_order_item_names(snapshot, sales_order, refund_ids=_refund_ids(order))
+		_verify_grand_total(sales_order, snapshot, order, _get_account(order))
+	except (SalesOrderLinesMismatch, SyncBlocker):
+		return None
+	if plan(paired, snapshot, evidence, erp_state)["outcome"] != NO_ACTION:
+		return None
+	order.last_synced_hash = snapshot_hash(snapshot)
+	order.last_synced_snapshot = frappe.as_json(paired)
+	return paired
 
 
 def _execute_reconciliation_plan(
@@ -1732,8 +1946,7 @@ def _execute_reconciliation_plan(
 			)
 			release_outbound_edit_marker(order)
 		order.last_erpnext_sync_on = now_datetime()
-		order.erpnext_sync_status = "Synced"
-		order.last_sync_error = None
+		reasons.apply_synced(order)
 		order.flags.skip_sync_status_update = True
 		order.save()
 		result = {
@@ -1784,6 +1997,7 @@ def _execute_reconciliation_plan(
 				"The database transaction was already rolled back; verify the Sales Order state in ERPNext."
 			),
 			"changes": reconciliation_plan["changes"],
+			"reason_code": reasons.RECONCILIATION_MISMATCH if rolled_back else reasons.VERIFY_ERP_STATE,
 		}
 		result = _save_reconciliation_advisory(order, attention)
 		_create_sync_log(
@@ -1799,17 +2013,24 @@ def _execute_reconciliation_plan(
 	except Exception as exc:
 		rolled_back = _rollback_reconcile_savepoint()
 		traceback_text = None
+		failure_code = reasons.ERP_VALIDATION_FAILED
 		if isinstance(exc, frappe.PermissionError):
 			message = _("You do not have permission to change the linked Sales Order in ERPNext.")
 			log_status = "Invalid"
+			failure_code = reasons.PERMISSION_DENIED
 		elif isinstance(exc, frappe.ValidationError):
 			message = strip_html(cstr(exc)) or _("ERPNext rejected the Sales Order change.")
 			log_status = "Invalid"
+		elif is_transient_failure(exc):
+			frappe.clear_messages()
+			order.reload()
+			return _handle_transient_failure(order, trigger_source, snapshot)
 		else:
 			frappe.log_error(title=_("Marketplace Sales Order reconciliation"))
 			traceback_text = frappe.get_traceback()
 			message = _("ERPNext could not apply the Sales Order change. Please review it and try again.")
 			log_status = "Error"
+			failure_code = reasons.SYNC_FAILED
 		frappe.clear_messages()
 		order.reload()
 		if reconciliation_plan.get("reopen"):
@@ -1827,6 +2048,7 @@ def _execute_reconciliation_plan(
 						"The database transaction was already rolled back; verify the Sales Order state in ERPNext."
 					),
 					"changes": reconciliation_plan["changes"],
+					"reason_code": reasons.VERIFY_ERP_STATE,
 				}
 				result = _save_reconciliation_advisory(order, attention)
 				_create_sync_log(
@@ -1840,7 +2062,26 @@ def _execute_reconciliation_plan(
 					erp_state=erp_state,
 				)
 				return result
-		result = _save_failure(order, message)
+		if failure_code == reasons.ERP_VALIDATION_FAILED and _changes_rows(reconciliation_plan):
+			# ERPNext refused a row it could not add or drop (case 10): the whole order needs a person.
+			attention = {
+				"outcome": NEEDS_ATTENTION,
+				"message": f"{_('ERPNext refused to add or remove a Sales Order row.')} {message}",
+				"changes": reconciliation_plan["changes"],
+				"reason_code": reasons.ROW_CHANGE_REFUSED,
+			}
+			result = _save_reconciliation_advisory(order, attention)
+			_create_sync_log(
+				order,
+				trigger_source,
+				"Invalid",
+				snapshot,
+				result,
+				reconciliation_plan=attention,
+				erp_state=erp_state,
+			)
+			return result
+		result = _save_failure(order, message, failure_code)
 		result["reconciliation"] = reconciliation_plan
 		_create_sync_log(
 			order,
@@ -1853,6 +2094,13 @@ def _execute_reconciliation_plan(
 			erp_state=erp_state,
 		)
 		return result
+
+
+def _changes_rows(reconciliation_plan):
+	"""True when the plan adds or removes Sales Order rows (case 10)."""
+	return any(
+		change.get("kind") in ("item_added", "item_removed") for change in reconciliation_plan["changes"]
+	)
 
 
 def _executed_message(outcome, sales_order_name):
@@ -1939,8 +2187,7 @@ def _save_success(order, current_hash, sales_order, updated, snapshot):
 	order.last_synced_hash = current_hash
 	order.last_synced_snapshot = frappe.as_json(persisted_snapshot)
 	order.last_erpnext_sync_on = now_datetime()
-	order.erpnext_sync_status = "Synced"
-	order.last_sync_error = None
+	reasons.apply_synced(order)
 	order.flags.skip_sync_status_update = True
 	order.save()
 	return {"ok": True, "sales_order": sales_order.name, "updated": updated}
@@ -1971,12 +2218,141 @@ def _save_reconciliation_advisory(order, reconciliation_plan):
 	}
 
 
-def _save_failure(order, message):
-	order.erpnext_sync_status = "Sync Error"
-	order.last_sync_error = cstr(message).strip()[:500] or _("ERPNext Sales Order synchronization failed.")
+def _save_failure(order, message, reason_code=reasons.SYNC_FAILED):
+	reasons.apply_sync_state(order, reason_code, message)
 	order.flags.skip_sync_status_update = True
 	order.save()
 	return {"ok": False, "status": order.erpnext_sync_status, "error": order.last_sync_error}
+
+
+def confirm_goods_received(marketplace_order):
+	"""Record that the returned goods were received and prepare the draft return (Group C, #364).
+
+	Reached only through ``api/marketplace_orders.py::confirm_goods_received``, which checks the
+	role (Stock Manager / System Manager) on the server.  Only an order waiting for receipt
+	(Needs Action with a receipt-gated reason) qualifies.  A marketplace or Bosta status is never
+	treated as receipt: this explicit call is the only evidence.
+
+	Non-Noon platforms get ONE draft return Delivery Note made with ERPNext's own
+	``make_sales_return`` from the one submitted Delivery Note of the Sales Order (full return;
+	staff edit the quantities before submitting).  Noon reuses its existing Noon Return flow:
+	the call records the receipt acknowledgement on the linked Noon Return and links it; its
+	inspection step creates the draft Sales Return.  Nothing is submitted.  Idempotent: a second
+	call, or an existing non-cancelled return for the same Delivery Note, creates no second draft.
+	The order row is locked first, so two clicks cannot both create a draft.
+	"""
+	frappe.db.get_value("Marketplace Order", marketplace_order, "name", for_update=True)
+	order = frappe.get_doc("Marketplace Order", marketplace_order)
+	if order.erpnext_sync_status != sync_status.NEEDS_ACTION or (
+		order.sync_reason_code not in reasons.RECEIPT_GATED_REASONS
+	):
+		frappe.throw(_("This order is not waiting for goods to be received."))
+	if not order.erpnext_sales_order:
+		frappe.throw(_("This order has no linked Sales Order."))
+
+	if order.platform == "Noon":
+		prepared_doctype, prepared_document, state, message = _confirm_noon_return_receipt(order)
+	else:
+		prepared_doctype, prepared_document, state, message = _prepare_delivery_note_return(order)
+
+	if not order.receipt_confirmed_on:
+		order.receipt_confirmed_by = frappe.session.user
+		order.receipt_confirmed_on = now_datetime()
+	order.sync_prepared_doctype = prepared_doctype
+	order.sync_prepared_document = prepared_document
+	order.sync_action_state = state
+	order.last_sync_error = message
+	order.flags.skip_sync_status_update = True
+	order.save()
+	return {
+		"ok": True,
+		"prepared_doctype": prepared_doctype,
+		"prepared_document": prepared_document,
+		"sync_action_state": state,
+		"message": message,
+	}
+
+
+def _existing_prepared_document(order, doctype):
+	"""The order's prepared document while it is draft or submitted; a cancelled or deleted one is replaced."""
+	if order.sync_prepared_doctype != doctype or not order.sync_prepared_document:
+		return None
+	docstatus = frappe.db.get_value(doctype, order.sync_prepared_document, "docstatus")
+	return order.sync_prepared_document if docstatus in (0, 1) else None
+
+
+def _prepare_delivery_note_return(order):
+	from erpnext.stock.doctype.delivery_note.delivery_note import make_sales_return
+
+	existing = _existing_prepared_document(order, "Delivery Note")
+	if existing:
+		return "Delivery Note", existing, sync_status.DRAFT_PREPARED, _prepared_message(existing)
+	frappe.has_permission("Delivery Note", "create", throw=True)
+	delivery_notes = read_erp_state(frappe.get_doc("Sales Order", order.erpnext_sales_order)).get(
+		"linked_documents", {}
+	).get("Delivery Note") or []
+	if not delivery_notes:
+		frappe.throw(
+			_("Sales Order {0} has no submitted Delivery Note, so there is nothing to return.").format(
+				order.erpnext_sales_order
+			)
+		)
+	if len(delivery_notes) > 1:
+		frappe.throw(
+			_(
+				"Sales Order {0} has several Delivery Notes ({1}); create the Sales Return manually from the one the goods came back for."
+			).format(order.erpnext_sales_order, ", ".join(delivery_notes))
+		)
+	source = delivery_notes[0]
+	# A return someone already made for this Delivery Note counts: never create a second one.
+	already = frappe.get_all(
+		"Delivery Note",
+		filters={"return_against": source, "docstatus": ["in", [0, 1]]},
+		pluck="name",
+		order_by="creation asc",
+		limit=1,
+	)
+	if already:
+		return "Delivery Note", already[0], sync_status.DRAFT_PREPARED, _prepared_message(already[0])
+	draft = make_sales_return(source)
+	draft.insert()
+	return "Delivery Note", draft.name, sync_status.DRAFT_PREPARED, _prepared_message(draft.name)
+
+
+def _prepared_message(document):
+	return _(
+		"Draft return {0} was prepared. Check the goods and quantities, then submit it. Nothing was submitted automatically."
+	).format(document)
+
+
+def _confirm_noon_return_receipt(order):
+	"""Noon: acknowledge the linked Noon Return's receipt (its own flow) and link it."""
+	returns = frappe.get_all(
+		"Noon Return",
+		filters={"marketplace_order": order.name},
+		fields=["name", "receipt_acknowledged_on", "sales_return"],
+		order_by="creation asc",
+	)
+	if not returns:
+		frappe.throw(
+			_("No Noon Return is linked to this order yet. Look up the return on the order first.")
+		)
+	for row in returns:
+		if not row.receipt_acknowledged_on:
+			frappe.get_doc("Noon Return", row.name).acknowledge_receipt(
+				_("Confirmed from Marketplace Order {0}").format(order.name)
+			)
+	target = returns[0]
+	if target.sales_return:
+		return "Noon Return", target.name, sync_status.DRAFT_PREPARED, _prepared_message(target.sales_return)
+	return (
+		"Noon Return",
+		target.name,
+		sync_status.WAITING_FOR_USER,
+		_("Receipt was recorded on Noon Return {0}. Record its inspection to prepare the draft Sales Return.").format(
+			target.name
+		),
+	)
 
 
 def _line_identifier(row):
