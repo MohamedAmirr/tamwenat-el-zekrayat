@@ -20,7 +20,9 @@ function parse_credentials_text(text) {
 			error: __("The credentials file is missing these keys or they are empty: {0}", [missing.join(", ")]),
 		};
 	}
-	return { credentials: data };
+	return {
+		credentials: { ...data, project_code: data.project_code.trim(), key_id: data.key_id.trim() },
+	};
 }
 
 function apply_credentials(frm, credentials) {
@@ -174,7 +176,9 @@ function add_webhook_destination_buttons(frm) {
 
 frappe.ui.form.on("Noon Connection", {
 	refresh(frm) {
-		frm.add_custom_button(__("Import Credentials File"), () => pick_credentials_file(frm));
+		if (frm.perm && frm.perm[0] && frm.perm[0].write) {
+			frm.add_custom_button(__("Import Credentials File"), () => pick_credentials_file(frm));
+		}
 		if (frm.is_new()) return;
 
 		frm.add_custom_button(__("Copy Webhook URL"), () => {
