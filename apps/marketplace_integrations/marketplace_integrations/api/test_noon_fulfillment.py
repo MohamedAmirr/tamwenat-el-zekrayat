@@ -152,6 +152,7 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 				{
 					"integration_shipment_nr": "ORD-1",
 					"status": "Created",
+					"items": [],
 					"awbs": [{"courier": "Aramex", "awb_nr": "AWB-1"}],
 					"delivery_note": "MAT-DN-0001",
 					"delivery_notes": ["MAT-DN-0001"],
@@ -162,6 +163,7 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 				{
 					"integration_shipment_nr": "ORD-2",
 					"status": "Error",
+					"items": [],
 					"awbs": [],
 					"delivery_note": "",
 					"delivery_notes": [],
@@ -182,8 +184,18 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 	def test_create_shipment_delegates_and_parses_json_list(self, mock_fn):
 		mock_fn.return_value = {"integration_shipment_nr": "ORD-1", "queued": True}
 		result = create_shipment(self.order.name, '["1", "2"]', "Noon")
-		mock_fn.assert_called_once_with(self.order.name, ["1", "2"], "Noon", None, None)
+		mock_fn.assert_called_once_with(self.order.name, ["1", "2"], "Noon")
 		self.assertEqual(result, {"integration_shipment_nr": "ORD-1", "queued": True})
+
+	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.create_shipment")
+	def test_create_shipment_awb_source_defaults_to_noon(self, mock_fn):
+		mock_fn.return_value = {"integration_shipment_nr": "ORD-1", "queued": True}
+		create_shipment(self.order.name, '["1"]')
+		mock_fn.assert_called_once_with(self.order.name, ["1"], "Noon")
+
+	def test_create_shipment_refuses_own_courier(self):
+		with self.assertRaises(frappe.ValidationError):
+			create_shipment(self.order.name, '["1"]', "Own Courier")
 
 	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.cancel_shipment")
 	def test_cancel_shipment_delegates(self, mock_fn):
@@ -195,8 +207,8 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.add_awb")
 	def test_add_awb_delegates(self, mock_fn):
 		mock_fn.return_value = {"queued": True}
-		result = add_awb(self.order.name, "ORD-1", "Aramex", "AWB-1")
-		mock_fn.assert_called_once_with(self.order.name, "ORD-1", "Aramex", "AWB-1")
+		result = add_awb(self.order.name, "ORD-1", "noon", "AWB-1")
+		mock_fn.assert_called_once_with(self.order.name, "ORD-1", "noon", "AWB-1")
 		self.assertEqual(result, {"queued": True})
 
 	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.mark_out_of_stock")

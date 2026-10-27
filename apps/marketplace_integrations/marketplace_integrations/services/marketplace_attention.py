@@ -963,6 +963,22 @@ def _fulfillment_message(log):
 	return message[:EXPLANATION_MAX_LENGTH]
 
 
+def _fulfillment_action_label(action):
+	"""Plain verb for a Noon fulfillment action code; an unknown code is shown as stored."""
+	labels = {
+		"CreateShipment": _("Create shipment"),
+		"GetShipment": _("Check shipment on Noon"),
+		"CancelShipment": _("Cancel shipment"),
+		"DiscardShipment": _("Discard shipment"),
+		"AddShipmentCourierAwbs": _("Add AWB"),
+		"UpdateOrder": _("Mark units Out of Stock"),
+		"UploadShipmentInvoice": _("Upload shipment invoice"),
+		"UploadOrderInvoice": _("Upload order invoice"),
+		"ReleaseStuckOosReservation": _("Release Out of Stock reservation"),
+	}
+	return labels.get(action) or action or _("Fulfillment action")
+
+
 def _collect_fulfillment_errors(accounts):
 	filters = {"sync_type": "Fulfillment", "marketplace_account": ["in", list(accounts)]}
 	fields = [
@@ -1021,6 +1037,17 @@ def _collect_fulfillment_errors(accounts):
 			):
 				remember(last_recovery, (log.marketplace_order, shipment), stamp)
 
+	# One lookup for the customer-facing order numbers shown instead of the MKTORD names.
+	references = {}
+	for chunk in _chunks(order_names):
+		for order in frappe.get_list(
+			"Marketplace Order",
+			filters={"name": ["in", chunk]},
+			fields=["name", "platform_order_reference"],
+			limit_page_length=0,
+		):
+			references[order.name] = order.platform_order_reference
+
 	items = []
 	seen = set()
 	for log in errors:
@@ -1037,17 +1064,17 @@ def _collect_fulfillment_errors(accounts):
 				resolved_by.append(last_recovery.get((log.marketplace_order, shipment)))
 		if any(later and later > stamp for later in resolved_by):
 			continue
-		label = action or _("Fulfillment action")
-		message = _fulfillment_message(log) or _("Noon fulfillment {0} failed - open the order.").format(
-			label
-		)
+		label = _fulfillment_action_label(action)
+		message = _fulfillment_message(log) or _("{0} failed - open the order.").format(label)
 		items.append(
 			_item(
 				FULFILLMENT_ERROR,
 				accounts[log.marketplace_account],
 				"Marketplace Sync Log",
 				log.name,
-				_("{0} failed on order {1}: {2}").format(label, log.marketplace_order or "", message),
+				_("{0} failed on order {1}: {2}").format(
+					label, references.get(log.marketplace_order) or log.marketplace_order or "", message
+				),
 				log.attempted_at or log.creation,
 				NEXT_VIEW_ERROR,
 			)

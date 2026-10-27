@@ -49,7 +49,7 @@ below). The reconciliation Script Report is not built (findings are Needs Attent
    Stock need a shippable unit; Cancel Shipment and Add AWB need a Created
    shipment; Upload Invoice needs a Created shipment with no invoice upload
    Pending; Retry needs a Pending, Error or Cancel Pending shipment, or a
-   Created one with a Pending Own Courier AWB or a Pending/Error invoice;
+   Created one with a Pending added AWB or a Pending/Error invoice;
    Mark Handed Over needs a Created shipment that is not handed over yet (no live
    Delivery Note, no recorded handover) or that still has unresolved handover units;
    Cancel Shipment and Discard Shipment are not offered while the shipment's Delivery Note
@@ -140,6 +140,33 @@ is not supported by this release.
   AWB and Upload Invoice workers recheck `Created` before calling Noon, so a
   cancellation completed during queue delay prevents the later mutation. An
   unsent AWB row becomes `Skipped`; an unsent invoice becomes `Error`.
+- **Readable names.** Noon's order payload has no product title, so item names
+  come only from the ERPNext Item behind the product mapping (one lookup per
+  distinct SKU); an unmapped SKU is shown as the SKU alone. The Create Shipment
+  and Mark Out of Stock checklists show `Item name (SKU)`, with a `(1 of 3)`
+  counter when a SKU repeats and the raw `mp_item_nr` only in the tooltip. The
+  Noon Shipments table shows `Shipment n` (full number in the tooltip), an Items
+  column (`Item name (SKU) x2, ...`) and AWBs as `Noon <number>`; shipment
+  dropdowns read `Shipment n - status` while keeping the full number as the
+  value. Error messages name units as `Item name (SKU)` and no longer mention
+  action codes. Fulfillment Needs Attention rows read `Create shipment failed on
+  order <platform order number>: ...` (every action code has a plain verb, an
+  unknown one is shown as stored). Marketplace Sync Log `request_data` gets the
+  extra keys `order_reference`, `shipment_label` and `items`; the existing keys
+  (`action`, `integration_shipment_nr`, notes) are unchanged because Needs
+  Attention parses them. Noon-sourced error text is shown unchanged.
+- **Noon is the only courier.** Every new shipment gets a Noon AWB (the
+  pre-generated pool first, else one `GetNoonLogisticsAWBs` call); the Create
+  Shipment dialog has no AWB source, courier or AWB number fields, and
+  `create_shipment` refuses any source other than Noon. **Add AWB** is Noon's
+  `AddShipmentCourierAwbs`, meant for adding a replacement AWB when warehouse
+  scanning of the current one fails: the user types the new AWB number and the
+  Courier field is a one-option Select (Noon). Noon documents `courier` as a
+  free string ("'noon' or your own logistics provider"); the value is always
+  stored and sent as lowercase `noon`, and the server refuses any other
+  courier. Shipments stored earlier with AWB source Own Courier, and AWB rows
+  with other courier text, are left as they are and keep working with Retry,
+  Cancel and Discard.
 - **Mark Out of Stock**: same shippable-unit rule as Create Shipment. Noon
   documents UpdateOrder as valid "before shipment creation" only. Selected
   units are reserved on the order before queueing, so Create Shipment cannot
@@ -150,7 +177,7 @@ is not supported by this release.
 - Shipment numbers (`<fbpi_order_nr>-<n>`) are never reused, even after
   cancellation — `n` counts every shipment ever created on the order.
 - Retrying re-runs a shipment's last pending/error action only; it does not
-  let you change units, AWB source, or invoice file after the first attempt.
+  let you change units or invoice file after the first attempt.
   Add AWB and invoice retries require the shipment to remain `Created`; the
   retry response reports when its job is already queued. To ship different
   units, create a new (separate) shipment.
