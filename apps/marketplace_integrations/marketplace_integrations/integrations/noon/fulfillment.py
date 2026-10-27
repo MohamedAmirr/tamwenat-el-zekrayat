@@ -79,6 +79,7 @@ from marketplace_integrations.integrations.noon.constants import (
 	SHIPMENT_INVOICE_MAX_BYTES,
 	SHIPMENT_INVOICE_UPLOAD_PATH,
 )
+from marketplace_integrations.integrations.noon.expected_change import record_out_of_stock
 from marketplace_integrations.integrations.noon.orders import get_order as get_fbpi_order
 from marketplace_integrations.integrations.noon.orders import import_order
 
@@ -468,7 +469,9 @@ def run_create_shipment(marketplace_order_name, integration_shipment_nr):
 	savepoint = "noon_create_shipment_import_" + frappe.generate_hash(length=10)
 	frappe.db.savepoint(savepoint)
 	try:
-		import_order(account, raw_order, bump_trigger_source="Manual")
+		# Our own pre-shipment refresh: echo_guard=False so it never consumes an expected-change
+		# marker (services/echo_guard.py) that a later poll should compare.
+		import_order(account, raw_order, bump_trigger_source="Manual", echo_guard=False)
 	except Exception:
 		frappe.db.rollback(save_point=savepoint)
 		order = _fail_shipment_by_name(
@@ -1411,6 +1414,9 @@ def run_mark_out_of_stock(marketplace_order_name, mp_item_nrs):
 			)
 			return
 
+		# #364 expected-change marker: UpdateOrder succeeded, so record what we sent. The own
+		# refresh below passes echo_guard=False so it leaves the marker for a later poll.
+		record_out_of_stock(order.name, mp_item_nrs)
 		# #146 round-5 fix (review finding #5): this worker used to hold the
 		# order lock (re-acquired just above) across the GetFbpiOrder HTTP
 		# call below - the module/function docstrings already claimed it was
@@ -1429,7 +1435,8 @@ def run_mark_out_of_stock(marketplace_order_name, mp_item_nrs):
 			savepoint = "noon_oos_refresh_" + frappe.generate_hash(length=10)
 			frappe.db.savepoint(savepoint)
 			try:
-				import_order(account, raw_order, bump_trigger_source="Manual")
+				# Our own refresh: echo_guard=False leaves the expected-change marker for a later poll.
+				import_order(account, raw_order, bump_trigger_source="Manual", echo_guard=False)
 			except Exception:
 				frappe.db.rollback(save_point=savepoint)
 				raise

@@ -10,9 +10,9 @@ How `Marketplace Order.erpnext_sync_status` is decided, which cases end in which
 | Synced | ERPNext matches the intended marketplace state, or an approved reconciliation has been completed. | No staff action. |
 | Sync Error | The integration cannot reliably build, interpret or execute the sync: invalid or missing integration data, or a technical failure. | Shows the concrete error. Recoverable problems are retried or re-synced automatically. |
 | Needs Action | The desired change is understood, but applying it needs a human operational or accounting decision, approval, physical verification, or manual correction of conflicting ERP documents. | Shows the required action and any draft the app prepared. |
-| Cancelled | Terminal: the order was cancelled before any Sales Order existed (#353). | Excluded from every sweep and catch-up. |
+| Cancelled | Terminal: the order was cancelled before any Sales Order existed (#353): a Shopify cancellation (unpaid or fully refunded), or a Noon order whose every unit is cancelled. | Excluded from every sweep and catch-up. |
 
-"Not Synced" and "Modified After Sync" no longer exist. Sales Orders stay auto-submitted at import. The 45 second debounce is unchanged and covers webhooks, polls, sweeps and form edits.
+"Not Synced" and "Modified After Sync" no longer exist. The migration patch moves legacy "Not Synced" rows as follows: a row created within the last 30 days (`LEGACY_NOT_SYNCED_RECENT_DAYS`, measured from `creation`, the import time) that is also eligible is set to Syncing and bumped; every other row becomes Needs Action with `LEGACY_NOT_SYNCED_REVIEW`. Eligible means: Talabat always; Noon when the order has at least one eligible unit; Shopify when it is not cancelled and its financial status is PAID or PARTIALLY_PAID, or a manual payment is pending. Sales Orders stay auto-submitted at import. The 45 second debounce is unchanged and covers webhooks, polls, sweeps and form edits.
 
 ### Choosing between Sync Error and Needs Action
 
@@ -34,6 +34,7 @@ How `Marketplace Order.erpnext_sync_status` is decided, which cases end in which
 | Shipping charge changes on a submitted order | Needs Action | No approved safe amendment path |
 | Duplicate or missing snapshot line identity | Needs Action | Data-integrity review |
 | Shopify order cancelled after payment, before any Sales Order | Needs Action | Refund the customer in the marketplace |
+| Legacy "Not Synced" row that is older than 30 days or not eligible (migration) | Needs Action, `LEGACY_NOT_SYNCED_REVIEW` | Review it; use Retry Sync if it is still needed |
 
 ## Reason codes and metadata
 
@@ -97,7 +98,7 @@ The app never invents a missing identity, overwrites an ambiguous baseline or cl
 | 16 | Already billed, Sales Invoice exists | Needs Action (accounting decision) |
 | 17 | Delivery or billing blocks the submitted-order update | Needs Action |
 
-**Receipt gate.** A marketplace `return`, `refund` or `cancelled` event does not prove goods were received, and neither does a Bosta status. The order waits in Needs Action with action state Awaiting Receipt. A user with the Stock Manager or System Manager role presses **Confirm Goods Received** on the Marketplace Order (the whitelisted method checks the role on the server and records `receipt_confirmed_by` and `receipt_confirmed_on`). The app then:
+**Receipt gate.** A marketplace `return`, `refund` or `cancelled` event does not prove goods were received, and neither does a Bosta status. The order waits in Needs Action with action state Awaiting Receipt. A user with the Stock Manager or System Manager role who also has write permission on Marketplace Order (a platform role such as Talabat User or Noon User; Stock Manager alone is not enough) presses **Confirm Goods Received** on the Marketplace Order (the whitelisted method checks the role and the write permission on the server and records `receipt_confirmed_by` and `receipt_confirmed_on`). The app then:
 
 - for Talabat and Shopify, creates one draft return Delivery Note with ERPNext's `make_sales_return` from the order's one submitted Delivery Note, links it in `sync_prepared_*` and sets Draft Prepared;
 - for Noon, records the receipt acknowledgement on the linked Noon Return (its existing inspection flow) and links that Noon Return; its inspection step creates the draft Sales Return.
@@ -124,7 +125,7 @@ Timeouts, lock or deadlock errors, HTTP 5xx and 429 in the sync path are retried
 
 A person should not need to press a button after fixing a blocker. Two triggers feed the normal debounced sync:
 
-- Document events: a Delivery Note, Sales Invoice or Payment Entry submit, cancel or delete, or a Sales Order update after submit or cancel, queues a re-check of the linked orders that are in Needs Action or Sync Error (matched through the Sales Order link or as the recorded blocking or prepared document). The order shows Recheck Queued and the trigger source is "ERPNext Document Change". The handler only bumps the debounce: it never raises, makes no HTTP call and ignores the order whose sync is running.
+- Document events: a Delivery Note, Sales Invoice or Payment Entry submit, cancel or delete, or a Sales Order update after submit or cancel, queues a re-check of the linked orders that are in Needs Action or Sync Error (matched through the Sales Order link or as the recorded blocking or prepared document). The order shows Recheck Queued and the trigger source is "ERPNext Document Change". The handler never raises and makes no HTTP call. The debounce bump itself is queued with `enqueue_after_commit`, so it runs only if the submitter's transaction commits and never writes inside it. The order whose sync is running is ignored only when that sync runs in the same process; a sync running in a worker is not seen, and the debounce window it leaves absorbs the bump.
 - Mapping save: saving an enabled Marketplace Product Mapping bumps the account's orders in Sync Error with a mapping or price reason code.
 
 The hourly sweep is the fallback for missed events, imports and a Close or Reopen. It re-checks Needs Action and Sync Error orders at most once a day. The manual **Retry Sync** button runs the same guarded path and is a fallback, never a required step.
@@ -143,3 +144,33 @@ Completion rules: a resolved blocker does not force Synced if another blocker re
 ## Echo of the app's own actions
 
 The Talabat webhook queues a sync only when the order is new or its evidence fingerprint changed, so the echo of our own PUT (whose response was already stored) does not raise Syncing. The Shopify item-edit and cancel markers, the Talabat cancel marker and the Bosta timestamp guard are unchanged.
+
+### Expected-change marker (Talabat and Noon)
+
+An outbound call that changes the platform order makes the platform report the new state back on the next webhook, import or poll. Without a guard that report looks like a platform-side change and re-triggers the sync. The guard works as follows.
+
+- **Marker.** After the platform accepts the call, the order stores `expected_change_hash` (a SHA-256 of the state we sent) and `expected_change_scope` (what the hash covers). Both fields are hidden and read-only. They are separate from the Shopify `outbound_edit_fingerprint` and `outbound_edit_state` pair and from `outbound_cancelled_on`, which keep working as before. The marker is written after the HTTP call returns; the caller commits it before anything that can fail, like `outbound_cancelled_on` (Talabat: `request_platform_cancel` and the `update_order` API commit right after the send; Noon: the worker's next commit, before its refresh). Noon's worker holds the order row lock only until that commit and takes no lock across the HTTP call. Talabat's `request_platform_cancel` already held the row lock across its PUT before this change, and still does. No save of a document changes the marker in either direction: the controller copies the stored values back on every save, so a stale copy can neither blank a marker nor bring back a cleared one.
+- **Next import.** The import paths hash the incoming platform state over the same scope and compare. Equal means the change is our own echo. The marker is cleared and the order is saved without the `before_save` re-plan (so no Syncing, no Needs Action from the echo) and without a debounce bump. Different means a real platform change: the marker is cleared and the import runs the normal path. No marker means the normal path, unchanged.
+- **The Sales Order is still brought up to date.** On an echo of a linked order whose evidence changed, the importer queues a short job (`echo_guard.run_echo_sync`, `enqueue_after_commit`, one job per order) that runs `sync_sales_order`, so the quantity or cancellation is applied and the baseline advances without a debounce. It runs only after the import has committed, so a failure in the sync can never roll the import back, lose the webhook payload or bring the marker back, and no webhook worker or request runs a full sync itself. If the job's sync raises, the order falls back to the normal debounce. A genuine planner result such as a delivered line is still reported as it is today.
+- **Our own refresh.** The immediate re-import after our send does not consume the marker: the Talabat PUT response is upserted directly (not through the guard), and Noon's refresh after Mark Out of Stock and its pre-shipment refresh in Create Shipment call `import_order(echo_guard=False)`. Only a later webhook, import, poll or manual refresh (Talabat `refresh_order`, `import_vendor_orders`) consumes it.
+- **New orders are never left Syncing.** A new order starts Syncing, so every import path bumps the debounce for it: the Talabat webhook, `refresh_order` and `import_vendor_orders` (new or changed evidence), and the Noon import even when the new order has no eligible unit. An order that can never sync then ends in a final state through the normal path, not in Syncing: a new Noon order whose every unit is CANCELLED, with no Sales Order, becomes the terminal Cancelled status (the same path as a Shopify cancellation before sync, no Sales Order created); a Noon order with no eligible unit that is not fully cancelled (for example units out of stock) ends in Sync Error with the reason.
+- **Only the later echo is guarded.** A Needs Action raised by our own immediate refresh (the `update_order` upsert, `_upsert_returned_order`, or the Noon own refresh) is not suppressed: the guard changes how the later webhook, import or poll is treated, nothing else.
+- **A second echo while the sync job is queued or running** falls back to the normal debounce bump, because the queue drops a second job with the same id and that job may have read the state before the echo.
+- **Unlinked orders.** An order with no Sales Order has nothing to protect; its marker is cleared and the normal path runs.
+
+What is hashed, per platform:
+
+| Platform and call | Sent state | Incoming state compared |
+|---|---|---|
+| Talabat cancel PUT | Order status `CANCELLED` and the cancellation reason | `external_status` and `cancellation_reason` |
+| Talabat UPDATE_CART | Order status `UPDATE_CART` and, per item keyed by SKU: pricing type, status class, quantity (UNIT) or weight (KG) | `external_status` and, per item keyed by `external_sku`: pricing type, status class, `fulfilled_quantity` or `fulfilled_weight` |
+| Noon Mark Out of Stock | The sent `mp_item_nr` values, each expected `OUT_OF_STOCK` (the unit numbers are also stored in `expected_change_scope`) | The `integration_status` of exactly those units in the incoming order; a unit missing from the payload counts as different |
+
+Decisions and limits:
+
+- Weighted pieces are not hashed: the UI always sends them (0 when unset) and Talabat may omit them in the echo.
+- Talabat item status class: `IN_CART` and `ADDITION` count as one class, "present", because the Talabat OpenAPI allows both spellings on request and response and does not say how an added item is echoed. `NOT_FOUND` and `REPLACED` keep their own value and carry no quantity.
+- An UPDATE_CART whose items are all `NOT_FOUND` is cancelled by Talabat with reason `ITEM_UNAVAILABLE` (OpenAPI), so the expected state is `CANCELLED` with that reason. Whenever the incoming order is `CANCELLED`, only status and reason are compared.
+- Not done: Noon Cancel Shipment. The API says all items of the shipment are cancelled but not which statuses they return with, and the shipment rows are local state, not part of the import. It stays outside the guard until the real post-cancel unit state is known.
+- Not covered: Talabat DISPATCHED and READY_FOR_PICKUP, and every Shopify call.
+

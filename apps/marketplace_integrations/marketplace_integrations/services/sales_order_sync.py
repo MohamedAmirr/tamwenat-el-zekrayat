@@ -218,6 +218,8 @@ def _sync_sales_order(marketplace_order, trigger_source):
 		and _reconciliation_evidence(order).get("cancellation") == "full"
 	):
 		return _skip_cancelled_before_sync(order, trigger_source)
+	if order.platform == "Noon" and not order.erpnext_sales_order and _noon_fully_cancelled(order):
+		return _skip_noon_cancelled_before_sync(order, trigger_source)
 
 	snapshot = None
 	allow_payment_mirroring = False
@@ -471,6 +473,38 @@ def _skip_cancelled_before_sync(order, trigger_source):
 	else:
 		result = {"ok": False, "status": status, "error": error}
 		_create_sync_log(order, trigger_source, "Invalid", None, result)
+	return result
+
+
+NOON_CANCELLED_EXTERNAL_STATUS = "CANCELLED"
+
+
+def _noon_fully_cancelled(order):
+	"""True when the Noon order has units and every one is CANCELLED (out-of-stock units that
+	are not cancelled keep the normal blocker path)."""
+	rows = order.items or []
+	return bool(rows) and all(row.external_status == NOON_CANCELLED_EXTERNAL_STATUS for row in rows)
+
+
+def _skip_noon_cancelled_before_sync(order, trigger_source):
+	"""Resolve a fully cancelled Noon order before any Sales Order exists: terminal ``Cancelled``
+	(#353), like the Shopify path above.  Nothing is created."""
+	if order.erpnext_sync_status != sync_status.CANCELLED or order.last_sync_error:
+		order.erpnext_sync_status = sync_status.CANCELLED
+		order.last_sync_error = None
+		reasons.clear_sync_state(order)
+		order.flags.skip_sync_status_update = True
+		order.save()
+	result = {
+		"ok": True,
+		"skipped": True,
+		"status": sync_status.CANCELLED,
+		"message": _(
+			"Every unit of the Noon order was cancelled before an ERPNext Sales Order was created; "
+			"no Sales Order is needed."
+		),
+	}
+	_create_sync_log(order, trigger_source, "Success", None, result)
 	return result
 
 
@@ -752,7 +786,7 @@ def _shopify_transactions(order):
 	return [row for row in raw if isinstance(row, dict)] if isinstance(raw, list) else []
 
 
-def _is_manual_payment_pending(order):
+def is_manual_payment_pending(order):
 	"""A PENDING Shopify order whose payment is a manual method (COD, bank deposit, custom),
 	or one staff created with payment terms ("Due on receipt") and no transaction yet.
 
@@ -819,7 +853,7 @@ def _build_shopify_sales_order_lines(order, account, tolerate_zero_quantity=Fals
 	eligible_statuses = {"PAID", "PARTIALLY_PAID"}
 	if tolerate_zero_quantity:
 		eligible_statuses |= {"REFUNDED", "PARTIALLY_REFUNDED"}
-	if order.external_financial_status not in eligible_statuses and not _is_manual_payment_pending(order):
+	if order.external_financial_status not in eligible_statuses and not is_manual_payment_pending(order):
 		raise SyncBlocker(
 			_("Shopify order {0} is not financially eligible for synchronization ({1}).{2}").format(
 				order.name,

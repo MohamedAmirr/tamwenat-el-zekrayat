@@ -1,6 +1,7 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -37,6 +38,26 @@ _DEFAULT_VARIANT = object()
 # Shopify paymentTerms of an order staff recorded with payment "Due on receipt".
 _DUE_ON_RECEIPT = {"paymentTermsType": "RECEIPT", "paymentTermsName": "Due on receipt", "dueInDays": None}
 
+
+
+@contextmanager
+def recheck_jobs_run_inline():
+	"""Run the re-check job (``sales_order_recheck.bump_queued_orders``) at the moment it is queued.
+
+	The handlers queue it with ``enqueue_after_commit``, which a test transaction never reaches.
+	"""
+	from marketplace_integrations.services import sales_order_recheck
+
+	real_enqueue = frappe.enqueue
+	job = "marketplace_integrations.services.sales_order_recheck.bump_queued_orders"
+
+	def enqueue(method, *args, **kwargs):
+		if method == job:
+			return sales_order_recheck.bump_queued_orders(kwargs["order_names"], kwargs["recheck_queued"])
+		return real_enqueue(method, *args, **kwargs)
+
+	with patch("frappe.enqueue", side_effect=enqueue):
+		yield
 
 class IntegrationTestSalesOrderSync(IntegrationTestCase):
 	def setUp(self):
@@ -3708,8 +3729,13 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 					],
 				)
 				result = sync_sales_order(order.name)
-				self.assertFalse(result["ok"])
 				self.assertFalse(order.erpnext_sales_order)
+				if options["external_status"] == "CANCELLED":
+					# Every unit cancelled, no Sales Order: terminal Cancelled, not an error.
+					self.assertTrue(result["ok"])
+					self.assertEqual(result["status"], "Cancelled")
+				else:
+					self.assertFalse(result["ok"])
 
 	def test_noon_zeroed_stale_row_never_counts(self):
 		"""Decision 2: #145 zeroes (never deletes) a stale status-group row -
@@ -3977,7 +4003,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 				{
 					"external_item_id": "sku:SKU-NOON:x:y",
 					"external_sku": "SKU-NOON",
-					"external_status": "CANCELLED",
+					"external_status": "CONFIRMED",
 					"integration_status": "OUT_OF_STOCK",
 					"current_quantity": 2,
 					"transaction_amount": 200.0,
@@ -5222,6 +5248,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(order.sync_reason_code, "LINE_RESTORED_FROM_ZERO")
 
 	def test_missing_mapping_is_a_sync_error_and_saving_the_mapping_resyncs_automatically(self):
+		self.enterContext(recheck_jobs_run_inline())
 		order = self._make_order(sku="SKU-LATER")
 
 		result = sync_sales_order(order.name)
@@ -5419,6 +5446,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			sales_order_sync_service.confirm_goods_received(order.name)
 
 	def test_submitting_the_prepared_return_rechecks_and_closes_the_order(self):
+		self.enterContext(recheck_jobs_run_inline())
 		from marketplace_integrations.api.marketplace_orders import confirm_goods_received
 
 		order, sales_order, delivery_note = self._delivered_and_cancelled_order()
@@ -5446,6 +5474,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 	# --- Auto-reconciliation after a human action ---------------------------------------
 
 	def test_document_event_queues_a_recheck_only_for_orders_that_need_one(self):
+		self.enterContext(recheck_jobs_run_inline())
 		from marketplace_integrations.services.sales_order_recheck import bump_linked_orders
 
 		order = self._synced_talabat_order()
@@ -5463,6 +5492,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(order.pending_sync_trigger_source, "ERPNext Document Change")
 
 	def test_document_event_skips_the_order_whose_sync_is_running(self):
+		self.enterContext(recheck_jobs_run_inline())
 		from marketplace_integrations.services.sales_order_recheck import bump_linked_orders
 
 		order = self._synced_talabat_order()
@@ -5477,6 +5507,47 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(order.erpnext_sync_status, "Sync Error")
 		self.assertFalse(order.sync_debounce_until)
 
+	def test_document_event_queues_the_bump_after_commit_and_writes_nothing_itself(self):
+		from marketplace_integrations.services.sales_order_recheck import bump_linked_orders
+
+		order = self._synced_talabat_order()
+		frappe.db.set_value("Marketplace Order", order.name, "erpnext_sync_status", "Needs Action")
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+
+		with patch("marketplace_integrations.services.sales_order_recheck.frappe.enqueue") as enqueue:
+			bump_linked_orders(sales_order)
+
+		kwargs = enqueue.call_args.kwargs
+		self.assertTrue(kwargs["enqueue_after_commit"])
+		self.assertEqual(kwargs["order_names"], [order.name])
+		self.assertTrue(kwargs["recheck_queued"])
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
+		self.assertFalse(order.sync_debounce_until)
+
+	def test_queued_bump_job_skips_an_order_that_is_no_longer_waiting(self):
+		from marketplace_integrations.services.sales_order_recheck import bump_queued_orders
+
+		order = self._synced_talabat_order()  # Synced by now: nothing to re-check
+
+		bump_queued_orders([order.name], recheck_queued=True)
+
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertFalse(order.sync_debounce_until)
+
+	def test_document_event_never_raises_when_queueing_fails(self):
+		from marketplace_integrations.services.sales_order_recheck import bump_linked_orders
+
+		order = self._synced_talabat_order()
+		frappe.db.set_value("Marketplace Order", order.name, "erpnext_sync_status", "Needs Action")
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		with patch(
+			"marketplace_integrations.services.sales_order_recheck.frappe.enqueue",
+			side_effect=ConnectionError,
+		):
+			bump_linked_orders(sales_order)  # must not raise
+
 	def test_document_event_never_raises(self):
 		from marketplace_integrations.services.sales_order_recheck import bump_linked_orders
 
@@ -5489,6 +5560,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			bump_linked_orders(sales_order)  # must not raise
 
 	def test_a_user_without_marketplace_order_permission_can_trigger_the_event(self):
+		self.enterContext(recheck_jobs_run_inline())
 		from marketplace_integrations.services.sales_order_recheck import bump_linked_orders
 		from marketplace_integrations.tests.utils import make_role_user
 
@@ -5508,6 +5580,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(order.sync_action_state, "Recheck Queued")
 
 	def test_event_sweep_and_manual_retry_run_one_sync_per_order(self):
+		self.enterContext(recheck_jobs_run_inline())
 		from marketplace_integrations.services.sales_order_recheck import bump_linked_orders
 		from marketplace_integrations.services.sales_order_sync_debounce import sweep_due_sales_order_syncs
 
@@ -5527,6 +5600,111 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(len(calls), 1)
 		self.assertEqual(calls[0].kwargs["job_id"], f"marketplace-sync-{order.name}")
 		self.assertTrue(calls[0].kwargs["deduplicate"])
+
+	# --- #364 echo guard with a real linked order ------------------------------------------
+
+	def _echo_normalized(self, order, qty, total, status="RECEIVED"):
+		# RECEIVED, not UPDATE_CART: the Talabat evidence builder only knows RECEIVED as editable.
+		return {
+			"external_order_id": order.external_order_id,
+			"latest_payload": {"order_id": "external-order"},
+			"external_status": status,
+			"received_on": nowdate(),
+			"promised_for": add_days(nowdate(), 1),
+			"customer_first_name": "Talabat Customer",
+			"customer_phone_number": "masked",
+			"order_total": 1200,
+			"items": [
+				{
+					"external_item_id": "line-1",
+					"external_sku": "SKU-UNIT",
+					"external_status": "IN_CART",
+					"pricing_type": "UNIT",
+					"fulfilled_quantity": qty,
+					"fulfilled_unit_price": total / qty,
+					"fulfilled_total_price": total,
+				}
+			],
+		}
+
+	def _echo_marker(self, order, qty):
+		from marketplace_integrations.services import echo_guard
+
+		# The marker holds the hash of exactly the state the echo will carry.
+		echo_guard.record_expected_change(
+			order.name, echo_guard.talabat_incoming_hash(self._echo_normalized(order, qty, 500)), None
+		)
+
+	def _run_echo_upsert(self, order, normalized):
+		from marketplace_integrations.services.echo_guard import upsert_talabat_order
+
+		real_enqueue = frappe.enqueue
+		queued = []
+
+		def enqueue(method, *args, **kwargs):
+			if method == "marketplace_integrations.services.echo_guard.run_echo_sync":
+				queued.append(kwargs)
+				return None
+			return real_enqueue(method, *args, **kwargs)
+
+		with patch("frappe.enqueue", side_effect=enqueue):
+			result = upsert_talabat_order(self.account.name, normalized, "Talabat Webhook")
+		return result, queued
+
+	def test_echo_of_a_linked_order_is_not_replanned_and_its_sync_runs_after_commit(self):
+		from marketplace_integrations.services.echo_guard import run_echo_sync
+
+		order = self._synced_talabat_order()
+		self._echo_marker(order, 1)
+
+		(_updated, echo), queued = self._run_echo_upsert(order, self._echo_normalized(order, 1, 500))
+
+		order.reload()
+		self.assertTrue(echo, (order.sync_reason_code, order.last_sync_error))
+		# No re-plan: still Synced, nothing bumped; the sync is only queued, after commit.
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertFalse(order.sync_debounce_until)
+		self.assertFalse(order.expected_change_hash)
+		self.assertEqual(len(queued), 1)
+		self.assertTrue(queued[0]["enqueue_after_commit"])
+		self.assertEqual(queued[0]["job_id"], f"marketplace-echo-sync-{order.name}")
+
+		run_echo_sync(order.name, "Talabat Webhook")
+
+		order.reload()
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(sales_order.items[0].qty, 1)
+		self.assertEqual(sales_order.items[0].amount, 500)
+
+	def test_a_different_state_with_a_marker_is_a_real_change_and_is_replanned(self):
+		order = self._synced_talabat_order()
+		self._echo_marker(order, 1)
+
+		(_updated, echo), queued = self._run_echo_upsert(order, self._echo_normalized(order, 3, 1500))
+
+		order.reload()
+		self.assertFalse(echo)
+		self.assertEqual(queued, [])
+		self.assertEqual(order.erpnext_sync_status, "Syncing")
+		self.assertFalse(order.expected_change_hash)
+
+	def test_run_echo_sync_falls_back_to_the_debounce_when_the_sync_raises(self):
+		from marketplace_integrations.services.echo_guard import run_echo_sync
+
+		order = self._synced_talabat_order()
+		with (
+			patch("marketplace_integrations.services.sales_order_sync.sync_sales_order", side_effect=RuntimeError),
+			patch("frappe.log_error"),
+			patch("frappe.db.rollback"),
+			patch("frappe.db.commit"),
+		):
+			run_echo_sync(order.name, "Talabat Webhook")
+
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Syncing")
+		self.assertTrue(order.sync_debounce_until)
+		self.assertEqual(order.pending_sync_trigger_source, "Talabat Webhook")
 
 	# --- #364 migration patch -------------------------------------------------------------
 
@@ -5585,8 +5763,38 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self._legacy_status(fresh, "Not Synced")
 		cancelled = self._make_order()
 		self._legacy_status(cancelled, "Cancelled")
+		# #364 Not Synced rows: recent AND eligible are bumped, everything else is reviewed.
+		old = self._make_order(sku="SKU-OLD")
+		self._legacy_status(old, "Not Synced")
+		frappe.db.set_value("Marketplace Order", old.name, "creation", add_days(now_datetime(), -31))
+		noon_without_units = self._make_order(sku="SKU-NOON")
+		self._legacy_status(noon_without_units, "Not Synced")
+		frappe.db.set_value("Marketplace Order", noon_without_units.name, "platform", "Noon")
+		shopify_paid = self._make_order(sku="SKU-SHOP-PAID")
+		self._legacy_status(shopify_paid, "Not Synced")
+		frappe.db.set_value(
+			"Marketplace Order",
+			shopify_paid.name,
+			{"platform": "Shopify", "external_financial_status": "PAID"},
+		)
+		shopify_pending = self._make_order(sku="SKU-SHOP-PENDING")
+		self._legacy_status(shopify_pending, "Not Synced")
+		frappe.db.set_value(
+			"Marketplace Order",
+			shopify_pending.name,
+			{"platform": "Shopify", "external_financial_status": "PENDING"},
+		)
 
 		self._run_status_patch()
+
+		for needs_review in (old, noon_without_units, shopify_pending):
+			row = self._row(needs_review)
+			self.assertEqual(row.erpnext_sync_status, "Needs Action", needs_review.name)
+			self.assertEqual(row.sync_reason_code, "LEGACY_NOT_SYNCED_REVIEW")
+			self.assertEqual(row.sync_action_state, "Waiting for User")
+			self.assertFalse(row.sync_debounce_until)
+		self.assertEqual(self._row(shopify_paid).erpnext_sync_status, "Syncing")
+		self.assertTrue(self._row(shopify_paid).sync_debounce_until)
 
 		self.assertEqual(self._row(executable).erpnext_sync_status, "Syncing")
 		self.assertTrue(self._row(executable).sync_debounce_until)
@@ -5604,7 +5812,18 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertTrue(fresh_row.sync_debounce_until)
 		self.assertEqual(self._row(cancelled).erpnext_sync_status, "Cancelled")
 
-		orders = (executable, matching, blocked, unmapped, fresh, cancelled)
+		orders = (
+			executable,
+			matching,
+			blocked,
+			unmapped,
+			fresh,
+			cancelled,
+			old,
+			noon_without_units,
+			shopify_paid,
+			shopify_pending,
+		)
 		before = {order.name: self._row(order) for order in orders}
 		self._run_status_patch()
 		self.assertEqual(before, {order.name: self._row(order) for order in orders})

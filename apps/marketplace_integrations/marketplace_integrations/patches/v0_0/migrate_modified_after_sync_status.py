@@ -9,8 +9,13 @@
   Syncing when the planner says the sync can apply the change itself (or ERPNext already
   matches, which the next sync confirms as Synced).  A row that cannot be classified is
   conservatively Needs Action for review.
-- Every "Not Synced" row becomes Syncing and is bumped through the debounce, so the minute
-  sweep syncs it.
+- A "Not Synced" row that is recent (created within ``LEGACY_NOT_SYNCED_RECENT_DAYS`` days, by
+  ``creation``) AND eligible for an automatic sync becomes Syncing and is bumped through the
+  debounce, so the minute sweep syncs it.  Eligible means: Talabat always; Noon when the order
+  has at least one eligible unit (``noon.orders.has_eligible_units``); Shopify when it is not
+  cancelled and its financial status is PAID or PARTIALLY_PAID, or a manual payment is pending
+  (the rule ``sales_order_sync`` applies).  Every other "Not Synced" row becomes Needs Action
+  with ``LEGACY_NOT_SYNCED_REVIEW`` instead of mass-syncing months-old orders.
 - "Cancelled" rows are not touched.
 
 The status and reason fields are written with ``frappe.db.set_value`` (and the debounce
@@ -23,14 +28,21 @@ statuses nothing selects it again.
 """
 
 import frappe
+from frappe.utils import add_days, get_datetime, now_datetime
 
+from marketplace_integrations.integrations.noon.orders import has_eligible_units
 from marketplace_integrations.services import sync_reason_codes as reasons
 from marketplace_integrations.services import sync_status
-from marketplace_integrations.services.sales_order_sync import set_sync_status_from_current_snapshot
+from marketplace_integrations.services.sales_order_sync import (
+	is_manual_payment_pending,
+	set_sync_status_from_current_snapshot,
+)
 from marketplace_integrations.services.sales_order_sync_debounce import bump_sync_debounce
 
 OLD_NEEDS_REVIEW = "Modified After Sync"
 OLD_NEW = "Not Synced"
+# A legacy Not Synced row older than this (days since ``creation``) is not auto-synced.
+LEGACY_NOT_SYNCED_RECENT_DAYS = 30
 TRIGGER_SOURCE = "Scheduled Sweep"
 
 _STATE_FIELDS = (
@@ -93,8 +105,36 @@ def classify_row(name):
 
 
 def migrate_not_synced_rows():
-	for name in frappe.get_all("Marketplace Order", filters={"erpnext_sync_status": OLD_NEW}, pluck="name"):
-		bump_sync_debounce(name, TRIGGER_SOURCE)
+	cutoff = add_days(now_datetime(), -LEGACY_NOT_SYNCED_RECENT_DAYS)
+	for row in frappe.get_all(
+		"Marketplace Order", filters={"erpnext_sync_status": OLD_NEW}, fields=["name", "creation"]
+	):
+		if get_datetime(row.creation) >= cutoff and is_eligible_for_sync(row.name):
+			bump_sync_debounce(row.name, TRIGGER_SOURCE)
+		else:
+			_write_state(
+				row.name,
+				{
+					"erpnext_sync_status": sync_status.NEEDS_ACTION,
+					"last_sync_error": reasons.instruction(reasons.LEGACY_NOT_SYNCED_REVIEW),
+					"sync_reason_code": reasons.LEGACY_NOT_SYNCED_REVIEW,
+					"sync_action_type": reasons.REASONS[reasons.LEGACY_NOT_SYNCED_REVIEW]["action_type"],
+					"sync_remediation_mode": reasons.MANUAL,
+					"sync_action_state": sync_status.WAITING_FOR_USER,
+				},
+			)
+
+
+def is_eligible_for_sync(name):
+	"""Whether a never-synced order can be synced automatically (see the module docstring)."""
+	order = frappe.get_doc("Marketplace Order", name)
+	if order.platform == "Noon":
+		return has_eligible_units(name)
+	if order.platform == "Shopify":
+		return not order.cancelled_at and (
+			order.external_financial_status in ("PAID", "PARTIALLY_PAID") or is_manual_payment_pending(order)
+		)
+	return True
 
 
 def _write_state(name, values):

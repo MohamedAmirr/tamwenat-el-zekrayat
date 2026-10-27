@@ -103,7 +103,9 @@ ITEM_FIELDS = (
 JSON_ITEM_FIELDS = ("barcodes", "promotions")
 
 
-def upsert_marketplace_order(marketplace_account, normalized_order, is_stale=None):
+def upsert_marketplace_order(
+	marketplace_account, normalized_order, is_stale=None, skip_status_replan=False
+):
 	"""Create or update one Marketplace Order and its Talabat line rows.
 
 	``normalized_order`` is the platform adapter's canonical result. It must
@@ -112,6 +114,9 @@ def upsert_marketplace_order(marketplace_account, normalized_order, is_stale=Non
 	``external_item_id``; SKU stays a product-mapping input, never an identity.
 	Rows absent from a later payload are retained so a partial/recovery import
 	cannot erase operational replacement history.
+
+	``skip_status_replan`` saves without the ``before_save`` re-plan of the sync status; the
+	echo guard (``services/echo_guard.py``) uses it for the echo of our own outbound call.
 	"""
 	if not isinstance(normalized_order, dict):
 		frappe.throw(_("Normalized marketplace order must be an object."))
@@ -140,6 +145,8 @@ def upsert_marketplace_order(marketplace_account, normalized_order, is_stale=Non
 	)
 	doc.marketplace_account = marketplace_account
 	doc.external_order_id = external_order_id
+	if skip_status_replan:
+		doc.flags.skip_sync_status_update = True
 	_apply_order_fields(doc, normalized_order)
 	_upsert_order_items(doc, normalized_order.get("items") or [])
 	if keep_shopify_cancelled:
@@ -168,6 +175,8 @@ def upsert_marketplace_order(marketplace_account, normalized_order, is_stale=Non
 			doc = frappe.get_doc("Marketplace Order", name)
 			if is_stale and is_stale(doc):
 				return doc
+			if skip_status_replan:
+				doc.flags.skip_sync_status_update = True
 			_apply_order_fields(doc, normalized_order)
 			_upsert_order_items(doc, normalized_order.get("items") or [])
 			doc.save()

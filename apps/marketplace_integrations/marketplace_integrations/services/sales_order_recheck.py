@@ -19,8 +19,11 @@ syncs, plans or calls a platform itself:
 The handler runs inside the transaction of whoever submitted the document (a Stock User with no
 Marketplace Order permission, for instance), so it reads with ``get_all`` and writes through the
 debounce's ``frappe.db.set_value()``: both skip permission checks, which is the point.  It
-never raises (a failure here must not block a Delivery Note submit), makes no HTTP call and
-ignores the order whose sync is running right now (that sync is the one changing the document).
+never raises (a failure here must not block a Delivery Note submit) and makes no HTTP call.
+The debounce bump itself is queued with ``enqueue_after_commit`` (``bump_queued_orders``), so it
+never writes inside the submitter's transaction.  The order whose sync is running right now is
+skipped, but only when that sync runs in the same process (``frappe.flags``): a sync running in
+a worker is not seen here, and its own finish (the debounce window) absorbs the bump.
 
 Everything else (the sweep as the fallback for missed events, retry, Close/Reopen) stays in
 ``services/sales_order_sync_debounce.py``.
@@ -42,10 +45,12 @@ MAX_ORDERS_PER_EVENT = 200
 def bump_linked_orders(doc, method=None):
 	"""``doc_events`` handler: queue a re-check for the orders ``doc`` belongs to.  Never raises."""
 	try:
+		names = []
 		for order_name in linked_marketplace_orders(doc):
 			if order_name in (frappe.flags.get("marketplace_syncing_orders") or ()):
 				continue
-			bump_sync_debounce(order_name, TRIGGER_SOURCE, extra_values={"sync_action_state": RECHECK_QUEUED})
+			names.append(order_name)
+		_queue_bumps(names, recheck_queued=True)
 	except Exception:
 		_log_failure(doc)
 
@@ -107,7 +112,7 @@ def bump_orders_for_mapping(mapping, method=None):
 	try:
 		if not mapping.get("enabled"):
 			return
-		for order_name in frappe.get_all(
+		names = frappe.get_all(
 			ORDER_DOCTYPE,
 			filters={
 				"marketplace_account": mapping.marketplace_account,
@@ -116,10 +121,46 @@ def bump_orders_for_mapping(mapping, method=None):
 			},
 			pluck="name",
 			limit=MAX_ORDERS_PER_EVENT,
-		):
-			bump_sync_debounce(order_name, TRIGGER_SOURCE)
+		)
+		_queue_bumps(names, recheck_queued=False)
 	except Exception:
 		_log_failure(mapping)
+
+
+def _queue_bumps(order_names, recheck_queued):
+	"""Queue the debounce bump to run after the caller's transaction commits.
+
+	The handler runs inside the submitter's transaction.  Writing the order row there would
+	take a row lock that lives until the submitter commits, and a rollback of the submit would
+	leave a re-check queued for a change that never happened.  ``enqueue_after_commit`` runs
+	the job only if the transaction commits.
+	"""
+	if not order_names:
+		return
+	frappe.enqueue(
+		"marketplace_integrations.services.sales_order_recheck.bump_queued_orders",
+		queue="short",
+		enqueue_after_commit=True,
+		order_names=list(order_names),
+		recheck_queued=recheck_queued,
+	)
+
+
+def bump_queued_orders(order_names, recheck_queued=False):
+	"""Background job: bump the debounce of the queued orders that are still waiting.
+
+	An order whose status changed between the event and this job (synced, or already
+	Syncing) is left alone.  Makes no HTTP call.  The "sync running right now" check is not
+	repeated here: it reads ``frappe.flags`` of the submitting process, which this job does not
+	share, and a running sync's own debounce window absorbs the bump.
+	"""
+	extra = {"sync_action_state": RECHECK_QUEUED} if recheck_queued else None
+	for order_name in frappe.get_all(
+		ORDER_DOCTYPE,
+		filters={"name": ["in", list(order_names)], "erpnext_sync_status": ["in", list(RECHECK_STATUSES)]},
+		pluck="name",
+	):
+		bump_sync_debounce(order_name, TRIGGER_SOURCE, extra_values=extra)
 
 
 def _log_failure(doc):

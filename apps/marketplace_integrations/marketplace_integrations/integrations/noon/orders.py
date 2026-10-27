@@ -42,9 +42,15 @@ from marketplace_integrations.integrations.noon.constants import (
 	ORDER_IMPORT_LOOKBACK_DAYS,
 	ORDERS_PAGE_SIZE,
 )
+from marketplace_integrations.integrations.noon.expected_change import incoming_matcher
 from marketplace_integrations.integrations.noon.order_mapper import normalize_order
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_order.marketplace_order import (
 	compute_order_identity_key,
+)
+from marketplace_integrations.services.echo_guard import (
+	consume_expected_change,
+	finish_echo,
+	linked_echo,
 )
 from marketplace_integrations.services.marketplace_order_reconciliation import (
 	schedule_first_syncs,
@@ -151,7 +157,7 @@ def get_order(account, fbpi_order_nr):
 	return data
 
 
-def import_order(account, raw_order, bump_trigger_source="Noon Order Import"):
+def import_order(account, raw_order, bump_trigger_source="Noon Order Import", echo_guard=True):
 	"""Normalize and upsert one raw Noon FBPI order object.
 
 	``bump_trigger_source`` is the sync-debounce trigger source recorded if this import
@@ -159,6 +165,12 @@ def import_order(account, raw_order, bump_trigger_source="Noon Order Import"):
 	own create-shipment / mark-out-of-stock actions, ``refresh_order()``) passes "Manual"
 	so its Sales Order sync is not mislabelled as a poll. Still bumps either way - the
 	planner must see the change those actions made.
+
+	``echo_guard=False`` skips the expected-change marker (``services/echo_guard.py``): our
+	own refresh right after Mark Out of Stock passes it so that it neither consumes the
+	marker nor takes the echo path. A later poll with the marker set and the sent units in
+	their expected state is the echo: the order is saved without the status re-plan or a
+	bump; run_echo_sync is queued after commit to bring its Sales Order up to date.
 
 	Returns ``(marketplace_order_doc, unmapped_skus)``. Raises on any
 	validation failure (decision 4) - the caller
@@ -286,12 +298,19 @@ def import_order(account, raw_order, bump_trigger_source="Noon Order Import"):
 		had_sales_order_before = bool(
 			frappe.db.get_value("Marketplace Order", existing_name, "erpnext_sales_order")
 		)
-		had_eligible_before = _has_eligible_units(existing_name)
+		had_eligible_before = has_eligible_units(existing_name)
 		fingerprint_before = linked_order_fingerprint(account.name, fbpi_order_nr)
+
+	echo = False
+	if existing_name and echo_guard:
+		echo = linked_echo(
+			fingerprint_before,
+			consume_expected_change(account.name, fbpi_order_nr, incoming_matcher(raw_order)),
+		)
 
 	_maybe_fetch_customer_data(account, normalized)
 	_zero_out_stale_status_groups(account, normalized)
-	order = upsert_marketplace_order(account.name, normalized)
+	order = upsert_marketplace_order(account.name, normalized, skip_status_replan=echo)
 
 	# #146 decision 7 bumped ONLY on the first transition into eligibility and never
 	# once a Sales Order was linked.  #178 part 3 reverses the linked half: a poll
@@ -300,7 +319,14 @@ def import_order(account, raw_order, bump_trigger_source="Noon Order Import"):
 	# (``bump_if_linked_order_changed()``: only when the evidence fingerprint
 	# changed, so a poll that merely re-confirms an order never re-bumps).  The
 	# first-eligibility bump for a not-yet-linked order is unchanged.
-	if not had_sales_order_before and not had_eligible_before and _has_eligible_units(order.name):
+	if echo:
+		finish_echo(order.name, fingerprint_before, bump_trigger_source)
+	elif not existing_name or (
+		not had_sales_order_before and not had_eligible_before and has_eligible_units(order.name)
+	):
+		# A NEW order is bumped even with no eligible unit: it is created Syncing, and the
+		# sync (not an idle status) is what turns an order that can never sync (every unit
+		# cancelled, ...) into Sync Error with the reason.
 		bump_sync_debounce(order.name, bump_trigger_source)
 	else:
 		bump_if_linked_order_changed(order.name, fingerprint_before, bump_trigger_source)
@@ -308,7 +334,7 @@ def import_order(account, raw_order, bump_trigger_source="Noon Order Import"):
 	return order, unmapped_skus
 
 
-def _has_eligible_units(order_name):
+def has_eligible_units(order_name):
 	"""Return whether ``order_name`` currently has at least one Sales-Order-
 	eligible unit, per #146 decision 2 (``external_status ==
 	NOON_ELIGIBLE_EXTERNAL_STATUS``, ``integration_status !=

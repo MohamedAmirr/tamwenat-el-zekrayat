@@ -76,6 +76,7 @@ RECONCILIATION_MISMATCH = "RECONCILIATION_MISMATCH"
 VERIFY_ERP_STATE = "VERIFY_ERP_STATE"
 OUTBOUND_EDIT_MISMATCH = "OUTBOUND_EDIT_MISMATCH"
 SALES_ORDER_CHANGED_IN_ERP = "SALES_ORDER_CHANGED_IN_ERP"
+LEGACY_NOT_SYNCED_REVIEW = "LEGACY_NOT_SYNCED_REVIEW"
 
 
 def _entry(status, mode, action_type, instruction):
@@ -321,6 +322,12 @@ REASONS = {
 		MANUAL,
 		"REVIEW_SALES_ORDER",
 		"The marketplace order changed after it was synced to ERPNext.",
+	),
+	LEGACY_NOT_SYNCED_REVIEW: _entry(
+		NEEDS_ACTION,
+		MANUAL,
+		"REVIEW_SALES_ORDER",
+		"This order was never synced to ERPNext before the sync status update, and it is old or not eligible for an automatic sync. Review it, then use Retry Sync if it is still needed.",
 	),
 }
 

@@ -1861,3 +1861,7 @@ This marketplace change would reduce the Sales Order total below its advance. Re
 ERPNext cannot reproduce the marketplace amounts for the changed lines.,لا يستطيع ERPNext إعادة إنتاج مبالغ السوق للسطور المتغيرة.
 ERPNext's items do not match the order the marketplace now shows; review the order.,أصناف ERPNext لا تطابق الطلب الذي يعرضه السوق الآن؛ راجع الطلب.
 "The returned goods were booked in ERPNext. ERPNext cannot cancel an order with submitted delivery documents, so the Sales Order is closed.",تم تسجيل البضاعة المرتجعة في ERPNext. لا يستطيع ERPNext إلغاء طلب له مستندات تسليم معتمدة، لذلك أُغلق أمر البيع.
+Expected Change Hash,بصمة التغيير المتوقع
+Expected Change Scope,نطاق التغيير المتوقع
+"This order was never synced to ERPNext before the sync status update, and it is old or not eligible for an automatic sync. Review it, then use Retry Sync if it is still needed.",لم تتم مزامنة هذا الطلب مع ERPNext قبل تحديث حالة المزامنة، وهو قديم أو غير مؤهل للمزامنة التلقائية. راجعه ثم استخدم إعادة محاولة المزامنة إذا كان لا يزال مطلوبا.
+Every unit of the Noon order was cancelled before an ERPNext Sales Order was created; no Sales Order is needed.,تم إلغاء جميع وحدات طلب Noon قبل إنشاء أمر بيع في ERPNext؛ لا حاجة إلى أمر بيع.
