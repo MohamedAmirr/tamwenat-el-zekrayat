@@ -776,10 +776,39 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		rows = {row["reference_name"]: row for row in self.items_for(account, FULFILLMENT_ERROR)}
 
 		self.assertIn("Noon rejected the shipment.", rows[with_message.name]["explanation"])
-		self.assertIn("CancelShipment failed", rows[traceback_only.name]["explanation"])
+		self.assertIn("Cancel shipment failed", rows[traceback_only.name]["explanation"])
 		for row in rows.values():
 			self.assertNotIn("Traceback", row["explanation"])
 			self.assertNotIn("secret", row["explanation"])
+
+	def test_fulfillment_explanation_uses_plain_verbs_and_the_platform_order_reference(self):
+		account = self.make_noon_account()
+		order = self.make_order(account, platform_order_reference="21873645")
+		no_reference = self.make_order(account)
+		verbs = {
+			"CreateShipment": "Create shipment",
+			"GetShipment": "Check shipment on Noon",
+			"CancelShipment": "Cancel shipment",
+			"AddShipmentCourierAwbs": "Add AWB",
+			"UpdateOrder": "Mark units Out of Stock",
+			"UploadShipmentInvoice": "Upload shipment invoice",
+			"UploadOrderInvoice": "Upload order invoice",
+			"SomethingNew": "SomethingNew",
+		}
+		logs = {
+			action: self.make_fulfillment_log(account, order, action, integration_shipment_nr="S-1")
+			for action in verbs
+		}
+		fallback = self.make_fulfillment_log(account, no_reference, "CreateShipment", integration_shipment_nr="S-1")
+
+		rows = {row["reference_name"]: row for row in self.items_for(account, FULFILLMENT_ERROR)}
+
+		for action, verb in verbs.items():
+			explanation = rows[logs[action].name]["explanation"]
+			self.assertTrue(explanation.startswith(f"{verb} failed on order 21873645: "), explanation)
+			self.assertNotIn(order.name, explanation)
+		# Without a platform reference the order name is still shown.
+		self.assertIn(f"on order {no_reference.name}:", rows[fallback.name]["explanation"])
 
 	# -- Shopify webhook retries ------------------------------------------
 

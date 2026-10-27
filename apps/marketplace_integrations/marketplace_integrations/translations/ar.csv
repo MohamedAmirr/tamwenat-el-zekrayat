@@ -107,7 +107,6 @@ unknown,غير معروف
  (worst: {0}), (الأسوأ: {0})
 ERPNext Sales Order sync failed.,فشلت مزامنة أمر البيع في ERPNext.
 Fulfillment action,إجراء التنفيذ
-Noon fulfillment {0} failed - open the order.,فشل إجراء تنفيذ Noon {0} - افتح الطلب.
 Noon return {0} (order {1}) matches no Marketplace Order.,مرتجع Noon {0} (الطلب {1}) لا يطابق أي طلب سوق.
 Order {0} could not be imported: {1},تعذّر استيراد الطلب {0}: {1}
 Webhook {0} failed after {1} attempts and will not be retried: {2},فشل Webhook {0} بعد {1} محاولة ولن تتم إعادة المحاولة: {2}
@@ -505,7 +504,6 @@ Transaction Amount Missing,مبلغ المعاملة غير متوفر
 Container Deposit,تأمين العبوة
 Promotions,العروض
 Integration Shipment Nr,رقم شحنة التكامل
-AWB Source,مصدر بوليصة الشحن
 Cancelled On,تاريخ الإلغاء
 Shipment Invoice,فاتورة الشحنة
 Invoice File,ملف الفاتورة
@@ -619,7 +617,6 @@ A valid cancellation reason is required.,سبب إلغاء صالح مطلوب.
 ACKNOWLEDGED,تم الإقرار
 ADDITION,إضافة
 AWB Scan,مسح بوليصة الشحن (AWB)
-AWB Source must be Noon or Own Courier.,يجب أن يكون مصدر بوليصة الشحن (AWB) هو Noon أو مندوب خاص.
 AWB {0} is already recorded for shipment {1}.,بوليصة الشحن (AWB) {0} مسجّلة بالفعل للشحنة {1}.
 Acknowledge,إقرار
 Acknowledge Return Received,الإقرار باستلام المرتجع
@@ -808,7 +805,6 @@ Could not retrieve the inventory sync status.,تعذّر جلب حالة مزا�
 Could not retrieve the order import status.,تعذّر جلب حالة استيراد الطلبات.
 Could not start the background job.,تعذّر بدء مهمة الخلفية.
 Could not verify Shopify Connection {0}'s own shop - no shop id was returned.,تعذّر التحقق من متجر اتصال Shopify {0} - لم يُرجَع معرّف المتجر.
-Courier and AWB Nr are required for Own Courier shipments.,شركة الشحن ورقم بوليصة الشحن (AWB) مطلوبان لشحنات المندوب الخاص.
 Courier and AWB Nr are required.,شركة الشحن ورقم بوليصة الشحن (AWB) مطلوبان.
 Create Bosta Shipment,إنشاء شحنة Bosta
 Create Credit Note,إنشاء إشعار دائن
@@ -1312,7 +1308,6 @@ Set while a Delivery Note create/cancel action has failed; cleared when a later 
 Shipment discarded.,تم تجاهل الشحنة.
 Shipment is no longer Created.,"الشحنة لم تعد في حالة ""منشأة""."
 Shipment status changed from {0} to {1} while the Noon request was in flight.,تغيرت حالة الشحنة من {0} إلى {1} أثناء تنفيذ طلب Noon.
-Shipment status changed to {0} before CreateShipment could be sent; aborting to avoid creating an orphaned Noon shipment.,تغيرت حالة الشحنة إلى {0} قبل إرسال CreateShipment؛ تم الإيقاف لتجنب إنشاء شحنة Noon يتيمة.
 Shipment {0} can only be discarded from Error or Cancel Pending.,"لا يمكن تجاهل الشحنة {0} إلا من حالة ""خطأ"" أو ""إلغاء معلّق""."
 Shipment {0} has nothing to retry.,لا يوجد ما تُعاد محاولته للشحنة {0}.
 Shipment {0} is not in a cancellable state.,الشحنة {0} ليست في حالة قابلة للإلغاء.
@@ -1922,3 +1917,18 @@ Units added to the draft Delivery Note {0}. Review and submit it.,تمت إضا�
 Bosta shipments cannot be created for {0} orders: {0} fulfils its own orders.,لا يمكن إنشاء شحنات Bosta لطلبات {0}: {0} تتولى تنفيذ طلباتها بنفسها.
 "Bosta is not used for {0} orders, so none of the selected Sales Orders can be sent to Bosta.",لا تُستخدم Bosta لطلبات {0}، لذلك لا يمكن إرسال أي من أوامر البيع المحددة إلى Bosta.
 {0} selected Sales Order(s) were left out: Bosta is not used for {1} orders.,تم استبعاد {0} من أوامر البيع المحددة: لا تُستخدم Bosta لطلبات {1}.
+New shipments can only use a Noon AWB.,يمكن للشحنات الجديدة استخدام بوليصة شحن (AWB) من Noon فقط.
+Noon is the only supported courier.,Noon هي شركة الشحن الوحيدة المدعومة.
+AWB Source,مصدر بوليصة الشحن
+Shipment status changed to {0} before the shipment was created on Noon; stopped so no untracked shipment is created on Noon.,تغيرت حالة الشحنة إلى {0} قبل إنشاء الشحنة على Noon؛ تم الإيقاف لتجنب إنشاء شحنة غير متتبعة على Noon.
+{0} failed - open the order.,فشل {0} - افتح الطلب.
+Shipment {0},الشحنة {0}
+{0} of {1},{0} من {1}
+Create shipment,إنشاء شحنة
+Check shipment on Noon,التحقق من الشحنة على Noon
+Cancel shipment,إلغاء الشحنة
+Discard shipment,تجاهل الشحنة
+Mark units Out of Stock,تعليم الوحدات كنفدت من المخزون
+Upload shipment invoice,رفع فاتورة الشحنة
+Upload order invoice,رفع فاتورة الطلب
+Release Out of Stock reservation,تحرير حجز النفاد من المخزون
