@@ -1163,6 +1163,21 @@
 		);
 	}
 
+	// #368: Noon has no order-level update, so the server refuses item, quantity and rate edits on a
+	// submitted Noon Sales Order (hooks.py, services/noon_item_edit_guard.py). This only tells the
+	// user why and where the supported actions are; the server check is the real gate.
+	function add_noon_item_edit_hint(frm) {
+		const doc = frm.doc;
+		if (!doc || doc.docstatus !== 1 || doc.custom_marketplace_platform !== "Noon") return;
+		if (typeof frm.set_intro !== "function") return;
+		frm.set_intro(
+			__(
+				"Items and quantities of a Noon order cannot be changed here. Use the Noon Fulfillment tab on the Marketplace Order (Mark Out of Stock or Cancel Shipment)."
+			),
+			"orange"
+		);
+	}
+
 	function on_refresh(frm) {
 		add_marketplace_order_tab(frm);
 		add_bosta_shipment_ux(frm);
@@ -1173,6 +1188,7 @@
 		}
 		const closed_by_click = consume_close_request(frm);
 		if (!is_marketplace_sales_order(frm.doc)) return;
+		add_noon_item_edit_hint(frm);
 		add_shopify_edit_button(frm);
 		if (closed_by_click || is_closed_or_cancelled(frm.doc)) {
 			load_platform_option(frm, { prompt: closed_by_click, button: true });
@@ -1203,6 +1219,7 @@
 		module.exports = {
 			add_marketplace_order_tab,
 			add_bosta_shipment_ux,
+			add_noon_item_edit_hint,
 			add_shopify_edit_button,
 			can_offer_shopify_edit,
 			shopify_edit_alert,

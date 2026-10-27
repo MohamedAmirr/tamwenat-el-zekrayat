@@ -72,6 +72,16 @@ def cancel_shipment(marketplace_order: str, integration_shipment_nr: str):
 
 
 @frappe.whitelist(methods=["POST"])
+def mark_handed_over(marketplace_order: str, integration_shipment_nr: str):
+	"""Manual handover of a Created shipment: drafts one Delivery Note (#368).
+
+	No Noon call. The shared service also needs create permission on Delivery Note and checks it.
+	"""
+	_get_noon_order(marketplace_order)
+	return fulfillment.mark_handed_over(marketplace_order, integration_shipment_nr)
+
+
+@frappe.whitelist(methods=["POST"])
 def discard_shipment(marketplace_order: str, integration_shipment_nr: str):
 	_get_noon_order(marketplace_order)
 	return fulfillment.discard_shipment(marketplace_order, integration_shipment_nr)

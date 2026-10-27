@@ -117,6 +117,23 @@ A second click or a repeated event creates no second draft: an existing draft or
 
 The app does not override a deliberate manual close, delete drafts or reallocate advances.
 
+### Group E: draft Delivery Note units left off (#368)
+
+| Case | Handling |
+|---|---|
+| A handed-over unit has no enabled mapping | Needs Action, `DELIVERY_NOTE_UNITS_SKIPPED` (manual, action type `REVIEW_DELIVERY_UNITS`), at once. |
+| A handed-over unit's Item is not on the Sales Order, or the shipment holds more units of an Item than the Sales Order row still has undelivered ("excess") | The Sales Order is behind the platform order: the order is queued for a normal sync (Syncing). The units are drafted again after that sync; if they still cannot be matched, Needs Action with the same code. |
+
+The shared draft Delivery Note service (`services/delivery_note_drafts.py`) returns the units it could not draft and writes no status. The first caller, Noon Mark Handed Over, stores them on the shipment (`Marketplace Order Shipment.skipped_units` and `skipped_units_on`, `integrations/noon/handover_state.py`). **That record is authoritative**, not a one-time status write:
+
+- While a shipment that is not Cancelled or Discarded has a final entry, `Marketplace Order.before_save` re-applies Needs Action with this code on every save, also when the sync skips its re-plan. So a later save, sync or re-check cannot clear it.
+- An `unmapped` entry is final at once. A `not_on_order` or `excess` entry becomes final only after a sync has run and the retry still cannot place the units; until then the order shows Syncing.
+- It never overwrites a different Sync Error or Needs Action reason, and it is never lost: when the other reason clears, the next save shows this one again. When both exist, Sync Error is shown first, then the other Needs Action.
+- The record clears only when the units are drafted (a manual Mark Handed Over, or the automatic retry) or the shipment is Cancelled or Discarded. The order then drops this reason and is queued for a normal sync that recomputes the real status.
+- Automatic retry (`fulfillment.retry_unresolved_handovers`, queued after commit, runs as the system): after a Marketplace Product Mapping save (`sales_order_recheck.bump_orders_for_mapping`) and after every successful Sales Order sync of an order that has a record. It retries only shipments that still have a live Delivery Note (or whose record covers every unit); a shipment whose Delivery Note was deleted waits for a manual Mark Handed Over, which drafts the whole shipment again. The sync-triggered retry never queues another sync, so the chain cannot loop.
+
+"Excess" for Noon means: units on the shipment of an Item, versus that Item's Sales Order row quantity minus its `delivered_qty` minus draft Delivery Note quantity. A quantity capped to zero is therefore reported, never silently dropped, so delivered quantities never disagree with the Sales Order.
+
 ## Transient failures
 
 Timeouts, lock or deadlock errors, HTTP 5xx and 429 in the sync path are retried up to three times, after 1, 5 and 15 minutes. The retry rides on `sync_debounce_until` and `sync_retry_count`, so the minute sweep and its `job_id` deduplication run it, and the order shows Syncing while a retry is pending. After the third retry the status becomes Sync Error with `SYNC_RETRIES_EXHAUSTED`. Terminal failures (missing mapping or price, validation errors) go straight to Sync Error without a retry. A success resets the count; a manual Retry Sync gives a fresh budget.

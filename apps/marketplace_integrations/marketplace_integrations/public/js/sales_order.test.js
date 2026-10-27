@@ -1486,6 +1486,29 @@ test("the Shopify edit button needs an eligible preview, write permission and an
 	}
 });
 
+test("a submitted Noon Sales Order shows the item-edit hint; other platforms and drafts do not", async () => {
+	const cases = [
+		["submitted Noon", { custom_marketplace_platform: "Noon" }, 1],
+		["Shopify", { custom_marketplace_platform: "Shopify" }, 0],
+		["Talabat", { custom_marketplace_platform: "Talabat" }, 0],
+		["draft Noon", { custom_marketplace_platform: "Noon", docstatus: 0 }, 0],
+		["cancelled Noon", { custom_marketplace_platform: "Noon", docstatus: 2 }, 0],
+	];
+	for (const [name, doc, intros] of cases) {
+		const { handlers } = load({ shopify_preview: { state: "not_applicable", changes: [], reasons: [] } });
+		const frm = make_frm(doc);
+		const shown = [];
+		frm.set_intro = (message, color) => shown.push({ message, color });
+		await handlers["Sales Order"].refresh(frm);
+		await settle();
+		assert.equal(shown.length, intros, name);
+		if (intros) {
+			assert.match(shown[0].message, /Noon Fulfillment tab/);
+			assert.equal(shown[0].color, "orange");
+		}
+	}
+});
+
 test("a preview that arrives after the form moved to another document adds no button", async () => {
 	const { handlers } = load({ shopify_preview: shopify_preview_result() });
 	const frm = make_frm({});

@@ -63,8 +63,9 @@ import json
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, get_datetime, now_datetime
+from frappe.utils import cstr, flt, get_datetime, now_datetime
 
+from marketplace_integrations.integrations.noon import handover_state
 from marketplace_integrations.integrations.noon.awb_pool import claim_pool_awb
 from marketplace_integrations.integrations.noon.catalog import get_account, validate_connection_enabled
 from marketplace_integrations.integrations.noon.client import NoonClient
@@ -82,6 +83,7 @@ from marketplace_integrations.integrations.noon.constants import (
 from marketplace_integrations.integrations.noon.expected_change import record_out_of_stock
 from marketplace_integrations.integrations.noon.orders import get_order as get_fbpi_order
 from marketplace_integrations.integrations.noon.orders import import_order
+from marketplace_integrations.services.delivery_note_drafts import create_draft_delivery_note
 
 RQ_JOB_PREFIX = "marketplace-noon-fulfillment"
 
@@ -245,6 +247,10 @@ def get_available_actions(order):
 	if created:
 		actions.append("cancel_shipment")
 		actions.append("add_awb")
+	# mark_handed_over(): a Created shipment with no live draft/submitted Delivery Note yet, or
+	# with handed-over units still unresolved (#368).
+	if any(not _live_delivery_note(row) or handover_state.load_entries(row) for row in created):
+		actions.append("mark_handed_over")
 	# upload_invoice() also refuses while an upload is already Pending, and
 	# (no mixing) while an order-level invoice is Pending/Uploaded.
 	if not _order_invoice_blocks_shipment_invoice(order) and any(
@@ -975,9 +981,163 @@ def run_cancel_shipment(marketplace_order_name, integration_shipment_nr):
 	shipment.status = "Cancelled"
 	shipment.cancelled_on = now_datetime()
 	shipment.last_error = None
+	handover_state.clear_entries(shipment)  # a cancelled shipment no longer owes a Delivery Note
 	order.save()
 	frappe.db.commit()
 	_log_fulfillment(order, "CancelShipment", "Success", {"integration_shipment_nr": integration_shipment_nr})
+
+
+# ---------------------------------------------------------------------------
+# Mark handed over (#368)
+# ---------------------------------------------------------------------------
+
+
+def _live_delivery_note(shipment):
+	"""The shipment's recorded Delivery Note while it still exists and is not cancelled."""
+	name = cstr(shipment.delivery_note).strip()
+	if not name:
+		return None
+	docstatus = frappe.db.get_value("Delivery Note", name, "docstatus")
+	return name if docstatus is not None and docstatus != 2 else None
+
+
+def _shipment_units(order, integration_shipment_nr):
+	return [
+		{"external_sku": cstr(row.partner_sku).strip(), "qty": 1}
+		for row in order.noon_shipment_units or []
+		if row.integration_shipment_nr == integration_shipment_nr
+	]
+
+
+def _entry_units(entries):
+	return [
+		{"external_sku": e.get("external_sku") or "", "item": e.get("item") or "", "qty": e.get("qty")}
+		for e in entries
+	]
+
+
+def _draft_and_record(order, shipment, units, after_sync=False, queue_sync=True):
+	"""Run the shared service for ``units`` and update the shipment row's records (in memory).
+
+	Replaces the shipment's unresolved record with what is still unresolved.  An entry stays or
+	becomes ``final`` (kept in Needs Action) when its reason is ``unmapped``, it already was
+	final, or ``after_sync`` says the Sales Order sync it waited for has run.  Returns the
+	service result.
+	"""
+	previous = {
+		(e.get("external_sku") or "", e.get("item") or ""): e for e in handover_state.load_entries(shipment)
+	}
+	result = create_draft_delivery_note(order, units, queue_sync=queue_sync)
+	if result["delivery_note"]:
+		if not _live_delivery_note(shipment):
+			shipment.delivery_note = result["delivery_note"]
+			shipment.handed_over_on = now_datetime()
+		elif not shipment.handed_over_on:
+			shipment.handed_over_on = now_datetime()
+	remaining = []
+	for entry in result["unresolved"]:
+		prior = previous.get((entry.get("external_sku") or "", entry.get("item") or ""))
+		entry["final"] = bool(
+			entry["reason"] == handover_state.UNMAPPED or after_sync or (prior and prior.get("final"))
+		)
+		remaining.append(entry)
+	handover_state.store_entries(shipment, remaining)
+	return result
+
+
+def mark_handed_over(marketplace_order_name, integration_shipment_nr):
+	"""Record that a Created shipment's units were handed over and draft ONE Delivery Note.
+
+	Noon's checked-in API has no handover endpoint, so this makes no Noon call: it is a manual
+	action that calls the shared draft Delivery Note service
+	(``services/delivery_note_drafts.py``) with the shipment's units, then stores the time and
+	the Delivery Note name on the shipment row.  Nothing is submitted.  Idempotent per shipment:
+	while the recorded Delivery Note exists and is not cancelled and nothing is unresolved, a
+	second call returns it and creates nothing.  Units the service could not draft are stored on
+	the shipment (``handover_state``) and keep the order in Needs Action until they are drafted;
+	a click while such a record exists retries just those units.  A deleted or cancelled Delivery
+	Note clears the link, so the whole shipment is drafted again (the service caps against what
+	is still undelivered, so this can never over-deliver).  Runs synchronously under the order lock.
+	"""
+	order = _lock_and_load_order(marketplace_order_name)
+	shipment = _find_shipment_row(order, integration_shipment_nr)
+	if not shipment or shipment.status != "Created":
+		frappe.throw(_("Shipment {0} is not in a state that can be marked handed over.").format(integration_shipment_nr))
+	existing = _live_delivery_note(shipment)
+	entries = handover_state.load_entries(shipment)
+	if existing and not entries:
+		return {"delivery_note": existing, "created": False, "unresolved": []}
+
+	units = _entry_units(entries) if existing else _shipment_units(order, integration_shipment_nr)
+	result = _draft_and_record(order, shipment, units)
+	# The status is kept by handover_state.reassert() on this save; skip the re-plan so it
+	# cannot run before the record is final.
+	order.flags.skip_sync_status_update = True
+	order.save()
+	frappe.db.commit()
+	return {
+		"delivery_note": result["delivery_note"],
+		"created": bool(result["delivery_note"]),
+		"unresolved": [dict(e, text=handover_state.entry_text(e)) for e in handover_state.load_entries(shipment)],
+	}
+
+
+def retry_unresolved_handovers(marketplace_order, after_sync=False):
+	"""Background job: draft the unresolved handover units of a Noon order again (#368).
+
+	Queued after a Marketplace Product Mapping save and after a Sales Order sync of an order with
+	an unresolved record.  Runs as the system (the user who handed the shipment over already
+	passed the Delivery Note permission check).  Only shipments that still have a live Delivery
+	Note are retried: one whose Delivery Note was deleted waits for a manual Mark Handed Over,
+	because drafting only the leftover units would hide the rest.  Queues a sync only when not after one
+	(``after_sync`` false), so the chain sync -> retry -> sync cannot loop.  ``after_sync`` marks entries that are
+	still unresolved as final, so the order goes to Needs Action.
+	"""
+	if not frappe.db.exists("Marketplace Order", marketplace_order):
+		return
+	frappe.set_user("Administrator")
+	order = _lock_and_load_order(marketplace_order)
+	changed = False
+	for shipment in handover_state.active_shipments(order):
+		entries = handover_state.load_entries(shipment)
+		if not entries or shipment.status != "Created":
+			continue
+		# No live Delivery Note: either nothing was ever drafted (the record then covers every
+		# unit, so retrying it is the whole handover) or the note was deleted (the leftover
+		# units alone would hide the rest, so it waits for a manual Mark Handed Over).
+		covers_all = sum(flt(e.get("qty")) for e in entries) >= len(_shipment_units(order, shipment.integration_shipment_nr))
+		if not _live_delivery_note(shipment) and not covers_all:
+			if after_sync:
+				for entry in entries:
+					entry["final"] = True
+				handover_state.store_entries(shipment, entries)
+				changed = True
+			continue
+		_draft_and_record(
+			order, shipment, _entry_units(entries), after_sync=after_sync, queue_sync=not after_sync
+		)
+		changed = True
+	if changed:
+		order.flags.skip_sync_status_update = True
+		order.save()
+	frappe.db.commit()
+
+
+def orders_with_unresolved_handovers(marketplace_account=None):
+	"""Names of Noon Marketplace Orders that have a shipment with an unresolved handover record."""
+	parents = frappe.get_all(
+		"Marketplace Order Shipment",
+		filters={"parenttype": "Marketplace Order", "skipped_units": ["!=", ""]},
+		pluck="parent",
+		parent_doctype="Marketplace Order",
+	)
+	if not parents or not marketplace_account:
+		return sorted(set(parents))
+	return frappe.get_all(
+		"Marketplace Order",
+		filters={"name": ["in", list(set(parents))], "marketplace_account": marketplace_account},
+		pluck="name",
+	)
 
 
 # ---------------------------------------------------------------------------
@@ -1010,6 +1170,7 @@ def discard_shipment(marketplace_order_name, integration_shipment_nr):
 		)
 	shipment.status = "Discarded"
 	shipment.last_error = None
+	handover_state.clear_entries(shipment)  # a discarded shipment no longer owes a Delivery Note
 	order.save()
 	frappe.db.commit()
 	_log_fulfillment(

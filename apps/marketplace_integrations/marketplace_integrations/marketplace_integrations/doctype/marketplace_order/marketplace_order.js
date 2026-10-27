@@ -235,6 +235,11 @@ function render_noon_fulfillment_buttons(frm, available_actions) {
 		},
 		{ action: "add_awb", label: __("Add AWB"), click: () => show_noon_add_awb_dialog(frm) },
 		{
+			action: "mark_handed_over",
+			label: __("Mark Handed Over"),
+			click: () => show_noon_mark_handed_over_dialog(frm),
+		},
+		{
 			action: "upload_invoice",
 			label: __("Upload Invoice"),
 			click: () => show_noon_upload_invoice_dialog(frm),
@@ -523,6 +528,103 @@ function show_noon_cancel_shipment_dialog(frm) {
 					})
 					.then((r) => show_noon_queue_toast(r, frm));
 			});
+		},
+	});
+	dialog.show();
+}
+
+// #368: Created shipments with no Delivery Note recorded yet, or with unresolved handover units.
+function noon_handover_shipment_options(frm) {
+	return (frm.doc.noon_shipments || [])
+		.filter(
+			(shipment) =>
+				shipment.status === "Created" && (!shipment.delivery_note || shipment.skipped_units)
+		)
+		.map((shipment) => ({
+			label: frappe.utils.escape_html(shipment.integration_shipment_nr),
+			value: shipment.integration_shipment_nr,
+		}));
+}
+
+// Pure step for testing: the alert shown for the mark_handed_over result
+// ({delivery_note, created, unresolved[{text, reason}]}). Nothing here is submitted
+// and no Noon call is made. Units that could not be drafted stay on the shipment and
+// keep the order in Needs Action (or Syncing while a Sales Order sync is pending).
+function noon_handover_alert(result) {
+	result = result || {};
+	const unresolved = result.unresolved || [];
+	let skipped = unresolved.length
+		? " " + __("Not added: {0}", [unresolved.map((entry) => entry.text).join("; ")])
+		: "";
+	if (unresolved.some((entry) => entry.reason === "excess" || entry.reason === "not_on_order")) {
+		skipped +=
+			" " +
+			__(
+				"The Sales Order is behind the platform order: a sync was queued and these units are retried afterwards."
+			);
+	}
+	if (!result.delivery_note) {
+		return {
+			message: __("No Delivery Note was created.") + skipped,
+			indicator: "orange",
+		};
+	}
+	return {
+		message:
+			(result.created
+				? __("Draft Delivery Note {0} created. Review and submit it.", [result.delivery_note])
+				: __("Delivery Note {0} already exists for this shipment.", [result.delivery_note])) +
+			skipped,
+		indicator: skipped ? "orange" : "green",
+	};
+}
+
+function show_noon_mark_handed_over_dialog(frm) {
+	const options = noon_handover_shipment_options(frm);
+	if (!options.length) {
+		frappe.msgprint({
+			message: __("No Created shipments on this order are waiting to be marked handed over."),
+			indicator: "orange",
+		});
+		return;
+	}
+	const dialog = new frappe.ui.Dialog({
+		title: __("Mark Noon Shipment Handed Over"),
+		fields: [
+			{
+				fieldname: "note",
+				fieldtype: "HTML",
+				options: `<p class="text-muted">${frappe.utils.escape_html(
+					__(
+						"This creates one draft Delivery Note for the shipment's units. Nothing is sent to Noon and the Delivery Note is not submitted."
+					)
+				)}</p>`,
+			},
+			{
+				fieldname: "integration_shipment_nr",
+				fieldtype: "Select",
+				label: __("Shipment"),
+				options,
+				reqd: 1,
+			},
+		],
+		primary_action_label: __("Mark Handed Over"),
+		primary_action(values) {
+			dialog.hide();
+			frappe
+				.call({
+					method: "marketplace_integrations.api.noon_fulfillment.mark_handed_over",
+					args: {
+						marketplace_order: frm.doc.name,
+						integration_shipment_nr: values.integration_shipment_nr,
+					},
+					freeze: true,
+					freeze_message: __("Creating the draft Delivery Note..."),
+				})
+				.then((r) => {
+					frappe.show_alert(noon_handover_alert(r.message));
+					frm.reload_doc();
+				});
 		},
 	});
 	dialog.show();
@@ -1309,6 +1411,8 @@ if (typeof module !== "undefined") {
 		mp_item_nrs_from_unit_indices,
 		noon_created_shipment_options,
 		noon_discardable_shipment_options,
+		noon_handover_shipment_options,
+		noon_handover_alert,
 		select_noon_fulfillment_buttons,
 	};
 }

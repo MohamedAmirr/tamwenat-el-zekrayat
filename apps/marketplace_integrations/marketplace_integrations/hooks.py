@@ -161,10 +161,24 @@ _RECHECK_EVENTS = {
 	"on_cancel": _RECHECK_HANDLER,
 	"on_trash": _RECHECK_HANDLER,
 }
+# #368: a Delivery Note that a Noon shipment row links to must stay deletable and cancellable, so
+# its on_trash and on_cancel also clear that link (it never raises).
+_HANDOVER_CLEAR_HANDLER = "marketplace_integrations.integrations.noon.handover_state.clear_deleted_delivery_note"
 doc_events = {
-	"Delivery Note": _RECHECK_EVENTS,
+	"Delivery Note": {
+		**_RECHECK_EVENTS,
+		"on_cancel": [_RECHECK_HANDLER, _HANDOVER_CLEAR_HANDLER],
+		"on_trash": [_RECHECK_HANDLER, _HANDOVER_CLEAR_HANDLER],
+	},
 	"Sales Invoice": _RECHECK_EVENTS,
 	"Payment Entry": _RECHECK_EVENTS,
+	# #368: Noon has no order update, so item rows of a submitted Noon Sales Order are locked. The check
+	# is on the rows because update_child_qty_rate changes them before it saves the parent.
+	"Sales Order Item": {
+		"before_update_after_submit": "marketplace_integrations.services.noon_item_edit_guard.block_row_change",
+		"before_insert": "marketplace_integrations.services.noon_item_edit_guard.block_row_add",
+		"on_trash": "marketplace_integrations.services.noon_item_edit_guard.block_row_remove",
+	},
 	"Sales Order": {
 		"on_update_after_submit": _RECHECK_HANDLER,
 		"on_cancel": _RECHECK_HANDLER,
@@ -196,7 +210,8 @@ doc_events = {
 # polling, never a document hook. api/test_talabat_catalog.py's
 # test_no_catalog_document_events_are_registered depends on this app registering
 # no doc_events for the catalog doctypes; do not add one for them here. The
-# only doc_events are the #364 Marketplace Order re-check handlers above.
+# only doc_events are the #364 Marketplace Order re-check handlers and the #368 Noon Sales
+# Order Item row check above.
 scheduler_events = {
 	"hourly": [
 		"marketplace_integrations.integrations.shopify.webhooks.retry_errored_webhook_deliveries",

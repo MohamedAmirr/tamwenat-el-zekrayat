@@ -214,7 +214,10 @@ class IntegrationTestNoonAvailableActions(IntegrationTestNoonFulfillmentBase):
 		)
 		order.save()
 		result = fulfillment.get_available_actions(order)
-		self.assertEqual(result["actions"], ["cancel_shipment", "add_awb", "upload_invoice", "upload_order_invoice"])
+		self.assertEqual(
+			result["actions"],
+			["cancel_shipment", "add_awb", "mark_handed_over", "upload_invoice", "upload_order_invoice"],
+		)
 		self.assertFalse(result["cancelled_on_noon"])
 
 		# Retry appears once the Created shipment has a Pending invoice upload,
@@ -222,7 +225,8 @@ class IntegrationTestNoonAvailableActions(IntegrationTestNoonFulfillmentBase):
 		order.noon_shipments[0].invoice_status = "Pending"
 		order.save()
 		self.assertEqual(
-			fulfillment.get_available_actions(order)["actions"], ["cancel_shipment", "add_awb", "retry"]
+			fulfillment.get_available_actions(order)["actions"],
+			["cancel_shipment", "add_awb", "mark_handed_over", "retry"],
 		)
 
 	def test_error_shipment_offers_retry_and_discard(self):

@@ -17,9 +17,11 @@ below). The reconciliation Script Report is not built (findings are Needs Attent
   Invoice (or one order-level invoice), and Retry — backed by three new child doctypes (`Marketplace
   Order Shipment`, `...Unit`, `...AWB`) and a `Fulfillment` sync_type on
   `Marketplace Sync Log`.
-- No ERPNext stock or accounting side effects: no Delivery Note, Sales
+- No ERPNext stock or accounting side effects from the Noon calls: no Sales
   Invoice, Payment Entry, Credit Note, or stock ledger entry is ever created
-  by any fulfillment action. Shipments are Noon-side evidence only.
+  by any fulfillment action. The one ERPNext document a fulfillment action can
+  create is the **draft** Delivery Note of Mark Handed Over (#368, see "Mark
+  Handed Over" below); it is never submitted by the app.
 
 ## Setup
 
@@ -37,7 +39,8 @@ below). The reconciliation Script Report is not built (findings are Needs Attent
    shipment; Upload Invoice needs a Created shipment with no invoice upload
    Pending; Retry needs a Pending, Error or Cancel Pending shipment, or a
    Created one with a Pending Own Courier AWB or a Pending/Error invoice;
-   Discard Shipment needs an Error or Cancel Pending shipment; Release Stuck
+   Mark Handed Over needs a Created shipment with no live Delivery Note
+   recorded; Discard Shipment needs an Error or Cancel Pending shipment; Release Stuck
    Out of Stock Reservation needs a pending reservation. With no applicable
    action the group is absent, and a fully cancelled order shows a "Cancelled
    on Noon; no fulfillment actions available" headline. If the call fails the
@@ -212,6 +215,52 @@ anything else the planner reports as `Modified After Sync` is a **manual
 accounting action**. Cancelling a Noon order from ERPNext is not supported
 (#181 reports Noon as blocked: no order-level cancel).
 
+## Mark Handed Over and the item lock (#368)
+
+**Mark Handed Over** is a manual action on a `Created` shipment. The checked-in
+Noon spec has no handover endpoint, so it makes **no Noon call** and is
+synchronous (no queue). It sends the shipment's units (one per `Marketplace
+Order Shipment Unit`, by `partner_sku`) to the shared service
+`services/delivery_note_drafts.py`, which maps them through the Marketplace
+Product Mapping, caps them at what the Sales Order still has undelivered
+(including existing draft Delivery Notes) and creates ONE draft Delivery Note
+through ERPNext's own mapper (a Product Bundle is unpacked by ERPNext). A person
+reviews and submits it; the app never does. The user needs write permission on
+the Marketplace Order and create permission on Delivery Note (both checked server
+side). The shipment row records `handed_over_on` and `delivery_note` (read-only).
+
+- Idempotent per shipment: while the recorded Delivery Note exists, is not
+  cancelled and nothing is unresolved, a second click returns it and creates
+  nothing. The shipment's `delivery_note` is a Link; a Delivery Note `on_trash` /
+  `on_cancel` handler (`handover_state.clear_deleted_delivery_note`) clears the
+  link and `handed_over_on` first, so a wrong draft can still be deleted, and the
+  next click drafts the whole shipment again (the cap prevents over-delivery).
+- Units that could not be drafted (no enabled mapping; Item not on the Sales
+  Order; more units than the Sales Order row has undelivered) are stored on the
+  shipment (`skipped_units`) and keep the order in Needs Action
+  (`DELIVERY_NOTE_UNITS_SKIPPED`) until they are drafted or the shipment is
+  Cancelled or Discarded; a later save, sync or re-check cannot clear it. The other
+  units still get their draft. A click while a record exists retries just those
+  units. A mapping save and every Sales Order sync retry them automatically. When
+  the Sales Order is behind the platform order (not on order, excess) a normal sync
+  is queued first and the order shows Syncing until it has run. Details and the
+  conflict rules: `docs/marketplace-integrations/sync-status.md`, Group E.
+- The Sales Order must already exist and be submitted. When a retry adds a second
+  draft Delivery Note for leftover units, the shipment keeps pointing at the first.
+
+**Item lock.** A submitted Sales Order linked to a Noon order refuses changes to
+item, quantity, rate and row add or remove (`services/noon_item_edit_guard.py`, a check on the Sales Order Item rows (`before_update_after_submit`, `before_insert`, `on_trash`), because `update_child_qty_rate` changes the rows before it saves the parent),
+because Noon has no order update and the two would diverge. The message points to
+the Noon Fulfillment tab, and the Sales Order form shows the same hint. The sync
+and the reconciliation planner still update the order (so Mark Out of Stock and
+Cancel Shipment reach the Sales Order through the planner), and non-item fields
+stay editable. Shopify and Talabat orders are not affected.
+
+Unverified against a real Noon account: the handover signal itself (verification
+item 2), and which statuses Noon reports after CreateShipment (item 6 of the
+user's checklist for this issue). Mark Handed Over does not depend on either: it is a
+manual record.
+
 ## Real-world verification checklist
 
 Sandbox test (user-reported, 2026-10-07): a sandbox order was created and
@@ -330,7 +379,8 @@ shipment invoice (private PDF attachment, Invoice Nr, Issued At).
   `UploadFbpiOrderInvoice` were added later; see "Noon AWB pool" and
   "Order-level invoice".)
 - Automatic Sales Order amendment after delivery (cancellation of an
-  undelivered, unbilled order is done by the reconciliation planner, #179), Delivery Note, Sales
+  undelivered, unbilled order is done by the reconciliation planner, #179), automatic
+  Delivery Notes (only the manual draft of Mark Handed Over, #368), Sales
   Invoice, Payment Entry, Credit Note, or stock ledger entries. (A draft Sales
   Return and draft Credit Note are created later only by the user actions in
   the returns section, #261/#262.)
