@@ -7,6 +7,7 @@ import frappe
 from frappe import _
 from frappe.utils import cstr, now_datetime
 
+from marketplace_integrations.services.listing_quantity import get_bundle_components
 from marketplace_integrations.services.mappings import resolve_mapping_and_item
 
 MAPPING_DOCTYPE = "Marketplace Product Mapping"
@@ -64,12 +65,22 @@ def selected_mappings(account_name, mapping_names=None, stock_only=False):
 		fields=["name", "stock_uom", "disabled", "is_stock_item", "has_variants"],
 	)
 	item_by_name = {item.name: item for item in items}
+	# A non-stock Item with an enabled Product Bundle is still pushed: its quantity comes from the
+	# bundle components (#368).
+	bundle_parents = (
+		set(get_bundle_components([item.name for item in items if not item.is_stock_item]))
+		if stock_only
+		else set()
+	)
 	selected = []
 	for row, resolved in resolved_rows:
 		item = item_by_name.get(resolved["item"])
 		if not item:
 			continue
-		if item.disabled or (stock_only and (not item.is_stock_item or item.has_variants)):
+		if item.disabled or (
+			stock_only
+			and ((not item.is_stock_item and item.name not in bundle_parents) or item.has_variants)
+		):
 			continue
 		selected.append((row, resolved, item))
 	return selected

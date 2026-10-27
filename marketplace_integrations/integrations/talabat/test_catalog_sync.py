@@ -170,6 +170,50 @@ class IntegrationTestTalabatCatalogSync(IntegrationTestCase):
 		with self.assertRaises(catalog_sync.CatalogBuildError):
 			catalog_sync.build_catalog_product(self.account, mapping)
 
+	def _make_bundle_parent(self, marker, components):
+		parent = frappe.get_doc(
+			{
+				"doctype": "Item",
+				"item_code": f"TEST-CATALOG-SYNC-{marker}-{self.suffix}",
+				"item_group": "Products",
+				"stock_uom": "Nos",
+				"is_stock_item": 0,
+			}
+		).insert()
+		# ERPNext rejects a bundle with no rows at insert, so an empty (invalid) bundle is built
+		# legitimately with one component and then emptied with a direct DB write.
+		rows = [(item, qty) for item, qty in components] or [(self._make_item(f"{marker}PH"), 1)]
+		bundle = frappe.get_doc(
+			{
+				"doctype": "Product Bundle",
+				"new_item_code": parent.name,
+				"items": [{"item_code": item.name, "qty": qty} for item, qty in rows],
+			}
+		).insert(ignore_permissions=True)
+		if not components:
+			frappe.db.delete("Product Bundle Item", {"parent": bundle.name})
+		return parent
+
+	def test_bundle_parent_quantity_comes_from_its_components(self):
+		part = self._make_item("BUNDLEPART")
+		self._set_actual_qty(part, 11)
+		parent = self._make_bundle_parent("BUNDLE", [(part, 2)])
+		mapping = self._make_mapping(parent, "bundle-sku")
+		self._make_price(parent, 10)
+
+		self.assertEqual(catalog_sync.build_catalog_product(self.account, mapping)["quantity"], 5)
+
+	def test_invalid_bundle_is_a_build_error_not_a_zero_quantity(self):
+		parent = self._make_bundle_parent("BADBUNDLE", [])
+		mapping = self._make_mapping(parent, "bad-bundle-sku")
+		self._make_price(parent, 10)
+
+		built = catalog_sync.build_catalog_batch(self.account, [mapping.name])
+
+		self.assertEqual(built["batches"], [])
+		self.assertEqual([row["mapping_name"] for row in built["errors"]], [mapping.name])
+		self.assertIn("no component", built["errors"][0]["error"])
+
 	def test_price_prefers_current_exact_uom_general_item_price(self):
 		item = self._make_item("PRICE")
 		mapping = self._make_mapping(item, "price-sku")

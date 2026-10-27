@@ -724,6 +724,128 @@ class IntegrationTestNonStockItems(InventoryFixtureMixin, IntegrationTestCase):
 		self.assertEqual(self.shopify.variants[mapping.external_reference]["on_hand"], 4)
 
 
+class IntegrationTestBundleItems(InventoryFixtureMixin, IntegrationTestCase):
+	# The inventory sync commits, so the Items, Bins and Product Bundles these tests create would
+	# survive the class rollback: every one is removed by a cleanup (which runs after tearDown has
+	# deleted the mappings) and committed.
+	def _delete_item_records(self, item_code):
+		try:
+			for bundle in frappe.get_all("Product Bundle", filters={"new_item_code": item_code}, pluck="name"):
+				frappe.delete_doc("Product Bundle", bundle, ignore_permissions=True, force=True)
+			frappe.db.delete("Bin", {"item_code": item_code})
+			if frappe.db.exists("Item", item_code):
+				frappe.delete_doc("Item", item_code, ignore_permissions=True, force=True)
+			frappe.db.commit()
+		except Exception:
+			frappe.log_error(title="shopify bundle test cleanup failed", message=frappe.get_traceback())
+
+	def _make_item(self, marker, *args, **kwargs):
+		item_code = super()._make_item(marker, *args, **kwargs)
+		self.addCleanup(self._delete_item_records, item_code)
+		return item_code
+
+	def _bundle_mapping(self, components, **shopify_state):
+		"""Non-stock parent Item with a Product Bundle, mapped to a variant."""
+		parent = frappe.get_doc(
+			{
+				"doctype": "Item",
+				"item_code": f"Inventory Bundle Parent {random.randint(0, 10**6)} {self.suffix}",
+				"item_group": "Products",
+				"stock_uom": "Nos",
+				"is_stock_item": 0,
+			}
+		).insert()
+		self.addCleanup(self._delete_item_records, parent.name)
+		if components is not None:
+			# ERPNext rejects a bundle with no rows at insert: build an empty (invalid) bundle with
+			# one placeholder component and empty it with a direct DB write.
+			rows = components or [(self._make_item(f"BundlePlaceholder{random.randint(0, 10**6)}", qty=1), 1)]
+			bundle = frappe.get_doc(
+				{
+					"doctype": "Product Bundle",
+					"new_item_code": parent.name,
+					"items": [{"item_code": code, "qty": qty} for code, qty in rows],
+				}
+			).insert(ignore_permissions=True)
+			if not components:
+				frappe.db.delete("Product Bundle Item", {"parent": bundle.name})
+		mapping = self._make_mapping(parent.name)
+		shopify_state.setdefault("on_hand", 0)
+		self.shopify.add(mapping.external_reference, **shopify_state)
+		return mapping
+
+	def test_bundle_parent_uses_the_bundle_quantity_instead_of_being_skipped(self):
+		part = self._make_item(f"BundlePart{random.randint(0, 10**6)}", qty=11)
+		mapping = self._bundle_mapping([(part, 2)], on_hand=1)
+
+		payload = self._sync([mapping.name])
+
+		self.assertEqual((payload["succeeded"], payload["skipped_mappings"], payload["failed"]), (1, 0, 0))
+		self.assertEqual(self.shopify.variants[mapping.external_reference]["on_hand"], 5)
+
+	def test_bundle_with_no_components_is_an_error_and_not_pushed_as_zero(self):
+		mapping = self._bundle_mapping([], on_hand=3)
+
+		payload = self._sync([mapping.name])
+
+		self.assertEqual((payload["succeeded"], payload["failed"]), (0, 1))
+		self.assertEqual(self.shopify.calls_of("set"), [])
+		self.assertEqual(self.shopify.variants[mapping.external_reference]["on_hand"], 3)
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Error")
+		self.assertIn("no component", mapping.inventory_last_error)
+
+	def test_non_stock_item_without_a_bundle_is_still_skipped(self):
+		mapping = self._bundle_mapping(None, tracked=False, has_level=False, on_hand=None)
+
+		payload = self._sync([mapping.name])
+
+		self.assertEqual((payload["skipped_mappings"], payload["failed"]), (1, 0))
+		self.assertEqual(self.shopify.calls, [])
+
+	def test_sweep_enqueues_a_bundle_parent_when_a_component_bin_changes(self):
+		part = self._make_item(f"SweepPart{random.randint(0, 10**6)}", qty=8)
+		mapping = self._bundle_mapping([(part, 1)])
+		unrelated = self._one(3)
+		account = frappe.get_doc("Marketplace Account", self.account.name)
+		with patch.object(
+			inventory_sync, "_sweep_since", return_value=add_to_date(now_datetime(), minutes=-5)
+		), patch.object(inventory_sync, "_advance_watermark"), patch.object(
+			inventory_sync, "enqueue_account_sync", return_value=(True, "job")
+		) as enqueue:
+			inventory_sync._sweep_account(account, now_datetime())
+
+		names = enqueue.call_args.args[1]
+		self.assertIn(mapping.name, names)
+		self.assertIn(unrelated.name, names)
+
+	def test_sweep_ignores_a_component_whose_bin_did_not_change(self):
+		part = self._make_item(f"SweepOld{random.randint(0, 10**6)}", qty=8)
+		mapping = self._bundle_mapping([(part, 1)])
+		account = frappe.get_doc("Marketplace Account", self.account.name)
+		with patch.object(
+			inventory_sync, "_sweep_since", return_value=add_to_date(now_datetime(), minutes=5)
+		), patch.object(inventory_sync, "_advance_watermark"), patch.object(
+			inventory_sync, "enqueue_account_sync", return_value=(True, "job")
+		) as enqueue:
+			inventory_sync._sweep_account(account, now_datetime())
+
+		enqueue.assert_not_called()
+		self.assertTrue(mapping.name)
+
+	def test_sync_uses_the_shared_resolver(self):
+		mapping = self._one(4)
+		with patch.object(
+			inventory_sync,
+			"resolve_stock_quantities",
+			return_value=({mapping.item: 9}, {}),
+		) as resolver:
+			self._sync([mapping.name])
+
+		resolver.assert_called_once()
+		self.assertEqual(self.shopify.variants[mapping.external_reference]["on_hand"], 9)
+
+
 class IntegrationTestTemplateItems(InventoryFixtureMixin, IntegrationTestCase):
 	def test_template_item_is_skipped_with_no_shopify_change(self):
 		mapping = self._one(None, has_variants=1, tracked=False, has_level=False, on_hand=None)

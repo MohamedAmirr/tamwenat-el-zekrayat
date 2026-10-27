@@ -1875,3 +1875,50 @@ stock queued as a manual run.,تمت إضافة المخزون إلى قائمة
 queued as a manual run.,تمت الإضافة إلى قائمة الانتظار كتشغيل يدوي.
 "Noon {0} sync queued as a manual run (automatic push is off for this account). Refresh this mapping to see the results.",تمت إضافة مزامنة {0} في Noon إلى قائمة الانتظار كتشغيل يدوي (الإرسال التلقائي متوقف لهذا الحساب). حدّث هذا الربط لرؤية النتائج.
 "Noon {0} sync queued as a manual run (automatic push is off for this account). Mapping statuses will update when the jobs finish.",تمت إضافة مزامنة {0} في Noon إلى قائمة الانتظار كتشغيل يدوي (الإرسال التلقائي متوقف لهذا الحساب). ستتحدث حالات الربط عند انتهاء المهام.
+Product Bundle {0} has no component Items.,حزمة المنتجات {0} لا تحتوي على أي عناصر مكوّنة.
+Product Bundle {0}: component Item {1} does not exist.,حزمة المنتجات {0}: العنصر المكوّن {1} غير موجود.
+Product Bundle {0}: component Item {1} is not a stock Item.,حزمة المنتجات {0}: العنصر المكوّن {1} ليس عنصر مخزون.
+Product Bundle {0}: component Item {1} is itself a Product Bundle.,حزمة المنتجات {0}: العنصر المكوّن {1} هو نفسه حزمة منتجات.
+Product Bundle {0}: component Item {1} needs a positive quantity.,حزمة المنتجات {0}: العنصر المكوّن {1} يحتاج إلى كمية موجبة.
+Marketplace Order {0} has no Sales Order yet.,طلب السوق {0} ليس له أمر بيع بعد.
+Sales Order {0} is not submitted.,أمر البيع {0} غير معتمد.
+{0}: no enabled product mapping,{0}: لا يوجد ربط منتج مفعّل
+{0}: not on the Sales Order,{0}: غير موجود في أمر البيع
+Not added to the Delivery Note: {0},لم تتم إضافته إلى مذكرة التسليم: {0}
+Some handed-over units could not be added to the draft Delivery Note. Fix the product mapping or add them to a Delivery Note by hand.,تعذّرت إضافة بعض الوحدات المسلّمة إلى مسودة مذكرة التسليم. أصلح ربط المنتج أو أضفها إلى مذكرة تسليم يدويًا.
+Shipment {0} is not in a state that can be marked handed over.,لا يمكن وضع علامة تم التسليم على الشحنة {0} في حالتها الحالية.
+"Items, quantities and rates of a Noon order cannot be changed in ERPNext because Noon has no order update. Use the Noon Fulfillment buttons on the Sales Order (Mark Out of Stock or Cancel Shipment).",لا يمكن تغيير أصناف وكميات وأسعار طلب Noon في ERPNext لأن Noon لا تدعم تحديث الطلب. استخدم أزرار تنفيذ Noon في أمر البيع (وضع علامة نفاد المخزون أو إلغاء الشحنة).
+Noon order items are locked,أصناف طلب Noon مقفلة
+Mark Handed Over,وضع علامة تم التسليم
+Not added: {0},لم تتم الإضافة: {0}
+No Delivery Note was created.,لم يتم إنشاء مذكرة تسليم.
+Draft Delivery Note {0} created. Review and submit it.,تم إنشاء مسودة مذكرة التسليم {0}. راجعها ثم اعتمدها.
+Delivery Note {0} already exists for this shipment.,مذكرة التسليم {0} موجودة بالفعل لهذه الشحنة.
+No Created shipments on this order are waiting to be marked handed over.,لا توجد شحنات منشأة في هذا الطلب بانتظار وضع علامة تم التسليم.
+Mark Noon Shipment Handed Over,وضع علامة تم تسليم شحنة Noon
+This creates one draft Delivery Note for the shipment's units. Nothing is sent to Noon and the Delivery Note is not submitted.,سيُنشئ هذا مسودة مذكرة تسليم واحدة لوحدات الشحنة. لن يُرسل شيء إلى Noon ولن تُعتمد مذكرة التسليم.
+Creating the draft Delivery Note...,جارٍ إنشاء مسودة مذكرة التسليم...
+Items and quantities of a Noon order cannot be changed here. Use the Noon Fulfillment buttons on this Sales Order (Mark Out of Stock or Cancel Shipment).,لا يمكن تغيير أصناف وكميات طلب Noon هنا. استخدم أزرار تنفيذ Noon في أمر البيع هذا (وضع علامة نفاد المخزون أو إلغاء الشحنة).
+Handed Over On,تاريخ التسليم
+Delivery Note,مذكرة التسليم
+Shipment,الشحنة
+Set by Mark Handed Over (#368): when the units were recorded as handed over. No Noon call is made.,يُعيَّن عند وضع علامة تم التسليم (#368): وقت تسجيل تسليم الوحدات. لا يتم أي استدعاء إلى Noon.
+{0}: {1} more than the Sales Order has,{0}: {1} أكثر مما في أمر البيع
+The Sales Order is behind the platform order: a sync was queued and these units are retried afterwards.,أمر البيع متأخر عن طلب المنصة: تمت جدولة مزامنة وستُعاد محاولة هذه الوحدات بعدها.
+Unresolved Handover Units,وحدات التسليم غير المحسومة
+Unresolved Since,غير محسومة منذ
+"Handed-over units that could not be put on a Delivery Note and are still unresolved (#368): a JSON list. While this is set the order stays in Needs Action. Cleared only when the units are drafted, or the shipment is cancelled or discarded.",وحدات مسلّمة تعذّرت إضافتها إلى مذكرة تسليم ولا تزال غير محسومة (#368): قائمة JSON. ما دام هذا الحقل معيّنًا يبقى الطلب في حالة يتطلب إجراء. يُمسح فقط عند إنشاء مسودة للوحدات أو عند إلغاء الشحنة أو استبعادها.
+When the unresolved handover units were first recorded (#368).,وقت تسجيل وحدات التسليم غير المحسومة لأول مرة (#368).
+Noon Shipments,شحنات Noon
+AWB,بوليصة الشحن
+Not added,لم تُضف
+The draft Delivery Note Mark Handed Over created for this shipment (#368). A second click creates none while it exists and is not cancelled. Deleting the Delivery Note clears this field.,مسودة مذكرة التسليم التي أنشأها إجراء وضع علامة تم التسليم لهذه الشحنة (#368). لا تُنشأ مذكرة ثانية ما دامت موجودة وغير ملغاة. حذف مذكرة التسليم يمسح هذا الحقل.
+Delivery Notes,مذكرات التسليم
+"Every Delivery Note created for this shipment (#368), as a JSON list. The first one is also in Delivery Note. A retry adds rows to the first note while it is a draft and starts a new draft only once it is submitted.",كل مذكرات التسليم المنشأة لهذه الشحنة (#368) كقائمة JSON. الأولى موجودة أيضًا في حقل مذكرة التسليم. تضيف إعادة المحاولة صفوفًا إلى المذكرة الأولى ما دامت مسودة، ولا تبدأ مسودة جديدة إلا بعد اعتمادها.
+Shipment {0} still has a live Delivery Note ({1}). Delete or cancel that Delivery Note first.,لا تزال للشحنة {0} مذكرة تسليم قائمة ({1}). احذف مذكرة التسليم هذه أو ألغها أولًا.
+Delivery Note {0} is not a draft.,مذكرة التسليم {0} ليست مسودة.
+Units added to the draft Delivery Note {0}. Review and submit it.,تمت إضافة الوحدات إلى مسودة مذكرة التسليم {0}. راجعها ثم اعتمدها.
+{0} shipment(s) created but not marked handed over for over {1} hour(s),{0} شحنة منشأة لم يوضع عليها علامة تم التسليم منذ أكثر من {1} ساعة
+Bosta shipments cannot be created for {0} orders: {0} fulfils its own orders.,لا يمكن إنشاء شحنات Bosta لطلبات {0}: {0} تتولى تنفيذ طلباتها بنفسها.
+"Bosta is not used for {0} orders, so none of the selected Sales Orders can be sent to Bosta.",لا تُستخدم Bosta لطلبات {0}، لذلك لا يمكن إرسال أي من أوامر البيع المحددة إلى Bosta.
+{0} selected Sales Order(s) were left out: Bosta is not used for {1} orders.,تم استبعاد {0} من أوامر البيع المحددة: لا تُستخدم Bosta لطلبات {1}.

@@ -20,16 +20,18 @@ Locked decisions this implements (see the issue's "Implementation plan"):
 
 - **Quantity** (3/5): writes ``on_hand`` (Shopify derives ``available``) from
   ``floor(max(Bin.actual_qty, 0))`` in the Item's **stock UOM** - ``sales_uom``
-  is ignored. Source: ``services/listing_quantity.py::get_stock_quantities()``
-  (one bulk ``Bin`` query per chunk).
+  is ignored. Source: ``services/listing_quantity.py::resolve_stock_quantities()``
+  (bulk ``Bin`` reads per chunk). An Item with a Product Bundle uses the
+  bundle quantity from its components (#368); an invalid bundle is an
+  ``Error`` on its mapping, never pushed as 0.
 - **Skips** (6): a disabled Account, Connection, mapping, or ERPNext Item makes
   no mutation. Disabled mappings/Items are reported as ``skipped`` (never
   ``Error``). So is a mapping whose Item is not a stock Item
-  (``is_stock_item = 0``: a service / Product Bundle parent / template Item -
+  (``is_stock_item = 0``: a service / template Item without a Product Bundle -
   its Shopify variant is deliberately untracked, and a missing Bin would
   otherwise read as 0 and turn tracking on / sell the variant out). This holds
-  for explicit selections and full reconciliation alike. Bundle parents wrongly
-  flagged ``is_stock_item = 1`` are NOT detected - no bundle logic here. A variant not stocked at the location gets ``inventoryActivate``;
+  for explicit selections and full reconciliation alike. A bundle parent
+  flagged ``is_stock_item = 1`` also uses the bundle quantity. A variant not stocked at the location gets ``inventoryActivate``;
   an untracked inventory item gets ``inventoryItemUpdate(tracked: true)`` first
   (both deliberate, user-approved changes to Shopify configuration).
 - **Ids at sync time** (7): per chunk, one ``nodes(ids:)`` read returns each
@@ -179,7 +181,7 @@ from marketplace_integrations.integrations.shopify.constants import (
 from marketplace_integrations.integrations.shopify.locations import fetch_shop_and_active_locations
 from marketplace_integrations.integrations.shopify.products import _is_variant_gid
 from marketplace_integrations.services.account_warehouse import validate_account_warehouse
-from marketplace_integrations.services.listing_quantity import get_stock_quantities
+from marketplace_integrations.services.listing_quantity import get_bundle_components, resolve_stock_quantities
 from marketplace_integrations.services.mapping_push import group_mappings_by_account, parse_mapping_names
 
 MAPPING_DOCTYPE = "Marketplace Product Mapping"
@@ -708,7 +710,9 @@ def _sync_chunk(client, account_doc, location_id, mappings, item_by_name):
 	"""Sync one chunk of mappings and persist every outcome together under one
 	savepoint/commit."""
 	item_codes = [item_by_name[mapping.item].name for mapping in mappings if mapping.item in item_by_name]
-	quantities = get_stock_quantities(account_doc.warehouse, item_codes)
+	quantities, problems = resolve_stock_quantities(account_doc.warehouse, item_codes)
+	# An invalid Product Bundle is reported on its mapping and never pushed as 0.
+	problem_entries = [frappe._dict(name=mapping.name) for mapping in mappings if mapping.item in problems]
 	entries = [
 		frappe._dict(
 			name=mapping.name,
@@ -718,12 +722,16 @@ def _sync_chunk(client, account_doc, location_id, mappings, item_by_name):
 			applied=[],
 		)
 		for mapping in mappings
+		if mapping.item not in problems
 	]
 	# Commit before HTTP so no write lock is held across it.
 	frappe.db.commit()
 
-	outcomes = {}
+	outcomes = {
+		mapping.name: (False, problems[mapping.item]) for mapping in mappings if mapping.item in problems
+	}
 	_sync_entries(client, location_id, entries, outcomes)
+	entries = entries + problem_entries
 	for entry in entries:
 		# Safety net: every entry must end with an outcome.
 		outcomes.setdefault(entry.name, (False, REMOTE_ERROR))
@@ -981,8 +989,8 @@ def _fetch_items(item_names):
 def _split_active_mappings(mappings, item_by_name):
 	"""Return ``(active_mappings, skipped_results)``. A disabled mapping, one
 	whose Item is disabled, one whose Item is not a stock Item
-	(``is_stock_item = 0`` - a missing Bin would read 0 and enable tracking /
-	sell out a deliberately untracked variant), or one whose Item is a template
+	(``is_stock_item = 0`` and no Product Bundle - a missing Bin would read 0
+	and enable tracking / sell out a deliberately untracked variant), or one whose Item is a template
 	(``has_variants = 1`` - ERPNext defaults ``is_stock_item`` to 1 even for a
 	template and refuses to post stock against it directly, so it has no Bin
 	either) gets no mutation and no status write, and is reported as skipped
@@ -990,6 +998,11 @@ def _split_active_mappings(mappings, item_by_name):
 	mapping whose Item no longer exists is kept - it surfaces as a local error."""
 	active = []
 	skipped_results = []
+	# A non-stock Item with an enabled Product Bundle is not skipped: its
+	# quantity comes from the bundle components (#368).
+	bundle_parents = set(
+		get_bundle_components([item.name for item in item_by_name.values() if not item.is_stock_item])
+	)
 	for mapping in mappings:
 		item = item_by_name.get(mapping.item)
 		reason = None
@@ -997,7 +1010,7 @@ def _split_active_mappings(mappings, item_by_name):
 			reason = _("Mapping is disabled.")
 		elif item and item.disabled:
 			reason = _("Item is disabled.")
-		elif item and not item.is_stock_item:
+		elif item and not item.is_stock_item and item.name not in bundle_parents:
 			reason = _("Item is not a stock Item.")
 		elif item and item.has_variants:
 			reason = _("Item is a template (has variants).")
@@ -1348,17 +1361,28 @@ def _sweep_account(account, tick_time):
 		for mapping in mappings:
 			mapping_names_by_item.setdefault(mapping.item, []).append(mapping.name)
 
+		# A bundle parent has no Bin: a change to one of its components' Bins
+		# re-pushes the parent's mappings too (#368).
+		parents_by_component = {}
+		for parent, rows in get_bundle_components(list(mapping_names_by_item)).items():
+			for row in rows:
+				parents_by_component.setdefault(row.item_code, set()).add(parent)
+		watched_items = set(mapping_names_by_item) | set(parents_by_component)
 		changed_items = frappe.get_all(
 			"Bin",
 			filters={
 				"warehouse": account.warehouse,
-				"item_code": ["in", list(mapping_names_by_item.keys())],
+				"item_code": ["in", sorted(watched_items)],
 				"modified": [">", since],
 			},
 			pluck="item_code",
 		)
+		affected_items = set()
+		for item_code in set(changed_items):
+			affected_items.add(item_code)
+			affected_items.update(parents_by_component.get(item_code, ()))
 		affected_mapping_names = sorted(
-			{name for item_code in set(changed_items) for name in mapping_names_by_item.get(item_code, [])}
+			{name for item_code in affected_items for name in mapping_names_by_item.get(item_code, [])}
 		)
 		if affected_mapping_names:
 			enqueued, _job_id = enqueue_account_sync(account.name, affected_mapping_names)

@@ -24,6 +24,10 @@
 	const BOSTA_CREATE_METHOD = "marketplace_integrations.api.bosta_shipments.create_shipment";
 
 	const BOSTA_CREATOR_ROLES = ["Sales Manager", "Stock User", "System Manager", "Bosta User"];
+	// Marketplaces that fulfil their own orders get no Bosta action on their Sales Orders (#368).
+	// Mirrors BOSTA_EXCLUDED_PLATFORMS in integrations/bosta/constants.py (a parity test keeps the two
+	// equal). Add Amazon and Instashop here and there when those platforms are built.
+	const BOSTA_EXCLUDED_PLATFORMS = ["Noon", "Talabat"];
 
 	const BOSTA_SHIPMENT_METHOD = "marketplace_integrations.api.bosta_shipments.get_sales_order_shipment";
 	const BOSTA_LABEL_METHOD = "marketplace_integrations.api.bosta_shipments.print_a4_arabic_label";
@@ -45,6 +49,7 @@
 		Shopify: ["marketplace_integrations.api.shopify_orders.refresh_order", "Refresh from Shopify", "Refreshing from Shopify..."],
 		Noon: ["marketplace_integrations.api.noon_orders.refresh_order", "Refresh from Noon", "Queuing Noon refresh..."],
 	};
+	const NOON_FULFILLMENT_ASSET = "/assets/marketplace_integrations/js/noon_fulfillment.js";
 	const MARKETPLACE_SYNC_METHOD = "marketplace_integrations.api.marketplace_orders.sync_to_erpnext";
 
 	function bosta_state_presentation(delivery_type, state_code, state_name, exception_reason, delivery_note_posted) {
@@ -194,7 +199,14 @@
 					field.$wrapper.html(`<p class="text-muted">${frappe.utils.escape_html(__("Marketplace Order summary unavailable."))}</p>`);
 					return;
 				}
+				// The Noon shipments summary comes from the same call that drives the Noon
+				// Fulfillment buttons (load_noon_fulfillment), so wait for it before rendering.
+				const noon_state = summary.platform === "Noon" ? frm.__mi_noon_state || Promise.resolve(null) : Promise.resolve(null);
+				return noon_state.then((state) => {
+				if (request !== frm.__mi_marketplace_request || frm.doc.name !== sales_order) return;
+				const noon = noon_fulfillment_module();
 				let html = marketplace_summary_html(summary);
+				if (state && noon) html += noon.noon_shipments_html(state.shipments);
 				field.$wrapper.html(html);
 				const refresh = MARKETPLACE_REFRESH_METHODS[summary.platform];
 				if (refresh) {
@@ -221,6 +233,7 @@
 						});
 					}
 				});
+				});
 			},
 			() => {
 				if (request === frm.__mi_marketplace_request && frm.doc.name === sales_order) {
@@ -240,9 +253,14 @@
 		Canceled: "gray",
 	};
 
+	function is_bosta_excluded_platform(doc) {
+		return Boolean(doc) && BOSTA_EXCLUDED_PLATFORMS.includes(doc.custom_marketplace_platform);
+	}
+
 	function can_create_bosta_shipment(frm) {
 		return Boolean(
 			frm.doc &&
+				!is_bosta_excluded_platform(frm.doc) &&
 				frm.doc.docstatus === 1 &&
 				frm.doc.status !== "Cancelled" &&
 				frappe.user &&
@@ -389,8 +407,8 @@
 	// the shipment read failed (so "No Bosta shipment" would be a guess).
 	function bosta_tab_html(shipment, options) {
 		const escape = frappe.utils.escape_html;
-		const { create, failed } = options || {};
-		if (shipment && shipment.shipments) return bosta_multi_tab_html(shipment.shipments, { create });
+		const { create, failed, read_only } = options || {};
+		if (shipment && shipment.shipments) return bosta_multi_tab_html(shipment.shipments, { create, read_only });
 		const buttons = [];
 		let html = "";
 		if (!shipment) {
@@ -428,7 +446,7 @@
 			html += `</tbody></table>`;
 			if (shipment.active && shipment.tracking_number) {
 				buttons.push(bosta_button("print", __("Print A4 Label")));
-				if (create) buttons.push(bosta_button("refresh", __("Refresh from Bosta")));
+				if (create || read_only) buttons.push(bosta_button("refresh", __("Refresh from Bosta")));
 				if (create && BOSTA_EDITABLE_STATES.includes(shipment.bosta_state_code)) {
 					buttons.push(bosta_button("edit", __("Edit Bosta Shipment")));
 				}
@@ -445,7 +463,7 @@
 		return html + (buttons.length ? `<p>${buttons.join("")}</p>` : "");
 	}
 
-	function bosta_multi_tab_html(shipments, { create }) {
+	function bosta_multi_tab_html(shipments, { create, read_only }) {
 		const escape = frappe.utils.escape_html;
 		const text = (value) => (value ? escape(value) : "");
 		const buttons = [];
@@ -482,11 +500,11 @@
 			if (row.status === "Delivery Note Failed" && row.delivery_note_error) html += `<p class="text-danger">${escape(row.delivery_note_error)}</p>`;
 			if (row.active && row.tracking_number) {
 				buttons.push(bosta_button(`print:${row.name}`, __("Print A4 Label")));
-				if (create) buttons.push(bosta_button(`refresh:${row.name}`, __("Track Bosta Shipment")));
+				if (create || read_only) buttons.push(bosta_button(`refresh:${row.name}`, __("Track Bosta Shipment")));
 				if (create && BOSTA_EDITABLE_STATES.includes(row.bosta_state_code)) buttons.push(bosta_button(`edit:${row.name}`, __("Edit Bosta Shipment")));
 				if (create && row.bosta_state_code !== BOSTA_DELIVERED_STATE) buttons.push(bosta_button(`cancel:${row.name}`, __("Cancel Bosta Shipment")));
 			}
-			if (BOSTA_HANDOVER_ROLES.some((role) => frappe.user.has_role(role)) && row.active && (row.handover_status === "Awaiting Handover" || row.stock_posting_status === "Failed")) {
+			if (!read_only && BOSTA_HANDOVER_ROLES.some((role) => frappe.user.has_role(role)) && row.active && (row.handover_status === "Awaiting Handover" || row.stock_posting_status === "Failed")) {
 				buttons.push(bosta_button(`handover:${row.name}`, __(row.handover_status === "Awaiting Handover" ? "Confirm Physical Handover" : "Retry Stock Posting")));
 			}
 			if (create && row.active && row.status === "Bosta Failed" && !row.tracking_number) buttons.push(bosta_button("create", __("Retry Bosta Shipment")));
@@ -555,6 +573,11 @@
 		const request = (frm.__mi_bosta_request = (frm.__mi_bosta_request || 0) + 1);
 		const sales_order = frm.doc.name;
 		const create = can_create_bosta_shipment(frm);
+		// A Sales Order of a platform that fulfils its own orders keeps showing an existing shipment
+		// (state, label, refresh) but offers no create, edit, cancel or handover.
+		const read_only =
+			is_bosta_excluded_platform(frm.doc) &&
+			Boolean(frappe.user && frappe.user.has_role(BOSTA_CREATOR_ROLES));
 		if (!(frappe.model && frappe.model.can_read("Bosta Shipment"))) {
 			const field = frm.get_field && frm.get_field(BOSTA_TAB_FIELD);
 			if (field && field.$wrapper) field.$wrapper.html("");
@@ -586,7 +609,7 @@
 				}
 				if (shipment) {
 					toggle_bosta_tab(frm, true);
-					render_bosta_tab(frm, shipment, { create, failed });
+					render_bosta_tab(frm, shipment, { create, failed, read_only });
 					return;
 				}
 				if (!create) {
@@ -1163,7 +1186,52 @@
 		);
 	}
 
+	function noon_fulfillment_module() {
+		return frappe.marketplace_integrations && frappe.marketplace_integrations.noon_fulfillment;
+	}
+
+	// Noon fulfillment lives on the Sales Order form (the buttons and dialogs are in
+	// public/js/noon_fulfillment.js, loaded on demand). Only a submitted Sales Order linked to a
+	// Noon Marketplace Order gets it; every endpoint it calls still checks permission on the
+	// Marketplace Order. Sets frm.__mi_noon_state to the pending state so the Marketplace Order
+	// tab can list the shipments from the same call.
+	function load_noon_fulfillment(frm) {
+		frm.__mi_noon_state = null;
+		const doc = frm.doc;
+		if (
+			!doc ||
+			doc.docstatus !== 1 ||
+			!doc.custom_marketplace_order ||
+			doc.custom_marketplace_platform !== "Noon" ||
+			!frappe.model.can_read("Marketplace Order")
+		)
+			return Promise.resolve(null);
+		const load = frappe.require ? frappe.require(NOON_FULFILLMENT_ASSET).catch(() => {}) : Promise.resolve();
+		const state = load.then(() => {
+			const noon = noon_fulfillment_module();
+			return noon ? noon.add_noon_fulfillment_actions(frm) : null;
+		});
+		frm.__mi_noon_state = state;
+		return state;
+	}
+
+	// #368: Noon has no order-level update, so the server refuses item, quantity and rate edits on a
+	// submitted Noon Sales Order (hooks.py, services/noon_item_edit_guard.py). This only tells the
+	// user why and where the supported actions are; the server check is the real gate.
+	function add_noon_item_edit_hint(frm) {
+		const doc = frm.doc;
+		if (!doc || doc.docstatus !== 1 || doc.custom_marketplace_platform !== "Noon") return;
+		if (typeof frm.set_intro !== "function") return;
+		frm.set_intro(
+			__(
+				"Items and quantities of a Noon order cannot be changed here. Use the Noon Fulfillment buttons on this Sales Order (Mark Out of Stock or Cancel Shipment)."
+			),
+			"orange"
+		);
+	}
+
 	function on_refresh(frm) {
+		load_noon_fulfillment(frm);
 		add_marketplace_order_tab(frm);
 		add_bosta_shipment_ux(frm);
 		if (!wrap_close_sales_order(frm)) {
@@ -1173,6 +1241,7 @@
 		}
 		const closed_by_click = consume_close_request(frm);
 		if (!is_marketplace_sales_order(frm.doc)) return;
+		add_noon_item_edit_hint(frm);
 		add_shopify_edit_button(frm);
 		if (closed_by_click || is_closed_or_cancelled(frm.doc)) {
 			load_platform_option(frm, { prompt: closed_by_click, button: true });
@@ -1190,6 +1259,7 @@
 		frappe.marketplace_integrations = frappe.marketplace_integrations || {};
 		frappe.marketplace_integrations.open_bosta_create_dialog = open_create_dialog;
 		frappe.marketplace_integrations.BOSTA_CREATOR_ROLES = BOSTA_CREATOR_ROLES;
+		frappe.marketplace_integrations.BOSTA_EXCLUDED_PLATFORMS = BOSTA_EXCLUDED_PLATFORMS;
 		if (frappe.ui && frappe.ui.form && !frappe.ui.form.__mi_sales_order_hooks) {
 			frappe.ui.form.__mi_sales_order_hooks = true;
 			frappe.ui.form.on("Sales Order", {
@@ -1203,6 +1273,8 @@
 		module.exports = {
 			add_marketplace_order_tab,
 			add_bosta_shipment_ux,
+			add_noon_item_edit_hint,
+			load_noon_fulfillment,
 			add_shopify_edit_button,
 			can_offer_shopify_edit,
 			shopify_edit_alert,
@@ -1219,6 +1291,8 @@
 			show_bosta_edit_dialog,
 			blocked_message,
 			can_offer_cancel,
+			is_bosta_excluded_platform,
+			BOSTA_EXCLUDED_PLATFORMS,
 			consume_close_request,
 			is_closed_or_cancelled,
 			is_marketplace_sales_order,
