@@ -57,15 +57,17 @@ def get_available_actions(marketplace_order: str):
 
 
 def _shipment_summaries(doc):
-	"""Display values of each shipment: status, AWBs, Delivery Note and the units that could not
+	"""Display values of each shipment: status, units grouped by SKU (``Item name (SKU)`` x qty), AWBs, Delivery Note and the units that could not
 	be put on a Delivery Note (as text)."""
 	awbs = {}
 	for awb in doc.noon_shipment_awbs or []:
 		awbs.setdefault(awb.integration_shipment_nr, []).append({"courier": awb.courier, "awb_nr": awb.awb_nr})
+	items = fulfillment.shipment_items(doc)
 	return [
 		{
 			"integration_shipment_nr": row.integration_shipment_nr,
 			"status": row.status,
+			"items": items.get(row.integration_shipment_nr, []),
 			"awbs": awbs.get(row.integration_shipment_nr, []),
 			"delivery_note": row.delivery_note or "",
 			"delivery_notes": handover_state.shipment_notes(row),
@@ -77,13 +79,11 @@ def _shipment_summaries(doc):
 
 
 @frappe.whitelist(methods=["POST"])
-def create_shipment(
-	marketplace_order: str, mp_item_nrs, awb_source: str, courier: str | None = None, awb_nr: str | None = None
-):
+def create_shipment(marketplace_order: str, mp_item_nrs, awb_source: str = "Noon"):
 	_get_noon_order(marketplace_order)
 	if isinstance(mp_item_nrs, str):
 		mp_item_nrs = frappe.parse_json(mp_item_nrs)
-	return fulfillment.create_shipment(marketplace_order, mp_item_nrs, awb_source, courier, awb_nr)
+	return fulfillment.create_shipment(marketplace_order, mp_item_nrs, awb_source)
 
 
 @frappe.whitelist(methods=["POST"])
