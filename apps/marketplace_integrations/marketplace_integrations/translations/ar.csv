@@ -1920,3 +1920,5 @@ Delivery Note {0} is not a draft.,مذكرة التسليم {0} ليست مسو�
 Units added to the draft Delivery Note {0}. Review and submit it.,تمت إضافة الوحدات إلى مسودة مذكرة التسليم {0}. راجعها ثم اعتمدها.
 {0} shipment(s) created but not marked handed over for over {1} hour(s),{0} شحنة منشأة لم يوضع عليها علامة تم التسليم منذ أكثر من {1} ساعة
 Bosta shipments cannot be created for {0} orders: {0} fulfils its own orders.,لا يمكن إنشاء شحنات Bosta لطلبات {0}: {0} تتولى تنفيذ طلباتها بنفسها.
+"Bosta is not used for {0} orders, so none of the selected Sales Orders can be sent to Bosta.",لا تُستخدم Bosta لطلبات {0}، لذلك لا يمكن إرسال أي من أوامر البيع المحددة إلى Bosta.
+{0} selected Sales Order(s) were left out: Bosta is not used for {1} orders.,تم استبعاد {0} من أوامر البيع المحددة: لا تُستخدم Bosta لطلبات {1}.

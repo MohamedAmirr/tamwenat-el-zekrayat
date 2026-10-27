@@ -80,8 +80,30 @@
 			.catch((error) => console.error("Order hover card failed to load (#325).", error));
 	}
 
+	// The selected rows as {name, platform}. A row the list did not load a platform for (or a plain
+	// name) has no platform and is never excluded.
+	function selected_rows(listview) {
+		return (listview.get_checked_items() || []).map((row) =>
+			typeof row === "string"
+				? { name: row, platform: "" }
+				: { name: row.name, platform: row.custom_marketplace_platform || "" }
+		);
+	}
+
+	// Splits the selection by the platforms that fulfil their own orders (the one shared list,
+	// frappe.marketplace_integrations.BOSTA_EXCLUDED_PLATFORMS from sales_order.js, mirrored from
+	// integrations/bosta/constants.py). The server still skips excluded orders as a second layer.
+	function split_by_platform(rows, excluded) {
+		const blocked = excluded || [];
+		return {
+			allowed: rows.filter((row) => !blocked.includes(row.platform)).map((row) => row.name),
+			left_out: rows.filter((row) => blocked.includes(row.platform)).length,
+		};
+	}
+
 	function start(listview) {
-		const names = listview.get_checked_items(true);
+		const rows = selected_rows(listview);
+		const names = rows.map((row) => row.name);
 		if (!names.length) return;
 		if (names.length > MAX_ORDERS) {
 			frappe.msgprint(
@@ -91,16 +113,40 @@
 		}
 		return frappe
 			.require([FORM_ASSET, STATUS_ASSET])
-			.then(() =>
-				frappe.call({
-					method: PLAN_METHOD,
-					type: "POST",
-					args: { sales_orders: names },
-					freeze: true,
-					freeze_message: __("Checking the selected Sales Orders..."),
-				})
-			)
-			.then((r) => confirm_plan(listview, r.message || {}));
+			.then(() => {
+				const excluded = frappe.marketplace_integrations.BOSTA_EXCLUDED_PLATFORMS || [];
+				const { allowed, left_out } = split_by_platform(rows, excluded);
+				if (!allowed.length) {
+					// Every selected order is of a platform that fulfils its own orders.
+					frappe.msgprint({
+						title: __("Create Bosta Shipments"),
+						message: frappe.utils.escape_html(
+							__("Bosta is not used for {0} orders, so none of the selected Sales Orders can be sent to Bosta.", [
+								excluded.join(", "),
+							])
+						),
+					});
+					return null;
+				}
+				if (left_out) {
+					frappe.show_alert({
+						message: __("{0} selected Sales Order(s) were left out: Bosta is not used for {1} orders.", [
+							left_out,
+							excluded.join(", "),
+						]),
+						indicator: "orange",
+					});
+				}
+				return frappe
+					.call({
+						method: PLAN_METHOD,
+						type: "POST",
+						args: { sales_orders: allowed },
+						freeze: true,
+						freeze_message: __("Checking the selected Sales Orders..."),
+					})
+					.then((r) => confirm_plan(listview, r.message || {}));
+			});
 	}
 
 	// Lists the pre-check skips with their reasons before anything is sent.
@@ -303,6 +349,9 @@
 	// Add the action to ERPNext's own Sales Order list settings instead of replacing them.
 	if (typeof frappe !== "undefined" && frappe.listview_settings) {
 		const settings = (frappe.listview_settings["Sales Order"] = frappe.listview_settings["Sales Order"] || {});
+		// Load each row's platform, so the Bosta bulk action can leave out the platforms that fulfil
+		// their own orders (merged into ERPNext's own add_fields, never replacing them).
+		settings.add_fields = [...new Set([...(settings.add_fields || []), "custom_marketplace_platform"])];
 		settings.formatters = {
 			...(settings.formatters || {}),
 			custom_bosta_delivery_status: format_bosta_delivery_status,
@@ -326,6 +375,8 @@
 			add_bulk_action,
 			format_bosta_delivery_status,
 			start,
+			selected_rows,
+			split_by_platform,
 			confirm_plan,
 			review_and_send,
 			send,

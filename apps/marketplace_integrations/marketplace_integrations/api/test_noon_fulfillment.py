@@ -16,10 +16,10 @@ import frappe
 from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api.noon_fulfillment import (
+	_shipment_summaries,
 	add_awb,
 	cancel_shipment,
 	create_shipment,
-	_shipment_summaries,
 	discard_shipment,
 	get_available_actions,
 	get_shippable_units,
@@ -108,9 +108,17 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 	def test_get_available_actions_adds_shipments_and_needs_only_read(self, mock_fn):
 		mock_fn.return_value = {"actions": ["retry"], "cancelled_on_noon": False}
 		email, _role = make_role_user(self, "Noon Fulfillment Read Only", {"Marketplace Order": ["read"]})
-		with self.set_user(email):
+		# A document-level read also passes the platform filter (permissions.py), which needs the
+		# platform role; that role carries write too, so the rule "read only" is proved by the
+		# permission type the endpoint asks for.
+		frappe.get_doc("User", email).add_roles("Noon User")
+		with (
+			self.set_user(email),
+			patch("frappe.model.document.Document.check_permission", autospec=True) as check_permission,
+		):
 			result = get_available_actions(self.order.name)
 		self.assertEqual(result, {"actions": ["retry"], "cancelled_on_noon": False, "shipments": []})
+		self.assertEqual([call.args[1] for call in check_permission.call_args_list], ["read"])
 
 	def test_get_available_actions_requires_read_and_a_noon_order(self):
 		email, _role = make_role_user(self, "Noon Fulfillment No Read", {"Sales Order": ["read"]})
@@ -146,6 +154,9 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 					"status": "Created",
 					"awbs": [{"courier": "Aramex", "awb_nr": "AWB-1"}],
 					"delivery_note": "MAT-DN-0001",
+					"delivery_notes": ["MAT-DN-0001"],
+					# MAT-DN-0001 does not exist here, so it is not a live note and nothing was recorded.
+					"handed_over": False,
 					"unresolved": ["SKU-1: no enabled product mapping"],
 				},
 				{
@@ -153,6 +164,8 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 					"status": "Error",
 					"awbs": [],
 					"delivery_note": "",
+					"delivery_notes": [],
+					"handed_over": False,
 					"unresolved": [],
 				},
 			],

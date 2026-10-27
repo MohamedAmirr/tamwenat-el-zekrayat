@@ -79,12 +79,12 @@ from marketplace_integrations.integrations.shopify.webhooks import MAX_WEBHOOK_D
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_product_mapping.marketplace_product_mapping import (
 	compute_mapping_identity_key,
 )
-from marketplace_integrations.services.sync_status import CANCELLED, NEEDS_ACTION, SYNC_ERROR, SYNCED
 from marketplace_integrations.services.sales_order_sync import (
 	FINAL_ITEM_STATUSES,
 	NOON_ELIGIBLE_EXTERNAL_STATUS,
 	NOON_INELIGIBLE_INTEGRATION_STATUS,
 )
+from marketplace_integrations.services.sync_status import CANCELLED, NEEDS_ACTION, SYNC_ERROR, SYNCED
 
 UNMAPPED_ITEMS = "Unmapped Items"
 ORDER_IMPORT_ERROR = "Order Import Error"

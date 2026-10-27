@@ -22,6 +22,7 @@ from marketplace_integrations.services.sales_order_sync_debounce import bump_syn
 from marketplace_integrations.tests.handover_fixture import SubmittedOrderFixture
 from marketplace_integrations.tests.utils import make_role_user
 
+
 class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 	def setUp(self):
 		super().setUp()
@@ -205,7 +206,9 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 		# The retry added the leftover unit to the shipment's first note, which is still a draft.
 		self.assertEqual(len(fx.delivery_notes()), 1)
 		quantities = {row.item_code: row.qty for row in frappe.get_doc("Delivery Note", fx.delivery_notes()[0]).items}
-		self.assertEqual(quantities, {fx.items["A"].name: 2, fx.items["B"].name: 1})
+		# The shipment holds one unit of A and one of B (the Sales Order row of A has 2, but only the
+		# shipment's units are drafted), so each row is 1: B was added, A was not raised.
+		self.assertEqual(quantities, {fx.items["A"].name: 1, fx.items["B"].name: 1})
 		row = self._status(order)
 		# No record left: the reason is dropped and a normal re-sync recomputes the status.
 		self.assertNotEqual(row.sync_reason_code, reasons.DELIVERY_NOTE_UNITS_SKIPPED)
@@ -384,7 +387,7 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 		self.assertEqual([row.item_code for row in frappe.get_doc("Delivery Note", notes[1]).items], [fx.items["B"].name])
 
 	def test_deleting_a_tracked_note_resets_the_shipment_and_bumps_the_order(self):
-		fx, order, nr = self._shipped_order([("A", 2)], ["A", "A"])
+		_fx, order, nr = self._shipped_order([("A", 2)], ["A", "A"])
 		note = fulfillment.mark_handed_over(order, nr)["delivery_note"]
 		before = frappe.db.get_value("Marketplace Order", order, "modified")
 		frappe.delete_doc("Delivery Note", note)
@@ -395,14 +398,17 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 		self.assertGreater(frappe.db.get_value("Marketplace Order", order, "modified"), before)
 
 	def test_a_cancelled_note_keeps_the_link_and_an_amended_draft_counts_as_live(self):
-		fx, order, nr = self._shipped_order([("A", 2)], ["A", "A"])
+		_fx, order, nr = self._shipped_order([("A", 2)], ["A", "A"])
 		first = fulfillment.mark_handed_over(order, nr)["delivery_note"]
 		frappe.db.set_value("Delivery Note", first, "docstatus", 2)  # stand-in for a cancel
 		shipment = self._shipment(order, nr)
 		self.assertEqual(shipment.delivery_note, first)  # on_cancel keeps the link
 		self.assertEqual(handover_state.live_notes(shipment), [])
-		amended = frappe.copy_doc(frappe.get_doc("Delivery Note", first)).insert()
-		frappe.db.set_value("Delivery Note", amended.name, "amended_from", first)
+		# Like ERPNext's amend flow: a draft copy of the cancelled note pointing back at it.
+		amended = frappe.copy_doc(frappe.get_doc("Delivery Note", first))
+		amended.docstatus = 0
+		amended.amended_from = first
+		amended.insert()
 		self.assertEqual(handover_state.live_note(first), amended.name)
 		self.assertEqual(handover_state.live_notes(self._shipment(order, nr)), [amended.name])
 
@@ -411,7 +417,7 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 			fulfillment._entry_units([{"external_sku": "S", "item": "OLD", "qty": 1}, {"item": "I", "qty": 2}]),
 			[{"external_sku": "S", "qty": 1}, {"item": "I", "qty": 2}],
 		)
-		fx, order, nr = self._shipped_order([("A", 1)], ["A", "A"])
+		_fx, order, nr = self._shipped_order([("A", 1)], ["A", "A"])
 		fulfillment.mark_handed_over(order, nr)
 		fulfillment.retry_unresolved_handovers(order, after_sync=True)
 		self.assertTrue(self._record(order, nr)[0]["final"])
@@ -422,7 +428,7 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 	# ---- retry robustness ----------------------------------------------------------------------
 
 	def test_a_failing_retry_is_logged_and_keeps_the_record(self):
-		fx, order, nr = self._shipped_order([("A", 2), ("B", 1)], ["A", "B"], unmapped=("B",))
+		_fx, order, nr = self._shipped_order([("A", 2), ("B", 1)], ["A", "B"], unmapped=("B",))
 		fulfillment.mark_handed_over(order, nr)
 		with patch.object(fulfillment, "_draft_and_record", side_effect=RuntimeError("boom")), patch.object(
 			frappe, "log_error"
@@ -443,7 +449,7 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 	# ---- cancel shipment is refused while a Delivery Note is live ------------------------------
 
 	def test_cancel_shipment_is_refused_while_the_delivery_note_is_live(self):
-		fx, order, nr = self._shipped_order([("A", 2)], ["A", "A"])
+		_fx, order, nr = self._shipped_order([("A", 2)], ["A", "A"])
 		note = fulfillment.mark_handed_over(order, nr)["delivery_note"]
 		self.assertNotIn(
 			"cancel_shipment", fulfillment.get_available_actions(frappe.get_doc("Marketplace Order", order))["actions"]

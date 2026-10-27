@@ -3,7 +3,7 @@
 
 """Bosta delivery creation and the corresponding ERPNext Delivery Note."""
 
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 import frappe
 from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
