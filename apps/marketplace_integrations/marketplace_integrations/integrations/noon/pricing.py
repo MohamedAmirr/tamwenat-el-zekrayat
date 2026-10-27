@@ -30,9 +30,10 @@ PRICING_PATH = "/pricing/v1/pricing/upsert"
 
 
 def queue_pricing_push(account_name, mapping_names=None):
+	"""Manual Desk entry point: runs once regardless of the account push switch."""
 	mapping_names = authorize_selection(account_name, mapping_names)
 	get_account(account_name)
-	return enqueue_push(push_pricing, "pricing", account_name, mapping_names)
+	return enqueue_push(push_pricing, "pricing", account_name, mapping_names, manual=True)
 
 
 def validate_price_setup(account):
@@ -57,9 +58,11 @@ def validate_price_setup(account):
 	return price_list
 
 
-def push_pricing(account_name, mapping_names=None):
-	"""Set current prices for existing Noon partner SKUs, item by item."""
-	if is_push_paused(account_name, "pricing"):
+def push_pricing(account_name, mapping_names=None, manual=False):
+	"""Set current prices for existing Noon partner SKUs, item by item. A manual run
+	(queued from a Desk click) ignores the account push switch, which governs only
+	automatic triggers; ``manual`` is set by the enqueuer, never read from the request."""
+	if not manual and is_push_paused(account_name, "pricing"):
 		# Switch turned off after this job was queued: no Noon call, no mapping touched.
 		return {"synced": 0, "failed": 0, "paused": True}
 	account = get_account(account_name)
@@ -104,7 +107,7 @@ def push_pricing(account_name, mapping_names=None):
 	failed = len(local_errors)
 	for batch in chunks(prepared, PRICING_CHUNK_SIZE):
 		# Fresh DB read before every chunk: stop before the next Noon write once off.
-		if is_push_paused(account.name, "pricing"):
+		if not manual and is_push_paused(account.name, "pricing"):
 			return {"synced": synced, "failed": failed, "paused": True}
 		try:
 			response = client.request("POST", PRICING_PATH, json={"items": [payload for _, payload in batch]})

@@ -389,11 +389,15 @@ function sync_noon(frm) {
 		}).then((response) => {
 			const queued = response.message || {};
 			const kinds = ["pricing", "stock"].filter((kind) => queued[kind] && queued[kind].queued);
-			frappe.msgprint(
-				kinds.length
-					? __("Noon {0} sync queued. Mapping statuses will update when the jobs finish.", [kinds.join(" and ")])
-					: __("Noon pricing and stock syncs are already queued or running.")
-			);
+			// switch_off: the account's automatic push switch is off; this click still ran once.
+			const manual_override = kinds.some((kind) => queued[kind].switch_off);
+			let message = __("Noon pricing and stock syncs are already queued or running.");
+			if (kinds.length) {
+				message = manual_override
+					? __("Noon {0} sync queued as a manual run (automatic push is off for this account). Mapping statuses will update when the jobs finish.", [kinds.join(" and ")])
+					: __("Noon {0} sync queued. Mapping statuses will update when the jobs finish.", [kinds.join(" and ")]);
+			}
+			frappe.msgprint(message);
 		});
 	});
 }

@@ -1097,7 +1097,6 @@ Noon order {0} was not found.,لم يتم العثور على طلب Noon {0}.
 Noon order {0}'s presentment currency ({1}) does not match the resolved ERPNext currency ({2}). Multi-currency Sales Order synchronization is not supported.,عملة عرض طلب Noon {0} ({1}) لا تطابق عملة ERPNext المحددة ({2}). مزامنة أوامر البيع متعددة العملات غير مدعومة.
 Noon orders cannot be cancelled from ERPNext.,لا يمكن إلغاء طلبات Noon من ERPNext.
 Noon partner SKU is required.,رمز منتج الشريك في Noon مطلوب.
-"Noon pricing and stock syncs are already queued, running or paused.",مزامنة أسعار ومخزون Noon في قائمة الانتظار أو قيد التشغيل أو متوقفة مؤقتًا.
 Noon pricing and stock syncs are already queued or running.,مزامنة أسعار ومخزون Noon في قائمة الانتظار أو قيد التشغيل بالفعل.
 Noon pricing setup failed; see Error Log.,فشل إعداد أسعار Noon؛ راجع سجل الأخطاء.
 Noon pricing update failed; see Error Log.,فشل تحديث أسعار Noon؛ راجع سجل الأخطاء.
@@ -1501,7 +1500,7 @@ This updates Bosta and the Bosta Shipment only. The Sales Order address and Shop
 Tracking,التتبع
 Transaction currency {0} differs from the Company currency {1}.,عملة المعاملة {0} تختلف عن عملة الشركة {1}.
 Transactions (kind/status/gateway/manual): {0}.,المعاملات (النوع/الحالة/البوابة/يدوي): {0}.
-Turn off to keep importing Shopify orders while ERPNext stops writing inventory to this store. Turning it back on does not trigger a full push.,أوقفه لمواصلة استيراد طلبات Shopify بينما يتوقف ERPNext عن كتابة المخزون في هذا المتجر. إعادة تشغيله لا تُطلق إرسالًا كاملًا.
+Turn off to keep importing Shopify orders while ERPNext stops automatically writing inventory to this store. Turning it back on does not trigger a full push. Manual syncs from the mapping still run.,أوقفه لمواصلة استيراد طلبات Shopify بينما يتوقف ERPNext عن الكتابة التلقائية لـ المخزون في هذا المتجر. إعادة تشغيله لا تُطلق إرسالًا كاملًا. تظل المزامنة اليدوية من الربط تعمل.
 UNIT,وحدة
 UNIT items require a non-negative quantity.,عناصر الوحدة تحتاج إلى كمية غير سالبة.
 Unavailable,غير متاح
@@ -1649,10 +1648,9 @@ The order no longer has a Created shipment.,لم يعد للطلب شحنة بح
 The order invoice has nothing to retry.,لا توجد فاتورة طلب لإعادة محاولتها.
 Push Inventory to Noon,إرسال المخزون إلى Noon
 Push Prices to Noon,إرسال الأسعار إلى Noon
-Turn off to keep importing Noon orders while ERPNext stops writing stock to this account. Turning it back on does not trigger a full push.,أوقفه لمواصلة استيراد طلبات Noon بينما يتوقف ERPNext عن كتابة المخزون في هذا الحساب. إعادة تشغيله لا تُطلق إرسالًا كاملًا.
-Turn off to keep importing Noon orders while ERPNext stops writing prices to this account. Turning it back on does not trigger a full push.,أوقفه لمواصلة استيراد طلبات Noon بينما يتوقف ERPNext عن كتابة الأسعار في هذا الحساب. إعادة تشغيله لا تُطلق إرسالًا كاملًا.
+Turn off to keep importing Noon orders while ERPNext stops automatically writing stock to this account. Turning it back on does not trigger a full push. Manual syncs from the mapping still run.,أوقفه لمواصلة استيراد طلبات Noon بينما يتوقف ERPNext عن الكتابة التلقائية لـ المخزون في هذا الحساب. إعادة تشغيله لا تُطلق إرسالًا كاملًا. تظل المزامنة اليدوية من الربط تعمل.
+Turn off to keep importing Noon orders while ERPNext stops automatically writing prices to this account. Turning it back on does not trigger a full push. Manual syncs from the mapping still run.,أوقفه لمواصلة استيراد طلبات Noon بينما يتوقف ERPNext عن الكتابة التلقائية لـ الأسعار في هذا الحساب. إعادة تشغيله لا تُطلق إرسالًا كاملًا. تظل المزامنة اليدوية من الربط تعمل.
 Price push is paused for this account.,إرسال الأسعار متوقف مؤقتًا لهذا الحساب.
-push paused.,الإرسال متوقف مؤقتًا.
 Bosta City Code,رمز مدينة Bosta
 Sent to Bosta with the address first line; Bosta resolves the district.,يُرسل إلى Bosta مع السطر الأول من العنوان؛ وتحدد Bosta المنطقة.
 Choose a Bosta city.,اختر مدينة Bosta.
@@ -1873,3 +1871,7 @@ The credentials file is missing these keys or they are empty: {0},ملف الا�
 The private key does not look like a PEM key (no {0} line). Check the file before saving.,المفتاح الخاص لا يبدو مفتاح PEM (لا يوجد سطر {0}). تحقق من الملف قبل الحفظ.
 This form already has a different Project Code or Key ID. Overwrite them with the values from the file?,يحتوي هذا النموذج بالفعل على رمز مشروع أو معرف مفتاح مختلف. هل تريد استبدالهما بقيم الملف؟
 The file could not be read.,تعذرت قراءة الملف.
+stock queued as a manual run.,تمت إضافة المخزون إلى قائمة الانتظار كتشغيل يدوي.
+queued as a manual run.,تمت الإضافة إلى قائمة الانتظار كتشغيل يدوي.
+"Noon {0} sync queued as a manual run (automatic push is off for this account). Refresh this mapping to see the results.",تمت إضافة مزامنة {0} في Noon إلى قائمة الانتظار كتشغيل يدوي (الإرسال التلقائي متوقف لهذا الحساب). حدّث هذا الربط لرؤية النتائج.
+"Noon {0} sync queued as a manual run (automatic push is off for this account). Mapping statuses will update when the jobs finish.",تمت إضافة مزامنة {0} في Noon إلى قائمة الانتظار كتشغيل يدوي (الإرسال التلقائي متوقف لهذا الحساب). ستتحدث حالات الربط عند انتهاء المهام.

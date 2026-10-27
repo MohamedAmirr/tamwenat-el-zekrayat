@@ -87,9 +87,13 @@ Where work happens (no ambiguity about the Desk request path):
   connection, enabled flags, Location set, Warehouse - all local DB reads), and
   the enqueue. **No Shopify HTTP call is made in the request.**
 - "Push Inventory to Shopify" switch (``Marketplace Account.shopify_inventory_push_enabled``,
-  default on): when off, the sweep / daily reconcile skip the account,
-  ``_validate_inventory_account_local()`` and ``enqueue_account_sync()`` refuse
-  with "Inventory push is paused for this account.", and a job queued earlier
+  default on) governs ONLY the automatic triggers. A manual Desk click
+  (``manual=True`` threaded from the whitelisted endpoints through
+  ``enqueue_account_sync()`` to the worker) runs once whatever the switch says
+  and the worker skips every switch re-check; all other config checks still
+  apply. When off, the sweep / daily reconcile skip the account,
+  ``enqueue_account_sync()`` (automatic, ``manual=False``) refuses
+  with "Inventory push is paused for this account.", and an automatic job queued earlier
   returns from ``sync_account_inventory()`` before any Shopify call. A job
   already running re-reads the switch (fresh DB read) before every chunk and
   stops before the next Shopify write if it was turned off: result ``paused``
@@ -312,7 +316,7 @@ def _as_account(value):
 	return frappe.get_doc("Marketplace Account", value)
 
 
-def validate_inventory_account(account):
+def validate_inventory_account(account, manual=False):
 	"""Return ``(account_doc, connection)`` fully validated for inventory sync.
 
 	Runs ``_validate_inventory_account_local()``'s fast, non-network checks and
@@ -320,15 +324,16 @@ def validate_inventory_account(account):
 	the background worker calls this full version; the Desk request path stops
 	at the local half - see the module docstring.
 	"""
-	account_doc, connection = _validate_inventory_account_local(account)
+	account_doc, connection = _validate_inventory_account_local(account, manual=manual)
 	_validate_location_in_use(account_doc, connection)
 	return account_doc, connection
 
 
-def _validate_inventory_account_local(account):
+def _validate_inventory_account_local(account, manual=False):
 	"""Return ``(account_doc, connection)`` checking only local platform /
 	connection / enabled / Location-set / Warehouse configuration - no
-	network call."""
+	network call. The push switch is checked unless ``manual`` (a Desk click:
+	the switch governs only automatic triggers)."""
 	account_doc = _as_account(account)
 	if account_doc.platform != "Shopify":
 		frappe.throw(_("Marketplace Account {0} is not a Shopify account.").format(account_doc.name))
@@ -336,7 +341,7 @@ def _validate_inventory_account_local(account):
 		frappe.throw(_("Marketplace Account {0} does not use a Shopify Connection.").format(account_doc.name))
 	if not account_doc.enabled:
 		frappe.throw(_("Marketplace Account {0} is disabled.").format(account_doc.name))
-	if not account_doc.shopify_inventory_push_enabled:
+	if not manual and not account_doc.shopify_inventory_push_enabled:
 		frappe.throw(_push_paused_message())
 	if not cstr(account_doc.shopify_location_gid).strip():
 		frappe.throw(
@@ -391,7 +396,7 @@ def queue_inventory_sync(mapping_names):
 	valid_accounts = {}
 	for account_name, selected in accounts.items():
 		try:
-			_validate_inventory_account_local(selected["account"])
+			_validate_inventory_account_local(selected["account"], manual=True)
 		except frappe.ValidationError as error:
 			frappe.clear_last_message()
 			skipped_accounts.append(
@@ -417,7 +422,7 @@ def queue_account_reconciliation(account_name):
 	skipped_accounts = []
 	valid_accounts = {}
 	try:
-		_validate_inventory_account_local(account_doc)
+		_validate_inventory_account_local(account_doc, manual=True)
 	except frappe.ValidationError as error:
 		frappe.clear_last_message()
 		skipped_accounts.append(
@@ -435,7 +440,9 @@ def _enqueue_accounts(valid_accounts, skipped_accounts):
 	owner = frappe.session.user
 	jobs = []
 	for account_name, mapping_names in valid_accounts.items():
-		enqueued, job_id = enqueue_account_sync(account_name, mapping_names, owner)
+		# Only the whitelisted manual endpoints reach here: a manual run (the switch
+		# governs only automatic triggers).
+		enqueued, job_id = enqueue_account_sync(account_name, mapping_names, owner, manual=True)
 		if not enqueued:
 			skipped_accounts.append(
 				{
@@ -454,7 +461,7 @@ def _enqueue_accounts(valid_accounts, skipped_accounts):
 	return {"jobs": jobs, "skipped_accounts": skipped_accounts}
 
 
-def enqueue_account_sync(account_name, mapping_names=None, owner=None):
+def enqueue_account_sync(account_name, mapping_names=None, owner=None, manual=False):
 	"""Enqueue one deduplicated inventory-sync job for an account and return
 	``(enqueued, job_id)``: ``enqueued`` is False if a job for that account is
 	already queued/running (RQ dedup); ``job_id`` is the status job id (``None``
@@ -464,11 +471,14 @@ def enqueue_account_sync(account_name, mapping_names=None, owner=None):
 	PR2's ``sweep_changed_bins()`` / ``reconcile_all_accounts()`` call it too
 	(they only enqueue). ``owner`` is the Desk user for owner-scoped status;
 	without one no status entry/realtime event is created.
+
+	``manual=True`` (only the whitelisted Desk endpoints pass it) bypasses the push
+	switch and is forwarded to the worker so it does not stop on the switch either.
 	"""
-	if _is_push_paused(account_name):
-		# Defense in depth: every caller already filters/validates, but this is
-		# the single enqueue choke point, so nothing can queue a push for a
-		# paused account.
+	if not manual and _is_push_paused(account_name):
+		# Defense in depth: every automatic caller already filters/validates, but
+		# this is the single enqueue choke point, so no automatic trigger can queue
+		# a push for a paused account.
 		raise _PushPaused(_push_paused_message())
 	job_id = frappe.generate_hash(length=16) if owner else None
 	if job_id:
@@ -485,6 +495,7 @@ def enqueue_account_sync(account_name, mapping_names=None, owner=None):
 		owner=owner,
 		account_name=account_name,
 		mapping_names=mapping_names,
+		manual=manual,
 	)
 	if job is None:
 		if job_id:
@@ -503,14 +514,14 @@ def get_sync_status(job_id):
 # --- Worker -----------------------------------------------------------------
 
 
-def sync_account_inventory(account_name, mapping_names=None, job_id_for_result=None, owner=None):
+def sync_account_inventory(account_name, mapping_names=None, job_id_for_result=None, owner=None, manual=False):
 	"""Background job body (the worker): push ERPNext stock to Shopify ``on_hand``
 	for every given mapping (``None`` = every enabled mapping of the account).
 
 	Returns the result payload. Status/progress is written only when a
 	``job_id_for_result`` is given. See the module docstring for the shape.
 	"""
-	if _is_push_paused(account_name):
+	if not manual and _is_push_paused(account_name):
 		# The switch was turned off after this job was queued. Exit before any
 		# Shopify call and before touching any mapping's status; report it as
 		# a clear one-off result rather than raising (no Error Log, no retry).
@@ -531,7 +542,7 @@ def sync_account_inventory(account_name, mapping_names=None, job_id_for_result=N
 	mapping_processing_started = False
 	try:
 		_report(job_id_for_result, owner, status="running", processed=0, result=_result_payload([]))
-		account_doc, connection = validate_inventory_account(account_name)
+		account_doc, connection = validate_inventory_account(account_name, manual=manual)
 		client = ShopifyClient(connection.name)
 		location_id = account_doc.shopify_location_gid
 
@@ -581,7 +592,7 @@ def sync_account_inventory(account_name, mapping_names=None, job_id_for_result=N
 			# the transaction snapshot): a job already running when the switch is
 			# turned off must make no further Shopify write. Mappings in the
 			# chunks not yet pushed keep their current status untouched.
-			if _is_push_paused(account_doc.name):
+			if not manual and _is_push_paused(account_doc.name):
 				stopped_by_switch = True
 				break
 			chunk = syncable[chunk_start : chunk_start + chunk_size]

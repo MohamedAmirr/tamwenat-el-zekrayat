@@ -41,14 +41,17 @@ STOCK_PATH = "/stock/v1/stock-update"
 
 
 def queue_stock_push(account_name, mapping_names=None):
+	"""Manual Desk entry point: runs once regardless of the account push switch."""
 	mapping_names = authorize_selection(account_name, mapping_names)
 	get_account(account_name)
-	return enqueue_push(push_stock, "stock", account_name, mapping_names)
+	return enqueue_push(push_stock, "stock", account_name, mapping_names, manual=True)
 
 
-def push_stock(account_name, mapping_names=None):
-	"""Push current stock for enabled exact mappings of one Noon account."""
-	if is_push_paused(account_name, "stock"):
+def push_stock(account_name, mapping_names=None, manual=False):
+	"""Push current stock for enabled exact mappings of one Noon account. A manual run
+	(queued from a Desk click) ignores the account push switch, which governs only
+	automatic triggers; ``manual`` is set by the enqueuer, never read from the request."""
+	if not manual and is_push_paused(account_name, "stock"):
 		# Switch turned off after this job was queued: no Noon call, no mapping touched.
 		return {"synced": 0, "failed": 0, "paused": True}
 	account = get_account(account_name)
@@ -101,7 +104,7 @@ def push_stock(account_name, mapping_names=None):
 		# Fresh DB read before every chunk (the previous chunk's commit ended the
 		# transaction snapshot): a running job makes no further Noon write once the
 		# switch is off. Mappings of unpushed chunks keep their status untouched.
-		if is_push_paused(account.name, "stock"):
+		if not manual and is_push_paused(account.name, "stock"):
 			return {"synced": synced, "failed": failed, "paused": True}
 		try:
 			response = client.request(

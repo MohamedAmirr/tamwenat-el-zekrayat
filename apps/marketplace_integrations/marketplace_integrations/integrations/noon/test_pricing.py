@@ -84,6 +84,59 @@ class UnitTestNoonPricing(UnitTestCase):
 		self.assertEqual(client.request.call_count, 1)
 		persist.assert_called_once()
 
+	def test_manual_price_run_pushes_with_the_switch_off_and_never_rechecks_it(self):
+		account = SimpleNamespace(name="ACC", connection="CONN", noon_country_code="ae")
+		rows = [
+			(
+				SimpleNamespace(name=f"M{n}", external_reference=f"SKU-{n}"),
+				{"sales_uom": None},
+				SimpleNamespace(name=f"ITEM-{n}", stock_uom="Nos"),
+			)
+			for n in (1, 2)
+		]
+		self.paused.return_value = True
+		module = "marketplace_integrations.integrations.noon.pricing"
+		with patch(f"{module}.get_account", return_value=account):
+			with patch(f"{module}.selected_mappings", return_value=rows):
+				with patch(f"{module}.validate_price_setup", return_value=SimpleNamespace(name="PL")):
+					with patch(f"{module}.resolve_listing_price", return_value=Decimal("10")):
+						with patch(f"{module}.PRICING_CHUNK_SIZE", 1):
+							with patch(f"{module}.NoonClient") as client_class:
+								with patch(f"{module}.persist_outcomes"):
+									client = client_class.return_value
+									client.request.side_effect = [
+										Response([result("SKU-1")]),
+										Response([result("SKU-2")]),
+									]
+									outcome = push_pricing("ACC", manual=True)
+		self.assertEqual(outcome, {"synced": 2, "failed": 0})
+		self.assertEqual(client.request.call_count, 2)
+		self.paused.assert_not_called()
+
+	def test_manual_price_run_with_a_bad_price_list_still_errors(self):
+		account = SimpleNamespace(name="ACC", connection="CONN", noon_country_code="ae")
+		rows = [
+			(
+				SimpleNamespace(name="M1", external_reference="SKU-1"),
+				{"sales_uom": None},
+				SimpleNamespace(name="ITEM-1", stock_uom="Nos"),
+			)
+		]
+		self.paused.return_value = True
+		module = "marketplace_integrations.integrations.noon.pricing"
+		with patch(f"{module}.get_account", return_value=account):
+			with patch(f"{module}.selected_mappings", return_value=rows):
+				with patch(
+					f"{module}.validate_price_setup",
+					side_effect=frappe.ValidationError("Price List PL must be an enabled selling price list."),
+				):
+					with patch(f"{module}.NoonClient") as client_class:
+						with patch(f"{module}.persist_outcomes") as persist:
+							outcome = push_pricing("ACC", manual=True)
+		self.assertEqual(outcome, {"synced": 0, "failed": 1})
+		client_class.assert_not_called()
+		self.assertIn("enabled selling price list", persist.call_args.args[0]["M1"])
+
 	def test_price_payload_partial_failure_and_retry(self):
 		account = SimpleNamespace(name="ACC", connection="CONN", noon_country_code="ae")
 		rows = [

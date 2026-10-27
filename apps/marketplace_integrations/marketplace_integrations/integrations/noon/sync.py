@@ -96,9 +96,13 @@ def authorize_selection(account_name, mapping_names=None):
 	return names
 
 
-def enqueue_push(worker, kind, account_name, mapping_names=None):
-	if is_push_paused(account_name, kind):
-		# The single enqueue choke point: nothing can queue a push for a paused account.
+def enqueue_push(worker, kind, account_name, mapping_names=None, manual=False):
+	"""The single enqueue choke point. The account push switch governs only automatic
+	triggers: an automatic caller (manual=False) is refused while it is off. A manual
+	click (manual=True, passed only by the whitelisted Desk endpoints) runs once
+	whatever the switch says, and the worker is told so it does not stop on the switch."""
+	switch_off = is_push_paused(account_name, kind)
+	if switch_off and not manual:
 		raise PushPaused(push_paused_message(kind))
 	job = frappe.enqueue(
 		worker,
@@ -108,8 +112,9 @@ def enqueue_push(worker, kind, account_name, mapping_names=None):
 		deduplicate=True,
 		account_name=account_name,
 		mapping_names=mapping_names,
+		manual=manual,
 	)
-	return {"queued": job is not None}
+	return {"queued": job is not None, "switch_off": switch_off}
 
 
 def chunks(rows, size):

@@ -10,7 +10,7 @@ from marketplace_integrations.integrations.noon.catalog import list_warehouses a
 from marketplace_integrations.integrations.noon.catalog import upsert_mapping as upsert_noon_mapping
 from marketplace_integrations.integrations.noon.inventory import push_stock
 from marketplace_integrations.integrations.noon.pricing import push_pricing
-from marketplace_integrations.integrations.noon.sync import PushPaused, authorize_selection, enqueue_push
+from marketplace_integrations.integrations.noon.sync import authorize_selection, enqueue_push
 
 
 @frappe.whitelist(methods=["POST"])
@@ -27,21 +27,15 @@ def list_warehouses(connection: str):
 
 @frappe.whitelist(methods=["POST"])
 def queue_account_sync(account: str, mapping_names=None):
-	"""Queue both updates for one account; each worker owns its statuses."""
+	"""Manual Desk entry point: queue both updates for one account; each worker owns its
+	statuses. Runs once whatever the account push switches say (they govern only the
+	automatic triggers); "switch_off" in each result flags that the switch was bypassed."""
 	mapping_names = authorize_selection(account, mapping_names)
 	get_account(account)
-	result = {}
-	paused = []
-	for kind, worker in (("pricing", push_pricing), ("stock", push_stock)):
-		try:
-			result[kind] = enqueue_push(worker, kind, account, mapping_names)
-		except PushPaused as error:
-			paused.append(error)
-			result[kind] = {"queued": False, "paused": True}
-	if len(paused) == len(result):
-		# Both switches off: refuse with the message rather than report two skips.
-		raise paused[0]
-	return result
+	return {
+		kind: enqueue_push(worker, kind, account, mapping_names, manual=True)
+		for kind, worker in (("pricing", push_pricing), ("stock", push_stock))
+	}
 
 
 @frappe.whitelist()
