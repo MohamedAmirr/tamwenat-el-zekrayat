@@ -8,6 +8,7 @@ import frappe
 from frappe.tests import UnitTestCase
 
 from marketplace_integrations.integrations.noon.inventory import push_stock
+from marketplace_integrations.services.listing_quantity import BundleStockError
 
 
 class Response:
@@ -284,3 +285,31 @@ class UnitTestNoonInventory(UnitTestCase):
 								self.assertEqual(push_stock("ACC"), {"synced": 0, "failed": 1})
 		client.assert_not_called()
 		self.assertEqual(persist.call_args.kwargs, {"inventory": True})
+
+	def test_invalid_bundle_is_reported_locally_and_not_pushed_as_zero(self):
+		account = SimpleNamespace(
+			name="ACC", connection="CONN", warehouse="ERP-WH", noon_warehouse_code="NOON-WH"
+		)
+		rows = self._two_rows()
+		prefix = "marketplace_integrations.integrations.noon.inventory"
+		with patch(f"{prefix}.get_account", return_value=account):
+			with patch(f"{prefix}.selected_mappings", return_value=rows):
+				with patch(f"{prefix}.validate_account_warehouse"):
+					with patch(f"{prefix}.validate_warehouse_code"):
+						with patch(
+							f"{prefix}.get_sellable_qty",
+							side_effect=[BundleStockError("Product Bundle ITEM-1 has no component Items."), 4],
+						):
+							with patch(f"{prefix}.NoonClient") as client_class:
+								with patch(f"{prefix}.persist_outcomes") as persist:
+									client = client_class.return_value
+									client.request.return_value = Response([result("SKU-2")])
+									outcome = push_stock("ACC")
+		self.assertEqual(outcome, {"synced": 1, "failed": 1})
+		payload = client.request.call_args.kwargs["json"]
+		self.assertEqual(
+			payload, {"items": [{"warehouse_code": "NOON-WH", "partner_sku": "SKU-2", "qty": 4}]}
+		)
+		self.assertEqual(
+			persist.call_args_list[0].args[0], {"M1": "Product Bundle ITEM-1 has no component Items."}
+		)

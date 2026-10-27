@@ -55,7 +55,6 @@ const {
 	apply_platform_gating,
 	load_erpnext_sync_status,
 	load_shopify_item_presentation,
-	select_noon_fulfillment_buttons,
 	JSON_EVIDENCE_FIELDS,
 } = require("./marketplace_order.js");
 
@@ -490,6 +489,26 @@ test("apply_platform_gating shows Retry Sync for an unsynced Shopify order", () 
 	assert.ok(frm_calls.custom_buttons.includes("Refresh from Shopify"));
 });
 
+test("apply_platform_gating keeps Refresh from Noon and adds no fulfillment actions for a Noon order", () => {
+	frm_calls = { custom_buttons: [], indicators: [] };
+	const methods = [];
+	const original_call = global.frappe.call;
+	global.frappe.call = (opts) => {
+		methods.push(opts.method);
+		return original_call(opts);
+	};
+	try {
+		apply_platform_gating(make_frm({ platform: "Noon", name: "MO-NOON-1" }));
+	} finally {
+		global.frappe.call = original_call;
+	}
+	assert.ok(frm_calls.custom_buttons.includes("Refresh from Noon"));
+	for (const label of ["Create Shipment", "Mark Out of Stock", "Mark Handed Over", "Add AWB"]) {
+		assert.ok(!frm_calls.custom_buttons.includes(label), label);
+	}
+	assert.ok(!methods.some((method) => method.includes("noon_fulfillment")));
+});
+
 function run_status_load({ saved, dirty }) {
 	frm_calls = { custom_buttons: [], indicators: [] };
 	const frm = make_frm({
@@ -662,17 +681,6 @@ test("add_order_actions shows Cancel Order only for RECEIVED and UPDATE_CART ord
 		add_order_actions(make_frm({ external_status: status }));
 		assert.ok(!frm_calls.custom_buttons.includes("Cancel Order"), String(status));
 	}
-});
-
-test("select_noon_fulfillment_buttons keeps only available actions, or all when the call failed", () => {
-	const buttons = [{ action: "create_shipment" }, { action: "retry" }, { action: "add_awb" }];
-	assert.deepEqual(
-		select_noon_fulfillment_buttons(buttons, ["retry", "unknown_action"]).map((b) => b.action),
-		["retry"]
-	);
-	assert.deepEqual(select_noon_fulfillment_buttons(buttons, []), []);
-	assert.equal(select_noon_fulfillment_buttons(buttons, null), buttons);
-	assert.equal(select_noon_fulfillment_buttons(buttons, undefined), buttons);
 });
 
 test("Shopify item presentation shows Unmapped, a null variant label, mapped names, and keeps markup as text", async () => {

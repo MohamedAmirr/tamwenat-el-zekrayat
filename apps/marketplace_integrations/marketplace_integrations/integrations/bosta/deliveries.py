@@ -3,7 +3,7 @@
 
 """Bosta delivery creation and the corresponding ERPNext Delivery Note."""
 
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 import frappe
 from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
@@ -16,6 +16,7 @@ from marketplace_integrations.integrations.bosta.client import (
 	is_success_response,
 	response_body,
 )
+from marketplace_integrations.integrations.bosta.constants import BOSTA_EXCLUDED_PLATFORMS
 from marketplace_integrations.marketplace_integrations.doctype.bosta_shipment.bosta_shipment import (
 	save_as_system,
 )
@@ -428,8 +429,30 @@ def _get_sales_order(sales_order_name):
 	return order
 
 
+def excluded_platform(order):
+	"""The marketplace platform of ``order`` when it fulfils its own orders (no Bosta), else ``None``.
+
+	Read from the linked Marketplace Order, the authority: the Sales Order's
+	``custom_marketplace_platform`` is only fetched when the document is saved."""
+	marketplace_order = order.get("custom_marketplace_order")
+	platform = (
+		frappe.db.get_value("Marketplace Order", marketplace_order, "platform")
+		if marketplace_order
+		else order.get("custom_marketplace_platform")
+	)
+	return platform if platform in BOSTA_EXCLUDED_PLATFORMS else None
+
+
 def _validate_deliverable(order):
-	"""Reject before inserting a shipment or calling Bosta (H2)."""
+	"""Reject before inserting a shipment or calling Bosta (H2).
+
+	Every create path (single, bulk plan and bulk create) goes through here, so a Sales Order of a
+	platform that fulfils its own orders is refused for all of them."""
+	platform = excluded_platform(order)
+	if platform:
+		frappe.throw(
+			_("Bosta shipments cannot be created for {0} orders: {0} fulfils its own orders.").format(platform)
+		)
 	if order.docstatus != 1:
 		frappe.throw(_("Bosta Shipment can only be created from a submitted Sales Order."))
 	if order.status in ("Closed", "On Hold"):

@@ -138,7 +138,9 @@ class UnitTestNoonChangedStockSweep(UnitTestCase):
 			SimpleNamespace(name="M3", item="ITEM-3"),
 		]
 		self.changed_items = ["ITEM-1", "ITEM-1", "ITEM-3"]
+		self.bundles = {}  # {parent item: [component rows]}, what get_bundle_components returns
 		for target, value in (
+			(f"{SWEEP}.get_bundle_components", lambda item_codes: self.bundles),
 			(f"{SWEEP}.now_datetime", TICK),
 			(f"{SWEEP}.frappe.cache", lambda: self.cache),
 			(f"{SWEEP}.frappe.get_all", self._get_all),
@@ -182,6 +184,25 @@ class UnitTestNoonChangedStockSweep(UnitTestCase):
 		self.cache.set_value.assert_called_once()
 		self.assertEqual(self.cache.set_value.call_args.args[1], TICK)
 		self.assertIn("noon", self.cache.set_value.call_args.args[0])
+
+	def test_a_changed_component_bin_re_pushes_the_bundle_parent(self):
+		# ITEM-2 is a bundle parent (no Bin of its own); its component COMP has a changed Bin.
+		self.bundles = {"ITEM-2": [SimpleNamespace(item_code="COMP", qty=1)]}
+		self.changed_items = ["COMP"]
+		enqueue = self._run()
+		self.assertEqual(enqueue.call_args.args[1:], ("stock", "ACC", ["M2"]))
+		bin_call = next(call for call in self.get_all_calls if call[0] == "Bin")
+		# The query watches the mapped items and the components, and still only this Warehouse.
+		self.assertEqual(
+			bin_call[1]["filters"]["item_code"], ["in", ["COMP", "ITEM-1", "ITEM-2", "ITEM-3"]]
+		)
+		self.assertEqual(bin_call[1]["filters"]["warehouse"], "WH")
+
+	def test_a_component_change_does_not_touch_unrelated_mappings(self):
+		self.bundles = {"ITEM-2": [SimpleNamespace(item_code="COMP", qty=1)]}
+		self.changed_items = ["COMP", "ITEM-1"]
+		enqueue = self._run()
+		self.assertEqual(enqueue.call_args.args[1:], ("stock", "ACC", ["M1", "M2"]))
 
 	def test_uses_stored_watermark_minus_overlap(self):
 		self.cache.get_value.return_value = datetime(2026, 10, 19, 11, 58, 0)

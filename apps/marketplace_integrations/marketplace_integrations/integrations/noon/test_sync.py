@@ -65,6 +65,48 @@ class IntegrationTestNoonSyncState(IntegrationTestCase):
 		self._accounts.append(account)
 		return account
 
+	def test_stock_selection_keeps_a_non_stock_bundle_parent_but_not_a_plain_non_stock_item(self):
+		bundle_parent, plain_non_stock = (
+			frappe.get_doc(
+				{
+					"doctype": "Item",
+					"item_code": f"TEST-NOON-{marker}-{frappe.generate_hash(length=8)}",
+					"item_group": "Products",
+					"stock_uom": "Nos",
+					"is_stock_item": 0,
+				}
+			).insert()
+			for marker in ("BUNDLE", "SERVICE")
+		)
+		bundle = frappe.get_doc(
+			{
+				"doctype": "Product Bundle",
+				"new_item_code": bundle_parent.name,
+				"items": [{"item_code": self.item.name, "qty": 1}],
+			}
+		).insert(ignore_permissions=True)
+		mappings = [
+			frappe.get_doc(
+				{
+					"doctype": "Marketplace Product Mapping",
+					"marketplace_account": self.account.name,
+					"item": item.name,
+					"external_reference": f"SKU-{frappe.generate_hash(length=8)}",
+				}
+			).insert()
+			for item in (bundle_parent, plain_non_stock)
+		]
+		try:
+			selected = {entry[0].name for entry in selected_mappings(self.account.name, stock_only=True)}
+			self.assertIn(mappings[0].name, selected)
+			self.assertNotIn(mappings[1].name, selected)
+		finally:
+			for mapping in mappings:
+				frappe.db.delete("Marketplace Product Mapping", {"name": mapping.name})
+			frappe.delete_doc("Product Bundle", bundle.name, ignore_permissions=True, force=True)
+			for item in (bundle_parent, plain_non_stock):
+				frappe.delete_doc("Item", item.name, ignore_permissions=True, force=True)
+
 	def test_only_exact_enabled_mapping_and_account_resolve(self):
 		self.assertEqual(
 			[entry[0].name for entry in selected_mappings(self.account.name)], [self.mapping.name]

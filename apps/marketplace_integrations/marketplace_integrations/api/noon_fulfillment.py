@@ -13,7 +13,7 @@ queue. No Noon HTTP call ever happens inside a Desk request.
 
 import frappe
 
-from marketplace_integrations.integrations.noon import fulfillment
+from marketplace_integrations.integrations.noon import fulfillment, handover_state
 
 
 def _get_noon_order(marketplace_order):
@@ -45,14 +45,35 @@ def get_shippable_units(marketplace_order: str):
 
 @frappe.whitelist(methods=["POST"])
 def get_available_actions(marketplace_order: str):
-	"""Read-only convenience for the form: which Noon Fulfillment buttons to
-	show. No lock needed (nothing is written), so this loads directly and
-	only needs read permission; every action still validates server side."""
+	"""Read-only convenience for the Sales Order form: which Noon Fulfillment buttons to show,
+	plus a compact copy of the shipments for its dialogs and read-only summary. No lock needed
+	(nothing is written), so this loads directly and only needs read permission; every action
+	still validates server side."""
 	doc = frappe.get_doc("Marketplace Order", marketplace_order)
 	doc.check_permission("read")
 	if doc.platform != "Noon":
 		frappe.throw(frappe._("Marketplace Order {0} is not a Noon order.").format(doc.name))
-	return fulfillment.get_available_actions(doc)
+	return {**fulfillment.get_available_actions(doc), "shipments": _shipment_summaries(doc)}
+
+
+def _shipment_summaries(doc):
+	"""Display values of each shipment: status, AWBs, Delivery Note and the units that could not
+	be put on a Delivery Note (as text)."""
+	awbs = {}
+	for awb in doc.noon_shipment_awbs or []:
+		awbs.setdefault(awb.integration_shipment_nr, []).append({"courier": awb.courier, "awb_nr": awb.awb_nr})
+	return [
+		{
+			"integration_shipment_nr": row.integration_shipment_nr,
+			"status": row.status,
+			"awbs": awbs.get(row.integration_shipment_nr, []),
+			"delivery_note": row.delivery_note or "",
+			"delivery_notes": handover_state.shipment_notes(row),
+			"handed_over": fulfillment._handed_over(row),
+			"unresolved": [handover_state.entry_text(entry) for entry in handover_state.load_entries(row)],
+		}
+		for row in doc.noon_shipments or []
+	]
 
 
 @frappe.whitelist(methods=["POST"])
@@ -69,6 +90,16 @@ def create_shipment(
 def cancel_shipment(marketplace_order: str, integration_shipment_nr: str):
 	_get_noon_order(marketplace_order)
 	return fulfillment.cancel_shipment(marketplace_order, integration_shipment_nr)
+
+
+@frappe.whitelist(methods=["POST"])
+def mark_handed_over(marketplace_order: str, integration_shipment_nr: str):
+	"""Manual handover of a Created shipment: drafts one Delivery Note (#368).
+
+	No Noon call. The shared service also needs create permission on Delivery Note and checks it.
+	"""
+	_get_noon_order(marketplace_order)
+	return fulfillment.mark_handed_over(marketplace_order, integration_shipment_nr)
 
 
 @frappe.whitelist(methods=["POST"])

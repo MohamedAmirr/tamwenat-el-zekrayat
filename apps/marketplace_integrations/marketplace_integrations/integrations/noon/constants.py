@@ -89,6 +89,11 @@ MERCHANT_CODES_MAX = 200
 # shipment row's creation. 1 hour is a placeholder with no documented basis.
 NOON_PENDING_SHIPMENT_STUCK_HOURS = 1
 
+# #368: Needs Attention reminds the user about a Created shipment that nobody marked handed over
+# (no handed_over_on, no live Delivery Note) after this many hours, measured from the shipment
+# row's creation. 36 hours was chosen by the user; Noon's API has no handover signal to detect it.
+NOON_HANDOVER_REMINDER_HOURS = 36
+
 # Changed-stock sweep (integrations/noon/sweep.py::sweep_changed_bins), registered
 # in hooks.py scheduler_events["cron"]. Frappe has no every-N-minutes bucket.
 NOON_INVENTORY_SWEEP_CRON = "*/2 * * * *"

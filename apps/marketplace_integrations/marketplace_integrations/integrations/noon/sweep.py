@@ -14,6 +14,7 @@ from frappe.utils import add_to_date, now_datetime
 from marketplace_integrations.integrations.noon.constants import NOON_INVENTORY_SWEEP_OVERLAP_MINUTES
 from marketplace_integrations.integrations.noon.inventory import push_stock
 from marketplace_integrations.integrations.noon.sync import PushPaused, enqueue_push
+from marketplace_integrations.services.listing_quantity import get_bundle_components
 
 
 def sweep_all_accounts():
@@ -96,16 +97,27 @@ def _sweep_account(account, tick_time):
 		names_by_item = {}
 		for mapping in mappings:
 			names_by_item.setdefault(mapping.item, []).append(mapping.name)
+		# A bundle parent has no Bin: a change to one of its components' Bins re-pushes the
+		# parent's mappings too (#368), the same widening as Shopify's sweep.
+		parents_by_component = {}
+		for parent, rows in get_bundle_components(list(names_by_item)).items():
+			for row in rows:
+				parents_by_component.setdefault(row.item_code, set()).add(parent)
+		watched_items = set(names_by_item) | set(parents_by_component)
 		changed_items = frappe.get_all(
 			"Bin",
 			filters={
 				"warehouse": account.warehouse,
-				"item_code": ["in", list(names_by_item)],
+				"item_code": ["in", sorted(watched_items)],
 				"modified": [">", since],
 			},
 			pluck="item_code",
 		)
-		affected = sorted({name for item in set(changed_items) for name in names_by_item.get(item, [])})
+		affected_items = set()
+		for item_code in set(changed_items):
+			affected_items.add(item_code)
+			affected_items.update(parents_by_component.get(item_code, ()))
+		affected = sorted({name for item in affected_items for name in names_by_item.get(item, [])})
 		if affected:
 			should_advance = bool(enqueue_push(push_stock, "stock", account.name, affected)["queued"])
 	if should_advance:
