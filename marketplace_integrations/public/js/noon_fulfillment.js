@@ -22,6 +22,8 @@
 // script, and this asset is loaded into that same page scope.
 (function () {
 	const API = "marketplace_integrations.api.noon_fulfillment.";
+	// Noon is the only courier; the value Noon documents for its own AWBs.
+	const NOON_COURIER = "noon";
 
 	// A context is rebuilt on every form refresh from the get_available_actions result.
 	function build_context(frm, state) {
@@ -152,7 +154,14 @@
 		const rows = shipments
 			.map((shipment) => {
 				const awbs = (shipment.awbs || [])
-					.map((awb) => escape([awb.courier, awb.awb_nr].filter(Boolean).join(" ")))
+					.map((awb) =>
+						escape(
+							[awb.courier === "noon" ? "Noon" : awb.courier, awb.awb_nr].filter(Boolean).join(" ")
+						)
+					)
+					.join(", ");
+				const items = (shipment.items || [])
+					.map((item) => escape(`${item.label} x${item.qty}`))
 					.join(", ");
 				// Every Delivery Note created for the shipment (the first one alone for older data).
 				const notes = (shipment.delivery_notes || []).length
@@ -167,14 +176,16 @@
 					)
 					.join(", ");
 				const unresolved = (shipment.unresolved || []).map((text) => escape(text)).join("; ");
-				return `<tr><td>${escape(shipment.integration_shipment_nr || "")}</td><td>${escape(
+				return `<tr><td title="${escape(shipment.integration_shipment_nr || "")}">${escape(
+					noon_shipment_label(shipment.integration_shipment_nr)
+				)}</td><td>${items}</td><td>${escape(
 					__(shipment.status || "")
 				)}</td><td>${awbs}</td><td>${delivery_note}</td><td>${unresolved}</td></tr>`;
 			})
 			.join("");
 		return (
 			`<h5>${escape(__("Noon Shipments"))}</h5>` +
-			`<table class="table table-bordered"><thead><tr><th>${escape(__("Shipment"))}</th><th>${escape(
+			`<table class="table table-bordered"><thead><tr><th>${escape(__("Shipment"))}</th><th>${escape(__("Items"))}</th><th>${escape(
 				__("Status")
 			)}</th><th>${escape(__("AWB"))}</th><th>${escape(__("Delivery Note"))}</th><th>${escape(
 				__("Not added")
@@ -215,13 +226,27 @@
 	// Noon-sourced text): multicheck.js interpolates a control's `value` unescaped into a
 	// `data-unit="..."` HTML attribute, so a raw mp_item_nr could break out and run script.
 	// mp_item_nrs_from_unit_indices() maps the selected indices back to the real `mp_item_nr`s.
+	//
+	// The visible label is "Item name (SKU)" (just the SKU for an unmapped SKU); a SKU shared by
+	// several units gets a "(1 of 3)" counter so the lines can be told apart. The raw mp_item_nr
+	// is only in the tooltip (title attribute), never visible text.
 	function noon_unit_checklist_options(units) {
-		return units.map((unit, index) => ({
-			label: `${frappe.utils.escape_html(unit.mp_item_nr)} (${frappe.utils.escape_html(
-				unit.partner_sku || ""
-			)})`,
-			value: String(index),
-		}));
+		const escape = frappe.utils.escape_html;
+		const totals = {};
+		units.forEach((unit) => {
+			totals[unit.partner_sku || ""] = (totals[unit.partner_sku || ""] || 0) + 1;
+		});
+		const seen = {};
+		return units.map((unit, index) => {
+			const sku = unit.partner_sku || "";
+			seen[sku] = (seen[sku] || 0) + 1;
+			let text = unit.item_name && sku ? `${unit.item_name} (${sku})` : unit.item_name || sku;
+			if (totals[sku] > 1) text += ` (${__("{0} of {1}", [seen[sku], totals[sku]])})`;
+			return {
+				label: `<span title="${escape(unit.mp_item_nr || "")}">${escape(text)}</span>`,
+				value: String(index),
+			};
+		});
 	}
 
 	// Maps a MultiCheck's selected index-string values back to the real `mp_item_nr`s the Noon
@@ -233,9 +258,18 @@
 			.filter((mp_item_nr) => mp_item_nr);
 	}
 
+	// "Shipment 2" for "<order nr>-2"; the full number stays in tooltips and as the dropdown
+	// value (it is the key the API takes).
+	function noon_shipment_label(shipment_nr) {
+		const nr = String(shipment_nr || "");
+		return __("Shipment {0}", [nr.slice(nr.lastIndexOf("-") + 1)]);
+	}
+
 	function shipment_option(shipment) {
 		return {
-			label: frappe.utils.escape_html(shipment.integration_shipment_nr),
+			label: frappe.utils.escape_html(
+				`${noon_shipment_label(shipment.integration_shipment_nr)} - ${__(shipment.status || "")}`
+			),
 			value: shipment.integration_shipment_nr,
 		};
 	}
@@ -283,39 +317,12 @@
 						columns: 1,
 						reqd: 1,
 					},
-					{
-						fieldname: "awb_source",
-						fieldtype: "Select",
-						label: __("AWB Source"),
-						options: "Noon\nOwn Courier",
-						default: "Noon",
-						reqd: 1,
-					},
-					{
-						fieldname: "courier",
-						fieldtype: "Data",
-						label: __("Courier"),
-						depends_on: "eval:doc.awb_source=='Own Courier'",
-					},
-					{
-						fieldname: "awb_nr",
-						fieldtype: "Data",
-						label: __("AWB Nr"),
-						depends_on: "eval:doc.awb_source=='Own Courier'",
-					},
 				],
 				primary_action_label: __("Create"),
 				primary_action(values) {
 					if (!values.units || !values.units.length) {
 						frappe.msgprint({
 							message: __("At least one unit must be selected."),
-							indicator: "red",
-						});
-						return;
-					}
-					if (values.awb_source === "Own Courier" && (!values.courier || !values.awb_nr)) {
-						frappe.msgprint({
-							message: __("Courier and AWB Nr are required for Own Courier shipments."),
 							indicator: "red",
 						});
 						return;
@@ -327,9 +334,6 @@
 							args: {
 								marketplace_order: ctx.marketplace_order,
 								mp_item_nrs: mp_item_nrs_from_unit_indices(units, values.units),
-								awb_source: values.awb_source,
-								courier: values.courier,
-								awb_nr: values.awb_nr,
 							},
 							freeze: true,
 							freeze_message: __("Queuing shipment creation..."),
@@ -554,7 +558,15 @@
 					options,
 					reqd: 1,
 				},
-				{ fieldname: "courier", fieldtype: "Data", label: __("Courier"), reqd: 1 },
+				{
+					// Noon is the only courier; the stored/sent value is Noon's documented lowercase "noon".
+					fieldname: "courier",
+					fieldtype: "Select",
+					label: __("Courier"),
+					options: [{ label: __("Noon"), value: NOON_COURIER }],
+					default: NOON_COURIER,
+					reqd: 1,
+				},
 				{ fieldname: "awb_nr", fieldtype: "Data", label: __("AWB Nr"), reqd: 1 },
 			],
 			primary_action_label: __("Add AWB"),

@@ -84,9 +84,11 @@ from marketplace_integrations.integrations.noon.expected_change import record_ou
 from marketplace_integrations.integrations.noon.orders import get_order as get_fbpi_order
 from marketplace_integrations.integrations.noon.orders import import_order
 from marketplace_integrations.services.delivery_note_drafts import create_draft_delivery_note
-from marketplace_integrations.services.mappings import resolve_item
+from marketplace_integrations.services.mappings import resolve_item, resolve_mapping_and_item
 
 RQ_JOB_PREFIX = "marketplace-noon-fulfillment"
+# The only courier: the value Noon documents for AWBs it generated.
+NOON_COURIER = "noon"
 
 MP_STATUS_CONFIRMED = "MP_ITEM_STATUS_CONFIRMED"
 INTEGRATION_STATUS_ACKNOWLEDGED = "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED"
@@ -203,8 +205,76 @@ def _release_pending_oos_units(marketplace_order_name, mp_item_nrs):
 	frappe.db.commit()
 
 
+def item_names_by_sku(order, skus):
+	"""``{sku: Item.item_name}`` for the SKUs that have an enabled product mapping, one lookup per
+	distinct SKU. Noon's order payload carries no product title, so an unmapped SKU is simply
+	absent (callers show the SKU alone)."""
+	names = {}
+	for sku in {cstr(sku).strip() for sku in skus if cstr(sku).strip()}:
+		resolved = resolve_mapping_and_item(order.marketplace_account, sku)
+		item = resolved and resolved.get("item")
+		item_name = frappe.db.get_value("Item", item, "item_name") if item else None
+		if item_name:
+			names[sku] = item_name
+	return names
+
+
+def unit_label(sku, names):
+	"""``Item name (SKU)``, or the SKU alone when it is not mapped."""
+	sku = cstr(sku).strip()
+	name = names.get(sku)
+	return f"{name} ({sku})" if name else sku
+
+
+def shipment_number(integration_shipment_nr):
+	"""The ``n`` of ``<fbpi_order_nr>-<n>``."""
+	return cstr(integration_shipment_nr).rsplit("-", 1)[-1]
+
+
+def shipment_items(order, integration_shipment_nrs=None, names=None):
+	"""``{shipment_nr: [{"label": "Item name (SKU)", "qty": n}, ...]}`` from the shipment unit
+	rows, grouped by SKU in first-seen order."""
+	rows = [
+		row
+		for row in order.noon_shipment_units or []
+		if integration_shipment_nrs is None or row.integration_shipment_nr in integration_shipment_nrs
+	]
+	if names is None:
+		names = item_names_by_sku(order, [row.partner_sku for row in rows])
+	grouped = {}
+	for row in rows:
+		sku = cstr(row.partner_sku).strip()
+		entry = grouped.setdefault(row.integration_shipment_nr, {}).setdefault(
+			sku, {"label": unit_label(sku, names), "qty": 0}
+		)
+		entry["qty"] += 1
+	return {nr: list(by_sku.values()) for nr, by_sku in grouped.items()}
+
+
+def _unit_skus(order):
+	"""``{mp_item_nr: partner_sku}`` from the shipment unit rows and the latest payload."""
+	skus = {}
+	for item in _latest_payload_items(order):
+		if isinstance(item, dict):
+			skus[cstr(item.get("mp_item_nr")).strip()] = cstr(item.get("partner_sku")).strip()
+	for row in order.noon_shipment_units or []:
+		skus[cstr(row.mp_item_nr).strip()] = cstr(row.partner_sku).strip()
+	return skus
+
+
+def _unit_text(order, mp_item_nr):
+	"""Readable name of one unit for error messages: ``Item name (SKU)``; falls back to the
+	``mp_item_nr`` only when the SKU is unknown."""
+	mp_item_nr = cstr(mp_item_nr).strip()
+	sku = _unit_skus(order).get(mp_item_nr)
+	if not sku:
+		return mp_item_nr
+	return unit_label(sku, item_names_by_sku(order, [sku]))
+
+
 def get_shippable_units(order, include_pending_oos=False):
-	"""Return ``[{"mp_item_nr": ..., "partner_sku": ...}, ...]`` for units
+	"""Return ``[{"mp_item_nr": ..., "partner_sku": ..., "item_name": ...}, ...]`` (``item_name``
+	only for a SKU with a product mapping) for units
 	currently shippable per #146 decision 11: CONFIRMED + ACKNOWLEDGED (raw
 	Noon enum values) in ``latest_payload.items[]``, and not already claimed
 	by an active (non-Cancelled) shipment or reserved for queued Out of Stock.
@@ -227,6 +297,10 @@ def get_shippable_units(order, include_pending_oos=False):
 			continue
 		seen.add(mp_item_nr)
 		shippable.append({"mp_item_nr": mp_item_nr, "partner_sku": cstr(item.get("partner_sku")).strip()})
+	names = item_names_by_sku(order, [unit["partner_sku"] for unit in shippable])
+	for unit in shippable:
+		if unit["partner_sku"] in names:
+			unit["item_name"] = names[unit["partner_sku"]]
 	return shippable
 
 
@@ -269,12 +343,12 @@ def get_available_actions(order):
 
 	# Mirrors retry(): Pending/Error re-run CreateShipment, Cancel Pending
 	# re-runs CancelShipment, and a Created shipment can retry a Pending
-	# Own Courier AWB or a Pending/Error invoice.
+	# AWB added through Add AWB or a Pending/Error invoice.
 	created_nrs = {row.integration_shipment_nr for row in created}
 	if (
 		statuses & {"Pending", "Error", "Cancel Pending"}
 		or any(
-			row.integration_shipment_nr in created_nrs and row.status == "Pending" and row.source == "Own Courier"
+			row.integration_shipment_nr in created_nrs and row.status == "Pending"
 			for row in order.noon_shipment_awbs or []
 		)
 		or any(row.invoice_status in ("Pending", "Error") for row in created)
@@ -301,11 +375,26 @@ def _next_shipment_number(order):
 	return f"{order.external_order_id}-{len(order.noon_shipments or []) + 1}"
 
 
+def _with_readable_keys(order, request_data):
+	"""Adds ``order_reference`` and, when the call names a shipment, ``shipment_label`` and
+	``items`` next to the existing keys (which other code parses and which stay as they are)."""
+	readable = {"order_reference": order.platform_order_reference or ""}
+	shipment_nr = request_data.get("integration_shipment_nr")
+	if shipment_nr:
+		readable["shipment_label"] = f"Shipment {shipment_number(shipment_nr)}"
+		readable["items"] = [
+			f"{item['label']} x{item['qty']}" if item["qty"] > 1 else item["label"]
+			for item in shipment_items(order, {shipment_nr}).get(shipment_nr, [])
+		]
+	return {**readable, **request_data}
+
+
 def _log_fulfillment(order, action, status, request_data=None, response_data=None, traceback_text=None):
 	"""One committed Marketplace Sync Log row per Noon fulfillment call
 	(#146 decision 21). Never includes invoice bytes - callers are
 	responsible for keeping ``request_data`` free of them."""
 	now = now_datetime()
+	request_data = _with_readable_keys(order, request_data or {})
 	frappe.get_doc(
 		{
 			"doctype": "Marketplace Sync Log",
@@ -316,7 +405,7 @@ def _log_fulfillment(order, action, status, request_data=None, response_data=Non
 			"trigger_source": "Manual",
 			"attempted_at": now,
 			"completed_at": now,
-			"request_data": frappe.as_json({"action": action, **(request_data or {})}, ensure_ascii=False),
+			"request_data": frappe.as_json({"action": action, **request_data}, ensure_ascii=False),
 			"response_data": frappe.as_json(response_data, ensure_ascii=False)
 			if response_data is not None
 			else None,
@@ -331,10 +420,14 @@ def _log_fulfillment(order, action, status, request_data=None, response_data=Non
 # ---------------------------------------------------------------------------
 
 
-def create_shipment(marketplace_order_name, mp_item_nrs, awb_source, courier=None, awb_nr=None):
+def create_shipment(marketplace_order_name, mp_item_nrs, awb_source="Noon"):
 	"""Request path: allocate a shipment number, reject any unit already in
 	an active shipment, write Pending shipment/unit/AWB rows, commit, then
 	enqueue the Noon write (#146 decision 13/14/20)."""
+	# Noon is the only courier: every new shipment takes a Noon AWB. Shipments
+	# already stored with awb_source "Own Courier" stay readable and retryable.
+	if awb_source != "Noon":
+		frappe.throw(_("New shipments can only use a Noon AWB."))
 	order = _lock_and_load_order(marketplace_order_name)
 	_account_and_client(order)
 
@@ -347,17 +440,10 @@ def create_shipment(marketplace_order_name, mp_item_nrs, awb_source, courier=Non
 	if not_shippable:
 		frappe.throw(
 			_("Units {0} are not shippable (already shipped, cancelled, or not yet acknowledged).").format(
-				", ".join(not_shippable)
+				", ".join(_unit_text(order, nr) for nr in not_shippable)
 			)
 		)
 
-	if awb_source not in ("Noon", "Own Courier"):
-		frappe.throw(_("AWB Source must be Noon or Own Courier."))
-	if awb_source == "Own Courier":
-		courier = cstr(courier).strip()
-		awb_nr = cstr(awb_nr).strip()
-		if not courier or not awb_nr:
-			frappe.throw(_("Courier and AWB Nr are required for Own Courier shipments."))
 
 	integration_shipment_nr = _next_shipment_number(order)
 	order.append(
@@ -379,17 +465,6 @@ def create_shipment(marketplace_order_name, mp_item_nrs, awb_source, courier=Non
 				"integration_shipment_nr": integration_shipment_nr,
 				"mp_item_nr": mp_item_nr,
 				"partner_sku": shippable[mp_item_nr],
-			},
-		)
-	if awb_source == "Own Courier":
-		order.append(
-			"noon_shipment_awbs",
-			{
-				"integration_shipment_nr": integration_shipment_nr,
-				"courier": courier,
-				"awb_nr": awb_nr,
-				"source": "Own Courier",
-				"status": "Pending",
 			},
 		)
 	order.save()
@@ -534,7 +609,7 @@ def run_create_shipment(marketplace_order_name, integration_shipment_nr):
 			or item.get("mp_status") != MP_STATUS_CONFIRMED
 			or item.get("integration_status") != INTEGRATION_STATUS_ACKNOWLEDGED
 		):
-			_fail_shipment(order, shipment, _("Unit {0} is no longer shippable.").format(unit.mp_item_nr))
+			_fail_shipment(order, shipment, _("Unit {0} is no longer shippable.").format(_unit_text(order, unit.mp_item_nr)))
 			_log_fulfillment(
 				order,
 				"CreateShipment",
@@ -682,7 +757,7 @@ def run_create_shipment(marketplace_order_name, integration_shipment_nr):
 			"noon_shipment_awbs",
 			{
 				"integration_shipment_nr": integration_shipment_nr,
-				"courier": "noon",
+				"courier": NOON_COURIER,
 				"awb_nr": awb_nrs[0],
 				"source": "Noon",
 				"status": "Pending",
@@ -722,8 +797,8 @@ def run_create_shipment(marketplace_order_name, integration_shipment_nr):
 			"Error",
 			{"integration_shipment_nr": integration_shipment_nr},
 			_(
-				"Shipment status changed to {0} before CreateShipment could be sent; "
-				"aborting to avoid creating an orphaned Noon shipment."
+				"Shipment status changed to {0} before the shipment was created on Noon; "
+				"stopped so no untracked shipment is created on Noon."
 			).format(shipment.status),
 		)
 		return
@@ -1284,6 +1359,10 @@ def add_awb(marketplace_order_name, integration_shipment_nr, courier, awb_nr):
 	awb_nr = cstr(awb_nr).strip()
 	if not courier or not awb_nr:
 		frappe.throw(_("Courier and AWB Nr are required."))
+	# Noon is the only courier. Noon documents the value as lowercase 'noon'.
+	if courier.lower() != NOON_COURIER:
+		frappe.throw(_("Noon is the only supported courier."))
+	courier = NOON_COURIER
 	if any(
 		row.integration_shipment_nr == integration_shipment_nr and row.awb_nr == awb_nr
 		for row in order.noon_shipment_awbs or []
@@ -1298,7 +1377,7 @@ def add_awb(marketplace_order_name, integration_shipment_nr, courier, awb_nr):
 			"integration_shipment_nr": integration_shipment_nr,
 			"courier": courier,
 			"awb_nr": awb_nr,
-			"source": "Own Courier",
+			"source": "Noon",
 			"status": "Pending",
 		},
 	)
@@ -2107,7 +2186,6 @@ def retry(marketplace_order_name, integration_shipment_nr):
 			for row in order.noon_shipment_awbs or []
 			if row.integration_shipment_nr == integration_shipment_nr
 			and row.status == "Pending"
-			and row.source == "Own Courier"
 		),
 		None,
 	)

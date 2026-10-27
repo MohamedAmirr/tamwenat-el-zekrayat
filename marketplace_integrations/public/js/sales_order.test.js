@@ -1914,7 +1914,8 @@ test("dialog options come from the shipments and escape shipment numbers", async
 	const ctx = noon.build_context(frm, { shipments: [{ integration_shipment_nr: "<i>1</i>", status: "Created", delivery_note: "", unresolved: [] }, ...noon_shipments()] });
 	assert.equal(ctx.marketplace_order, "MO-NOON");
 	assert.equal(ctx.sales_order, "SAL-ORD-1");
-	assert.equal(noon.noon_created_shipment_options(ctx)[0].label, "&lt;i&gt;1&lt;/i&gt;");
+	assert.equal(noon.noon_created_shipment_options(ctx)[0].label, "Shipment &lt;i&gt;1&lt;/i&gt; - Created");
+	assert.equal(noon.noon_created_shipment_options(ctx)[1].label, "Shipment 1 - Created");
 	assert.deepEqual(noon.noon_created_shipment_options(ctx).map((o) => o.value), ["<i>1</i>", "ORD-1", "ORD-3", "ORD-4"]);
 	// Error and Cancel Pending only
 	assert.deepEqual(noon.noon_discardable_shipment_options(ctx).map((o) => o.value), ["ORD-2"]);
@@ -1925,13 +1926,54 @@ test("dialog options come from the shipments and escape shipment numbers", async
 test("unit checklist uses indices as values, escapes labels and maps back to the real units", () => {
 	load();
 	const noon = require("./noon_fulfillment.js");
+	global.frappe.utils.escape_html = escape_html;
 	const units = [{ mp_item_nr: "<b>1</b>", partner_sku: "S\"1" }, { mp_item_nr: "2", partner_sku: undefined }];
 	const options = noon.noon_unit_checklist_options(units);
 	assert.deepEqual(options.map((o) => o.value), ["0", "1"]);
-	assert.match(options[0].label, /&lt;b&gt;1&lt;\/b&gt; \(S&quot;1\)/);
-	assert.equal(options[1].label, "2 ()");
+	assert.match(options[0].label, /&lt;b&gt;1&lt;\/b&gt;/); // raw mp_item_nr only in the tooltip
+	assert.match(options[0].label, />S&quot;1</);
+	assert.equal(options[1].label, '<span title="2"></span>');
 	assert.deepEqual(noon.mp_item_nrs_from_unit_indices(units, ["1", "0", "7"]), ["2", "<b>1</b>"]);
 	assert.deepEqual(noon.mp_item_nrs_from_unit_indices(units, undefined), []);
+});
+
+test("unit checklist labels: mapped name, unmapped SKU fallback, repeated SKU counter, tooltip and escaping", () => {
+	load();
+	const noon = require("./noon_fulfillment.js");
+	global.frappe.utils.escape_html = escape_html;
+	const options = noon.noon_unit_checklist_options([
+		{ mp_item_nr: "N1", partner_sku: "SKU-001", item_name: "Hand Soap 500ml" },
+		{ mp_item_nr: "N2", partner_sku: "SKU-009" },
+		{ mp_item_nr: "N3", partner_sku: "SKU-002", item_name: "Rice <1kg>" },
+		{ mp_item_nr: "N4", partner_sku: "SKU-002", item_name: "Rice <1kg>" },
+		{ mp_item_nr: "N5", partner_sku: "SKU-002", item_name: "Rice <1kg>" },
+	]);
+	assert.equal(options[0].label, '<span title="N1">Hand Soap 500ml (SKU-001)</span>');
+	assert.equal(options[1].label, '<span title="N2">SKU-009</span>');
+	assert.equal(options[2].label, '<span title="N3">Rice &lt;1kg&gt; (SKU-002) (1 of 3)</span>');
+	assert.match(options[4].label, /\(SKU-002\) \(3 of 3\)/);
+	// the visible text never carries the raw mp_item_nr
+	assert.doesNotMatch(options[0].label.replace(/title="[^"]*"/, ""), /N1/);
+});
+
+test("the shipments summary shows Shipment n with a tooltip, an Items column and Noon AWBs", () => {
+	load();
+	const { noon_shipments_html } = require("./noon_fulfillment.js");
+	global.frappe.utils.escape_html = escape_html;
+	const html = noon_shipments_html([
+		{
+			integration_shipment_nr: "ORD-12-3",
+			status: "Created",
+			awbs: [{ courier: "noon", awb_nr: "N123" }, { courier: "Aramex", awb_nr: "A9" }],
+			items: [{ label: "Hand Soap 500ml (SKU-001)", qty: 2 }, { label: "SKU-009", qty: 1 }],
+			delivery_notes: [],
+			unresolved: [],
+		},
+	]);
+	assert.match(html, /<th>Items<\/th>/);
+	assert.match(html, /<td title="ORD-12-3">Shipment 3<\/td>/);
+	assert.match(html, /Hand Soap 500ml \(SKU-001\) x2, SKU-009 x1/);
+	assert.match(html, /Noon N123, Aramex A9/);
 });
 
 test("noon_handover_alert reports created, existing, nothing created and skipped units", () => {
@@ -1988,6 +2030,24 @@ test("a Closed submitted Noon Sales Order keeps the Noon Fulfillment buttons (th
 	assert.deepEqual(frm.buttons.map((b) => b.label), ["Create Shipment", "Mark Handed Over"]);
 });
 
+test("Add AWB dialog: Courier is a one-option Noon Select sending lowercase noon", async () => {
+	const { frm, dialogs, noon_calls } = await refresh_noon({
+		noon_state: { actions: ["add_awb"], shipments: noon_shipments() },
+	});
+	const by_label = Object.fromEntries(frm.buttons.map((b) => [b.label, b.action]));
+	by_label["Add AWB"]();
+	const dialog = dialogs[dialogs.length - 1];
+	const courier = dialog.config.fields.find((f) => f.fieldname === "courier");
+	assert.equal(courier.fieldtype, "Select");
+	assert.deepEqual(courier.options, [{ label: "Noon", value: "noon" }]);
+	assert.equal(courier.default, "noon");
+	dialog.config.primary_action({ integration_shipment_nr: "ORD-1", courier: "noon", awb_nr: "A1" });
+	await settle();
+	const call = noon_calls[noon_calls.length - 1];
+	assert.equal(call.method, "marketplace_integrations.api.noon_fulfillment.add_awb");
+	assert.equal(call.args.courier, "noon");
+});
+
 test("a button opens its dialog and calls the endpoint with the linked Marketplace Order", async () => {
 	const { frm, dialogs, noon_calls, confirms } = await refresh_noon({
 		noon_state: { actions: ["create_shipment", "cancel_shipment", "mark_handed_over", "release_stuck_oos_reservation"], shipments: noon_shipments() },
@@ -1998,11 +2058,12 @@ test("a button opens its dialog and calls the endpoint with the linked Marketpla
 	await settle();
 	const create = dialogs[dialogs.length - 1];
 	assert.equal(create.config.title, "Create Noon Shipment");
-	create.config.primary_action({ units: ["1"], awb_source: "Noon" });
+	assert.deepEqual(create.config.fields.map((f) => f.fieldname), ["units"]);
+	create.config.primary_action({ units: ["1"] });
 	await settle();
 	const call = noon_calls[noon_calls.length - 1];
 	assert.equal(call.method, "marketplace_integrations.api.noon_fulfillment.create_shipment");
-	assert.deepEqual(call.args, { marketplace_order: "MO-NOON", mp_item_nrs: ["2"], awb_source: "Noon", courier: undefined, awb_nr: undefined });
+	assert.deepEqual(call.args, { marketplace_order: "MO-NOON", mp_item_nrs: ["2"] });
 	assert.equal(frm.reloads, 1);
 
 	by_label["Mark Handed Over"]();
