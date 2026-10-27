@@ -55,9 +55,6 @@ const {
 	apply_platform_gating,
 	load_erpnext_sync_status,
 	load_shopify_item_presentation,
-	select_noon_fulfillment_buttons,
-	noon_handover_shipment_options,
-	noon_handover_alert,
 	JSON_EVIDENCE_FIELDS,
 } = require("./marketplace_order.js");
 
@@ -492,6 +489,26 @@ test("apply_platform_gating shows Retry Sync for an unsynced Shopify order", () 
 	assert.ok(frm_calls.custom_buttons.includes("Refresh from Shopify"));
 });
 
+test("apply_platform_gating keeps Refresh from Noon and adds no fulfillment actions for a Noon order", () => {
+	frm_calls = { custom_buttons: [], indicators: [] };
+	const methods = [];
+	const original_call = global.frappe.call;
+	global.frappe.call = (opts) => {
+		methods.push(opts.method);
+		return original_call(opts);
+	};
+	try {
+		apply_platform_gating(make_frm({ platform: "Noon", name: "MO-NOON-1" }));
+	} finally {
+		global.frappe.call = original_call;
+	}
+	assert.ok(frm_calls.custom_buttons.includes("Refresh from Noon"));
+	for (const label of ["Create Shipment", "Mark Out of Stock", "Mark Handed Over", "Add AWB"]) {
+		assert.ok(!frm_calls.custom_buttons.includes(label), label);
+	}
+	assert.ok(!methods.some((method) => method.includes("noon_fulfillment")));
+});
+
 function run_status_load({ saved, dirty }) {
 	frm_calls = { custom_buttons: [], indicators: [] };
 	const frm = make_frm({
@@ -664,54 +681,6 @@ test("add_order_actions shows Cancel Order only for RECEIVED and UPDATE_CART ord
 		add_order_actions(make_frm({ external_status: status }));
 		assert.ok(!frm_calls.custom_buttons.includes("Cancel Order"), String(status));
 	}
-});
-
-test("select_noon_fulfillment_buttons keeps only available actions, or all when the call failed", () => {
-	const buttons = [{ action: "create_shipment" }, { action: "retry" }, { action: "add_awb" }];
-	assert.deepEqual(
-		select_noon_fulfillment_buttons(buttons, ["retry", "unknown_action"]).map((b) => b.action),
-		["retry"]
-	);
-	assert.deepEqual(select_noon_fulfillment_buttons(buttons, []), []);
-	assert.equal(select_noon_fulfillment_buttons(buttons, null), buttons);
-	assert.equal(select_noon_fulfillment_buttons(buttons, undefined), buttons);
-});
-
-test("noon_handover_shipment_options lists Created shipments without a Delivery Note or with unresolved units", () => {
-	const frm = {
-		doc: {
-			noon_shipments: [
-				{ integration_shipment_nr: "A-1", status: "Created", delivery_note: "" },
-				{ integration_shipment_nr: "A-2", status: "Created", delivery_note: "MAT-DN-0001" },
-				{ integration_shipment_nr: "A-3", status: "Cancelled", delivery_note: "" },
-				{ integration_shipment_nr: "A-4", status: "Created", delivery_note: "MAT-DN-0002", skipped_units: "[{}]" },
-			],
-		},
-	};
-	assert.deepEqual(noon_handover_shipment_options(frm), [
-		{ label: "A-1", value: "A-1" },
-		{ label: "A-4", value: "A-4" },
-	]);
-});
-
-test("noon_handover_alert reports created, existing, nothing created and skipped units", () => {
-	assert.deepEqual(noon_handover_alert({ delivery_note: "DN-1", created: true, unresolved: [] }), {
-		message: "Draft Delivery Note DN-1 created. Review and submit it.",
-		indicator: "green",
-	});
-	assert.match(
-		noon_handover_alert({ delivery_note: "DN-1", created: false, unresolved: [] }).message,
-		/already exists/
-	);
-	const partial = noon_handover_alert({ delivery_note: "DN-1", created: true, unresolved: [{ text: "X: no enabled product mapping", reason: "unmapped" }] });
-	assert.equal(partial.indicator, "orange");
-	assert.match(partial.message, /Not added: X: no enabled product mapping/);
-	const none = noon_handover_alert({ delivery_note: null, unresolved: [{ text: "X: not on the Sales Order", reason: "not_on_order" }] });
-	assert.equal(none.indicator, "orange");
-	assert.match(none.message, /No Delivery Note was created\./);
-	assert.match(none.message, /sync was queued/);
-	assert.doesNotMatch(partial.message, /sync was queued/);
-	assert.equal(noon_handover_alert(undefined).indicator, "orange");
 });
 
 test("Shopify item presentation shows Unmapped, a null variant label, mapped names, and keeps markup as text", async () => {

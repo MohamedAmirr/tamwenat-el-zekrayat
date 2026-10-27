@@ -161,13 +161,13 @@ _RECHECK_EVENTS = {
 	"on_cancel": _RECHECK_HANDLER,
 	"on_trash": _RECHECK_HANDLER,
 }
-# #368: a Delivery Note that a Noon shipment row links to must stay deletable and cancellable, so
-# its on_trash and on_cancel also clear that link (it never raises).
+# #368: a Delivery Note that a Noon shipment row links to must stay deletable, so its on_trash
+# also runs the handler that clears that link (it never raises). on_cancel keeps the link on
+# purpose: the amend flow re-links through amended_from (integrations/noon/handover_state.py).
 _HANDOVER_CLEAR_HANDLER = "marketplace_integrations.integrations.noon.handover_state.clear_deleted_delivery_note"
 doc_events = {
 	"Delivery Note": {
 		**_RECHECK_EVENTS,
-		"on_cancel": [_RECHECK_HANDLER, _HANDOVER_CLEAR_HANDLER],
 		"on_trash": [_RECHECK_HANDLER, _HANDOVER_CLEAR_HANDLER],
 	},
 	"Sales Invoice": _RECHECK_EVENTS,

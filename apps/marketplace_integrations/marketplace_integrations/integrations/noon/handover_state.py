@@ -29,13 +29,15 @@ from frappe import _
 from frappe.utils import cstr, now_datetime
 
 from marketplace_integrations.services import sync_reason_codes as reasons
+from marketplace_integrations.services.delivery_note_drafts import (
+	NOT_ON_ORDER,
+	RESYNC_TRIGGER,
+	UNMAPPED,
+)
 from marketplace_integrations.services.sync_status import SYNCED
 
 INACTIVE_SHIPMENT_STATUSES = ("Cancelled", "Discarded")
-UNMAPPED = "unmapped"
-NOT_ON_ORDER = "not_on_order"
-EXCESS = "excess"
-RESYNC_TRIGGER = "ERPNext Document Change"
+SHIPMENT_DOCTYPE = "Marketplace Order Shipment"
 
 
 def load_entries(shipment):
@@ -115,36 +117,109 @@ def reassert(order):
 			reasons.apply_sync_state(order, reasons.DELIVERY_NOTE_UNITS_SKIPPED, message)
 		return
 	if order.get("sync_reason_code") == reasons.DELIVERY_NOTE_UNITS_SKIPPED:
-		from marketplace_integrations.services.sales_order_sync import _queue_resync_in_memory
+		from marketplace_integrations.services.sales_order_sync import queue_resync_in_memory
 
 		reasons.clear_sync_state(order)
-		_queue_resync_in_memory(order, RESYNC_TRIGGER)
+		queue_resync_in_memory(order, RESYNC_TRIGGER)
+
+
+def shipment_notes(shipment):
+	"""Names of every Delivery Note recorded for the shipment: the ``delivery_note`` link (the
+	first one) and the ``delivery_notes`` JSON list (all of them)."""
+	names = []
+	raw = cstr(shipment.get("delivery_notes")).strip()
+	if raw:
+		try:
+			listed = frappe.parse_json(raw)
+		except ValueError:
+			listed = []
+		names = [n for n in listed if isinstance(n, str)] if isinstance(listed, list) else []
+	first = cstr(shipment.get("delivery_note")).strip()
+	if first and first not in names:
+		names.insert(0, first)
+	return names
+
+
+def record_note(shipment, name):
+	"""Record ``name`` on the shipment row (in memory); the first note is also the Link field."""
+	names = shipment_notes(shipment)
+	if name not in names:
+		names.append(name)
+	shipment.delivery_notes = frappe.as_json(names)
+	if not shipment.get("delivery_note"):
+		shipment.delivery_note = name
+
+
+def live_note(name):
+	"""``name`` while it is a draft or submitted Delivery Note.  A cancelled note is followed to
+	the note that amends it (``amended_from``), so an amended draft counts as the shipment's."""
+	for _hop in range(3):
+		if not name:
+			return None
+		docstatus = frappe.db.get_value("Delivery Note", name, "docstatus")
+		if docstatus is None:
+			return None
+		if docstatus != 2:
+			return name
+		name = frappe.db.get_value("Delivery Note", {"amended_from": name, "docstatus": ["!=", 2]}, "name")
+	return None
+
+
+def live_notes(shipment):
+	"""Live Delivery Notes of the shipment (see ``live_note``), first note first."""
+	live = []
+	for name in shipment_notes(shipment):
+		found = live_note(name)
+		if found and found not in live:
+			live.append(found)
+	return live
+
+
+def reset_delivery_note_tracking(shipment):
+	"""Forget the shipment's Delivery Notes (in memory)."""
+	shipment.delivery_note = None
+	shipment.delivery_notes = None
+	shipment.handed_over_on = None
 
 
 def clear_deleted_delivery_note(doc, method=None):
-	"""``doc_events`` handler (Delivery Note ``on_trash`` and ``on_cancel``): forget the note on
-	the shipment row that points to it.  Never raises.
+	"""``doc_events`` handler (Delivery Note ``on_trash``): forget the notes of the shipment rows
+	that track the deleted one.  Never raises.
 
 	``Marketplace Order Shipment.delivery_note`` is a Link, and Frappe refuses to delete a
 	document that is still linked, so the link must be cleared before that check.  The write is
-	a direct ``set_value`` inside the deleter's transaction on purpose (a queued write would
-	come too late) and it rolls back with that transaction.  The shipment's unresolved record is
-	left as it is: with no live note the next Mark Handed Over drafts the whole shipment again
-	and rebuilds it.
+	a direct ``set_value`` inside the deleter's transaction on purpose (a queued write would come
+	too late) and it rolls back with that transaction.  The parent Marketplace Order row is
+	locked first and its ``modified`` is bumped, so a copy loaded earlier cannot save over the
+	change unnoticed.  Tracking is reset for the whole shipment (link, list and handed-over time):
+	the next Mark Handed Over drafts the shipment again, and units that another live Delivery
+	Note still covers count as resolved, so nothing is delivered twice.  A cancelled note keeps
+	its link on purpose (the amend flow re-links through ``amended_from``, see ``live_note``).
+	The unresolved record is left as it is.
 	"""
 	try:
-		rows = frappe.get_all(
-			"Marketplace Order Shipment",
-			filters={"delivery_note": doc.name, "parenttype": "Marketplace Order"},
-			pluck="name",
-			parent_doctype="Marketplace Order",
-		)
-		for name in rows:
+		names = [doc.name] + ([doc.amended_from] if doc.get("amended_from") else [])
+		rows = {}
+		for name in names:
+			for filters in (
+				{"delivery_note": name},
+				[["delivery_notes", "like", f'%"{name}"%']],
+			):
+				for row in frappe.get_all(
+					SHIPMENT_DOCTYPE,
+					filters=filters,
+					fields=["name", "parent"],
+					parent_doctype="Marketplace Order",
+				):
+					rows[row.name] = row.parent
+		for row_name, parent in rows.items():
+			frappe.db.get_value("Marketplace Order", parent, "name", for_update=True)
 			frappe.db.set_value(
-				"Marketplace Order Shipment",
-				name,
-				{"delivery_note": None, "handed_over_on": None},
+				SHIPMENT_DOCTYPE,
+				row_name,
+				{"delivery_note": None, "delivery_notes": None, "handed_over_on": None},
 				update_modified=False,
 			)
+			frappe.db.set_value("Marketplace Order", parent, "modified", now_datetime(), update_modified=False)
 	except Exception:
 		frappe.log_error(title="Noon handover: could not clear a Delivery Note link", message=frappe.get_traceback())

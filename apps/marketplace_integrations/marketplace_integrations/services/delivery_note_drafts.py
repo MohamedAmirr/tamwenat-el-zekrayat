@@ -26,8 +26,8 @@ How it works:
    are then limited to the capped quantities.
 4. Units that could not be drafted come back in ``unresolved`` (``{"external_sku", "item",
    "qty", "reason"}``), never silently dropped: ``unmapped`` (no enabled mapping),
-   ``not_on_order`` (the Item has no Sales Order row) and ``excess`` (the unit count is larger
-   than what the Sales Order row still has undelivered).  The last two mean the Sales Order is
+   ``not_on_order`` (the Item has no Sales Order row) and ``excess`` (the platform order has
+   more units of the Item than the Sales Order row quantity).  The last two mean the Sales Order is
    behind the platform order, so, unless ``queue_sync`` is false, the order is queued for the
    normal debounced sync (in memory, like ``set_sync_status_from_current_snapshot``) and the
    caller drafts those units again once the Sales Order has the rows.  The caller persists the
@@ -37,33 +37,44 @@ How it works:
 Permission: the session user needs create permission on Delivery Note (checked here, server
 side).  The caller owns the transaction: this function never commits, and takes the Sales Order
 row lock itself so two concurrent calls cannot both cap against the same undelivered quantity.
-When it is given a Marketplace Order name it loads the order itself and saves it only if it
-queued a sync; given a document it leaves saving to the caller.
+It takes a Marketplace Order document and leaves saving it (including the in-memory sync
+queue) to the caller.
 """
 
 import frappe
 from frappe import _
-from frappe.model.document import Document
 from frappe.utils import cstr, flt
 
 from marketplace_integrations.services.mappings import resolve_item
 
 ORDER_DOCTYPE = "Marketplace Order"
+# Reasons of an unresolved unit (see the module docstring).
+UNMAPPED = "unmapped"
+NOT_ON_ORDER = "not_on_order"
+EXCESS = "excess"
+# ``pending_sync_trigger_source`` option used when a handover queues a Sales Order sync.
 RESYNC_TRIGGER = "ERPNext Document Change"
 
 
-def create_draft_delivery_note(marketplace_order, units, queue_sync=True):
-	"""Create one draft Delivery Note for ``units`` of ``marketplace_order``; never submits.
+def create_draft_delivery_note(marketplace_order, units, queue_sync=True, expected_units=None, add_to=None):
+	"""Create (or extend) a draft Delivery Note for ``units`` of ``marketplace_order``; never submits.
 
-	``marketplace_order`` is a Marketplace Order name or document.  Returns
-	``{"delivery_note": name or None, "delivered": {item: qty}, "unresolved": [entry, ...]}``.
-	``delivery_note`` is ``None`` when nothing could be drafted.
+	``marketplace_order`` is a Marketplace Order document.  Returns ``{"delivery_note": name or
+	None, "added_to_existing": bool, "delivered": {item: qty}, "unresolved": [entry, ...],
+	"covered": {item: qty}}``.  ``delivery_note`` is ``None`` when nothing could be drafted.
+
+	``add_to`` is the name of a Delivery Note that is still a draft: the granted rows are added to
+	it (a row of the same Sales Order row gets its quantity raised) instead of creating a new
+	note.  ``expected_units`` ({item: units the platform order has of that Item in total}) lets
+	the caller tell "the Sales Order is behind" from "already covered by a Delivery Note someone
+	else made": a shortfall that fits inside the Sales Order row quantity is ``covered`` (resolved,
+	reported in ``covered``), and only the part the Sales Order really lacks is an ``excess``
+	entry.  Without it every shortfall is an excess.
 	"""
 	frappe.has_permission("Delivery Note", "create", throw=True)
-	loaded_here = not isinstance(marketplace_order, Document)
-	order = (
-		frappe.get_doc(ORDER_DOCTYPE, marketplace_order) if loaded_here else marketplace_order
-	)
+	if add_to:
+		frappe.has_permission("Delivery Note", "write", throw=True)
+	order = marketplace_order
 	if not order.erpnext_sales_order:
 		frappe.throw(_("Marketplace Order {0} has no Sales Order yet.").format(order.name))
 
@@ -75,44 +86,76 @@ def create_draft_delivery_note(marketplace_order, units, queue_sync=True):
 
 	wanted, unresolved = _count_units(order, sales_order, units)
 	grants, shortfall = _cap_to_undelivered(sales_order, wanted)
+	covered = {}
 	for item, qty in shortfall.items():
-		unresolved.append(
-			{
-				"external_sku": wanted[item]["sku"],
-				"item": item,
-				"qty": qty,
-				"reason": "excess",
-			}
-		)
+		row_qty = sum(flt(row.qty) for row in sales_order.items if row.item_code == item)
+		missing = qty
+		if expected_units is not None:
+			missing = min(qty, max(flt(expected_units.get(item)) - row_qty, 0))
+			if qty - missing > 0:
+				covered[item] = qty - missing
+		if missing > 0:
+			unresolved.append(
+				{"external_sku": wanted[item]["sku"], "item": item, "qty": missing, "reason": EXCESS}
+			)
 
-	result = {"delivery_note": None, "delivered": {}, "unresolved": unresolved}
+	result = {
+		"delivery_note": None,
+		"added_to_existing": False,
+		"delivered": {},
+		"unresolved": unresolved,
+		"covered": covered,
+	}
 	if any(flt(qty) > 0 for qty in grants.values()):
 		delivery_note = _build_draft(sales_order, grants)
 		if delivery_note.items:
-			delivery_note.insert()
-			result["delivery_note"] = delivery_note.name
+			if add_to:
+				target = _merge_into_draft(add_to, delivery_note.items)
+				result["added_to_existing"] = True
+			else:
+				delivery_note.insert()
+				target = delivery_note
+			result["delivery_note"] = target.name
 			for row in delivery_note.items:
 				item = _item_of_row(sales_order, row.so_detail)
 				result["delivered"][item] = result["delivered"].get(item, 0) + flt(row.qty)
-	if queue_sync and any(entry["reason"] in ("excess", "not_on_order") for entry in unresolved):
+	if queue_sync and any(entry["reason"] in (EXCESS, NOT_ON_ORDER) for entry in unresolved):
 		# The Sales Order is behind the platform order: let the planner bring it up to date.
-		from marketplace_integrations.services.sales_order_sync import _queue_resync_in_memory
+		from marketplace_integrations.services.sales_order_sync import queue_resync_in_memory
 
-		_queue_resync_in_memory(order, RESYNC_TRIGGER)
-		if loaded_here:
-			order.flags.skip_sync_status_update = True
-			order.flags.ignore_permissions = True
-			order.save()
+		queue_resync_in_memory(order, RESYNC_TRIGGER)
 	return result
+
+
+def _merge_into_draft(name, rows):
+	"""Add the mapped ``rows`` to the draft Delivery Note ``name`` and save it.
+
+	A row of a Sales Order row the note already has raises that row's quantity; others are
+	appended.  Saving the note rebuilds its packed items (ERPNext does that on validate).
+	"""
+	target = frappe.get_doc("Delivery Note", name)
+	if target.docstatus != 0:
+		frappe.throw(_("Delivery Note {0} is not a draft.").format(name))
+	existing = {row.so_detail: row for row in target.items if row.so_detail}
+	for row in rows:
+		current = existing.get(row.so_detail)
+		if current:
+			current.qty = flt(current.qty) + flt(row.qty)
+			current.stock_qty = flt(current.qty) * (flt(current.conversion_factor) or 1)
+		else:
+			target.append("items", row.as_dict(no_default_fields=True))
+	target.save()
+	return target
 
 
 def _count_units(order, sales_order, units):
 	"""``({item: {"qty", "sku"}}, unresolved)`` for the units, counted per Item.
 
-	Units that cannot be matched to a Sales Order row are returned as unresolved entries,
-	aggregated per SKU or Item.
+	An ``external_sku`` is resolved once per SKU.  Units that cannot be matched to a Sales Order
+	row are returned as unresolved entries, aggregated per SKU or Item.
 	"""
 	row_items = {row.item_code for row in sales_order.items}
+	resolved_skus = {}
 	wanted = {}
 	lost = {}
 	for unit in units or []:
@@ -123,11 +166,13 @@ def _count_units(order, sales_order, units):
 			continue
 		reason = None
 		if not item:
-			item = resolve_item(order.marketplace_account, sku)
+			if sku not in resolved_skus:
+				resolved_skus[sku] = resolve_item(order.marketplace_account, sku)
+			item = resolved_skus[sku]
 			if not item:
-				reason = "unmapped"
+				reason = UNMAPPED
 		if not reason and item not in row_items:
-			reason = "not_on_order"
+			reason = NOT_ON_ORDER
 		if reason:
 			key = (sku, item or "", reason)
 			lost[key] = lost.get(key, 0) + qty

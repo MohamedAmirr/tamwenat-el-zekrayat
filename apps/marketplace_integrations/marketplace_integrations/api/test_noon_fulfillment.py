@@ -19,7 +19,9 @@ from marketplace_integrations.api.noon_fulfillment import (
 	add_awb,
 	cancel_shipment,
 	create_shipment,
+	_shipment_summaries,
 	discard_shipment,
+	get_available_actions,
 	get_shippable_units,
 	mark_out_of_stock,
 	release_stuck_oos_reservation,
@@ -101,6 +103,60 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 			get_shippable_units(self.order.name)
 		with self.assertRaises(frappe.ValidationError):
 			create_shipment(self.order.name, ["1"], "Noon")
+
+	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.get_available_actions")
+	def test_get_available_actions_adds_shipments_and_needs_only_read(self, mock_fn):
+		mock_fn.return_value = {"actions": ["retry"], "cancelled_on_noon": False}
+		email, _role = make_role_user(self, "Noon Fulfillment Read Only", {"Marketplace Order": ["read"]})
+		with self.set_user(email):
+			result = get_available_actions(self.order.name)
+		self.assertEqual(result, {"actions": ["retry"], "cancelled_on_noon": False, "shipments": []})
+
+	def test_get_available_actions_requires_read_and_a_noon_order(self):
+		email, _role = make_role_user(self, "Noon Fulfillment No Read", {"Sales Order": ["read"]})
+		with self.set_user(email):
+			with self.assertRaises(frappe.PermissionError):
+				get_available_actions(self.order.name)
+		frappe.db.set_value("Marketplace Order", self.order.name, "platform", "Talabat")
+		with self.assertRaises(frappe.ValidationError):
+			get_available_actions(self.order.name)
+
+	def test_shipment_summaries_list_awbs_delivery_note_and_unresolved_text(self):
+		doc = frappe._dict(
+			noon_shipments=[
+				frappe._dict(
+					integration_shipment_nr="ORD-1",
+					status="Created",
+					delivery_note="MAT-DN-0001",
+					skipped_units=frappe.as_json(
+						[{"external_sku": "SKU-1", "item": "ITEM-1", "qty": 1, "reason": "unmapped", "final": False}]
+					),
+				),
+				frappe._dict(integration_shipment_nr="ORD-2", status="Error", delivery_note=None, skipped_units=None),
+			],
+			noon_shipment_awbs=[
+				frappe._dict(integration_shipment_nr="ORD-1", courier="Aramex", awb_nr="AWB-1"),
+			],
+		)
+		self.assertEqual(
+			_shipment_summaries(doc),
+			[
+				{
+					"integration_shipment_nr": "ORD-1",
+					"status": "Created",
+					"awbs": [{"courier": "Aramex", "awb_nr": "AWB-1"}],
+					"delivery_note": "MAT-DN-0001",
+					"unresolved": ["SKU-1: no enabled product mapping"],
+				},
+				{
+					"integration_shipment_nr": "ORD-2",
+					"status": "Error",
+					"awbs": [],
+					"delivery_note": "",
+					"unresolved": [],
+				},
+			],
+		)
 
 	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.get_shippable_units")
 	def test_get_shippable_units_delegates(self, mock_fn):

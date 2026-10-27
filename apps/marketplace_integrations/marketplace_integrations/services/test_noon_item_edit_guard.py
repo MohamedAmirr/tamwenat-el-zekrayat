@@ -10,7 +10,7 @@ from erpnext.controllers.accounts_controller import update_child_qty_rate
 
 from marketplace_integrations.integrations.noon.test_fulfillment import IntegrationTestNoonFulfillmentBase
 from marketplace_integrations.services import sales_order_sync
-from marketplace_integrations.services.handover_fixture import SubmittedOrderFixture
+from marketplace_integrations.tests.handover_fixture import SubmittedOrderFixture
 
 GUARD = "marketplace_integrations.services.noon_item_edit_guard"
 
@@ -71,6 +71,16 @@ class IntegrationTestNoonItemEditGuard(IntegrationTestNoonFulfillmentBase):
 		a = self.fx.items["A"].name
 		with self.assertRaises(frappe.ValidationError):
 			self._update(self._trans_items(**{a: {"rate": 99}}))
+
+	def test_a_changed_pack_size_or_uom_is_refused_too(self):
+		for field, value in (("conversion_factor", 2), ("stock_qty", 9), ("uom", "Box")):
+			with self.subTest(field=field):
+				row = frappe.get_doc("Sales Order Item", self.fx.row_for("A").name)
+				row.flags.ignore_validate_update_after_submit = True
+				row.set(field, value)
+				with self.assertRaises(frappe.ValidationError) as caught:
+					row.save()
+				self.assertIn("Noon Fulfillment", str(caught.exception))
 
 	def test_noon_row_removal_is_refused(self):
 		payload = [entry for entry in self._trans_items() if entry["item_code"] != self.fx.items["B"].name]

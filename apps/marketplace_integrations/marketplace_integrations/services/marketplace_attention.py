@@ -44,7 +44,8 @@ Problem sources (``problem_type``):
   and never drives the account level.
 - Noon Fulfillment: ONE rollup row per Noon order (shipment Error / Cancel
   Pending / invoice upload Error, or units pending Out of Stock), plus (#164)
-  shipments stuck in Pending longer than NOON_PENDING_SHIPMENT_STUCK_HOURS,
+  shipments stuck in Pending longer than NOON_PENDING_SHIPMENT_STUCK_HOURS, Created shipments
+  nobody marked handed over for NOON_HANDOVER_REMINDER_HOURS (#368),
   measured from the shipment row's creation. The Error / Cancel Pending /
   invoice error / Out of Stock parts have no age threshold.
 - Noon Return Unlinked (#164): one row per Noon Return with no Marketplace
@@ -69,7 +70,11 @@ import frappe
 from frappe import _
 from frappe.utils import add_to_date, cstr, flt, get_datetime, now_datetime
 
-from marketplace_integrations.integrations.noon.constants import NOON_PENDING_SHIPMENT_STUCK_HOURS
+from marketplace_integrations.integrations.noon import handover_state
+from marketplace_integrations.integrations.noon.constants import (
+	NOON_HANDOVER_REMINDER_HOURS,
+	NOON_PENDING_SHIPMENT_STUCK_HOURS,
+)
 from marketplace_integrations.integrations.shopify.webhooks import MAX_WEBHOOK_DELIVERY_ATTEMPTS
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_product_mapping.marketplace_product_mapping import (
 	compute_mapping_identity_key,
@@ -1113,7 +1118,15 @@ def _collect_noon_rollups(accounts):
 
 	def rollup(order):
 		return rollups.setdefault(
-			order, {"shipments": 0, "worst": None, "invoice_errors": 0, "pending_oos": 0, "stuck_pending": 0}
+			order,
+			{
+				"shipments": 0,
+				"worst": None,
+				"invoice_errors": 0,
+				"pending_oos": 0,
+				"stuck_pending": 0,
+				"not_handed_over": 0,
+			},
 		)
 
 	pending = _get_orders(
@@ -1162,6 +1175,24 @@ def _collect_noon_rollups(accounts):
 	for shipment in stuck:
 		rollup(shipment.parent)["stuck_pending"] += 1
 
+	# #368: Created shipments nobody marked handed over (no handed_over_on) for longer than the
+	# reminder threshold and with no live Delivery Note. Cancelled / Discarded are not Created, and
+	# setting handed_over_on (Mark Handed Over) or cancelling/discarding the shipment clears it.
+	unhanded = frappe.get_list(
+		"Marketplace Order Shipment",
+		parent_doctype="Marketplace Order",
+		filters={
+			"status": "Created",
+			"handed_over_on": ["is", "not set"],
+			"creation": ["<=", add_to_date(now_datetime(), hours=-NOON_HANDOVER_REMINDER_HOURS)],
+		},
+		fields=["parent", "delivery_note", "delivery_notes"],
+		limit_page_length=0,
+	)
+	for shipment in unhanded:
+		if not handover_state.live_notes(shipment):
+			rollup(shipment.parent)["not_handed_over"] += 1
+
 	if not rollups:
 		return []
 	orders = _get_orders_by_name(list(rollups), ["name", "marketplace_account", "platform", "modified"])
@@ -1182,6 +1213,12 @@ def _collect_noon_rollups(accounts):
 			parts.append(
 				_("{0} shipment(s) stuck in Pending for over {1} hour(s)").format(
 					entry["stuck_pending"], NOON_PENDING_SHIPMENT_STUCK_HOURS
+				)
+			)
+		if entry["not_handed_over"]:
+			parts.append(
+				_("{0} shipment(s) created but not marked handed over for over {1} hour(s)").format(
+					entry["not_handed_over"], NOON_HANDOVER_REMINDER_HOURS
 				)
 			)
 		if entry["pending_oos"]:

@@ -12,8 +12,8 @@ The check sits on the **Sales Order Item rows**, not on the parent.  ERPNext's
 ``update_child_qty_rate`` (the "Update Items" dialog) saves, inserts and deletes the child rows
 first and only then reloads and saves the parent, so a parent-level
 ``before_update_after_submit`` hook would see no difference.  ``hooks.py`` registers, for
-``Sales Order Item``: ``before_update_after_submit`` (an existing row's ``item_code``, ``qty`` or
-``rate`` changed; a row of a submitted order has ``docstatus`` 1, so Frappe saves it with the
+``Sales Order Item``: ``before_update_after_submit`` (an existing row's ``item_code``, ``uom``, ``qty``,
+``rate``, ``conversion_factor`` or ``stock_qty`` changed; a row of a submitted order has ``docstatus`` 1, so Frappe saves it with the
 ``update_after_submit`` action, which runs only that hook and never ``before_save``), ``before_insert`` (a row added) and ``on_trash`` (a row removed).
 
 A row is locked only when its parent Sales Order is submitted (``docstatus`` 1), is linked to a
@@ -25,9 +25,9 @@ Noon Marketplace Order and that order is not being synced right now.  So these s
   Marketplace Order in ``frappe.flags.marketplace_syncing_orders`` for the whole run, and the
   reconciliation planner (``sales_order_reconciliation.execute``) only runs inside it.  The same
   marker already lets ``services/sales_order_recheck.py`` ignore the sync's own writes.  Changes
-  made from the Noon Fulfillment tab (Mark Out of Stock, Cancel Shipment) reach the Sales Order
+  made from the Noon Fulfillment buttons on the Sales Order (Mark Out of Stock, Cancel Shipment) reach the Sales Order
   through that planner, so they pass.
-- Header and custom fields: only the three row fields above are compared, and the parent is not
+- Header and custom fields: only the row fields above are compared, and the parent is not
   checked at all.
 """
 
@@ -37,19 +37,21 @@ from frappe.utils import flt
 
 BLOCKED_PLATFORMS = ("Noon",)
 ROW_DOCTYPE = "Sales Order Item"
+# Besides item_code and uom: a different pack size (conversion_factor, stock_qty) is an item edit too.
+COMPARED_NUMBERS = ("qty", "rate", "conversion_factor", "stock_qty")
 
 
 def block_row_change(doc, method=None):
-	"""``before_update_after_submit``: refuse a changed ``item_code``, ``qty`` or ``rate`` on an existing row."""
+	"""``before_update_after_submit``: refuse a changed item, uom, quantity, rate or pack size of an existing row."""
 	if not doc.get("name"):
 		return
-	before = frappe.db.get_value(ROW_DOCTYPE, doc.name, ["item_code", "qty", "rate"], as_dict=True)
+	before = frappe.db.get_value(ROW_DOCTYPE, doc.name, ["item_code", *COMPARED_NUMBERS, "uom"], as_dict=True)
 	if not before:
 		return  # not stored yet: a new row, handled by block_row_add
 	if (
 		before.item_code == doc.item_code
-		and flt(before.qty, 6) == flt(doc.qty, 6)
-		and flt(before.rate, 6) == flt(doc.rate, 6)
+		and before.uom == doc.uom
+		and all(flt(before[field], 6) == flt(doc.get(field), 6) for field in COMPARED_NUMBERS)
 	):
 		return
 	_refuse_if_locked(doc)
@@ -66,15 +68,14 @@ def block_row_remove(doc, method=None):
 
 
 def _refuse_if_locked(row):
-	marketplace_order = locked_marketplace_order(row)
-	if not marketplace_order:
+	if not locked_marketplace_order(row):
 		return
 	frappe.throw(
 		_(
 			"Items, quantities and rates of a Noon order cannot be changed in ERPNext because Noon "
-			"has no order update. Use the Noon Fulfillment tab on Marketplace Order {0} "
+			"has no order update. Use the Noon Fulfillment buttons on the Sales Order "
 			"(Mark Out of Stock or Cancel Shipment)."
-		).format(marketplace_order),
+		),
 		title=_("Noon order items are locked"),
 	)
 

@@ -17,7 +17,11 @@ import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import now_datetime
 
-from marketplace_integrations.integrations.noon.constants import NOON_PENDING_SHIPMENT_STUCK_HOURS
+from marketplace_integrations.integrations.noon import handover_state
+from marketplace_integrations.integrations.noon.constants import (
+	NOON_HANDOVER_REMINDER_HOURS,
+	NOON_PENDING_SHIPMENT_STUCK_HOURS,
+)
 from marketplace_integrations.integrations.shopify.test_products import (
 	make_shopify_account,
 )
@@ -913,6 +917,75 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 
 		self.assertEqual(len(rows), 1)
 		self.assertNotIn("stuck in Pending", rows[0]["explanation"])
+
+	# ---- #368: a Created shipment nobody marked handed over ----------------------------------
+
+	def make_unhanded_order(self, account, status="Created", hours=None):
+		return self.make_pending_order(
+			account,
+			status=status,
+			hours=NOON_HANDOVER_REMINDER_HOURS + 1 if hours is None else hours,
+		)
+
+	def test_the_reminder_threshold_is_36_hours(self):
+		self.assertEqual(NOON_HANDOVER_REMINDER_HOURS, 36)
+
+	def test_created_shipment_not_handed_over_after_the_threshold_is_one_finding(self):
+		account = self.make_noon_account()
+		order = self.make_unhanded_order(account)
+
+		rows = self.items_for(account, NOON_FULFILLMENT)
+
+		self.assertEqual([row["reference_name"] for row in rows], [order.name])
+		self.assertIn("1 shipment(s) created but not marked handed over for over 36 hour(s)", rows[0]["explanation"])
+
+	def test_created_shipment_younger_than_the_threshold_is_not_a_finding(self):
+		account = self.make_noon_account()
+		self.make_unhanded_order(account, hours=NOON_HANDOVER_REMINDER_HOURS - 1)
+
+		self.assertEqual(self.items_for(account, NOON_FULFILLMENT), [])
+
+	def test_setting_handed_over_on_clears_the_reminder(self):
+		account = self.make_noon_account()
+		order = self.make_unhanded_order(account)
+		self.assertEqual(len(self.items_for(account, NOON_FULFILLMENT)), 1)
+
+		row = frappe.get_doc("Marketplace Order", order.name).noon_shipments[0]
+		frappe.db.set_value(row.doctype, row.name, "handed_over_on", now_datetime(), update_modified=False)
+
+		self.assertEqual(self.items_for(account, NOON_FULFILLMENT), [])
+
+	def test_a_live_delivery_note_clears_the_reminder_and_a_dead_one_does_not(self):
+		account = self.make_noon_account()
+		self.make_unhanded_order(account)
+		with patch.object(handover_state, "live_notes", return_value=["MAT-DN-1"]):
+			self.assertEqual(self.items_for(account, NOON_FULFILLMENT), [])
+		with patch.object(handover_state, "live_notes", return_value=[]):
+			self.assertEqual(len(self.items_for(account, NOON_FULFILLMENT)), 1)
+
+	def test_old_cancelled_and_discarded_shipments_are_not_reminded(self):
+		account = self.make_noon_account()
+		for status in ("Cancelled", "Discarded"):
+			self.make_unhanded_order(account, status=status)
+
+		self.assertEqual(self.items_for(account, NOON_FULFILLMENT), [])
+
+	def test_the_reminder_shares_the_order_row_with_other_fulfillment_problems(self):
+		account = self.make_noon_account()
+		order = self.make_order(
+			account,
+			shipments=[
+				{"integration_shipment_nr": "S-1", "status": "Created", "awb_source": "Noon"},
+				{"integration_shipment_nr": "S-2", "status": "Error", "awb_source": "Noon"},
+			],
+		)
+		self.age_shipments(order, NOON_HANDOVER_REMINDER_HOURS + 1)
+
+		rows = self.items_for(account, NOON_FULFILLMENT)
+
+		self.assertEqual(len(rows), 1)
+		self.assertIn("not marked handed over", rows[0]["explanation"])
+		self.assertIn("need attention", rows[0]["explanation"])
 
 	def test_fresh_pending_shipment_on_an_old_order_is_not_a_finding(self):
 		account = self.make_noon_account()

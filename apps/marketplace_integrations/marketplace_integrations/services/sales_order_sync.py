@@ -1110,10 +1110,10 @@ def set_sync_status_from_current_snapshot(order, preserve_sync_error=False):
 		reasons.apply_synced(order)
 	else:
 		# A Draft Sales Order is updated in place by the next sync.
-		_queue_resync_in_memory(order)
+		queue_resync_in_memory(order)
 
 
-def _queue_resync_in_memory(order, trigger_source="Manual"):
+def queue_resync_in_memory(order, trigger_source="Manual"):
 	"""Mark ``order`` Syncing and push its debounce, in memory, for the save already in progress.
 
 	``bump_sync_debounce()`` writes with ``frappe.db.set_value()``, which the surrounding
@@ -1188,7 +1188,7 @@ def _apply_reconciliation_status(order, reconciliation_plan, queue_executable=Fa
 		reasons.apply_synced(order)
 	elif outcome in _EXECUTABLE_OUTCOMES and queue_executable:
 		if order.get("sync_reason_code") not in reasons.EXECUTION_FAILED_REASONS:
-			_queue_resync_in_memory(order)
+			queue_resync_in_memory(order)
 	else:
 		reasons.apply_sync_state(
 			order,

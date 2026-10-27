@@ -25,3 +25,10 @@ BOSTA_AWB_MAX_TRACKING_NUMBERS = 50
 # Bosta lets merchants configure an arbitrary custom header for dashboard
 # webhooks. This is the header this integration asks the merchant to configure.
 BOSTA_WEBHOOK_SECRET_HEADER = "X-Bosta-Webhook-Secret"
+
+# Platforms that fulfil their own orders: no Bosta shipment is created for a Sales Order of one of
+# them, and the Sales Order form hides every Bosta action for it (#368).  Add Amazon and Instashop
+# here when those platforms are built; they do not exist in this app yet.  Mirrored by
+# BOSTA_EXCLUDED_PLATFORMS in public/js/sales_order.js (a parity test keeps the two equal).
+# Shopify and a Sales Order with no platform keep Bosta.
+BOSTA_EXCLUDED_PLATFORMS = ("Noon", "Talabat")

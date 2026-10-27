@@ -25,12 +25,18 @@ function load({
 	shipment = null,
 	shipment_fails = false,
 	defaults_fails = false,
+	noon_state = { actions: [], cancelled_on_noon: false, shipments: [] },
+	noon_fails = false,
+	can_create_delivery_note = true,
 	marketplace_summary = { name: "MO-1", platform: "Shopify", reference: "#SHOP-1", erpnext_sync_status: "Syncing", erpnext_sales_order: "" },
 } = {}) {
 	const calls = [];
 	const edit_calls = [];
 	const marketplace_calls = [];
 	const bosta_calls = [];
+	const noon_calls = [];
+	const confirms = [];
+	const required = [];
 	const alerts = [];
 	const msgprints = [];
 	const dialogs = [];
@@ -43,6 +49,7 @@ function load({
 			can_read: (doctype) =>
 				doctype === "Bosta Shipment" ? bosta_read : can_read && doctype === "Marketplace Order",
 			can_write: () => can_write,
+			can_create: (doctype) => can_create_delivery_note && doctype === "Delivery Note",
 		},
 		ui: {
 			form: {
@@ -85,6 +92,16 @@ function load({
 				marketplace_calls.push(opts);
 				return Promise.resolve({ message: marketplace_summary });
 			}
+			if (opts.method.includes("api.noon_fulfillment.")) {
+				noon_calls.push(opts);
+				if (opts.method.endsWith("get_available_actions")) {
+					return noon_fails ? Promise.reject(new Error("boom")) : Promise.resolve({ message: noon_state });
+				}
+				if (opts.method.endsWith("get_shippable_units")) {
+					return Promise.resolve({ message: [{ mp_item_nr: "<b>1</b>", partner_sku: "SKU-1" }, { mp_item_nr: "2", partner_sku: "" }] });
+				}
+				return Promise.resolve({ message: { queued: true } });
+			}
 			if (opts.method.endsWith("get_sales_order_shipment")) {
 				bosta_calls.push(opts);
 				return shipment_fails
@@ -104,12 +121,23 @@ function load({
 		},
 		show_alert: (alert) => alerts.push(alert),
 		msgprint: (message) => msgprints.push(message),
+		confirm: (message, proceed) => confirms.push({ message, proceed }),
+		// Like frappe.require: loads the asset (here by requiring the file, which registers itself).
+		require: (asset) => {
+			required.push(asset);
+			if (asset.endsWith("noon_fulfillment.js")) {
+				const noon_path = require.resolve("./noon_fulfillment.js");
+				delete require.cache[noon_path];
+				require(noon_path);
+			}
+			return Promise.resolve();
+		},
 	};
 	global.format_currency = (value, currency) => `${currency || "EGP"} ${value}`;
 	const path = require.resolve("./sales_order.js");
 	delete require.cache[path];
 	const module_exports = require(path);
-	return { calls, edit_calls, marketplace_calls, bosta_calls, alerts, msgprints, dialogs, handlers, module_exports };
+	return { calls, edit_calls, marketplace_calls, bosta_calls, noon_calls, confirms, required, alerts, msgprints, dialogs, handlers, module_exports };
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
@@ -166,7 +194,7 @@ function make_frm(doc, { close_sales_order } = {}) {
 		reloads: 0,
 		indicators,
 		dashboard: { add_indicator: (label, color) => indicators.push({ label, color }) },
-		add_custom_button: (label, action) => buttons.push({ label, action }),
+		add_custom_button: (label, action, group) => buttons.push({ label, action, group }),
 		reload_doc() {
 			frm.reloads += 1;
 			return Promise.resolve();
@@ -582,6 +610,70 @@ test("an active shipment shows status, tracking and a link, with a label button 
 	assert.deepEqual(labels(frm), ["print", "refresh", "cancel"]);
 	assert.equal(frm.tab.visible, true);
 	assert.equal(frm.tab.body_visible, true);
+});
+
+test("the excluded platform list mirrors the Python constant and holds Noon and Talabat only", () => {
+	const { module_exports } = load({ option: NO_PLATFORM });
+	// integrations/bosta/test_excluded_platforms.py reads the same list from the source.
+	assert.deepEqual(module_exports.BOSTA_EXCLUDED_PLATFORMS, ["Noon", "Talabat"]);
+	assert.equal(module_exports.is_bosta_excluded_platform({ custom_marketplace_platform: "Noon" }), true);
+	for (const platform of ["Shopify", "", undefined]) {
+		assert.equal(module_exports.is_bosta_excluded_platform({ custom_marketplace_platform: platform }), false);
+	}
+	assert.equal(module_exports.is_bosta_excluded_platform(null), false);
+});
+
+test("a Noon or Talabat Sales Order shows an existing Bosta shipment read-only: label and refresh only", async () => {
+	for (const platform of ["Noon", "Talabat"]) {
+		const { handlers } = load({ option: NO_PLATFORM, shipment: shipment_summary({ bosta_state_code: 10 }) });
+		const frm = make_frm({ custom_marketplace_platform: platform });
+		handlers["Sales Order"].refresh(frm);
+		await settle();
+		assert.deepEqual(labels(frm), ["print", "refresh"], platform);
+		assert.equal(frm.tab.visible, true, platform);
+	}
+	// The same shipment on a Shopify order keeps edit and cancel.
+	const { handlers } = load({ option: NO_PLATFORM, shipment: shipment_summary({ bosta_state_code: 10 }) });
+	const frm = make_frm({ custom_marketplace_platform: "Shopify" });
+	handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.deepEqual(labels(frm), ["print", "refresh", "edit", "cancel"]);
+});
+
+test("a Noon or Talabat Sales Order with no Bosta shipment has no Bosta tab and no Create button", async () => {
+	for (const platform of ["Noon", "Talabat"]) {
+		const { handlers } = load({ option: NO_PLATFORM, shipment: null });
+		const frm = make_frm({ custom_marketplace_platform: platform });
+		handlers["Sales Order"].refresh(frm);
+		await settle();
+		assert.equal(frm.tab.visible, false, platform);
+		assert.equal(frm.tab.html, "", platform);
+	}
+	// Shopify and an order with no platform keep Bosta exactly as before.
+	for (const platform of ["Shopify", undefined]) {
+		const { handlers } = load({ option: NO_PLATFORM, shipment: null });
+		const frm = make_frm({ custom_marketplace_platform: platform });
+		handlers["Sales Order"].refresh(frm);
+		await settle();
+		assert.equal(frm.tab.visible, true, String(platform));
+		assert.deepEqual(labels(frm), ["create"], String(platform));
+	}
+});
+
+test("a Noon Sales Order's existing Bosta shipments offer no handover or retry action", async () => {
+	global.format_currency = (value) => `EGP ${value}`;
+	const current = detailed({ name: "BOSTA-CURRENT", handover_status: "Awaiting Handover", stock_posting_status: "Not Posted" });
+	const multi = { ...current, shipments: [current] };
+	const noon = load({ option: NO_PLATFORM, shipment: multi });
+	const noon_frm = make_frm({ custom_marketplace_platform: "Noon" });
+	noon.handlers["Sales Order"].refresh(noon_frm);
+	await settle();
+	assert.deepEqual(labels(noon_frm), ["print:BOSTA-CURRENT", "refresh:BOSTA-CURRENT"]);
+	const shopify = load({ option: NO_PLATFORM, shipment: multi });
+	const shopify_frm = make_frm({ custom_marketplace_platform: "Shopify" });
+	shopify.handlers["Sales Order"].refresh(shopify_frm);
+	await settle();
+	assert.ok(labels(shopify_frm).includes("handover:BOSTA-CURRENT"));
 });
 
 test("indicator colour follows the shipment status", async () => {
@@ -1503,7 +1595,7 @@ test("a submitted Noon Sales Order shows the item-edit hint; other platforms and
 		await settle();
 		assert.equal(shown.length, intros, name);
 		if (intros) {
-			assert.match(shown[0].message, /Noon Fulfillment tab/);
+			assert.match(shown[0].message, /Noon Fulfillment buttons on this Sales Order/);
 			assert.equal(shown[0].color, "orange");
 		}
 	}
@@ -1686,4 +1778,263 @@ test("the tab shows cancellation, received, last update and last sync values", (
 	for (const text of ["Cancelled At", "user:2026-10-01 09:00:00", "customer", "Received On", "Last Platform Update On", "Last ERPNext Sync On", "boom"]) {
 		assert.ok(html.includes(text), text);
 	}
+});
+
+// ---- Noon fulfillment on the Sales Order form (moved from the Marketplace Order form) ----
+
+const NOON_ALL_ACTIONS = [
+	"create_shipment", "mark_out_of_stock", "cancel_shipment", "add_awb", "mark_handed_over", "upload_invoice",
+	"upload_order_invoice", "retry", "retry_order_invoice", "discard_shipment", "release_stuck_oos_reservation",
+];
+const NOON_LABELS = {
+	create_shipment: "Create Shipment", mark_out_of_stock: "Mark Out of Stock", cancel_shipment: "Cancel Shipment",
+	add_awb: "Add AWB", mark_handed_over: "Mark Handed Over", upload_invoice: "Upload Invoice",
+	upload_order_invoice: "Upload Order Invoice", retry: "Retry", retry_order_invoice: "Retry Order Invoice",
+	discard_shipment: "Discard Shipment", release_stuck_oos_reservation: "Release Stuck Out of Stock Reservation",
+};
+const noon_so = (extra = {}) => ({ custom_marketplace_platform: "Noon", custom_marketplace_order: "MO-NOON", ...extra });
+const noon_shipments = () => [
+	{ integration_shipment_nr: "ORD-1", status: "Created", awbs: [{ courier: "Aramex", awb_nr: "AWB-1" }], delivery_note: "", handed_over: false, unresolved: [] },
+	{ integration_shipment_nr: "ORD-2", status: "Error", awbs: [], delivery_note: "", handed_over: false, unresolved: [] },
+	{ integration_shipment_nr: "ORD-3", status: "Created", awbs: [], delivery_note: "MAT-DN-1", delivery_notes: ["MAT-DN-1", "MAT-DN-3"], handed_over: true, unresolved: ["SKU-9: not on the Sales Order"] },
+	{ integration_shipment_nr: "ORD-4", status: "Created", awbs: [], delivery_note: "MAT-DN-2", handed_over: true, unresolved: [] },
+];
+
+async function refresh_noon(options, doc) {
+	const context = load(options);
+	const frm = make_frm(doc || noon_so());
+	await context.handlers["Sales Order"].refresh(frm);
+	await settle();
+	return { ...context, frm };
+}
+
+test("a submitted Noon Sales Order gets the Noon Fulfillment group with one button per available action", async () => {
+	const { frm, noon_calls, required } = await refresh_noon({
+		noon_state: { actions: NOON_ALL_ACTIONS, cancelled_on_noon: false, shipments: noon_shipments() },
+	});
+	assert.deepEqual(required.filter((a) => a.endsWith("noon_fulfillment.js")), ["/assets/marketplace_integrations/js/noon_fulfillment.js"]);
+	assert.deepEqual(frm.buttons.map((b) => b.label), NOON_ALL_ACTIONS.map((a) => NOON_LABELS[a]));
+	assert.ok(frm.buttons.every((b) => b.group === "Noon Fulfillment"));
+	assert.equal(noon_calls.length, 1);
+	assert.equal(noon_calls[0].method, "marketplace_integrations.api.noon_fulfillment.get_available_actions");
+	assert.deepEqual(noon_calls[0].args, { marketplace_order: "MO-NOON" });
+});
+
+test("only the actions the server reports are shown, and none when the list is empty", async () => {
+	const some = await refresh_noon({ noon_state: { actions: ["retry", "add_awb", "unknown"], shipments: [] } });
+	assert.deepEqual(some.frm.buttons.map((b) => b.label), ["Add AWB", "Retry"]);
+	const none = await refresh_noon({ noon_state: { actions: [], shipments: [] } });
+	assert.deepEqual(none.frm.buttons, []);
+});
+
+test("a cancelled-on-Noon order shows the headline and no buttons", async () => {
+	const context = load({ noon_state: { actions: [], cancelled_on_noon: true, shipments: [] } });
+	const frm = make_frm(noon_so());
+	const headlines = [];
+	frm.dashboard.set_headline = (message, color) => headlines.push({ message, color });
+	await context.handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.deepEqual(frm.buttons, []);
+	assert.deepEqual(headlines, [{ message: "Cancelled on Noon; no fulfillment actions available", color: "orange" }]);
+});
+
+test("the Noon Fulfillment group is hidden for Shopify, Talabat, draft, cancelled, unlinked and unknown-platform orders", async () => {
+	const cases = [
+		["Shopify", noon_so({ custom_marketplace_platform: "Shopify" })],
+		["Talabat", noon_so({ custom_marketplace_platform: "Talabat" })],
+		["blank platform", noon_so({ custom_marketplace_platform: "" })],
+		["draft", noon_so({ docstatus: 0 })],
+		["cancelled", noon_so({ docstatus: 2 })],
+		["unlinked", noon_so({ custom_marketplace_order: "" })],
+	];
+	for (const [name, doc] of cases) {
+		const { frm, noon_calls, required } = await refresh_noon(
+			{ noon_state: { actions: NOON_ALL_ACTIONS, shipments: noon_shipments() }, shopify_preview: { state: "not_applicable", changes: [], reasons: [] } },
+			doc
+		);
+		assert.deepEqual(frm.buttons, [], name);
+		assert.equal(noon_calls.length, 0, name);
+		assert.ok(!required.some((a) => a.endsWith("noon_fulfillment.js")), name);
+	}
+});
+
+test("without write permission on Marketplace Order nothing is shown; without read the call is not made", async () => {
+	const no_write = await refresh_noon({ can_write: false, noon_state: { actions: NOON_ALL_ACTIONS, shipments: [] } });
+	assert.deepEqual(no_write.frm.buttons, []);
+	const no_read = await refresh_noon({ can_read: false, noon_state: { actions: NOON_ALL_ACTIONS, shipments: [] } });
+	assert.deepEqual(no_read.frm.buttons, []);
+	assert.equal(no_read.noon_calls.length, 0);
+});
+
+test("Mark Handed Over is hidden without create permission on Delivery Note", async () => {
+	const { frm } = await refresh_noon({
+		can_create_delivery_note: false,
+		noon_state: { actions: ["retry", "mark_handed_over"], shipments: [] },
+	});
+	assert.deepEqual(frm.buttons.map((b) => b.label), ["Retry"]);
+});
+
+test("a failed fulfillment call adds nothing and does not break the refresh", async () => {
+	const { frm } = await refresh_noon({ noon_fails: true });
+	assert.deepEqual(frm.buttons, []);
+});
+
+test("the Marketplace Order tab lists Noon shipments with escaped values and a Delivery Note link", async () => {
+	const shipments = [
+		{ integration_shipment_nr: "<img src=x>", status: "Created", awbs: [{ courier: "<b>Ar</b>", awb_nr: "A&1" }], delivery_note: "MAT/DN 1", unresolved: ["<script>x</script>: unmapped"] },
+	];
+	const { frm } = await refresh_noon({
+		marketplace_summary: { name: "MO-NOON", platform: "Noon", reference: "N-1", erpnext_sync_status: "Synced", erpnext_sales_order: "SAL-ORD-1" },
+		noon_state: { actions: [], shipments },
+	});
+	const html = frm.marketplace_tab.html;
+	assert.match(html, /Noon Shipments/);
+	assert.match(html, /&lt;img src&#x3D;x&gt;/);
+	assert.match(html, /&lt;b&gt;Ar&lt;\/b&gt; A&amp;1/);
+	assert.match(html, /<a href="\/app\/delivery-note\/MAT%2FDN%201">MAT\/DN 1<\/a>/);
+	assert.match(html, /&lt;script&gt;x&lt;\/script&gt;: unmapped/);
+	assert.doesNotMatch(html, /<img|<script/);
+});
+
+test("non-Noon orders and Noon orders without shipments show no shipments block", async () => {
+	const shopify = await refresh_noon({
+		noon_state: { actions: [], shipments: noon_shipments() },
+	}, noon_so({ custom_marketplace_platform: "Shopify" }));
+	assert.doesNotMatch(shopify.frm.marketplace_tab.html, /Noon Shipments/);
+	const empty = await refresh_noon({
+		marketplace_summary: { name: "MO-NOON", platform: "Noon", reference: "N-1", erpnext_sync_status: "Synced", erpnext_sales_order: "SAL-ORD-1" },
+		noon_state: { actions: [], shipments: [] },
+	});
+	assert.doesNotMatch(empty.frm.marketplace_tab.html, /Noon Shipments/);
+});
+
+test("dialog options come from the shipments and escape shipment numbers", async () => {
+	const { frm } = await refresh_noon({ noon_state: { actions: NOON_ALL_ACTIONS, shipments: noon_shipments() } });
+	const noon = global.frappe.marketplace_integrations.noon_fulfillment;
+	const ctx = noon.build_context(frm, { shipments: [{ integration_shipment_nr: "<i>1</i>", status: "Created", delivery_note: "", unresolved: [] }, ...noon_shipments()] });
+	assert.equal(ctx.marketplace_order, "MO-NOON");
+	assert.equal(ctx.sales_order, "SAL-ORD-1");
+	assert.equal(noon.noon_created_shipment_options(ctx)[0].label, "&lt;i&gt;1&lt;/i&gt;");
+	assert.deepEqual(noon.noon_created_shipment_options(ctx).map((o) => o.value), ["<i>1</i>", "ORD-1", "ORD-3", "ORD-4"]);
+	// Error and Cancel Pending only
+	assert.deepEqual(noon.noon_discardable_shipment_options(ctx).map((o) => o.value), ["ORD-2"]);
+	// Created and not handed over yet, or with unresolved units
+	assert.deepEqual(noon.noon_handover_shipment_options(ctx).map((o) => o.value), ["<i>1</i>", "ORD-1", "ORD-3"]);
+});
+
+test("unit checklist uses indices as values, escapes labels and maps back to the real units", () => {
+	load();
+	const noon = require("./noon_fulfillment.js");
+	const units = [{ mp_item_nr: "<b>1</b>", partner_sku: "S\"1" }, { mp_item_nr: "2", partner_sku: undefined }];
+	const options = noon.noon_unit_checklist_options(units);
+	assert.deepEqual(options.map((o) => o.value), ["0", "1"]);
+	assert.match(options[0].label, /&lt;b&gt;1&lt;\/b&gt; \(S&quot;1\)/);
+	assert.equal(options[1].label, "2 ()");
+	assert.deepEqual(noon.mp_item_nrs_from_unit_indices(units, ["1", "0", "7"]), ["2", "<b>1</b>"]);
+	assert.deepEqual(noon.mp_item_nrs_from_unit_indices(units, undefined), []);
+});
+
+test("noon_handover_alert reports created, existing, nothing created and skipped units", () => {
+	load();
+	const { noon_handover_alert } = require("./noon_fulfillment.js");
+	assert.deepEqual(noon_handover_alert({ delivery_note: "DN-1", created: true, unresolved: [] }), {
+		message: "Draft Delivery Note DN-1 created. Review and submit it.",
+		indicator: "green",
+	});
+	assert.match(noon_handover_alert({ delivery_note: "DN-1", created: false, unresolved: [] }).message, /already exists/);
+	const partial = noon_handover_alert({ delivery_note: "DN-1", created: true, unresolved: [{ text: "X: no enabled product mapping", reason: "unmapped" }] });
+	assert.equal(partial.indicator, "orange");
+	assert.match(partial.message, /Not added: X: no enabled product mapping/);
+	assert.doesNotMatch(partial.message, /sync was queued/);
+	const none = noon_handover_alert({ delivery_note: null, unresolved: [{ text: "X: not on the Sales Order", reason: "not_on_order" }] });
+	assert.equal(none.indicator, "orange");
+	assert.match(none.message, /No Delivery Note was created\./);
+	assert.match(none.message, /sync was queued/);
+	assert.equal(noon_handover_alert(undefined).indicator, "orange");
+	assert.match(
+		noon_handover_alert({ delivery_note: "DN-1", created: false, added_to_existing: true, unresolved: [] }).message,
+		/Units added to the draft Delivery Note DN-1/
+	);
+});
+
+test("noon_handover_alert escapes Noon-sourced unit text and the Delivery Note name", () => {
+	load();
+	const { noon_handover_alert } = require("./noon_fulfillment.js");
+	global.frappe.utils.escape_html = escape_html;
+	const alert = noon_handover_alert({
+		delivery_note: "DN<1>",
+		created: true,
+		unresolved: [{ text: "<img src=x onerror=1>: not on the Sales Order", reason: "not_on_order" }],
+	});
+	assert.doesNotMatch(alert.message, /<img/);
+	assert.match(alert.message, /&lt;img src&#x3D;x onerror&#x3D;1&gt;/);
+	assert.match(alert.message, /DN&lt;1&gt;/);
+});
+
+test("the shipments summary lists every Delivery Note of a shipment", () => {
+	load();
+	const { noon_shipments_html } = require("./noon_fulfillment.js");
+	global.frappe.utils.escape_html = escape_html;
+	const html = noon_shipments_html(noon_shipments());
+	assert.match(html, /MAT-DN-1<\/a>, <a href="\/app\/delivery-note\/MAT-DN-3">MAT-DN-3/);
+	assert.match(html, /MAT-DN-2/);
+});
+
+test("a Closed submitted Noon Sales Order keeps the Noon Fulfillment buttons (the server decides)", async () => {
+	const { frm } = await refresh_noon(
+		{ noon_state: { actions: ["create_shipment", "mark_handed_over"], shipments: [] } },
+		noon_so({ status: "Closed" })
+	);
+	assert.deepEqual(frm.buttons.map((b) => b.label), ["Create Shipment", "Mark Handed Over"]);
+});
+
+test("a button opens its dialog and calls the endpoint with the linked Marketplace Order", async () => {
+	const { frm, dialogs, noon_calls, confirms } = await refresh_noon({
+		noon_state: { actions: ["create_shipment", "cancel_shipment", "mark_handed_over", "release_stuck_oos_reservation"], shipments: noon_shipments() },
+	});
+	const by_label = Object.fromEntries(frm.buttons.map((b) => [b.label, b.action]));
+
+	by_label["Create Shipment"]();
+	await settle();
+	const create = dialogs[dialogs.length - 1];
+	assert.equal(create.config.title, "Create Noon Shipment");
+	create.config.primary_action({ units: ["1"], awb_source: "Noon" });
+	await settle();
+	const call = noon_calls[noon_calls.length - 1];
+	assert.equal(call.method, "marketplace_integrations.api.noon_fulfillment.create_shipment");
+	assert.deepEqual(call.args, { marketplace_order: "MO-NOON", mp_item_nrs: ["2"], awb_source: "Noon", courier: undefined, awb_nr: undefined });
+	assert.equal(frm.reloads, 1);
+
+	by_label["Mark Handed Over"]();
+	const handover = dialogs[dialogs.length - 1];
+	assert.equal(handover.config.title, "Mark Noon Shipment Handed Over");
+	handover.config.primary_action({ integration_shipment_nr: "ORD-1" });
+	await settle();
+	const handed = noon_calls[noon_calls.length - 1];
+	assert.equal(handed.method, "marketplace_integrations.api.noon_fulfillment.mark_handed_over");
+	assert.deepEqual(handed.args, { marketplace_order: "MO-NOON", integration_shipment_nr: "ORD-1" });
+
+	by_label["Cancel Shipment"]();
+	dialogs[dialogs.length - 1].config.primary_action({ integration_shipment_nr: "ORD-1" });
+	assert.equal(confirms.length, 1);
+	assert.match(confirms[0].message, /SAL-ORD-1/);
+	confirms[0].proceed();
+	await settle();
+	assert.equal(noon_calls[noon_calls.length - 1].method, "marketplace_integrations.api.noon_fulfillment.cancel_shipment");
+
+	by_label["Release Stuck Out of Stock Reservation"]();
+	assert.equal(confirms.length, 2);
+	confirms[1].proceed();
+	await settle();
+	assert.deepEqual(noon_calls[noon_calls.length - 1].args, { marketplace_order: "MO-NOON" });
+});
+
+test("a dialog with nothing to act on tells the user instead of opening", async () => {
+	const { frm, dialogs, msgprints } = await refresh_noon({
+		noon_state: { actions: ["cancel_shipment", "add_awb"], shipments: [{ integration_shipment_nr: "ORD-2", status: "Error", awbs: [], delivery_note: "", unresolved: [] }] },
+	});
+	const before = dialogs.length;
+	frm.buttons.find((b) => b.label === "Cancel Shipment").action();
+	assert.equal(dialogs.length, before);
+	assert.equal(msgprints.length, 1);
 });
