@@ -19,7 +19,7 @@ decides and acts, no corrective transaction is created).
 from frappe import _
 from frappe.utils import cstr
 
-from marketplace_integrations.services.sync_status import (  # noqa: F401 (re-exported)
+from marketplace_integrations.services.sync_status import (
 	AWAITING_RECEIPT,
 	CANCELLED,
 	DRAFT_PREPARED,
@@ -77,6 +77,7 @@ VERIFY_ERP_STATE = "VERIFY_ERP_STATE"
 OUTBOUND_EDIT_MISMATCH = "OUTBOUND_EDIT_MISMATCH"
 SALES_ORDER_CHANGED_IN_ERP = "SALES_ORDER_CHANGED_IN_ERP"
 LEGACY_NOT_SYNCED_REVIEW = "LEGACY_NOT_SYNCED_REVIEW"
+DELIVERY_NOTE_UNITS_SKIPPED = "DELIVERY_NOTE_UNITS_SKIPPED"
 
 
 def _entry(status, mode, action_type, instruction):
@@ -322,6 +323,13 @@ REASONS = {
 		MANUAL,
 		"REVIEW_SALES_ORDER",
 		"The marketplace order changed after it was synced to ERPNext.",
+	),
+	DELIVERY_NOTE_UNITS_SKIPPED: _entry(
+		NEEDS_ACTION,
+		MANUAL,
+		"REVIEW_DELIVERY_UNITS",
+		"Some handed-over units could not be added to the draft Delivery Note. "
+		"Fix the product mapping or add them to a Delivery Note by hand.",
 	),
 	LEGACY_NOT_SYNCED_REVIEW: _entry(
 		NEEDS_ACTION,

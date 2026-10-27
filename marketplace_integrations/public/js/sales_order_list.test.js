@@ -6,8 +6,9 @@ global.__ = (message, args) => {
 	return message.replace(/\{(\d+)\}/g, (_, index) => args[index]);
 };
 
-function load({ creator = true, original_onload = null, original_formatters = {}, defaults = null, defaults_fail = false } = {}) {
+function load({ excluded = ["Noon", "Talabat"], creator = true, original_onload = null, original_formatters = {}, defaults = null, defaults_fail = false } = {}) {
 	const msgprints = [];
+	const alerts = [];
 	const calls = [];
 	const dialogs = [];
 	const created_cards = [];
@@ -22,10 +23,12 @@ function load({ creator = true, original_onload = null, original_formatters = {}
 			},
 		},
 		msgprint: (message) => msgprints.push(message),
+		show_alert: (alert) => alerts.push(alert),
 		// Loading sales_order.js is what exports the creator roles.
 		require: () => {
 			global.frappe.marketplace_integrations = {
 				BOSTA_CREATOR_ROLES: ["Sales Manager"],
+				BOSTA_EXCLUDED_PLATFORMS: excluded,
 				order_hover_card: {
 					create: (opts) => {
 						created_cards.push(opts);
@@ -59,7 +62,7 @@ function load({ creator = true, original_onload = null, original_formatters = {}
 	const path = require.resolve("./sales_order_list.js");
 	delete require.cache[path];
 	const module_exports = require(path);
-	return { calls, msgprints, dialogs, created_cards, attached, module_exports, settings: global.frappe.listview_settings["Sales Order"] };
+	return { calls, alerts, msgprints, dialogs, created_cards, attached, module_exports, settings: global.frappe.listview_settings["Sales Order"] };
 }
 
 function listview(names = []) {
@@ -88,6 +91,56 @@ test("users without a creator role do not get the action", async () => {
 	settings.onload(view);
 	await new Promise((resolve) => setTimeout(resolve, 5));
 	assert.deepEqual(view.items, []);
+});
+
+// ---- the Bosta bulk action leaves out platforms that fulfil their own orders (#368) ----
+
+const rows = (...pairs) => pairs.map(([name, platform]) => ({ name, custom_marketplace_platform: platform }));
+const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
+const plan_call = (calls) => calls.find((call) => call.method.endsWith("get_bulk_create_plan"));
+
+test("the list loads each row's platform without dropping ERPNext's own fields", () => {
+	const { settings } = load();
+	assert.ok(settings.add_fields.includes("custom_marketplace_platform"));
+	global.frappe.listview_settings["Sales Order"].add_fields = ["status"];
+	const path = require.resolve("./sales_order_list.js");
+	delete require.cache[path];
+	require(path);
+	assert.deepEqual(global.frappe.listview_settings["Sales Order"].add_fields, ["status", "custom_marketplace_platform"]);
+});
+
+test("none excluded: Shopify and rows without a platform go to the server exactly as before", async () => {
+	const { module_exports, calls, alerts, msgprints } = load();
+	module_exports.start(listview(rows(["SO-1", "Shopify"], ["SO-2", ""], ["SO-3", undefined])));
+	await settle();
+	assert.deepEqual(plan_call(calls).args, { sales_orders: ["SO-1", "SO-2", "SO-3"] });
+	assert.deepEqual(alerts, []);
+	assert.deepEqual(msgprints, []);
+});
+
+test("all excluded: nothing is requested and the user is told Bosta is not used for these platforms", async () => {
+	const { module_exports, calls, msgprints } = load();
+	module_exports.start(listview(rows(["SO-1", "Noon"], ["SO-2", "Talabat"])));
+	await settle();
+	assert.equal(plan_call(calls), undefined);
+	assert.match(msgprints[0].message, /Bosta is not used for Noon, Talabat orders/);
+});
+
+test("mixed selection: only the non-excluded rows are sent and the alert counts the rows left out", async () => {
+	const { module_exports, calls, alerts } = load();
+	module_exports.start(listview(rows(["SO-1", "Noon"], ["SO-2", "Shopify"], ["SO-3", "Talabat"], ["SO-4", ""])));
+	await settle();
+	assert.deepEqual(plan_call(calls).args, { sales_orders: ["SO-2", "SO-4"] });
+	assert.equal(alerts.length, 1);
+	assert.match(alerts[0].message, /^2 selected Sales Order\(s\) were left out: Bosta is not used for Noon, Talabat orders\.$/);
+});
+
+test("split_by_platform treats a missing or unknown platform as allowed and an empty list as nothing excluded", () => {
+	const { module_exports } = load();
+	const selection = module_exports.selected_rows(listview(rows(["A", "Noon"], ["B", undefined], ["C", "Amazon"])));
+	assert.deepEqual(module_exports.split_by_platform(selection, ["Noon", "Talabat"]), { allowed: ["B", "C"], left_out: 1 });
+	assert.deepEqual(module_exports.split_by_platform(selection, []), { allowed: ["A", "B", "C"], left_out: 0 });
+	assert.deepEqual(module_exports.split_by_platform(selection, undefined), { allowed: ["A", "B", "C"], left_out: 0 });
 });
 
 test("more than 50 selected orders are refused naming 50 and nothing is requested", () => {
