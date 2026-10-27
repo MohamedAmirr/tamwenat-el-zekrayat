@@ -75,7 +75,6 @@ Disabled,معطّل
 Cancel Pending,إلغاء معلّق
 Synced,تمت المزامنة
 Not Synced,لم تتم المزامنة
-Modified After Sync,تم التعديل بعد المزامنة
 Sync Error,خطأ مزامنة
 Queued,في قائمة الانتظار
 Inventory Error,خطأ في المخزون
@@ -1098,7 +1097,6 @@ Noon order {0} was not found.,لم يتم العثور على طلب Noon {0}.
 Noon order {0}'s presentment currency ({1}) does not match the resolved ERPNext currency ({2}). Multi-currency Sales Order synchronization is not supported.,عملة عرض طلب Noon {0} ({1}) لا تطابق عملة ERPNext المحددة ({2}). مزامنة أوامر البيع متعددة العملات غير مدعومة.
 Noon orders cannot be cancelled from ERPNext.,لا يمكن إلغاء طلبات Noon من ERPNext.
 Noon partner SKU is required.,رمز منتج الشريك في Noon مطلوب.
-"Noon pricing and stock syncs are already queued, running or paused.",مزامنة أسعار ومخزون Noon في قائمة الانتظار أو قيد التشغيل أو متوقفة مؤقتًا.
 Noon pricing and stock syncs are already queued or running.,مزامنة أسعار ومخزون Noon في قائمة الانتظار أو قيد التشغيل بالفعل.
 Noon pricing setup failed; see Error Log.,فشل إعداد أسعار Noon؛ راجع سجل الأخطاء.
 Noon pricing update failed; see Error Log.,فشل تحديث أسعار Noon؛ راجع سجل الأخطاء.
@@ -1304,7 +1302,6 @@ Select one or more Error rows to retry.,حدّد صف خطأ واحدًا أو �
 Sellable,قابل للبيع
 Sellable drafts a Sales Return into the account warehouse. Damaged is only recorded: Noon is responsible for it.,"""قابل للبيع"" يُنشئ مسودة مرتجع مبيعات إلى مستودع الحساب. ""تالف"" يُسجَّل فقط: Noon مسؤولة عنه."
 Send the current webhook URL to Noon,إرسال رابط Webhook الحالي إلى Noon
-Send to ERPNext,إرسال إلى ERPNext
 Send to Talabat,إرسال إلى Talabat
 Set the ERPNext Company before choosing a Clearing Account.,اضبط شركة ERPNext قبل اختيار حساب التسوية.
 Set the ERPNext Company before choosing the ERPNext Shipping Income Account.,اضبط شركة ERPNext قبل اختيار حساب إيرادات الشحن في ERPNext.
@@ -1503,7 +1500,7 @@ This updates Bosta and the Bosta Shipment only. The Sales Order address and Shop
 Tracking,التتبع
 Transaction currency {0} differs from the Company currency {1}.,عملة المعاملة {0} تختلف عن عملة الشركة {1}.
 Transactions (kind/status/gateway/manual): {0}.,المعاملات (النوع/الحالة/البوابة/يدوي): {0}.
-Turn off to keep importing Shopify orders while ERPNext stops writing inventory to this store. Turning it back on does not trigger a full push.,أوقفه لمواصلة استيراد طلبات Shopify بينما يتوقف ERPNext عن كتابة المخزون في هذا المتجر. إعادة تشغيله لا تُطلق إرسالًا كاملًا.
+Turn off to keep importing Shopify orders while ERPNext stops automatically writing inventory to this store. Turning it back on does not trigger a full push. Manual syncs from the mapping still run.,أوقفه لمواصلة استيراد طلبات Shopify بينما يتوقف ERPNext عن الكتابة التلقائية لـ المخزون في هذا المتجر. إعادة تشغيله لا تُطلق إرسالًا كاملًا. تظل المزامنة اليدوية من الربط تعمل.
 UNIT,وحدة
 UNIT items require a non-negative quantity.,عناصر الوحدة تحتاج إلى كمية غير سالبة.
 Unavailable,غير متاح
@@ -1521,7 +1518,6 @@ Unsupported Talabat order update status.,حالة تحديث طلب Talabat غي
 Unsupported Talabat outlet status update.,تحديث حالة منفذ Talabat غير مدعوم.
 Update Bosta delivery {0}? {1},هل تريد تحديث توصيل Bosta {0}؟ {1}
 Update Cart,تحديث السلة
-Update ERPNext Order,تحديث أمر ERPNext
 Update Noon Destination,تحديث وجهة Noon
 Update Shipment,تحديث الشحنة
 Update Talabat Cart,تحديث سلة Talabat
@@ -1652,10 +1648,9 @@ The order no longer has a Created shipment.,لم يعد للطلب شحنة بح
 The order invoice has nothing to retry.,لا توجد فاتورة طلب لإعادة محاولتها.
 Push Inventory to Noon,إرسال المخزون إلى Noon
 Push Prices to Noon,إرسال الأسعار إلى Noon
-Turn off to keep importing Noon orders while ERPNext stops writing stock to this account. Turning it back on does not trigger a full push.,أوقفه لمواصلة استيراد طلبات Noon بينما يتوقف ERPNext عن كتابة المخزون في هذا الحساب. إعادة تشغيله لا تُطلق إرسالًا كاملًا.
-Turn off to keep importing Noon orders while ERPNext stops writing prices to this account. Turning it back on does not trigger a full push.,أوقفه لمواصلة استيراد طلبات Noon بينما يتوقف ERPNext عن كتابة الأسعار في هذا الحساب. إعادة تشغيله لا تُطلق إرسالًا كاملًا.
+Turn off to keep importing Noon orders while ERPNext stops automatically writing stock to this account. Turning it back on does not trigger a full push. Manual syncs from the mapping still run.,أوقفه لمواصلة استيراد طلبات Noon بينما يتوقف ERPNext عن الكتابة التلقائية لـ المخزون في هذا الحساب. إعادة تشغيله لا تُطلق إرسالًا كاملًا. تظل المزامنة اليدوية من الربط تعمل.
+Turn off to keep importing Noon orders while ERPNext stops automatically writing prices to this account. Turning it back on does not trigger a full push. Manual syncs from the mapping still run.,أوقفه لمواصلة استيراد طلبات Noon بينما يتوقف ERPNext عن الكتابة التلقائية لـ الأسعار في هذا الحساب. إعادة تشغيله لا تُطلق إرسالًا كاملًا. تظل المزامنة اليدوية من الربط تعمل.
 Price push is paused for this account.,إرسال الأسعار متوقف مؤقتًا لهذا الحساب.
-push paused.,الإرسال متوقف مؤقتًا.
 Bosta City Code,رمز مدينة Bosta
 Sent to Bosta with the address first line; Bosta resolves the district.,يُرسل إلى Bosta مع السطر الأول من العنوان؛ وتحدد Bosta المنطقة.
 Choose a Bosta city.,اختر مدينة Bosta.
@@ -1789,3 +1784,94 @@ Clear edit marker,مسح علامة التعديل
 Clear the marker of the item edit sent to Shopify? Do this only after you checked in Shopify what happened to that edit.,هل تريد مسح علامة تعديل العناصر المرسل إلى Shopify؟ افعل ذلك فقط بعد التحقق في Shopify مما حدث لهذا التعديل.
 Edit marker cleared.,تم مسح علامة التعديل.
 Marketplace outbound action: failed to write failure log,إجراء صادر للسوق: فشلت كتابة سجل الفشل
+Latest Bosta delivery state. Display only; it does not affect accounting.,أحدث حالة توصيل من Bosta. للعرض فقط ولا تؤثر على المحاسبة.
+"Delivery fee reported by Bosta, in EGP. Display only; it does not affect accounting.",رسوم التوصيل التي أبلغت عنها Bosta بالجنيه المصري. للعرض فقط ولا تؤثر على المحاسبة.
+Bosta exception,استثناء من Bosta
+Returned,مرتجع
+Received On,تاريخ الاستلام
+Invalid,غير صالح
+Bosta Delivery Fee Received On,تاريخ استلام رسوم توصيل Bosta
+"When Bosta first reported a delivery fee. A Currency column cannot tell an unset fee from a real 0, so the fee is shown and polling stops only once this is set.",وقت إبلاغ Bosta لأول مرة برسوم التوصيل. لا يميّز حقل العملة بين رسوم غير محددة وصفر حقيقي، لذلك تُعرض الرسوم ويتوقف الاستعلام عنها فقط بعد تعيين هذا الحقل.
+"This retry sends the COD entered earlier, {0}, not the current outstanding amount, {1}.",ستُرسل إعادة المحاولة هذه مبلغ الدفع عند الاستلام الذي أُدخل سابقًا، {0}، وليس المبلغ المستحق الحالي، {1}.
+Syncing,قيد المزامنة
+Needs Action,يحتاج إلى إجراء
+Waiting for User,بانتظار المستخدم
+Awaiting Receipt,بانتظار الاستلام
+Draft Prepared,تم تجهيز مسودة
+Recheck Queued,إعادة الفحص في الانتظار
+Resolved,تمت المعالجة
+ERPNext Document Change,تغيير مستند في ERPNext
+Sync Reason Code,رمز سبب المزامنة
+Sync Action Type,نوع إجراء المزامنة
+Sync Remediation Mode,أسلوب معالجة المزامنة
+Sync Action State,حالة إجراء المزامنة
+Blocking Document Type,نوع المستند المعيق
+Blocking Document,المستند المعيق
+Prepared Document Type,نوع المستند المجهز
+Prepared Document,المستند المجهز
+Sync Retry Count,عدد إعادات محاولة المزامنة
+Goods Receipt Confirmed By,تم تأكيد استلام البضاعة بواسطة
+Goods Receipt Confirmed On,تاريخ تأكيد استلام البضاعة
+Stable machine code for why the order is in Needs Action or Sync Error (services/sync_reason_codes.py).,رمز آلي ثابت يوضح سبب وجود الطلب في حالة يحتاج إلى إجراء أو خطأ مزامنة (services/sync_reason_codes.py).
+Internal: transient-failure retries used so far (services/sales_order_sync_debounce.py). Reset on success.,داخلي: عدد إعادات المحاولة المستخدمة حتى الآن بعد الأعطال المؤقتة (services/sales_order_sync_debounce.py). يُعاد تصفيره عند النجاح.
+Action State,حالة الإجراء
+Linked Document Type,نوع المستند المرتبط
+Linked Document,المستند المرتبط
+The marketplace order needs your action.,طلب السوق يحتاج إلى إجراء منك.
+Retry Sync,إعادة محاولة المزامنة
+Confirm Goods Received,تأكيد استلام البضاعة
+Sync action: {0},إجراء المزامنة: {0}
+Confirm that the returned goods were physically received. A draft return will be prepared for your review; nothing is submitted.,أكد أن البضاعة المرتجعة استُلمت فعليًا. سيتم تجهيز مسودة مرتجع لمراجعتك؛ ولن يُعتمد أي مستند.
+Preparing the draft return...,جارٍ تجهيز مسودة المرتجع...
+Draft prepared: {0},تم تجهيز المسودة: {0}
+ERPNext Sales Order synchronization kept failing because of a temporary problem.,استمر فشل مزامنة أمر البيع مع ERPNext بسبب مشكلة مؤقتة.
+A temporary problem interrupted the sync; retry {0} of {1} is scheduled.,قطعت مشكلة مؤقتة المزامنة؛ تمت جدولة إعادة المحاولة {0} من {1}.
+ERPNext refused to add or remove a Sales Order row.,رفض ERPNext إضافة صف إلى أمر البيع أو حذفه.
+This order is not waiting for goods to be received.,هذا الطلب لا ينتظر استلام بضاعة.
+This order has no linked Sales Order.,لا يوجد أمر بيع مرتبط بهذا الطلب.
+"Sales Order {0} has no submitted Delivery Note, so there is nothing to return.",أمر البيع {0} ليس له مذكرة تسليم معتمدة، لذلك لا يوجد ما يُرجَع.
+Sales Order {0} has several Delivery Notes ({1}); create the Sales Return manually from the one the goods came back for.,أمر البيع {0} له عدة مذكرات تسليم ({1})؛ أنشئ مرتجع المبيعات يدويًا من المذكرة التي رجعت بضاعتها.
+"Draft return {0} was prepared. Check the goods and quantities, then submit it. Nothing was submitted automatically.",تم تجهيز مسودة المرتجع {0}. راجع البضاعة والكميات ثم اعتمدها. لم يُعتمد أي مستند تلقائيًا.
+No Noon Return is linked to this order yet. Look up the return on the order first.,لا يوجد مرتجع Noon مرتبط بهذا الطلب بعد. ابحث عن المرتجع من الطلب أولًا.
+Confirmed from Marketplace Order {0},تم التأكيد من طلب السوق {0}
+Receipt was recorded on Noon Return {0}. Record its inspection to prepare the draft Sales Return.,تم تسجيل الاستلام على مرتجع Noon {0}. سجّل فحصه لتجهيز مسودة مرتجع المبيعات.
+A temporary problem interrupted the sync. It will be retried automatically.,قطعت مشكلة مؤقتة المزامنة. ستُعاد المحاولة تلقائيًا.
+The sync kept failing because of a temporary problem. Check the connection and use Retry Sync.,استمر فشل المزامنة بسبب مشكلة مؤقتة. تحقق من الاتصال ثم استخدم إعادة محاولة المزامنة.
+An item has no enabled Marketplace Product Mapping. Fix the mapping; the order syncs again automatically.,أحد الأصناف ليس له ربط منتجات سوق مفعّل. أصلح الربط وسيُزامَن الطلب مجددًا تلقائيًا.
+A line has no usable price. Refresh the order from the marketplace or correct its price.,أحد السطور بلا سعر صالح. حدّث الطلب من السوق أو صحّح سعره.
+The order cannot be synchronized until the problem is fixed.,لا يمكن مزامنة الطلب حتى تُحل المشكلة.
+The marketplace lines cannot be matched to the Sales Order rows. Review the order.,لا يمكن مطابقة سطور السوق مع صفوف أمر البيع. راجع الطلب.
+ERPNext rejected the Sales Order change. Fix the cause and retry.,رفض ERPNext تعديل أمر البيع. أصلح السبب ثم أعد المحاولة.
+The order was cancelled after payment. Refund the customer in the marketplace.,أُلغي الطلب بعد الدفع. أعد المبلغ إلى العميل من السوق.
+The marketplace reported a return or refund after ERPNext delivered or billed this order. Confirm the goods were received to prepare a draft Sales Return.,أبلغ السوق عن مرتجع أو استرداد بعد أن سلّم ERPNext هذا الطلب أو فوتره. أكد استلام البضاعة لتجهيز مسودة مرتجع مبيعات.
+The marketplace cancelled an order ERPNext already delivered. Confirm the goods were received to prepare a draft Sales Return.,ألغى السوق طلبًا سلّمه ERPNext مسبقًا. أكد استلام البضاعة لتجهيز مسودة مرتجع مبيعات.
+The marketplace cancelled the order after fulfillment and ERPNext has delivery. Confirm the goods were received to prepare a draft Sales Return.,ألغى السوق الطلب بعد التنفيذ، ولدى ERPNext تسليم. أكد استلام البضاعة لتجهيز مسودة مرتجع مبيعات.
+The order was cancelled after fulfillment and ERPNext has billing without delivery. Review what happened to the goods.,أُلغي الطلب بعد التنفيذ، ولدى ERPNext فوترة بلا تسليم. راجع ما حدث للبضاعة.
+No reconciled snapshot baseline is available for this Sales Order. Review the order against ERPNext.,لا توجد لقطة أساس مطابَقة لأمر البيع هذا. راجع الطلب مقابل ERPNext.
+The marketplace snapshot has duplicate or missing line identities. Review the order data.,لقطة السوق فيها هويات سطور مكررة أو مفقودة. راجع بيانات الطلب.
+The shipping charge differs from the submitted Sales Order; cancel and amend it.,رسوم الشحن تختلف عن أمر البيع المعتمد؛ ألغه وعدّله.
+"ERPNext refused to add or remove a Sales Order row (it is delivered, ordered, in a work order or billed). Amend the Sales Order manually.",رفض ERPNext إضافة صف إلى أمر البيع أو حذفه (مسلَّم أو مطلوب أو في أمر عمل أو مفوتر). عدّل أمر البيع يدويًا.
+A submitted Sales Order line is already billed in ERPNext. Cancel the invoice or issue a Credit Note.,أحد سطور أمر البيع المعتمد مفوتر مسبقًا في ERPNext. ألغِ الفاتورة أو أصدر إشعارًا دائنًا.
+ERPNext delivery or billing execution blocks an automatic submitted-order update.,تنفيذ التسليم أو الفوترة في ERPNext يمنع تعديل أمر البيع المعتمد تلقائيًا.
+An advance payment exists on the Sales Order; reallocate or cancel it before the order can be changed.,توجد دفعة مقدمة على أمر البيع؛ أعد تخصيصها أو ألغها قبل تغيير الطلب.
+This marketplace change would reduce the Sales Order total below its advance. Reallocate or cancel the advance before updating the order.,هذا التغيير من السوق سيخفض إجمالي أمر البيع عن دفعته المقدمة. أعد تخصيص الدفعة أو ألغها قبل تحديث الطلب.
+"ERPNext has draft documents for this order. Submit, cancel or delete them.",لدى ERPNext مستندات مسودة لهذا الطلب. اعتمدها أو ألغها أو احذفها.
+ERPNext cannot reproduce the marketplace amounts for the changed lines.,لا يستطيع ERPNext إعادة إنتاج مبالغ السوق للسطور المتغيرة.
+ERPNext's items do not match the order the marketplace now shows; review the order.,أصناف ERPNext لا تطابق الطلب الذي يعرضه السوق الآن؛ راجع الطلب.
+"The returned goods were booked in ERPNext. ERPNext cannot cancel an order with submitted delivery documents, so the Sales Order is closed.",تم تسجيل البضاعة المرتجعة في ERPNext. لا يستطيع ERPNext إلغاء طلب له مستندات تسليم معتمدة، لذلك أُغلق أمر البيع.
+Expected Change Hash,بصمة التغيير المتوقع
+Expected Change Scope,نطاق التغيير المتوقع
+"This order was never synced to ERPNext before the sync status update, and it is old or not eligible for an automatic sync. Review it, then use Retry Sync if it is still needed.",لم تتم مزامنة هذا الطلب مع ERPNext قبل تحديث حالة المزامنة، وهو قديم أو غير مؤهل للمزامنة التلقائية. راجعه ثم استخدم إعادة محاولة المزامنة إذا كان لا يزال مطلوبا.
+Every unit of the Noon order was cancelled before an ERPNext Sales Order was created; no Sales Order is needed.,تم إلغاء جميع وحدات طلب Noon قبل إنشاء أمر بيع في ERPNext؛ لا حاجة إلى أمر بيع.
+Import Credentials File,استيراد ملف الاعتماد
+The file is not valid JSON.,الملف ليس JSON صالحا.
+The file must contain a JSON object.,يجب أن يحتوي الملف على كائن JSON.
+The credentials file is missing these keys or they are empty: {0},ملف الاعتماد ينقصه هذه المفاتيح أو أنها فارغة: {0}
+"Credentials imported. Review them, then press Save.",تم استيراد بيانات الاعتماد. راجعها ثم اضغط حفظ.
+The private key does not look like a PEM key (no {0} line). Check the file before saving.,المفتاح الخاص لا يبدو مفتاح PEM (لا يوجد سطر {0}). تحقق من الملف قبل الحفظ.
+This form already has a different Project Code or Key ID. Overwrite them with the values from the file?,يحتوي هذا النموذج بالفعل على رمز مشروع أو معرف مفتاح مختلف. هل تريد استبدالهما بقيم الملف؟
+The file could not be read.,تعذرت قراءة الملف.
+stock queued as a manual run.,تمت إضافة المخزون إلى قائمة الانتظار كتشغيل يدوي.
+queued as a manual run.,تمت الإضافة إلى قائمة الانتظار كتشغيل يدوي.
+"Noon {0} sync queued as a manual run (automatic push is off for this account). Refresh this mapping to see the results.",تمت إضافة مزامنة {0} في Noon إلى قائمة الانتظار كتشغيل يدوي (الإرسال التلقائي متوقف لهذا الحساب). حدّث هذا الربط لرؤية النتائج.
+"Noon {0} sync queued as a manual run (automatic push is off for this account). Mapping statuses will update when the jobs finish.",تمت إضافة مزامنة {0} في Noon إلى قائمة الانتظار كتشغيل يدوي (الإرسال التلقائي متوقف لهذا الحساب). ستتحدث حالات الربط عند انتهاء المهام.

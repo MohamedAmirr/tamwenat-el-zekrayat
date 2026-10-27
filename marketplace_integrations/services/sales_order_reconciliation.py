@@ -15,6 +15,8 @@ import frappe
 from frappe import _
 from frappe.utils import cstr, flt
 
+from marketplace_integrations.services import sync_reason_codes as reasons
+
 NO_ACTION = "NO_ACTION"
 UPDATE_SUBMITTED_ORDER = "UPDATE_SUBMITTED_ORDER"
 CANCEL_ORDER = "CANCEL_ORDER"
@@ -138,6 +140,7 @@ def hold_cancel_for_draft_documents(reconciliation_plan, sales_order_name):
 			"then run the update again."
 		).format(listed),
 		reconciliation_plan["changes"],
+		reasons.DRAFT_DOCUMENTS_BLOCK_CANCEL,
 	)
 
 
@@ -267,21 +270,31 @@ def plan(previous, current, evidence, erp_state):
 	"""
 	evidence = evidence or {}
 	if not previous:
-		return _attention(_("No reconciled snapshot baseline is available for this Sales Order."))
+		return _attention(
+			_("No reconciled snapshot baseline is available for this Sales Order."),
+			reason_code=reasons.NO_BASELINE,
+		)
 	# A refund needs a compensating ERP transaction only once the ERP order has
 	# delivery or billing; an untouched order falls through (e.g. CANCEL_ORDER).
-	# Return evidence always needs one.
-	if evidence.get("return") or (evidence.get("refund") and _has_execution(erp_state)):
+	# Return evidence always needs one, until the prepared return document was
+	# submitted (``compensating_document_submitted``, #364).
+	if not evidence.get("compensating_document_submitted") and (
+		evidence.get("return") or (evidence.get("refund") and _has_execution(erp_state))
+	):
 		return _result(
 			UNSUPPORTED_COMPENSATING_TRANSACTION,
 			_refund_message(evidence, erp_state)
 			or _("Marketplace return or refund evidence needs a compensating ERP transaction."),
+			reason_code=reasons.RETURN_REQUIRES_RECEIPT_REVIEW,
 		)
 
 	previous_items = _items_by_external_id(previous)
 	current_items = _items_by_external_id(current)
 	if previous_items is None or current_items is None:
-		return _attention(_("The marketplace snapshot has duplicate or missing line identities."))
+		return _attention(
+			_("The marketplace snapshot has duplicate or missing line identities."),
+			reason_code=reasons.DUPLICATE_LINE_IDENTITY,
+		)
 	# Every line gone or at zero quantity is the same decision as a full cancellation.
 	# An absent "items" key means "no current snapshot" (not "no lines").
 	all_zero = "items" in current and not any(flt(line.get("qty")) > 0 for line in current["items"] or [])
@@ -291,11 +304,12 @@ def plan(previous, current, evidence, erp_state):
 		if external_item_id in previous_items
 	):
 		return _attention(
-			_("A marketplace line returned to a positive quantity; this needs a structural change.")
+			_("A marketplace line returned to a positive quantity; this needs a structural change."),
+			reason_code=reasons.LINE_RESTORED_FROM_ZERO,
 		)
 	if erp_state.get("docstatus") != 1 or erp_state.get("status") in INACTIVE_ERP_ORDER_STATUSES:
 		if (
-			evidence.get("outbound_cancel_requested")
+			(evidence.get("outbound_cancel_requested") or evidence.get("compensating_document_submitted"))
 			and evidence.get("cancellation") == "full"
 			and _is_reopenable_closed_order(erp_state)
 		):
@@ -322,7 +336,8 @@ def plan(previous, current, evidence, erp_state):
 					_(
 						"The Sales Order is Closed in ERPNext but the marketplace still expects fulfillment; "
 						"reopen it or review the order."
-					)
+					),
+					reason_code=reasons.CLOSED_EXPECTS_FULFILLMENT,
 				)
 			return reopened
 		if (evidence.get("cancellation") == "full" or all_zero) and _inactive_order_converged(erp_state):
@@ -334,7 +349,9 @@ def plan(previous, current, evidence, erp_state):
 		message = _("The linked ERPNext Sales Order is no longer an active submitted document.")
 		# Platform-specific wording is built by the integration side (#181), never here.
 		instruction = cstr(evidence.get("inactive_order_instruction")).strip()
-		return _attention(f"{message} {instruction}" if instruction else message)
+		return _attention(
+			f"{message} {instruction}" if instruction else message, reason_code=reasons.ORDER_INACTIVE
+		)
 
 	if evidence.get("cancellation") == "full" and evidence.get("cancelled_after_fulfillment"):
 		# Reached only while the ERP order is still active (an already cancelled or
@@ -348,13 +365,15 @@ def plan(previous, current, evidence, erp_state):
 					"The marketplace order was cancelled after fulfillment and ERPNext already has delivery; "
 					"a return or other compensating transaction is needed."
 				),
+				reason_code=reasons.CANCELLED_AFTER_FULFILLMENT_DELIVERED,
 			)
 		if _has_execution(erp_state):
 			return _attention(
 				_(
 					"The marketplace order was cancelled after fulfillment, but ERPNext has billing without "
 					"delivery; review what happened to the goods."
-				)
+				),
+				reason_code=reasons.CANCELLED_AFTER_FULFILLMENT_BILLED,
 			)
 		# No delivery and no billing: ERPNext never recorded the goods leaving, so the Sales Order
 		# is cancelled like any other cancellation (below); what happened to the parcel is physical.
@@ -371,9 +390,12 @@ def plan(previous, current, evidence, erp_state):
 					"A submitted Sales Order's charges are not edited automatically; cancel and amend it."
 				).format(shipping_change["previous"] or 0, shipping_change["current"] or 0),
 				header_changes + changes,
+				reasons.SHIPPING_CHANGED,
 			)
 		return _attention(
-			_("A submitted Sales Order has structural commercial changes."), header_changes + changes
+			_("A submitted Sales Order has structural commercial changes."),
+			header_changes + changes,
+			reasons.HEADER_CHANGED,
 		)
 	if (
 		(evidence.get("outbound_edit_requested") or evidence.get("outbound_edit_in_flight"))
@@ -395,25 +417,30 @@ def plan(previous, current, evidence, erp_state):
 			_(
 				"ERPNext's item edit may not have reached the marketplace (the outcome is unknown); "
 				"check the order in the marketplace."
-			)
+			),
+			reason_code=reasons.EDIT_OUTCOME_UNKNOWN,
 		)
 
-	structural_kinds = {"item_added"} if all_zero else {"item_added", "item_removed"}
-	if any(change["kind"] in structural_kinds for change in changes):
-		return _attention(_("A submitted Sales Order has structural line changes."), changes)
+	# Case 10 (#364): an added or removed line is applied by ``_execute_update`` through
+	# ``update_child_qty_rate``; ERPNext refuses a row it cannot add or drop (delivered,
+	# ordered, in a work order, billed), which ends as Needs Action for the whole order.
 
 	erp_lines = {line["sales_order_item"]: line for line in erp_state.get("lines") or []}
 	equivalent = _effectively_equivalent(
 		previous_items, current_items, erp_lines, erp_state.get("precision") or {}
 	)
 	if not equivalent and not changes:
-		return _attention(_("The ERPNext Sales Order no longer represents the reconciled marketplace state."))
+		return _attention(
+			_("The ERPNext Sales Order no longer represents the reconciled marketplace state."),
+			reason_code=reasons.ERP_STATE_DIVERGED,
+		)
 
 	explicit_cancellation = evidence.get("cancellation") == "full"
 	if all_zero and not explicit_cancellation and _has_delivery(erp_state):
 		return _attention(
 			_("All lines are zero but the order was already delivered; explicit cancellation is required."),
 			changes,
+			reasons.ALL_ZERO_DELIVERED,
 		)
 	cancelling = explicit_cancellation or all_zero
 	if equivalent and not cancelling:
@@ -423,7 +450,7 @@ def plan(previous, current, evidence, erp_state):
 	if not cancelling:
 		blocked_reason = _lifecycle_block_reason(evidence, changes)
 		if blocked_reason:
-			return _attention(blocked_reason, changes)
+			return _attention(blocked_reason, changes, reasons.LIFECYCLE_BLOCKS_CHANGE)
 		if any(
 			change["kind"] == "line_changed" and change["field"] in _MAPPING_SOURCED_LINE_FIELDS
 			for change in changes
@@ -434,6 +461,7 @@ def plan(previous, current, evidence, erp_state):
 					"this cannot be applied automatically."
 				),
 				changes,
+				reasons.LINE_IDENTITY_CHANGED,
 			)
 	if cancelling and _has_execution(erp_state) and not _has_outstanding_remainder(erp_state):
 		# Fully delivered (billed or not): only a compensating transaction can undo it,
@@ -454,6 +482,7 @@ def plan(previous, current, evidence, erp_state):
 				)
 			),
 			changes,
+			reasons.CANCELLED_FULLY_DELIVERED,
 		)
 	if changes or cancelling:
 		# Delivery/billing only blocks when something would actually change; an
@@ -464,12 +493,16 @@ def plan(previous, current, evidence, erp_state):
 			current_line = current_items.get(external_item_id) or {}
 			erp_line = erp_lines.get(previous_line.get("sales_order_item"))
 			if not erp_line:
-				return _attention(_("The reconciled Sales Order line is missing from ERPNext."), changes)
+				return _attention(
+					_("The reconciled Sales Order line is missing from ERPNext."), changes, reasons.SO_LINE_MISSING
+				)
 			# An all-zero order closes whatever remains after delivery; only an
 			# individual line reduction must stay above what was delivered.
 			if not all_zero and flt(current_line.get("qty")) < flt(erp_line.get("delivered_qty")):
 				return _attention(
-					_("Requested quantity is below the quantity already delivered in ERPNext."), changes
+					_("Requested quantity is below the quantity already delivered in ERPNext."),
+					changes,
+					reasons.QTY_BELOW_DELIVERED,
 				)
 			if flt(erp_line.get("billed_amt")):
 				invoices = _documents(erp_state, "Sales Invoice")
@@ -481,8 +514,11 @@ def plan(previous, current, evidence, erp_state):
 							"(or issue a Credit Note if it is submitted and paid), then run the update again."
 						).format(invoices),
 						changes,
+						reasons.ALREADY_BILLED,
 					)
-				return _attention(_("A submitted Sales Order line is already billed in ERPNext."), changes)
+				return _attention(
+					_("A submitted Sales Order line is already billed in ERPNext."), changes, reasons.ALREADY_BILLED
+				)
 
 	if cancelling:
 		if not _has_execution(erp_state):
@@ -491,6 +527,20 @@ def plan(previous, current, evidence, erp_state):
 					_(
 						"An advance payment exists on the Sales Order; reallocate or cancel it "
 						"before the order can be cancelled."
+					),
+					changes,
+					reasons.ADVANCE_BLOCKS_CANCEL,
+				)
+			if evidence.get("compensating_document_submitted"):
+				# The prepared return was submitted (#364).  ERPNext refuses to cancel a Sales Order
+				# that still has submitted Delivery Notes (the delivery and its return), so the
+				# cancelled order is closed instead; ``compensating_document_submitted`` also keeps
+				# the Closed order from being reopened (above).
+				return _result(
+					CLOSE_REMAINDER,
+					_(
+						"The returned goods were booked in ERPNext. ERPNext cannot cancel an order with "
+						"submitted delivery documents, so the Sales Order is closed."
 					),
 					changes,
 				)
@@ -510,7 +560,9 @@ def plan(previous, current, evidence, erp_state):
 		message = _("ERPNext delivery or billing execution blocks an automatic submitted-order update")
 		named = [_documents(erp_state, "Delivery Note"), _documents(erp_state, "Sales Invoice")]
 		named = "; ".join(documents for documents in named if documents)
-		return _attention(f"{message} ({named})." if named else f"{message}.", changes)
+		return _attention(
+			f"{message} ({named})." if named else f"{message}.", changes, reasons.EXECUTION_BLOCKS_UPDATE
+		)
 	projected_total = _projected_total_after_line_changes(previous, current, erp_state)
 	currency_precision = (erp_state.get("precision") or {}).get("currency", 2)
 	advance_paid = flt(erp_state.get("advance_paid"), currency_precision)
@@ -521,6 +573,7 @@ def plan(previous, current, evidence, erp_state):
 				"Reallocate or cancel the advance before updating the order."
 			).format(advance_paid),
 			changes,
+			reasons.TOTAL_BELOW_ADVANCE,
 		)
 	return _result(
 		UPDATE_SUBMITTED_ORDER,
@@ -535,15 +588,26 @@ def _projected_total_after_line_changes(previous, current, erp_state):
 		return None
 	previous_items = _items_by_external_id(previous)
 	current_items = _items_by_external_id(current)
-	if previous_items is None or current_items is None or set(previous_items) != set(current_items):
+	if previous_items is None or current_items is None:
 		return None
 	line_delta = 0.0
+	# Changed and added lines (an added line has no previous amount: it adds its whole amount),
+	# then removed lines (they subtract what the baseline had).
 	for external_item_id, line in current_items.items():
-		old_amount = previous_items[external_item_id].get("fulfilled_total_price")
+		old_amount = (
+			previous_items[external_item_id].get("fulfilled_total_price")
+			if external_item_id in previous_items
+			else 0
+		)
 		new_amount = line.get("fulfilled_total_price")
 		if old_amount is None or new_amount is None:
 			return None
 		line_delta += flt(new_amount) - flt(old_amount)
+	for external_item_id, line in previous_items.items():
+		if external_item_id not in current_items:
+			if line.get("fulfilled_total_price") is None:
+				return None
+			line_delta -= flt(line.get("fulfilled_total_price"))
 	# ERPNext allocates advances against rounded_total (falling back to
 	# grand_total). Project the changed grand total at that same currency
 	# precision so sub-cent float residue cannot block an otherwise valid update.
@@ -666,7 +730,7 @@ def _effectively_equivalent(previous_items, current_items, erp_lines, precision=
 	qty_precision = precision.get("qty")
 	amount_precision = precision.get("amount")
 	for external_item_id, line in current_items.items():
-		sales_order_item = previous_items[external_item_id].get("sales_order_item")
+		sales_order_item = (previous_items.get(external_item_id) or {}).get("sales_order_item")
 		erp_line = erp_lines.get(sales_order_item)
 		if not erp_line:
 			return False
@@ -761,12 +825,18 @@ def _has_outstanding_remainder(erp_state):
 	return any(flt(line.get("qty")) > flt(line.get("delivered_qty")) for line in erp_state.get("lines") or [])
 
 
-def _attention(message, changes=None):
-	return _result(NEEDS_ATTENTION, message, changes)
+def _attention(message, changes=None, reason_code=None):
+	return _result(NEEDS_ATTENTION, message, changes, reason_code)
 
 
-def _result(outcome, message, changes=None):
-	return {"outcome": outcome, "message": message, "changes": changes or []}
+def _result(outcome, message, changes=None, reason_code=None):
+	"""A plan result.  Every result other than NO_ACTION carries a ``reason_code``
+	(``services/sync_reason_codes.py``), which decides the visible status; the executable
+	outcomes (cancel, close, update) have none until an execution fails."""
+	result = {"outcome": outcome, "message": message, "changes": changes or []}
+	if reason_code:
+		result["reason_code"] = reason_code
+	return result
 
 
 class ReconciliationMismatch(Exception):
@@ -826,6 +896,14 @@ def execute(reconciliation_plan, sales_order_name, previous=None, current=None, 
 
 
 def _execute_update(sales_order, previous, current):
+	"""Apply quantity/rate changes, added lines and removed lines through ``update_child_qty_rate``.
+
+	A line the baseline already paired with a row is updated in place; a line without a
+	baseline row is added (case 10, #364); a row whose line is gone or at zero is left out
+	of ``trans_items``, which makes ERPNext delete it.  ERPNext refuses a row it cannot add
+	or drop (delivered, ordered, in a work order, billed) by raising a ``ValidationError``,
+	which the caller turns into Needs Action for the whole order.
+	"""
 	from erpnext.controllers.accounts_controller import update_child_qty_rate
 
 	previous_items = _items_by_external_id(previous) or {}
@@ -833,11 +911,16 @@ def _execute_update(sales_order, previous, current):
 	rows = {row.name: row for row in sales_order.items}
 	trans_items = []
 	line_rows = {}
+	added = []
 	for external_item_id, line in current_items.items():
 		if flt(line.get("qty")) <= 0:
 			line_rows[external_item_id] = None
 			continue  # omitted rows are deleted by ERPNext
-		row = rows.get((previous_items.get(external_item_id) or {}).get("sales_order_item"))
+		row_name = (previous_items.get(external_item_id) or {}).get("sales_order_item")
+		if not row_name and external_item_id not in previous_items:
+			added.append((external_item_id, line))
+			continue
+		row = rows.get(row_name)
 		if not row:
 			raise ReconciliationMismatch(
 				f"The Sales Order row for marketplace line {external_item_id} was not found."
@@ -857,11 +940,27 @@ def _execute_update(sales_order, previous, current):
 				"delivery_date": cstr(row.delivery_date) if row.delivery_date else None,
 			}
 		)
+	if added:
+		trans_items.extend(_new_row_payload(sales_order, line, current) for _id, line in added)
 	update_child_qty_rate("Sales Order", frappe.as_json(trans_items), sales_order.name)
 	sales_order = frappe.get_doc("Sales Order", sales_order.name)
+	# The added rows are the ones that did not exist before, paired to the added lines by item.
+	new_rows_by_item = {}
+	for row in sales_order.items:
+		if row.name not in rows:
+			new_rows_by_item.setdefault(row.item_code, []).append(row.name)
+	for external_item_id, line in added:
+		candidates = new_rows_by_item.get(line.get("item_code"))
+		if not candidates:
+			raise ReconciliationMismatch(f"ERPNext did not add a row for marketplace line {external_item_id}.")
+		line_rows[external_item_id] = candidates.pop(0)
 	state = read_erp_state(sales_order)
 	erp_lines = {line["sales_order_item"]: line for line in state["lines"]}
-	if not _effectively_equivalent(previous_items, current_items, erp_lines, state["precision"]):
+	# Equivalence is judged against the rows this update actually used, not the baseline's.
+	paired = {
+		external_item_id: {"sales_order_item": row_name} for external_item_id, row_name in line_rows.items()
+	}
+	if not _effectively_equivalent(paired, current_items, erp_lines, state["precision"]):
 		raise ReconciliationMismatch(
 			"ERPNext cannot reproduce the marketplace amounts for the changed lines."
 		)
@@ -871,4 +970,30 @@ def _execute_update(sales_order, previous, current):
 		"status": sales_order.status,
 		# marketplace external_item_id -> Sales Order row name (None: line removed)
 		"line_rows": line_rows,
+	}
+
+
+def _new_row_payload(sales_order, line, current):
+	"""``update_child_qty_rate`` payload for a new row (no ``docname``).
+
+	Adding a row needs create permission on Sales Order (ERPNext checks the session user) and a
+	warehouse the account resolves; both are checked here so the refusal is explicit.
+	"""
+	from erpnext.stock.get_item_details import get_conversion_factor
+
+	frappe.has_permission("Sales Order", "create", throw=True)
+	if not line.get("warehouse"):
+		raise ReconciliationMismatch(
+			f"No warehouse is available for the new marketplace line {line.get('external_item_id')}."
+		)
+	uom = line.get("uom")
+	return {
+		"item_code": line.get("item_code"),
+		"qty": flt(line.get("qty")),
+		"rate": flt(line.get("effective_rate"), 6),
+		"uom": uom,
+		"conversion_factor": flt(get_conversion_factor(line.get("item_code"), uom).get("conversion_factor"))
+		or 1,
+		"warehouse": line.get("warehouse"),
+		"delivery_date": cstr(current.get("delivery_date")) or cstr(sales_order.delivery_date),
 	}

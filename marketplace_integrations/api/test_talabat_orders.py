@@ -139,6 +139,45 @@ class IntegrationTestRefreshOrder(IntegrationTestCase):
 		self.assertEqual(payload["cancellation"], {"reason": "CLOSED"})
 
 	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.update_order")
+	def test_update_order_stores_the_expected_change_marker_before_its_own_upsert_and_keeps_it(self, mock_update):
+		from marketplace_integrations.services import echo_guard
+
+		mock_update.return_value = {
+			"order_id": "order-001",
+			"status": "CANCELLED",
+			"items": [],
+			"customer": {},
+			"payment": {},
+			"sys": {},
+			"cancellation": {"reason": "CLOSED"},
+		}
+		seen = []
+		real_upsert = upsert_marketplace_order
+
+		def spy(account, normalized, *args, **kwargs):
+			seen.append(frappe.db.get_value("Marketplace Order", self.order.name, "expected_change_hash"))
+			return real_upsert(account, normalized, *args, **kwargs)
+
+		with patch("marketplace_integrations.api.talabat_orders.upsert_marketplace_order", side_effect=spy):
+			update_order(self.order.name, "CANCELLED", "CLOSED")
+
+		expected = echo_guard.talabat_sent_hash({"status": "CANCELLED", "cancellation": {"reason": "CLOSED"}})
+		self.assertEqual(seen, [expected])
+		# Our own upsert of the PUT response leaves it for the later webhook or poll.
+		self.assertEqual(
+			frappe.db.get_value("Marketplace Order", self.order.name, "expected_change_hash"), expected
+		)
+
+	@patch(
+		"marketplace_integrations.api.talabat_orders.talabat_orders.update_order",
+		side_effect=frappe.ValidationError("remote"),
+	)
+	def test_update_order_remote_failure_stores_no_marker(self, mock_update):
+		with self.assertRaises(frappe.ValidationError):
+			update_order(self.order.name, "CANCELLED", "CLOSED")
+		self.assertFalse(frappe.db.get_value("Marketplace Order", self.order.name, "expected_change_hash"))
+
+	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.update_order")
 	def test_update_order_rejects_missing_cancellation_reason_before_remote_call(self, mock_update):
 		with self.assertRaises(frappe.ValidationError):
 			update_order(self.order.name, "CANCELLED")
@@ -270,6 +309,41 @@ class IntegrationTestRefreshOrder(IntegrationTestCase):
 
 		self.assertIn("name", result)
 		mock_get_order.assert_called_once_with(self.account.name, "order-001")
+
+	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.get_order")
+	def test_refresh_order_bumps_a_changed_order_but_not_an_unchanged_one(self, mock_get_order):
+		def raw(status):
+			return {
+				"order_id": "order-001",
+				"external_order_id": "MERCH-order-001",
+				"status": status,
+				"customer": {"delivery_address": {}},
+				"payment": {},
+				"sys": {},
+				"cancellation": {},
+				"items": [],
+			}
+
+		def debounce():
+			return frappe.db.get_value(
+				"Marketplace Order",
+				self.order.name,
+				["sync_debounce_until", "pending_sync_trigger_source"],
+				as_dict=True,
+			)
+
+		mock_get_order.return_value = raw("RECEIVED")
+		refresh_order(self.order.name)
+		frappe.db.set_value("Marketplace Order", self.order.name, "sync_debounce_until", None)
+
+		mock_get_order.return_value = raw("RECEIVED")
+		refresh_order(self.order.name)
+		self.assertIsNone(debounce().sync_debounce_until)  # unchanged: no bump
+
+		mock_get_order.return_value = raw("DISPATCHED")
+		refresh_order(self.order.name)
+		self.assertIsNotNone(debounce().sync_debounce_until)  # changed: the order is not left idle
+		self.assertEqual(debounce().pending_sync_trigger_source, "Manual")
 
 	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.get_order")
 	def test_refresh_order_validates_order_id_matches(self, mock_get_order):
@@ -616,6 +690,43 @@ class IntegrationTestImportVendorOrders(IntegrationTestCase):
 		self.assertIsInstance(result["imported"], list)
 		self.assertIsInstance(result["errors"], list)
 		self.assertEqual(result["count"], len(result["imported"]))
+
+	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.get_vendor_orders")
+	def test_import_vendor_orders_bumps_a_new_order_so_it_does_not_stay_syncing(self, mock_get_vendor_orders):
+		mock_get_vendor_orders.return_value = {
+			"orders": [
+				{
+					"order_id": "order-bump-001",
+					"external_order_id": "MERCH-bump-001",
+					"customer": {"delivery_address": {}},
+					"payment": {},
+					"sys": {},
+					"cancellation": {},
+					"items": [],
+				}
+			],
+			"page_number": 1,
+			"page_size": 20,
+			"total_pages": 1,
+		}
+
+		result = import_vendor_orders(self.account.name, "2026-08-01", "2026-08-31")
+
+		values = frappe.db.get_value(
+			"Marketplace Order",
+			result["imported"][0],
+			["erpnext_sync_status", "sync_debounce_until", "pending_sync_trigger_source"],
+			as_dict=True,
+		)
+		self.assertEqual(values.erpnext_sync_status, "Syncing")
+		self.assertIsNotNone(values.sync_debounce_until)
+		self.assertEqual(values.pending_sync_trigger_source, "Manual")
+
+		frappe.db.set_value("Marketplace Order", result["imported"][0], "sync_debounce_until", None)
+		import_vendor_orders(self.account.name, "2026-08-01", "2026-08-31")  # unchanged re-import
+		self.assertIsNone(
+			frappe.db.get_value("Marketplace Order", result["imported"][0], "sync_debounce_until")
+		)
 
 	@patch("marketplace_integrations.api.talabat_orders.talabat_orders.get_vendor_orders")
 	def test_import_vendor_orders_isolates_failing_orders_and_continues(self, mock_get_vendor_orders):

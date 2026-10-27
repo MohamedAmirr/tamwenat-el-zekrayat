@@ -1837,35 +1837,100 @@ class IntegrationTestPushSwitch(InventoryFixtureMixin, IntegrationTestCase):
 		for call in mocked_log_error.call_args_list:
 			self.assertNotIn(self.account.name, call.kwargs.get("message", ""))
 
-	def test_manual_actions_are_refused_with_the_paused_message_and_no_shopify_call(self):
+	def test_manual_actions_queue_once_while_the_switch_is_off(self):
 		mapping = self._one(5)
 		self._pause()
 
 		with (
 			patch(EXECUTE_TARGET) as mocked_execute,
 			patch(FETCH_LOCATIONS_TARGET) as mocked_fetch,
-			patch("frappe.enqueue") as mocked_enqueue,
+			patch("frappe.enqueue", return_value=object()) as mocked_enqueue,
 		):
 			selected = inventory_sync.queue_inventory_sync([mapping.name])
 			reconciled = inventory_sync.queue_account_reconciliation(self.account.name)
 
 		for result in (selected, reconciled):
-			self.assertEqual(result["jobs"], [])
-			self.assertEqual(result["skipped_accounts"][0]["account"], self.account.name)
-			self.assertIn(self.PAUSED, result["skipped_accounts"][0]["reason"])
+			self.assertEqual(result["skipped_accounts"], [])
+			self.assertEqual(result["jobs"][0]["account"], self.account.name)
+		# The request path itself makes no Shopify call; the worker is told it is manual.
 		mocked_execute.assert_not_called()
 		mocked_fetch.assert_not_called()
-		mocked_enqueue.assert_not_called()
+		self.assertEqual(mocked_enqueue.call_count, 2)
+		for call in mocked_enqueue.call_args_list:
+			self.assertIs(call.kwargs["manual"], True)
+			self.assertEqual(call.kwargs["account_name"], self.account.name)
 
-	def test_enqueue_account_sync_refuses_a_paused_account(self):
+	def test_manual_action_for_a_disabled_account_is_still_refused(self):
+		mapping = self._one(5)
 		self._pause()
+		self.account.db_set("enabled", 0, update_modified=False)
 
 		with patch("frappe.enqueue") as mocked_enqueue:
-			with self.assertRaises(frappe.ValidationError) as caught:
-				inventory_sync.enqueue_account_sync(self.account.name, None, "Administrator")
+			result = inventory_sync.queue_inventory_sync([mapping.name])
 
-		self.assertIn(self.PAUSED, str(caught.exception))
+		self.assertEqual(result["jobs"], [])
+		self.assertIn("disabled", result["skipped_accounts"][0]["reason"])
 		mocked_enqueue.assert_not_called()
+
+	def test_a_manual_click_while_a_sync_is_running_is_deduplicated(self):
+		mapping = self._one(5)
+		self._pause()
+
+		with patch("frappe.enqueue", return_value=None):
+			result = inventory_sync.queue_inventory_sync([mapping.name])
+
+		self.assertEqual(result["jobs"], [])
+		self.assertIn("already running", result["skipped_accounts"][0]["reason"])
+
+	def test_enqueue_account_sync_refuses_a_paused_account_for_automatic_callers_only(self):
+		self._pause()
+
+		with patch("frappe.enqueue", return_value=object()) as mocked_enqueue:
+			with self.assertRaises(frappe.ValidationError):
+				inventory_sync.enqueue_account_sync(self.account.name, None, "Administrator")
+			mocked_enqueue.assert_not_called()
+			enqueued, _job_id = inventory_sync.enqueue_account_sync(
+				self.account.name, None, "Administrator", manual=True
+			)
+
+		self.assertTrue(enqueued)
+		self.assertIs(mocked_enqueue.call_args.kwargs["manual"], True)
+		frappe.cache().delete_value(inventory_sync._status_cache_key(_job_id))
+
+	def test_a_manual_worker_pushes_with_the_switch_off(self):
+		mapping = self._one(5, shopify_on_hand=0)
+		self._pause()
+
+		payload = self._sync([mapping.name], manual=True)
+
+		self.assertNotIn("paused", payload)
+		self.assertEqual(self.shopify.variants[mapping.external_reference]["on_hand"], 5)
+		mapping.reload()
+		self.assertEqual(mapping.inventory_sync_status, "Synced")
+
+	def test_a_manual_worker_is_not_stopped_by_the_switch_between_chunks(self):
+		with patch.object(inventory_sync, "SHOPIFY_INVENTORY_SYNC_CHUNK_SIZE", 1):
+			first = self._one(3)
+			second = self._one(4)
+			# Switch turned off during chunk 1: an automatic run would stop; manual must finish.
+			self.shopify.before_set.append(self._pause)
+
+			payload = self._sync([first.name, second.name], manual=True)
+
+		self.assertNotIn("paused", payload)
+		self.assertEqual(self.shopify.kinds().count("set"), 2)
+		self.assertEqual(self.shopify.variants[first.external_reference]["on_hand"], 3)
+		self.assertEqual(self.shopify.variants[second.external_reference]["on_hand"], 4)
+
+	def test_a_manual_worker_for_a_disabled_account_still_fails(self):
+		mapping = self._one(5)
+		self._pause()
+		self.account.db_set("enabled", 0, update_modified=False)
+
+		with self.assertRaises(frappe.ValidationError):
+			self._sync([mapping.name], manual=True)
+
+		self.assertEqual(self.shopify.kinds().count("set"), 0)
 
 	def test_a_job_queued_before_the_switch_was_turned_off_makes_no_shopify_call(self):
 		mapping = self._one(5, shopify_on_hand=0)

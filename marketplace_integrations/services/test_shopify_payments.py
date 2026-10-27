@@ -16,7 +16,10 @@ from marketplace_integrations.marketplace_integrations.doctype.marketplace_accou
 	clearing_account_problem,
 )
 from marketplace_integrations.services import test_sales_order_sync
-from marketplace_integrations.services.marketplace_attention import _collect_payment_errors
+from marketplace_integrations.services.marketplace_attention import (
+	_collect_payment_errors,
+	_shopify_order_accounts,
+)
 from marketplace_integrations.services.sales_order_sync import sync_sales_order
 from marketplace_integrations.services.shopify_payments import mirror_shopify_payments
 from marketplace_integrations.tests.utils import make_role_user
@@ -128,8 +131,17 @@ class IntegrationTestShopifyPayments(IntegrationTestCase):
 		logs = self._logs(order)
 		self.assertEqual([row.status for row in logs], ["Invalid"])
 		self.assertIn("Create and Submit permission", logs[0].response_data)
-		attention = _collect_payment_errors({_account.name: _account})
+		accounts = {_account.name: _account}
+		attention = _collect_payment_errors(accounts, _shopify_order_accounts(accounts))
 		self.assertEqual([row["problem_type"] for row in attention], ["Payment Error"])
+
+		# A second sync by the same user repeats the problem without writing a second row.
+		try:
+			frappe.set_user(email)
+			mirror_shopify_payments(order.name, "Shopify Webhook")
+		finally:
+			frappe.set_user(previous_user)
+		self.assertEqual([row.status for row in self._logs(order)], ["Invalid"])
 
 	def _payment_entries(self, order):
 		return frappe.get_all(

@@ -388,22 +388,28 @@ function push_selected_noon_stock(account, mapping_names) {
 		})
 		.then((response) => {
 			const queued = !!(response.message && response.message.queued);
+			const manual_override = queued && !!response.message.switch_off;
 			return [
 				queued
-					? { category: "queued", platform: "Noon", text: `${account}: ${__("stock queued.")}` }
+					? {
+							category: "queued",
+							platform: "Noon",
+							text: `${account}: ${manual_override ? __("stock queued as a manual run.") : __("stock queued.")}`,
+					  }
 					: { category: "skipped", platform: "Noon", text: `${account}: ${__("stock already queued.")}` },
 			];
 		});
 }
 
-// queue_account_sync returns {pricing: {queued}, stock: {queued}}; queued=false
+// queue_account_sync returns {pricing: {queued, switch_off}, stock: {...}}; queued=false
 // means that update was already queued (a duplicate enqueue was rejected).
+// switch_off: the account's automatic push switch is off and this manual click ran anyway.
 function noon_queue_items(message, account) {
 	return ["pricing", "stock"].map((kind) => {
 		const queued = !!(message[kind] && message[kind].queued);
 		const label = kind === "pricing" ? __("pricing") : __("stock");
-		if (message[kind] && message[kind].paused) {
-			return { category: "skipped", platform: "Noon", text: `${account}: ${label} ${__("push paused.")}` };
+		if (queued && message[kind].switch_off) {
+			return { category: "queued", platform: "Noon", text: `${account}: ${label} ${__("queued as a manual run.")}` };
 		}
 		return queued
 			? { category: "queued", platform: "Noon", text: `${account}: ${label} ${__("queued.")}` }

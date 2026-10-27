@@ -35,15 +35,26 @@ import frappe
 from frappe import _
 from frappe.utils import cstr, flt
 
+from marketplace_integrations.services.sync_status import CANCELLED
 from marketplace_integrations.integrations.noon.catalog import get_account, validate_connection_enabled
 from marketplace_integrations.integrations.noon.client import NoonClient
 from marketplace_integrations.integrations.noon.constants import (
 	ORDER_IMPORT_LOOKBACK_DAYS,
 	ORDERS_PAGE_SIZE,
 )
+from marketplace_integrations.integrations.noon.expected_change import incoming_matcher
 from marketplace_integrations.integrations.noon.order_mapper import normalize_order
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_order.marketplace_order import (
 	compute_order_identity_key,
+)
+from marketplace_integrations.services.echo_guard import (
+	consume_expected_change,
+	finish_echo,
+	linked_echo,
+)
+from marketplace_integrations.services.marketplace_order_reconciliation import (
+	schedule_first_syncs,
+	write_catch_up_summary,
 )
 from marketplace_integrations.services.marketplace_orders import (
 	ITEM_FIELDS,
@@ -146,7 +157,7 @@ def get_order(account, fbpi_order_nr):
 	return data
 
 
-def import_order(account, raw_order, bump_trigger_source="Noon Order Import"):
+def import_order(account, raw_order, bump_trigger_source="Noon Order Import", echo_guard=True):
 	"""Normalize and upsert one raw Noon FBPI order object.
 
 	``bump_trigger_source`` is the sync-debounce trigger source recorded if this import
@@ -154,6 +165,12 @@ def import_order(account, raw_order, bump_trigger_source="Noon Order Import"):
 	own create-shipment / mark-out-of-stock actions, ``refresh_order()``) passes "Manual"
 	so its Sales Order sync is not mislabelled as a poll. Still bumps either way - the
 	planner must see the change those actions made.
+
+	``echo_guard=False`` skips the expected-change marker (``services/echo_guard.py``): our
+	own refresh right after Mark Out of Stock passes it so that it neither consumes the
+	marker nor takes the echo path. A later poll with the marker set and the sent units in
+	their expected state is the echo: the order is saved without the status re-plan or a
+	bump; run_echo_sync is queued after commit to bring its Sales Order up to date.
 
 	Returns ``(marketplace_order_doc, unmapped_skus)``. Raises on any
 	validation failure (decision 4) - the caller
@@ -281,12 +298,19 @@ def import_order(account, raw_order, bump_trigger_source="Noon Order Import"):
 		had_sales_order_before = bool(
 			frappe.db.get_value("Marketplace Order", existing_name, "erpnext_sales_order")
 		)
-		had_eligible_before = _has_eligible_units(existing_name)
+		had_eligible_before = has_eligible_units(existing_name)
 		fingerprint_before = linked_order_fingerprint(account.name, fbpi_order_nr)
+
+	echo = False
+	if existing_name and echo_guard:
+		echo = linked_echo(
+			fingerprint_before,
+			consume_expected_change(account.name, fbpi_order_nr, incoming_matcher(raw_order)),
+		)
 
 	_maybe_fetch_customer_data(account, normalized)
 	_zero_out_stale_status_groups(account, normalized)
-	order = upsert_marketplace_order(account.name, normalized)
+	order = upsert_marketplace_order(account.name, normalized, skip_status_replan=echo)
 
 	# #146 decision 7 bumped ONLY on the first transition into eligibility and never
 	# once a Sales Order was linked.  #178 part 3 reverses the linked half: a poll
@@ -295,7 +319,14 @@ def import_order(account, raw_order, bump_trigger_source="Noon Order Import"):
 	# (``bump_if_linked_order_changed()``: only when the evidence fingerprint
 	# changed, so a poll that merely re-confirms an order never re-bumps).  The
 	# first-eligibility bump for a not-yet-linked order is unchanged.
-	if not had_sales_order_before and not had_eligible_before and _has_eligible_units(order.name):
+	if echo:
+		finish_echo(order.name, fingerprint_before, bump_trigger_source)
+	elif not existing_name or (
+		not had_sales_order_before and not had_eligible_before and has_eligible_units(order.name)
+	):
+		# A NEW order is bumped even with no eligible unit: it is created Syncing, and the
+		# sync (not an idle status) is what turns an order that can never sync (every unit
+		# cancelled, ...) into Sync Error with the reason.
 		bump_sync_debounce(order.name, bump_trigger_source)
 	else:
 		bump_if_linked_order_changed(order.name, fingerprint_before, bump_trigger_source)
@@ -303,7 +334,7 @@ def import_order(account, raw_order, bump_trigger_source="Noon Order Import"):
 	return order, unmapped_skus
 
 
-def _has_eligible_units(order_name):
+def has_eligible_units(order_name):
 	"""Return whether ``order_name`` currently has at least one Sales-Order-
 	eligible unit, per #146 decision 2 (``external_status ==
 	NOON_ELIGIBLE_EXTERNAL_STATUS``, ``integration_status !=
@@ -620,7 +651,7 @@ def _as_noon_timestamp(value):
 	return value.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _run_import_for_account(account_name, trigger_source):
+def _run_import_for_account(account_name, trigger_source, catch_up_unlinked=False):
 	"""Shared by ``run_order_import()`` (manual) and ``poll_all_accounts()``
 	(scheduled): resolve and validate the account, then re-list and import
 	the fixed lookback window (decision 18) - ``created_before`` is fixed at
@@ -649,34 +680,26 @@ def _run_import_for_account(account_name, trigger_source):
 	imported, errors = import_orders_created_between(
 		account, created_after, created_before, trigger_source=trigger_source
 	)
-	if trigger_source == "Scheduled Reconciliation":
-		from frappe.utils import get_datetime, now_datetime
-
-		from marketplace_integrations.services.sales_order_sync_debounce import bump_sync_debounce
-
-		for candidate in frappe.get_all(
-			"Marketplace Order",
-			filters={
+	scheduled = 0
+	if catch_up_unlinked:
+		scheduled = schedule_first_syncs(
+			{
 				"marketplace_account": account.name,
 				"platform": "Noon",
 				"erpnext_sales_order": ["is", "not set"],
-				"erpnext_sync_status": ["!=", "Cancelled"],
-			},
-			fields=["name", "sync_debounce_until", "pending_sync_trigger_source"],
-		):
-			if (
-				candidate.pending_sync_trigger_source == trigger_source
-				and candidate.sync_debounce_until
-				and get_datetime(candidate.sync_debounce_until) > now_datetime()
-			):
-				continue
-			bump_sync_debounce(candidate.name, trigger_source)
+				"erpnext_sync_status": ["!=", CANCELLED],
+			}
+		)
 	if errors:
 		frappe.log_error(title="Noon order import: per-order failures", message=frappe.as_json(errors))
-	return {"imported": len(imported), "errors": len(errors)}
+	if catch_up_unlinked:
+		write_catch_up_summary(
+			account.name, imported=len(imported), scheduled=scheduled, failures=len(errors)
+		)
+	return {"imported": len(imported), "errors": len(errors), "scheduled": scheduled}
 
 
-def enqueue_order_import(account_name, trigger_source="Manual"):
+def enqueue_order_import(account_name, trigger_source="Manual", catch_up_unlinked=False):
 	"""Shared enqueue helper for a per-account, deduplicated
 	``run_order_import`` job on the ``long`` queue (decision 12's job_id
 	scheme) - the one place ``queue_order_import()``, ``poll_all_accounts()``,
@@ -690,14 +713,18 @@ def enqueue_order_import(account_name, trigger_source="Manual"):
 	(e.g. Redis down) - callers that need per-call isolation from that
 	(``poll_all_accounts()``) catch it themselves.
 	"""
+	# The nightly catch-up has its own job id so it is not dropped as a duplicate of
+	# a running hourly/manual import (and vice versa); both are still one per account.
+	job_prefix = f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-catch-up" if catch_up_unlinked else _ORDER_IMPORT_RQ_JOB_PREFIX
 	return frappe.enqueue(
 		run_order_import,
 		queue="long",
 		timeout=3600,
-		job_id=f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{account_name}",
+		job_id=f"{job_prefix}-{account_name}",
 		deduplicate=True,
 		account_name=account_name,
 		trigger_source=trigger_source,
+		catch_up_unlinked=catch_up_unlinked,
 	)
 
 
@@ -714,7 +741,7 @@ def queue_order_import(account_name):
 	return {"queued": job is not None}
 
 
-def run_order_import(account_name, trigger_source="Manual"):
+def run_order_import(account_name, trigger_source="Manual", catch_up_unlinked=False):
 	"""The enqueued worker target for a manual order-import run.
 
 	Switches to Administrator (decision 12, matching Talabat's/Shopify's
@@ -722,7 +749,15 @@ def run_order_import(account_name, trigger_source="Manual"):
 	Desk session originally queued it.
 	"""
 	frappe.set_user("Administrator")
-	return _run_import_for_account(account_name, trigger_source)
+	if not catch_up_unlinked:
+		return _run_import_for_account(account_name, trigger_source)
+	try:
+		return _run_import_for_account(account_name, trigger_source, catch_up_unlinked=True)
+	except Exception:
+		error = frappe.get_traceback()
+		frappe.db.rollback()
+		write_catch_up_summary(account_name, error=error)
+		raise
 
 
 def refresh_order(marketplace_order_name):

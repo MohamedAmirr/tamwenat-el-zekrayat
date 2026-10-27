@@ -134,11 +134,11 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 			self._call_webhook(payload, "test-order-webhook-secret")
 
 	@patch("marketplace_integrations.integrations.talabat.order_events.bump_sync_debounce")
-	@patch("marketplace_integrations.integrations.talabat.order_events.upsert_marketplace_order")
+	@patch("marketplace_integrations.integrations.talabat.order_events.upsert_talabat_order")
 	@patch("marketplace_integrations.integrations.talabat.order_events.normalize_order")
 	@patch("marketplace_integrations.integrations.talabat.order_events.frappe.set_user")
 	def test_worker_sets_system_user_before_shared_mapper_and_upsert(
-		self, set_user, normalize_order, upsert_marketplace_order, bump_sync_debounce
+		self, set_user, normalize_order, upsert_talabat_order, bump_sync_debounce
 	):
 		payload = _payload(self.account)
 		normalized = {"external_order_id": "webhook-order-001", "items": [], "latest_payload": payload}
@@ -149,8 +149,11 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 		normalize_order.side_effect = (
 			lambda event_payload: call_order.append(("normalize", event_payload)) or normalized
 		)
-		upsert_marketplace_order.side_effect = (
-			lambda account, order: call_order.append(("upsert", account, order)) or upserted_order
+		upsert_talabat_order.side_effect = (
+			lambda account, order, trigger_source, **_kwargs: call_order.append(
+				("upsert", account, order, trigger_source)
+			)
+			or (upserted_order, False)
 		)
 		bump_sync_debounce.side_effect = lambda marketplace_order, trigger_source: call_order.append(
 			("bump_sync_debounce", marketplace_order, trigger_source)
@@ -163,7 +166,7 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 			[
 				("set_user", "Administrator"),
 				("normalize", payload),
-				("upsert", self.account.name, normalized),
+				("upsert", self.account.name, normalized, "Talabat Webhook"),
 				("bump_sync_debounce", upserted_order.name, "Talabat Webhook"),
 			],
 		)
@@ -183,6 +186,81 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 				{"marketplace_account": self.account.name, "external_order_id": payload["order_id"]},
 			)
 		)
+
+	def test_webhook_bumps_only_a_new_order_or_one_whose_evidence_changed(self):
+		payload = _payload(self.account, order_id=f"echo-{frappe.generate_hash(length=8)}")
+		filters = {"marketplace_account": self.account.name, "external_order_id": payload["order_id"]}
+
+		process_order_event(self.account.name, payload)
+		name = frappe.db.get_value("Marketplace Order", filters, "name")
+		self.assertEqual(frappe.db.get_value("Marketplace Order", name, "erpnext_sync_status"), "Syncing")
+		self.assertTrue(frappe.db.get_value("Marketplace Order", name, "sync_debounce_until"))
+
+		# The echo of our own action: the same state arrives again, nothing is queued.
+		frappe.db.set_value(
+			"Marketplace Order",
+			name,
+			{"sync_debounce_until": None, "pending_sync_trigger_source": None, "erpnext_sync_status": "Synced"},
+		)
+		process_order_event(self.account.name, payload)
+		values = frappe.db.get_value(
+			"Marketplace Order", name, ["erpnext_sync_status", "sync_debounce_until"], as_dict=True
+		)
+		self.assertEqual(values.erpnext_sync_status, "Synced")
+		self.assertFalse(values.sync_debounce_until)
+
+		# A real change is queued.
+		process_order_event(self.account.name, {**payload, "status": "CANCELLED"})
+		values = frappe.db.get_value(
+			"Marketplace Order", name, ["erpnext_sync_status", "sync_debounce_until"], as_dict=True
+		)
+		self.assertEqual(values.erpnext_sync_status, "Syncing")
+		self.assertTrue(values.sync_debounce_until)
+
+	def test_webhook_echo_of_our_own_update_skips_the_bump_and_the_replan(self):
+		from marketplace_integrations.integrations.talabat.order_mapper import normalize_order
+		from marketplace_integrations.services import echo_guard
+
+		payload = _payload(self.account, order_id=f"echo-guard-{frappe.generate_hash(length=8)}")
+		process_order_event(self.account.name, payload)
+		name = frappe.db.get_value(
+			"Marketplace Order",
+			{"marketplace_account": self.account.name, "external_order_id": payload["order_id"]},
+			"name",
+		)
+		echoed = {**payload, "status": "CANCELLED", "cancellation": {"reason": "CLOSED"}}
+		frappe.db.set_value(
+			"Marketplace Order",
+			name,
+			{
+				"erpnext_sync_status": "Synced",
+				"sync_debounce_until": None,
+				"erpnext_sales_order": "SO-ECHO-FIXTURE",  # set_value skips link validation
+			},
+		)
+		echo_guard.record_expected_change(name, echo_guard.talabat_incoming_hash(normalize_order(echoed)), None)
+
+		with (
+			# Saving a linked order would validate the stand-in Sales Order link.
+			patch("frappe.model.document.Document._validate_links"),
+			patch("marketplace_integrations.services.echo_guard.is_job_enqueued", return_value=False),
+			patch("marketplace_integrations.services.echo_guard.frappe.enqueue") as enqueue,
+			patch("marketplace_integrations.integrations.talabat.order_events.bump_sync_debounce") as bump,
+		):
+			process_order_event(self.account.name, echoed)
+
+		bump.assert_not_called()
+		enqueue.assert_called_once()
+		self.assertEqual(enqueue.call_args.kwargs["trigger_source"], "Talabat Webhook")
+		values = frappe.db.get_value(
+			"Marketplace Order",
+			name,
+			["erpnext_sync_status", "sync_debounce_until", "expected_change_hash"],
+			as_dict=True,
+		)
+		self.assertEqual(values.erpnext_sync_status, "Synced")
+		self.assertFalse(values.sync_debounce_until)
+		self.assertFalse(values.expected_change_hash)
 
 	def test_duplicate_redelivery_creates_one_marketplace_order(self):
 		payload = _payload(self.account, order_id=f"duplicate-{frappe.generate_hash(length=8)}")
@@ -260,11 +338,11 @@ class IntegrationTestTalabatOrderWebhook(IntegrationTestCase):
 
 	@patch("marketplace_integrations.integrations.talabat.order_events.bump_sync_debounce")
 	@patch("frappe.db.commit")  # the failure-log write commits; keep this test's fixtures uncommitted
-	@patch("marketplace_integrations.integrations.talabat.order_events.upsert_marketplace_order")
+	@patch("marketplace_integrations.integrations.talabat.order_events.upsert_talabat_order")
 	def test_bump_sync_debounce_is_not_called_when_upsert_fails(
-		self, upsert_marketplace_order, _commit, bump_sync_debounce
+		self, upsert_talabat_order, _commit, bump_sync_debounce
 	):
-		upsert_marketplace_order.side_effect = frappe.ValidationError
+		upsert_talabat_order.side_effect = frappe.ValidationError
 		payload = _payload(self.account)
 
 		with self.assertRaises(frappe.ValidationError):

@@ -36,7 +36,7 @@ import json
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, flt, now_datetime
+from frappe.utils import cstr, escape_html, flt, now_datetime
 
 from marketplace_integrations.integrations.talabat.orders import CANCELLATION_REASONS
 from marketplace_integrations.services.marketplace_orders import rollback_to_savepoint
@@ -81,7 +81,7 @@ def send_shopify_order_edit(sales_order, fingerprint):
 	is re-baselined (``sales_order_sync.rebaseline_after_outbound_edit``) or by a System
 	Manager (``clear_edit_marker_manually``).  Only ``completed`` makes the planner keep
 	the ERP quantities (``plan()``, evidence ``outbound_edit_requested``); ``in_flight``
-	means the outcome is unknown and the order stays Modified After Sync.
+	means the outcome is unknown and the order stays Needs Action.
 
 	COMMITS the caller's open transaction (before the lock, before the platform call and
 	after it), like ``request_platform_cancel``.
@@ -542,7 +542,8 @@ def request_platform_cancel(sales_order, cancellation_reason=None):
 				order, sales_order.name, {"cancellation_reason": cancellation_reason}, error_text
 			)
 			frappe.db.commit()
-			frappe.throw(error_text)
+			# Desk renders a thrown message as HTML and the text is Shopify's, so escape it.
+			frappe.throw(escape_html(error_text))
 		if not isinstance(job_result, dict) or cstr(job_result.get("status")).strip().upper() != "SUCCEEDED":
 			return {
 				"ok": True,

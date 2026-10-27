@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import frappe
 from frappe.tests import UnitTestCase
 
 from marketplace_integrations.integrations.noon.inventory import push_stock
@@ -91,6 +92,52 @@ class UnitTestNoonInventory(UnitTestCase):
 		persist.assert_called_once()
 		self.assertIn("M1", persist.call_args.args[0])
 		self.assertNotIn("M2", persist.call_args.args[0])
+
+	def test_manual_run_pushes_with_the_switch_off_and_never_rechecks_it(self):
+		account = SimpleNamespace(
+			name="ACC", connection="CONN", warehouse="ERP-WH", noon_warehouse_code="NOON-WH"
+		)
+		self.paused.return_value = True
+		patches = "marketplace_integrations.integrations.noon.inventory"
+		with patch(f"{patches}.get_account", return_value=account):
+			with patch(f"{patches}.selected_mappings", return_value=self._two_rows()):
+				with patch(f"{patches}.validate_account_warehouse"):
+					with patch(f"{patches}.validate_warehouse_code"):
+						with patch(f"{patches}.get_sellable_qty", return_value=5):
+							with patch(f"{patches}.STOCK_CHUNK_SIZE", 1):
+								with patch(f"{patches}.NoonClient") as client_class:
+									with patch(f"{patches}.persist_outcomes"):
+										client = client_class.return_value
+										client.request.side_effect = [
+											Response([result("SKU-1")]),
+											Response([result("SKU-2")]),
+										]
+										outcome = push_stock("ACC", manual=True)
+		# Both chunks pushed although the switch reads off at entry and before each chunk.
+		self.assertEqual(outcome, {"synced": 2, "failed": 0})
+		self.assertEqual(client.request.call_count, 2)
+		self.paused.assert_not_called()
+
+	def test_manual_run_for_a_disabled_connection_still_errors(self):
+		account = SimpleNamespace(
+			name="ACC", connection="CONN", warehouse="ERP-WH", noon_warehouse_code="NOON-WH"
+		)
+		self.paused.return_value = True
+		patches = "marketplace_integrations.integrations.noon.inventory"
+		with patch(f"{patches}.get_account", return_value=account):
+			with patch(f"{patches}.selected_mappings", return_value=self._two_rows()):
+				with patch(f"{patches}.validate_account_warehouse"):
+					with patch(
+						f"{patches}.validate_connection_enabled",
+						side_effect=frappe.ValidationError("Noon Connection CONN is disabled."),
+					):
+						with patch(f"{patches}.NoonClient") as client_class:
+							with patch(f"{patches}.persist_outcomes") as persist:
+								outcome = push_stock("ACC", manual=True)
+		self.assertEqual(outcome, {"synced": 0, "failed": 2})
+		client_class.assert_not_called()
+		self.assertEqual(set(persist.call_args.args[0]), {"M1", "M2"})
+		self.assertIn("disabled", persist.call_args.args[0]["M1"])
 
 	def test_warehouse_partition_payload_failure_and_retry(self):
 		account = SimpleNamespace(

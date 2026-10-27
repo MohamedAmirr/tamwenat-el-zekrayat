@@ -150,13 +150,26 @@ has_permission = {
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+# #364: after a person fixes a blocker in ERPNext, the linked Marketplace Order is re-checked
+# without a Retry Sync click.  The handler (services/sales_order_recheck.py) only bumps the
+# order's sync debounce: it never raises, makes no HTTP call and skips an order whose sync is
+# running.  Catalog doctypes (Stock Ledger Entry, Item Price, Item, Marketplace Product Mapping,
+# Marketplace Account) still get no hook, see api/test_talabat_catalog.py.
+_RECHECK_HANDLER = "marketplace_integrations.services.sales_order_recheck.bump_linked_orders"
+_RECHECK_EVENTS = {
+	"on_submit": _RECHECK_HANDLER,
+	"on_cancel": _RECHECK_HANDLER,
+	"on_trash": _RECHECK_HANDLER,
+}
+doc_events = {
+	"Delivery Note": _RECHECK_EVENTS,
+	"Sales Invoice": _RECHECK_EVENTS,
+	"Payment Entry": _RECHECK_EVENTS,
+	"Sales Order": {
+		"on_update_after_submit": _RECHECK_HANDLER,
+		"on_cancel": _RECHECK_HANDLER,
+	},
+}
 
 # Scheduled Tasks
 # ---------------
@@ -181,8 +194,9 @@ has_permission = {
 #
 # Neither of these two is a doc_events entry - both are cron/interval
 # polling, never a document hook. api/test_talabat_catalog.py's
-# test_no_catalog_document_events_are_registered depends on doc_events
-# staying empty for every app; do not add one here.
+# test_no_catalog_document_events_are_registered depends on this app registering
+# no doc_events for the catalog doctypes; do not add one for them here. The
+# only doc_events are the #364 Marketplace Order re-check handlers above.
 scheduler_events = {
 	"hourly": [
 		"marketplace_integrations.integrations.shopify.webhooks.retry_errored_webhook_deliveries",

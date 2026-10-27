@@ -344,16 +344,84 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 				self.assertEqual(result["outcome"], NEEDS_ATTENTION)
 				self.assertFalse(result.get("reopen"))
 
-	def test_closed_erp_order_structural_changes_need_attention(self):
+	def test_non_executable_results_carry_a_registered_reason_code(self):
+		from marketplace_integrations.services.sync_reason_codes import REASONS
+
+		def code(current=None, evidence=None, erp=None, previous=None):
+			return plan(
+				self.previous if previous is None else previous,
+				current or self._current(),
+				evidence or {},
+				erp or self.erp_state,
+			)["reason_code"]
+
+		def delivered(**changes):
+			state = deepcopy(self.erp_state)
+			state["lines"][0].update({"delivered_qty": 2, **changes})
+			return state
+
+		header = self._current()
+		header["customer"] = "Other Customer"
+		shipping = self._current()
+		shipping["shipping"] = 5
+		restored = deepcopy(self.previous)
+		restored["items"][0]["qty"] = 0
+		fewer = self._current()
+		fewer["items"][0]["qty"] = 1
+		duplicate = self._current()
+		duplicate["items"].append(dict(duplicate["items"][0]))
+		zero = self._current()
+		zero["items"][0]["qty"] = 0
+		cases = {
+			"NO_BASELINE": code(previous={}),
+			"RETURN_REQUIRES_RECEIPT_REVIEW": code(evidence={"return": True}),
+			"DUPLICATE_LINE_IDENTITY": code(current=duplicate),
+			"LINE_RESTORED_FROM_ZERO": code(previous=restored),
+			"HEADER_CHANGED": code(current=header),
+			"SHIPPING_CHANGED": code(current=shipping),
+			"CANCELLED_FULLY_DELIVERED": code(evidence={"cancellation": "full"}, erp=delivered()),
+			"CANCELLED_AFTER_FULFILLMENT_DELIVERED": code(
+				evidence={"cancellation": "full", "cancelled_after_fulfillment": True}, erp=delivered()
+			),
+			"ALL_ZERO_DELIVERED": code(current=zero, erp=delivered()),
+			"QTY_BELOW_DELIVERED": code(current=fewer, erp=delivered(qty=3)),
+			"ADVANCE_BLOCKS_CANCEL": code(
+				evidence={"cancellation": "full"}, erp={**self.erp_state, "advance_paid": 50}
+			),
+			"ORDER_INACTIVE": code(erp={**self.erp_state, "status": "Cancelled"}),
+			"LIFECYCLE_BLOCKS_CHANGE": code(
+				current=fewer, evidence={"lifecycle_permits_change": False, "lifecycle_reason": "shipped"}
+			),
+			"ERP_STATE_DIVERGED": code(erp={**self.erp_state, "lines": [{**self.erp_state["lines"][0], "amount": 1}]}),
+		}
+		for expected, actual in cases.items():
+			with self.subTest(expected=expected):
+				self.assertEqual(actual, expected)
+				self.assertIn(actual, REASONS)
+
+	def test_submitted_return_makes_the_return_evidence_stop_blocking(self):
+		result = plan(
+			self.previous, self._current(), {"return": True, "compensating_document_submitted": True}, self.erp_state
+		)
+		self.assertEqual(result["outcome"], NO_ACTION)
+
+	def test_closed_erp_order_header_changes_need_attention(self):
 		self.erp_state.update({"status": "Closed"})
 		header = self._current()
 		header["customer"] = "Other Customer"
+		result = plan(self.previous, header, {}, self.erp_state)
+		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+		self.assertFalse(result.get("reopen"))
+
+	def test_closed_erp_order_with_an_added_line_is_updated_after_reopen(self):
+		# #364 case 10: an added line is an update (applied through update_child_qty_rate),
+		# so a Closed order with no delivery or billing is reopened first like any update.
+		self.erp_state.update({"status": "Closed"})
 		added = self._current()
 		added["items"].append({**added["items"][0], "external_item_id": "line-2"})
-		for current in (header, added):
-			result = plan(self.previous, current, {}, self.erp_state)
-			self.assertEqual(result["outcome"], NEEDS_ATTENTION)
-			self.assertFalse(result.get("reopen"))
+		result = plan(self.previous, added, {}, self.erp_state)
+		self.assertEqual(result["outcome"], UPDATE_SUBMITTED_ORDER)
+		self.assertTrue(result["reopen"])
 
 	def test_closed_erp_order_equivalent_to_the_marketplace_needs_attention_without_reopen(self):
 		self.erp_state.update({"status": "Closed"})

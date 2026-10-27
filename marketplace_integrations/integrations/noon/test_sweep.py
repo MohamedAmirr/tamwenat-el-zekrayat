@@ -70,6 +70,53 @@ class UnitTestNoonPushSwitch(UnitTestCase):
 			self.assertEqual(str(raised.exception), message)
 			enqueue.assert_not_called()
 
+	def test_manual_enqueue_runs_with_the_switch_off_and_tells_the_worker(self):
+		for kind in ("stock", "pricing"):
+			with patch("marketplace_integrations.integrations.noon.sync.is_push_paused", return_value=True):
+				with patch("marketplace_integrations.integrations.noon.sync.frappe.enqueue") as enqueue:
+					enqueue.return_value = object()
+					result = enqueue_push(lambda **kwargs: None, kind, "ACC", ["M1"], manual=True)
+			self.assertEqual(result, {"queued": True, "switch_off": True})
+			enqueue.assert_called_once()
+			self.assertIs(enqueue.call_args.kwargs["manual"], True)
+			self.assertEqual(enqueue.call_args.kwargs["job_id"], f"marketplace-noon-{kind}-ACC")
+			self.assertTrue(enqueue.call_args.kwargs["deduplicate"])
+
+	def test_automatic_enqueue_passes_manual_false_and_flags_no_override(self):
+		with patch("marketplace_integrations.integrations.noon.sync.is_push_paused", return_value=False):
+			with patch("marketplace_integrations.integrations.noon.sync.frappe.enqueue") as enqueue:
+				enqueue.return_value = object()
+				result = enqueue_push(lambda **kwargs: None, "stock", "ACC")
+		self.assertEqual(result, {"queued": True, "switch_off": False})
+		self.assertIs(enqueue.call_args.kwargs["manual"], False)
+
+	def test_a_manual_click_while_a_job_is_queued_is_deduplicated_not_doubled(self):
+		with patch("marketplace_integrations.integrations.noon.sync.is_push_paused", return_value=True):
+			with patch("marketplace_integrations.integrations.noon.sync.frappe.enqueue", return_value=None):
+				result = enqueue_push(lambda **kwargs: None, "stock", "ACC", None, manual=True)
+		self.assertEqual(result, {"queued": False, "switch_off": True})
+
+	def test_whitelisted_manual_endpoints_enqueue_with_manual_true_even_when_both_switches_are_off(self):
+		from marketplace_integrations.api import noon_catalog
+		from marketplace_integrations.integrations.noon import inventory, pricing
+
+		with patch("marketplace_integrations.integrations.noon.sync.is_push_paused", return_value=True):
+			with patch("marketplace_integrations.integrations.noon.sync.frappe.enqueue") as enqueue:
+				enqueue.return_value = object()
+				with patch.object(noon_catalog, "authorize_selection", return_value=["M1"]):
+					with patch.object(noon_catalog, "get_account"):
+						both = noon_catalog.queue_account_sync("ACC", ["M1"])
+				with patch.object(pricing, "authorize_selection", return_value=None):
+					with patch.object(pricing, "get_account"):
+						price = pricing.queue_pricing_push("ACC")
+				with patch.object(inventory, "authorize_selection", return_value=None):
+					with patch.object(inventory, "get_account"):
+						stock = inventory.queue_stock_push("ACC")
+		self.assertEqual(set(both), {"pricing", "stock"})
+		self.assertTrue(all(result["queued"] and result["switch_off"] for result in (*both.values(), price, stock)))
+		self.assertEqual(enqueue.call_count, 4)
+		self.assertTrue(all(call.kwargs["manual"] is True for call in enqueue.call_args_list))
+
 	def test_switches_are_independent_and_read_the_matching_field(self):
 		def get_value(doctype, name, field):
 			return {"noon_inventory_push_enabled": 0, "noon_price_push_enabled": 1}[field]

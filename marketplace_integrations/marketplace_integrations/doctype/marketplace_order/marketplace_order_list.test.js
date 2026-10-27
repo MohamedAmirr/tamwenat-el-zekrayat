@@ -95,16 +95,16 @@ test("Show Refunded Orders sets a filter to Shopify orders with a refund financi
 	]);
 });
 
-test("indicator colours each ERPNext sync status and falls back to Not Synced/grey", () => {
+test("indicator colours each ERPNext sync status and falls back to Syncing/blue", () => {
 	assert.deepEqual(get_order_indicator({ erpnext_sync_status: "Synced" }), [
 		"Synced",
 		"green",
 		"erpnext_sync_status,=,Synced",
 	]);
-	assert.equal(get_order_indicator({ erpnext_sync_status: "Not Synced" })[1], "grey");
-	assert.equal(get_order_indicator({ erpnext_sync_status: "Modified After Sync" })[1], "orange");
+	assert.equal(get_order_indicator({ erpnext_sync_status: "Syncing" })[1], "blue");
+	assert.equal(get_order_indicator({ erpnext_sync_status: "Needs Action" })[1], "orange");
 	assert.equal(get_order_indicator({ erpnext_sync_status: "Sync Error" })[1], "red");
-	assert.deepEqual(get_order_indicator({}), ["Not Synced", "grey", "erpnext_sync_status,=,Not Synced"]);
+	assert.deepEqual(get_order_indicator({}), ["Syncing", "blue", "erpnext_sync_status,=,Syncing"]);
 });
 
 test("platform status shows Shopify financial/fulfillment and external_status elsewhere", () => {

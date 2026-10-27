@@ -8,6 +8,7 @@ const {
 	push_to_talabat,
 	push_to_shopify,
 	sync_shopify_inventory,
+	sync_noon_mapping,
 	add_platform_push_button,
 } = require("./marketplace_product_mapping.js");
 
@@ -279,4 +280,41 @@ test("Sync Shopify Inventory shows the skipped account's real reason (escaped) a
 
 	assert.equal(alert_args.message, `esc(${reason})`);
 	assert.equal(dialog_opened, false);
+});
+
+test("Sync Noon Pricing and Stock says a manual run was queued when the account switch is off", async () => {
+	let msg;
+	global.frappe = {
+		call() {
+			return Promise.resolve({
+				message: { pricing: { queued: true, switch_off: true }, stock: { queued: true, switch_off: true } },
+			});
+		},
+		msgprint(message) {
+			msg = message;
+		},
+	};
+
+	sync_noon_mapping({ doc: { name: "MPM-1", marketplace_account: "NOON-A" } });
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.match(msg, /queued as a manual run/);
+});
+
+test("Sync Noon Pricing and Stock uses the plain queued message when the switch is on", async () => {
+	let msg;
+	global.frappe = {
+		call() {
+			return Promise.resolve({ message: { pricing: { queued: true, switch_off: false }, stock: { queued: false } } });
+		},
+		msgprint(message) {
+			msg = message;
+		},
+	};
+
+	sync_noon_mapping({ doc: { name: "MPM-1", marketplace_account: "NOON-A" } });
+	await new Promise((resolve) => setImmediate(resolve));
+
+	assert.doesNotMatch(msg, /manual run/);
+	assert.match(msg, /queued/);
 });

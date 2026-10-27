@@ -324,6 +324,81 @@ class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
 				{"document_type": "Bosta Shipment", "document_name": shipment.name},
 			)
 
+	def test_103_notifies_once_per_entry_not_on_repeated_events_at_103(self):
+		recipient = self.make_user("Bosta User")
+		_, shipment = self._completed_shipment(tracking=f"TRK-ONCE-{self.suffix}")
+		filters = {"for_user": recipient, "document_type": "Bosta Shipment", "document_name": shipment.name}
+		try:
+			statuses.process_webhook_event(self._event(shipment, 103, 9000))
+			statuses.process_webhook_event(self._event(shipment, 103, 9500))
+			self.assertEqual(frappe.db.count("Notification Log", filters), 1)
+
+			statuses.process_webhook_event(self._event(shipment, 100, 9600))
+			statuses.process_webhook_event(self._event(shipment, 103, 9700))
+			self.assertEqual(frappe.db.count("Notification Log", filters), 2)
+		finally:
+			frappe.db.delete("Notification Log", {"document_type": "Bosta Shipment", "document_name": shipment.name})
+
+	def test_each_listed_carrier_exception_state_gives_one_row_and_the_row_clears_on_move(self):
+		_, shipment = self._completed_shipment(tracking=f"TRK-EACH-{self.suffix}")
+		for code in marketplace_attention.BOSTA_PROBLEM_STATE_CODES:
+			frappe.db.set_value("Bosta Shipment", shipment.name, "bosta_state_code", code)
+			rows = self._attention_rows_for(shipment, marketplace_attention.BOSTA_CARRIER_EXCEPTION)
+			self.assertEqual(len(rows), 1, code)
+		self.assertEqual(marketplace_attention.BOSTA_PROBLEM_STATE_CODES, (47, 100, 101, 102, 103, 105))
+
+		frappe.db.set_value("Bosta Shipment", shipment.name, "bosta_state_code", 24)
+		self.assertEqual(self._attention_rows_for(shipment, marketplace_attention.BOSTA_CARRIER_EXCEPTION), [])
+
+	def test_cancellation_states_and_canceled_shipments_are_never_carrier_exceptions(self):
+		_, shipment = self._completed_shipment(tracking=f"TRK-NOEXC-{self.suffix}")
+		for code in (48, 49):
+			frappe.db.set_value("Bosta Shipment", shipment.name, "bosta_state_code", code)
+			self.assertEqual(
+				self._attention_rows_for(shipment, marketplace_attention.BOSTA_CARRIER_EXCEPTION), [], code
+			)
+		frappe.db.set_value(
+			"Bosta Shipment", shipment.name, {"bosta_state_code": 103, "status": "Canceled"}
+		)
+		self.assertEqual(self._attention_rows_for(shipment, marketplace_attention.BOSTA_CARRIER_EXCEPTION), [])
+
+	def test_excluded_shipments_are_never_listed_as_stale(self):
+		cases = {}
+		for label, values in (
+			("delivered", {"bosta_state_code": 45}),
+			("carrier-canceled", {"bosta_state_code": 49}),
+			("canceled", {"status": "Canceled"}),
+			("too-old", {"creation": add_days(now_datetime(), -(marketplace_attention.BOSTA_MAX_AGE_DAYS + 1))}),
+			("fresh", {"last_bosta_status_on": add_days(now_datetime(), -1)}),
+			("stale", {"last_bosta_status_on": add_days(now_datetime(), -6)}),
+		):
+			_, shipment = self._completed_shipment(tracking=f"TRK-{label}-{self.suffix}")
+			base = {"last_bosta_status_on": add_days(now_datetime(), -6)}
+			frappe.db.set_value("Bosta Shipment", shipment.name, {**base, **values}, update_modified=False)
+			cases[label] = shipment
+
+		listed = {
+			label
+			for label, shipment in cases.items()
+			if self._attention_rows_for(shipment, marketplace_attention.BOSTA_STATUS_STALE)
+		}
+
+		self.assertEqual(listed, {"stale"})
+
+	def test_user_without_bosta_shipment_read_sees_no_carrier_rows(self):
+		_, shipment = self._completed_shipment(tracking=f"TRK-NOREAD-{self.suffix}")
+		frappe.db.set_value("Bosta Shipment", shipment.name, "bosta_state_code", 47)
+		user = self.make_user("Talabat User")
+		self.assertFalse(frappe.has_permission("Bosta Shipment", "read", user=user))
+
+		frappe.set_user(user)
+		try:
+			references = {item["reference_name"] for item in marketplace_attention.get_attention_items()}
+		finally:
+			frappe.set_user("Administrator")
+
+		self.assertNotIn(shipment.name, references)
+
 	# -- polling -------------------------------------------------------------------------
 
 	def _poll(self, responses):
@@ -376,6 +451,10 @@ class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
 					update_modified=False,
 				)
 			shipments[tracking] = shipment
+		# A Delivered shipment is read again only until its fee was received (#346).
+		frappe.db.set_value(
+			"Bosta Shipment", shipments["T-DELIVERED"].name, "shipment_fee_received_on", now_datetime()
+		)
 		frappe.db.commit()
 		responses = {t: self._state_response(24) for t in ("T-LIVE", "T-NEVER-POLLED")}
 
@@ -523,6 +602,50 @@ class IntegrationTestBostaEvents(BostaFixtureMixin, IntegrationTestCase):
 		shipment.reload()
 		self.assertEqual(shipment.shipment_fee, 87)
 		self.assertEqual(frappe.db.get_value("Sales Order", order.name, "custom_bosta_delivery_status"), "Delivered")
+
+	def test_a_real_zero_fee_is_stored_once_shown_and_not_polled_again(self):
+		from marketplace_integrations.integrations.bosta import deliveries
+
+		order, shipment = self._completed_shipment("T-ZERO-FEE")
+		self.assertIsNone(deliveries.get_sales_order_shipment(order.name)["shipments"][0]["shipment_fee"])
+		self.assertEqual(
+			statuses.apply_state(
+				shipment.tracking_number, state_code=45, timestamp=5000, snapshot={"code": 45}, shipment_fee=0
+			),
+			statuses.APPLIED,
+		)
+		shipment.reload()
+		self.assertTrue(shipment.shipment_fee_received_on)
+		self.assertEqual(deliveries.get_sales_order_shipment(order.name)["shipments"][0]["shipment_fee"], 0)
+
+		again = statuses.apply_state(
+			shipment.tracking_number,
+			state_code=45,
+			timestamp=6000,
+			snapshot={"code": 45},
+			skip_if_unchanged=True,
+			shipment_fee=0,
+		)
+		self.assertEqual(again, statuses.UNCHANGED)
+
+		# A Delivered shipment whose fee was received (even 0) is not read again.
+		_updated, client = self._poll({})
+		self.assertNotIn(shipment.tracking_number, {call.args[0] for call in client.get_delivery.call_args_list})
+
+	def test_a_delivered_shipment_without_a_received_fee_is_still_polled_for_it(self):
+		_, shipment = self._completed_shipment("T-NO-FEE-YET")
+		statuses.apply_state(shipment.tracking_number, state_code=45, timestamp=5000, snapshot={"code": 45})
+		responses = {
+			shipment.tracking_number: FakeResponse(
+				200, {"success": True, "data": {"state": {"code": 45}, "shipmentFees": 0}}
+			)
+		}
+
+		_updated, client = self._poll(responses)
+
+		self.assertIn(shipment.tracking_number, {call.args[0] for call in client.get_delivery.call_args_list})
+		shipment.reload()
+		self.assertTrue(shipment.shipment_fee_received_on)
 
 	def test_sales_order_status_backfill_uses_latest_shipment_and_is_idempotent(self):
 		order, shipment = self._completed_shipment("T-STATUS-BACKFILL")

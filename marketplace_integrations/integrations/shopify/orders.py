@@ -8,8 +8,9 @@ from datetime import UTC
 
 import frappe
 from frappe import _
-from frappe.utils import add_to_date, cstr, get_datetime, now_datetime
+from frappe.utils import add_to_date, cstr, escape_html, get_datetime, now_datetime
 
+from marketplace_integrations.services.sync_status import CANCELLED, NEEDS_ACTION
 from marketplace_integrations.integrations.shopify.client import ShopifyClient
 from marketplace_integrations.integrations.shopify.constants import (
 	SHOPIFY_ORDER_LINE_ITEMS_PAGE_SIZE,
@@ -20,6 +21,10 @@ from marketplace_integrations.integrations.shopify.constants import (
 	SHOPIFY_ORDERS_PAGE_SIZE,
 )
 from marketplace_integrations.integrations.shopify.order_mapper import normalize_order
+from marketplace_integrations.services.marketplace_order_reconciliation import (
+	schedule_first_syncs,
+	write_catch_up_summary,
+)
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 from marketplace_integrations.services.sales_order_sync_debounce import (
 	bump_if_linked_order_changed,
@@ -269,7 +274,11 @@ def cancel_order(account, order_gid, reason):
 	user_errors = result.get("orderCancelUserErrors") or result.get("userErrors") or []
 	if user_errors:
 		messages = [cstr(error.get("message")).strip() for error in user_errors if isinstance(error, dict)]
-		frappe.throw(" ".join(message for message in messages if message) or _("Shopify rejected the cancellation."))
+		# Desk renders a thrown message as HTML and the text is Shopify's, so escape it.
+		frappe.throw(
+			escape_html(" ".join(message for message in messages if message))
+			or _("Shopify rejected the cancellation.")
+		)
 	job_result = result.get("jobResult")
 	if not isinstance(job_result, dict) or not cstr(job_result.get("id")).strip():
 		frappe.throw(_("Shopify accepted no cancellation job."))
@@ -357,7 +366,7 @@ def _import_order_isolated(
 			and order
 			and not order.erpnext_sales_order
 			and not order.cancelled_at
-			and order.erpnext_sync_status != "Cancelled"
+			and order.erpnext_sync_status != CANCELLED
 		):
 			bump_sync_debounce(order.name, trigger_source)
 	except Exception as exc:
@@ -532,47 +541,28 @@ def reconcile_all_accounts_orders(account_name=None, catch_up_unlinked=False):
 				bump_linked_changes=True,
 				bump_unlinked=catch_up_unlinked,
 			)
+			scheduled = 0
 			if catch_up_unlinked:
-				from marketplace_integrations.services.sales_order_sync_debounce import bump_sync_debounce
-
-				for candidate in frappe.get_all(
-					"Marketplace Order",
-					filters={
+				scheduled += schedule_first_syncs(
+					{
 						"marketplace_account": account.name,
 						"platform": "Shopify",
 						"cancelled_at": ["is", "not set"],
 						"erpnext_sales_order": ["is", "not set"],
-						"erpnext_sync_status": ["!=", "Cancelled"],
-					},
-					fields=["name", "sync_debounce_until", "pending_sync_trigger_source"],
-				):
-					if (
-						candidate.pending_sync_trigger_source == "Scheduled Reconciliation"
-						and candidate.sync_debounce_until
-						and get_datetime(candidate.sync_debounce_until) > now_datetime()
-					):
-						continue
-					bump_sync_debounce(candidate.name, "Scheduled Reconciliation")
+						"erpnext_sync_status": ["!=", CANCELLED],
+					}
+				)
 				# Canceled-but-paid orders are intentionally outside the normal
 				# unlinked import bump (their cancelled_at excludes that path).
-				for candidate in frappe.get_all(
-					"Marketplace Order",
-					filters={
+				scheduled += schedule_first_syncs(
+					{
 						"marketplace_account": account.name,
 						"platform": "Shopify",
 						"cancelled_at": ["is", "set"],
 						"erpnext_sales_order": ["is", "not set"],
-						"erpnext_sync_status": "Sync Error",
-					},
-					fields=["name", "sync_debounce_until", "pending_sync_trigger_source"],
-				):
-					if (
-						candidate.pending_sync_trigger_source == "Scheduled Reconciliation"
-						and candidate.sync_debounce_until
-						and get_datetime(candidate.sync_debounce_until) > now_datetime()
-					):
-						continue
-					bump_sync_debounce(candidate.name, "Scheduled Reconciliation")
+						"erpnext_sync_status": NEEDS_ACTION,
+					}
+				)
 			# Advance the watermark only after a successful run (decision 8) -
 			# per-order failures are already isolated above and don't count as
 			# a failed run on their own, but to the run-start time MINUS the
@@ -585,11 +575,17 @@ def reconcile_all_accounts_orders(account_name=None, catch_up_unlinked=False):
 					title="Shopify order reconciliation: per-order failures",
 					message=frappe.as_json(errors),
 				)
+			if catch_up_unlinked:
+				write_catch_up_summary(
+					account.name, imported=len(_imported), scheduled=scheduled, failures=len(errors)
+				)
 		except Exception:
-			frappe.log_error(
-				title="Shopify order reconciliation failed for account",
-				message=frappe.get_traceback(),
-			)
+			error = frappe.get_traceback()
+			if catch_up_unlinked:
+				frappe.db.rollback()
+			frappe.log_error(title="Shopify order reconciliation failed for account", message=error)
+			if catch_up_unlinked:
+				write_catch_up_summary(row.name, error=error)
 		else:
 			# Committed per-account, mirroring webhooks.py's
 			# retry_errored_webhook_deliveries() sweep: this account's imported

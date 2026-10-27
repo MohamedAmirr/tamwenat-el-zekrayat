@@ -34,6 +34,7 @@
   "bosta_state_code",
   "bosta_state_value",
   "shipment_fee",
+  "shipment_fee_received_on",
   "bosta_delivery_type",
   "last_bosta_event_timestamp",
   "bosta_exception_reason",
@@ -268,6 +269,14 @@
    "fieldname": "shipment_fee",
    "fieldtype": "Currency",
    "label": "Bosta Delivery Fee",
+   "read_only": 1
+  },
+  {
+   "description": "When Bosta first reported a delivery fee. A Currency column cannot tell an unset fee from a real 0, so the fee is shown and polling stops only once this is set.",
+   "fieldname": "shipment_fee_received_on",
+   "fieldtype": "Datetime",
+   "label": "Bosta Delivery Fee Received On",
+   "no_copy": 1,
    "read_only": 1
   },
   {

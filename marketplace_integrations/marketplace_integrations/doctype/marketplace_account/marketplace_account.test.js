@@ -298,9 +298,11 @@ test("gateway picker shows a scoped error and can be retried after the request f
 	let calls = 0;
 	let message;
 	let dialog_shown = false;
+	let silent;
 	global.frappe = {
-		call() {
+		call(opts) {
 			calls++;
+			silent = opts.silent;
 			return calls === 1
 				? Promise.reject(new Error("offline"))
 				: Promise.resolve({ message: [{ gateway: "Paymob", orders_count: 1, mapped: false }] });
@@ -327,6 +329,8 @@ test("gateway picker shows a scoped error and can be retried after the request f
 	assert.equal(message.title, "Shopify Payment Gateways");
 	assert.match(message.message, /Could not load Shopify payment gateways/);
 	assert.equal(message.indicator, "red");
+	// Silent, so Frappe's own error dialog does not stack on this message.
+	assert.equal(silent, true);
 
 	await show_shopify_gateway_picker(frm);
 	assert.equal(calls, 2);

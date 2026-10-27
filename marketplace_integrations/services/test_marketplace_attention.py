@@ -34,7 +34,7 @@ from marketplace_integrations.services.marketplace_attention import (
 	PAYMENT_ERROR,
 	PAYMENT_EXCESS,
 	FULFILLMENT_ERROR,
-	MODIFIED_AFTER_SYNC,
+	NEEDS_ACTION,
 	NOON_FULFILLMENT,
 	NOON_RETURN_UNLINKED,
 	ORDER_IMPORT_ERROR,
@@ -76,9 +76,13 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 			response_data=frappe.as_json({"message": "Gateway is not mapped"}),
 			attempted_at=stamp, creation=stamp, status="Invalid",
 		)
-		orders = [frappe._dict(name="MKTORD-1", marketplace_account=account.name)]
-		with patch.object(marketplace_attention.frappe, "get_list", side_effect=[orders, [failure], []]):
-			items = marketplace_attention._collect_payment_errors({account.name: account})
+		order_accounts = {"MKTORD-1": account.name}
+		accounts = {account.name: account}
+		# Reads: failures by stored account, failures of rows without an account, Success rows.
+		with patch.object(
+			marketplace_attention.frappe, "get_list", side_effect=[[failure], [], []]
+		):
+			items = marketplace_attention._collect_payment_errors(accounts, order_accounts)
 		self.assertEqual(len(items), 1)
 		self.assertEqual(items[0]["problem_type"], PAYMENT_ERROR)
 		self.assertIn("TX-1", items[0]["explanation"])
@@ -88,9 +92,26 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 			attempted_at=stamp + timedelta(seconds=1), creation=stamp + timedelta(seconds=1),
 		)
 		with patch.object(
-			marketplace_attention.frappe, "get_list", side_effect=[orders, [failure], [success]]
+			marketplace_attention.frappe, "get_list", side_effect=[[failure], [], [success]]
 		):
-			self.assertEqual(marketplace_attention._collect_payment_errors({account.name: account}), [])
+			self.assertEqual(marketplace_attention._collect_payment_errors(accounts, order_accounts), [])
+
+	def test_payment_error_of_a_log_without_an_account_is_found_by_its_order(self):
+		stamp = now_datetime()
+		account = frappe._dict(name="MKTACC-SHOPIFY", platform="Shopify")
+		old_row = frappe._dict(
+			name="LOG-OLD", marketplace_account=None, marketplace_order="MKTORD-1",
+			request_data=frappe.as_json({"transaction_id": "TX-9"}),
+			response_data=frappe.as_json({"message": "old"}),
+			attempted_at=stamp, creation=stamp, status="Error",
+		)
+		with patch.object(
+			marketplace_attention.frappe, "get_list", side_effect=[[], [old_row], []]
+		):
+			items = marketplace_attention._collect_payment_errors(
+				{account.name: account}, {"MKTORD-1": account.name}
+			)
+		self.assertEqual([item["reference_name"] for item in items], ["MKTORD-1"])
 
 	def test_payment_excess_and_cancelled_entry_are_listed_live(self):
 		account = frappe._dict(name="MKTACC-SHOPIFY", platform="Shopify")
@@ -98,7 +119,6 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 			marketplace_attention.frappe,
 			"get_list",
 			side_effect=[
-				[frappe._dict(name="MKTORD-1", marketplace_account=account.name)],
 				[
 					frappe._dict(
 						name="PE-EXCESS", custom_marketplace_order="MKTORD-1", unallocated_amount=12.5,
@@ -107,30 +127,45 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 				],
 			],
 		):
-			excess = marketplace_attention._collect_payment_excess({account.name: account})
+			excess = marketplace_attention._collect_payment_excess(
+				{account.name: account}, {"MKTORD-1": account.name}
+			)
 		self.assertEqual(excess[0]["problem_type"], PAYMENT_EXCESS)
 		self.assertIn("12.5", excess[0]["explanation"])
 
+		cancelled_entry = frappe._dict(
+			name="PE-CANCELLED", custom_marketplace_order="MKTORD-1",
+			custom_marketplace_transaction_id="TX-1", modified=now_datetime(),
+		)
+		accounts, order_accounts = {account.name: account}, {"MKTORD-1": account.name}
+		# Reads: the cancelled entries, then any submitted amendments of them.
+		with patch.object(
+			marketplace_attention.frappe, "get_list", side_effect=[[cancelled_entry], []]
+		):
+			cancelled = marketplace_attention._collect_cancelled_payment_entries(accounts, order_accounts)
+		self.assertEqual(cancelled[0]["problem_type"], PAYMENT_ENTRY_CANCELLED)
+		self.assertIn("record the payment manually", cancelled[0]["explanation"])
+
+		# Submitting the amendment clears the row (#231).
 		with patch.object(
 			marketplace_attention.frappe,
 			"get_list",
-			side_effect=[
-				[frappe._dict(name="MKTORD-1", marketplace_account=account.name)],
-				[
-					frappe._dict(
-						name="PE-CANCELLED", custom_marketplace_order="MKTORD-1",
-						custom_marketplace_transaction_id="TX-1", modified=now_datetime(),
-					)
-				],
-			],
-		) as get_list:
-			cancelled = marketplace_attention._collect_cancelled_payment_entries({account.name: account})
-		self.assertEqual(cancelled[0]["problem_type"], PAYMENT_ENTRY_CANCELLED)
-		self.assertIn("record the payment manually", cancelled[0]["explanation"])
-		# A submitted amendment cannot retain the unique transaction id, and is
-		# not a supported resolution signal. The collector needs only the order
-		# and cancelled-entry reads and leaves the item visible.
-		self.assertEqual(get_list.call_count, 2)
+			side_effect=[[cancelled_entry], [frappe._dict(amended_from="PE-CANCELLED")]],
+		):
+			self.assertEqual(
+				marketplace_attention._collect_cancelled_payment_entries(accounts, order_accounts), []
+			)
+
+	def test_shopify_order_accounts_are_read_once_for_all_payment_collectors(self):
+		account = frappe._dict(name="MKTACC-ONCE", platform="Shopify")
+		with (
+			patch.object(marketplace_attention, "_get_accounts", return_value={account.name: account}),
+			patch.object(
+				marketplace_attention, "_shopify_order_accounts", return_value={}
+			) as order_accounts,
+		):
+			marketplace_attention.get_attention_items()
+		self.assertEqual(order_accounts.call_count, 1)
 
 	def test_all_three_payment_attention_types_are_counted(self):
 		account_name = f"MKTACC-{self.suffix}"
@@ -271,7 +306,7 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		errored = self.make_order(account, erpnext_sync_status="Sync Error", last_sync_error="No warehouse")
 		modified = self.make_order(
 			account,
-			erpnext_sync_status="Modified After Sync",
+			erpnext_sync_status="Needs Action",
 			last_sync_error="Requested quantity is below the quantity already delivered in ERPNext.",
 		)
 		self.make_order(account, erpnext_sync_status="Synced")
@@ -284,7 +319,7 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		self.assertEqual(rows[errored.name]["explanation"], "No warehouse")
 		self.assertEqual(rows[errored.name]["reference_doctype"], "Marketplace Order")
 		self.assertEqual(rows[errored.name]["platform"], "Talabat")
-		self.assertEqual(rows[modified.name]["problem_type"], MODIFIED_AFTER_SYNC)
+		self.assertEqual(rows[modified.name]["problem_type"], NEEDS_ACTION)
 		self.assertEqual(rows[modified.name]["next_action"], "Open Order")
 		self.assertEqual(
 			rows[modified.name]["explanation"],
@@ -292,21 +327,61 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		)
 		self.assertTrue(rows[modified.name]["detected_at"])
 
+	def test_a_cancelled_order_is_never_listed_as_unmapped_or_needing_action(self):
+		account = self.make_talabat_account()
+		order = self.make_order(
+			account, items=[self.talabat_item("SKU-NOT-MAPPED")], erpnext_sync_status="Cancelled"
+		)
+		self.assertNotIn(order.name, {row["reference_name"] for row in self.items_for(account)})
+
+	def test_needs_action_row_carries_the_action_state_and_the_linked_document(self):
+		account = self.make_talabat_account()
+		waiting = self.make_order(
+			account,
+			erpnext_sync_status="Needs Action",
+			last_sync_error="Confirm the goods were received.",
+			sync_action_state="Awaiting Receipt",
+		)
+		prepared = self.make_order(
+			account,
+			erpnext_sync_status="Needs Action",
+			sync_action_state="Draft Prepared",
+		)
+		# Set directly: the named documents need not exist for the report to link them.
+		frappe.db.set_value(
+			"Marketplace Order",
+			prepared.name,
+			{
+				"sync_blocking_doctype": "Payment Entry",
+				"sync_blocking_document": "PE-BLOCKER",
+				"sync_prepared_doctype": "Delivery Note",
+				"sync_prepared_document": "MAT-DN-DRAFT",
+			},
+		)
+		rows = {row["reference_name"]: row for row in self.items_for(account, NEEDS_ACTION)}
+
+		self.assertEqual(rows[waiting.name]["action_state"], "Awaiting Receipt")
+		self.assertIsNone(rows[waiting.name]["linked_document"])
+		self.assertEqual(rows[prepared.name]["action_state"], "Draft Prepared")
+		# The prepared draft wins over the blocker.
+		self.assertEqual(rows[prepared.name]["linked_doctype"], "Delivery Note")
+		self.assertEqual(rows[prepared.name]["linked_document"], "MAT-DN-DRAFT")
+
 	def test_cancelled_sales_order_with_an_active_platform_order_shows_the_platform_instruction(self):
 		"""#181: no new problem type; the planner message (with the platform instruction) is the
-		explanation of a Modified After Sync row, in full and not truncated."""
+		explanation of a Needs Action row, in full and not truncated."""
 		account = self.make_talabat_account()
 		base = "The linked ERPNext Sales Order is no longer an active submitted document."
 		instruction = platform_instruction(
 			frappe._dict(platform="Talabat", external_status="RECEIVED", outbound_cancelled_on=None)
 		)
 		order = self.make_order(
-			account, erpnext_sync_status="Modified After Sync", last_sync_error=f"{base} {instruction}"
+			account, erpnext_sync_status="Needs Action", last_sync_error=f"{base} {instruction}"
 		)
 
 		rows = {row["reference_name"]: row for row in self.items_for(account)}
 
-		self.assertEqual(rows[order.name]["problem_type"], MODIFIED_AFTER_SYNC)
+		self.assertEqual(rows[order.name]["problem_type"], NEEDS_ACTION)
 		self.assertEqual(rows[order.name]["next_action"], "Open Order")
 		self.assertEqual(rows[order.name]["explanation"], f"{base} {instruction}")
 		self.assertIn("Cancel the order on Talabat", rows[order.name]["explanation"])
@@ -315,7 +390,7 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		account = self.make_talabat_account()
 		message = ("The marketplace refunded this order, but it was already delivered. " * 7).strip()
 		self.assertGreater(len(message), 300)
-		order = self.make_order(account, erpnext_sync_status="Modified After Sync", last_sync_error=message)
+		order = self.make_order(account, erpnext_sync_status="Needs Action", last_sync_error=message)
 
 		rows = {row["reference_name"]: row for row in self.items_for(account)}
 
@@ -972,13 +1047,13 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		talabat = self.make_talabat_account()
 		noon = self.make_noon_account()
 		self.make_order(talabat, erpnext_sync_status="Sync Error")
-		self.make_order(noon, erpnext_sync_status="Modified After Sync")
+		self.make_order(noon, erpnext_sync_status="Needs Action")
 
 		self.assertEqual({r["platform"] for r in get_attention_items({"account": talabat.name})}, {"Talabat"})
 		noon_rows = [r for r in get_attention_items({"platform": "Noon"}) if r["account"] == noon.name]
-		self.assertEqual([r["problem_type"] for r in noon_rows], [MODIFIED_AFTER_SYNC])
+		self.assertEqual([r["problem_type"] for r in noon_rows], [NEEDS_ACTION])
 		self.assertEqual(
-			get_attention_items({"account": talabat.name, "problem_type": MODIFIED_AFTER_SYNC}), []
+			get_attention_items({"account": talabat.name, "problem_type": NEEDS_ACTION}), []
 		)
 
 	def test_counts_group_orders_and_non_order_problems_per_account(self):
