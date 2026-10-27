@@ -1865,3 +1865,11 @@ Expected Change Hash,بصمة التغيير المتوقع
 Expected Change Scope,نطاق التغيير المتوقع
 "This order was never synced to ERPNext before the sync status update, and it is old or not eligible for an automatic sync. Review it, then use Retry Sync if it is still needed.",لم تتم مزامنة هذا الطلب مع ERPNext قبل تحديث حالة المزامنة، وهو قديم أو غير مؤهل للمزامنة التلقائية. راجعه ثم استخدم إعادة محاولة المزامنة إذا كان لا يزال مطلوبا.
 Every unit of the Noon order was cancelled before an ERPNext Sales Order was created; no Sales Order is needed.,تم إلغاء جميع وحدات طلب Noon قبل إنشاء أمر بيع في ERPNext؛ لا حاجة إلى أمر بيع.
+Import Credentials File,استيراد ملف الاعتماد
+The file is not valid JSON.,الملف ليس JSON صالحا.
+The file must contain a JSON object.,يجب أن يحتوي الملف على كائن JSON.
+The credentials file is missing these keys or they are empty: {0},ملف الاعتماد ينقصه هذه المفاتيح أو أنها فارغة: {0}
+"Credentials imported. Review them, then press Save.",تم استيراد بيانات الاعتماد. راجعها ثم اضغط حفظ.
+The private key does not look like a PEM key (no {0} line). Check the file before saving.,المفتاح الخاص لا يبدو مفتاح PEM (لا يوجد سطر {0}). تحقق من الملف قبل الحفظ.
+This form already has a different Project Code or Key ID. Overwrite them with the values from the file?,يحتوي هذا النموذج بالفعل على رمز مشروع أو معرف مفتاح مختلف. هل تريد استبدالهما بقيم الملف؟
+The file could not be read.,تعذرت قراءة الملف.

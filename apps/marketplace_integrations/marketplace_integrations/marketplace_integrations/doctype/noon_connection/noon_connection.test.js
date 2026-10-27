@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-global.__ = (message) => message;
+global.__ = (message, args) => (args || []).reduce((text, value, index) => text.replace(`{${index}}`, value), message);
 let handlers;
 let handlers_destination;
 const alerts = [];
@@ -19,14 +19,16 @@ global.frappe = {
 	},
 };
 
-require("./noon_connection.js");
+const { import_credentials_text } = require("./noon_connection.js");
 
 test("Test Connection is offered only after the document is saved", () => {
 	const buttons = [];
 	handlers.refresh({ is_new: () => true, add_custom_button: (label) => buttons.push(label) });
-	assert.deepEqual(buttons, []);
+	assert.deepEqual(buttons, ["Import Credentials File"]);
+	buttons.length = 0;
 	handlers.refresh({ is_new: () => false, doc: {}, add_custom_button: (label) => buttons.push(label) });
 	assert.deepEqual(buttons, [
+		"Import Credentials File",
 		"Copy Webhook URL",
 		"Copy Webhook Key",
 		"Refresh Webhook URL",
@@ -242,7 +244,7 @@ function destination_buttons(doc) {
 		doc,
 		add_custom_button: (label) => buttons.push(label),
 	});
-	return buttons.filter((label) => !/^(Copy|Refresh|Test)/.test(label));
+	return buttons.filter((label) => !/^(Copy|Refresh|Test|Import)/.test(label));
 }
 
 test("Destination actions follow the cached webhook status", () => {
@@ -293,4 +295,88 @@ test("Destination row button asks for confirmation then toggles the listed desti
 	);
 	confirmed();
 	assert.deepEqual(args, { destination_code: "d1", active: 0 });
+});
+
+// Credential import. All values are fake.
+const FAKE_PEM = "-----BEGIN PRIVATE KEY-----\nFAKE\n-----END PRIVATE KEY-----";
+function fake_file(overrides) {
+	return JSON.stringify({
+		key_id: "test-key",
+		private_key: FAKE_PEM,
+		project_code: "p000000",
+		channel_identifier: "user@p000000.idp.noon.partners",
+		type: "service_account",
+		issued_at: "2026-01-01T00:00:00Z",
+		...overrides,
+	});
+}
+
+function import_setup(doc) {
+	const set = {};
+	const out = { set, msgs: [], confirms: [], alerts: [] };
+	global.frappe.utils = { escape_html: (v) => v };
+	global.frappe.msgprint = (m) => out.msgs.push(m);
+	global.frappe.confirm = (message, yes) => out.confirms.push({ message, yes });
+	global.frappe.show_alert = (a) => out.alerts.push(a);
+	out.frm = { doc, set_value: (k, v) => (set[k] = v) };
+	return out;
+}
+
+test("credentials import fills the three fields and prefills an empty Connection Name", () => {
+	const t = import_setup({ environment: "Production" });
+	import_credentials_text(t.frm, fake_file());
+	assert.deepEqual(t.set, {
+		project_code: "p000000",
+		key_id: "test-key",
+		private_key: FAKE_PEM,
+		connection_name: "user@p000000.idp.noon.partners",
+	});
+	assert.equal(t.alerts.at(-1).indicator, "green");
+	assert.deepEqual(t.msgs, []);
+});
+
+test("credentials import keeps a non-empty Connection Name and ignores environment, type and issued_at", () => {
+	const t = import_setup({ connection_name: "My Noon", environment: "Static Sandbox" });
+	import_credentials_text(t.frm, fake_file());
+	assert.equal(t.set.connection_name, undefined);
+	assert.deepEqual(Object.keys(t.set).sort(), ["key_id", "private_key", "project_code"]);
+});
+
+test("credentials import errors change nothing", () => {
+	for (const text of ["not json", "[1]", "null", "42", fake_file({ key_id: "" }), fake_file({ private_key: undefined, project_code: 5 })]) {
+		const t = import_setup({});
+		import_credentials_text(t.frm, text);
+		assert.deepEqual(t.set, {});
+		assert.equal(t.msgs.length, 1);
+		assert.equal(t.msgs[0].indicator, "red");
+		assert.deepEqual(t.alerts, []);
+	}
+	const t = import_setup({});
+	import_credentials_text(t.frm, fake_file({ key_id: "", private_key: undefined }));
+	assert.match(t.msgs[0].message, /key_id, private_key/);
+	assert.doesNotMatch(t.msgs[0].message, /project_code/);
+});
+
+test("a non-PEM private key warns but still imports", () => {
+	const t = import_setup({});
+	import_credentials_text(t.frm, fake_file({ private_key: "FAKE" }));
+	assert.equal(t.set.private_key, "FAKE");
+	assert.equal(t.alerts[0].indicator, "orange");
+	assert.equal(t.alerts.at(-1).indicator, "green");
+});
+
+test("different existing Project Code or Key ID asks for confirmation first", () => {
+	const t = import_setup({ project_code: "p111111", key_id: "test-key" });
+	import_credentials_text(t.frm, fake_file());
+	assert.deepEqual(t.set, {});
+	assert.equal(t.confirms.length, 1);
+	t.confirms[0].yes();
+	assert.equal(t.set.project_code, "p000000");
+});
+
+test("identical existing values do not ask for confirmation", () => {
+	const t = import_setup({ project_code: "p000000", key_id: "test-key" });
+	import_credentials_text(t.frm, fake_file());
+	assert.equal(t.confirms.length, 0);
+	assert.equal(t.set.key_id, "test-key");
 });

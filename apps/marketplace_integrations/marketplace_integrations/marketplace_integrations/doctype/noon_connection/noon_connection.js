@@ -1,4 +1,86 @@
 const MAX_NOON_DESTINATIONS = 5;
+const REQUIRED_CREDENTIAL_KEYS = ["key_id", "private_key", "project_code"];
+
+// The file is read in the browser only. It is never uploaded, stored or logged.
+function parse_credentials_text(text) {
+	let data;
+	try {
+		data = JSON.parse(text);
+	} catch (error) {
+		return { error: __("The file is not valid JSON.") };
+	}
+	if (!data || typeof data !== "object" || Array.isArray(data)) {
+		return { error: __("The file must contain a JSON object.") };
+	}
+	const missing = REQUIRED_CREDENTIAL_KEYS.filter(
+		(key) => typeof data[key] !== "string" || !data[key].trim()
+	);
+	if (missing.length) {
+		return {
+			error: __("The credentials file is missing these keys or they are empty: {0}", [missing.join(", ")]),
+		};
+	}
+	return { credentials: data };
+}
+
+function apply_credentials(frm, credentials) {
+	frm.set_value("project_code", credentials.project_code);
+	frm.set_value("key_id", credentials.key_id);
+	frm.set_value("private_key", credentials.private_key);
+	const channel_identifier = credentials.channel_identifier;
+	if (!frm.doc.connection_name && typeof channel_identifier === "string" && channel_identifier.trim()) {
+		frm.set_value("connection_name", channel_identifier.trim());
+	}
+	frappe.show_alert({
+		message: __("Credentials imported. Review them, then press Save."),
+		indicator: "green",
+	});
+}
+
+function import_credentials_text(frm, text) {
+	const parsed = parse_credentials_text(text);
+	if (parsed.error) {
+		frappe.msgprint({ message: frappe.utils.escape_html(parsed.error), indicator: "red" });
+		return;
+	}
+	const credentials = parsed.credentials;
+	if (!credentials.private_key.includes("-----BEGIN")) {
+		frappe.show_alert({
+			message: __("The private key does not look like a PEM key (no {0} line). Check the file before saving.", [
+				"-----BEGIN",
+			]),
+			indicator: "orange",
+		});
+	}
+	const doc = frm.doc || {};
+	const differs =
+		(doc.project_code && doc.project_code !== credentials.project_code) ||
+		(doc.key_id && doc.key_id !== credentials.key_id);
+	if (differs) {
+		frappe.confirm(
+			__("This form already has a different Project Code or Key ID. Overwrite them with the values from the file?"),
+			() => apply_credentials(frm, credentials)
+		);
+		return;
+	}
+	apply_credentials(frm, credentials);
+}
+
+function pick_credentials_file(frm) {
+	const input = document.createElement("input");
+	input.type = "file";
+	input.accept = ".json,application/json";
+	input.onchange = () => {
+		const file = input.files && input.files[0];
+		if (!file) return;
+		const reader = new FileReader();
+		reader.onload = () => import_credentials_text(frm, String(reader.result || ""));
+		reader.onerror = () =>
+			frappe.msgprint({ message: __("The file could not be read."), indicator: "red" });
+		reader.readAsText(file);
+	};
+	input.click();
+}
 
 function show_webhook_result(frm, result) {
 	result = result || {};
@@ -92,6 +174,7 @@ function add_webhook_destination_buttons(frm) {
 
 frappe.ui.form.on("Noon Connection", {
 	refresh(frm) {
+		frm.add_custom_button(__("Import Credentials File"), () => pick_credentials_file(frm));
 		if (frm.is_new()) return;
 
 		frm.add_custom_button(__("Copy Webhook URL"), () => {
@@ -161,3 +244,7 @@ frappe.ui.form.on("Noon Destination", {
 		);
 	},
 });
+
+if (typeof module !== "undefined" && module.exports) {
+	module.exports = { parse_credentials_text, apply_credentials, import_credentials_text };
+}
