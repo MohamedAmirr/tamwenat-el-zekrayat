@@ -62,6 +62,13 @@ class MarketplaceOrder(Document):
 		):
 			self.outbound_edit_fingerprint = before.outbound_edit_fingerprint
 			self.outbound_edit_state = before.outbound_edit_state
+		# Echo-guard marker (services/echo_guard.py): no document save changes it, in either
+		# direction.  A stale copy must neither blank a marker set after it was loaded nor bring
+		# back one that was cleared; only echo_guard.record_expected_change() and
+		# clear_expected_change() write it, straight to the database.
+		if before:
+			self.expected_change_hash = before.get("expected_change_hash")
+			self.expected_change_scope = before.get("expected_change_scope")
 		if not self.flags.skip_sync_status_update:
 			from marketplace_integrations.services.sales_order_sync import (
 				set_sync_status_from_current_snapshot,

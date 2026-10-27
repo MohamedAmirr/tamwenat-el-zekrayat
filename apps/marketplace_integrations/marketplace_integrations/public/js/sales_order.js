@@ -166,6 +166,7 @@
 		const payment = marketplace_section("Payment", payment_rows);
 		const sync = marketplace_section("ERPNext Synchronization", [
 			marketplace_row("ERPNext Sync Status", summary.erpnext_sync_status),
+			marketplace_row("Sync Action State", summary.sync_action_state ? __(summary.sync_action_state) : ""),
 			marketplace_row("Last ERPNext Sync On", marketplace_datetime(summary.last_erpnext_sync_on)),
 			marketplace_row("Last Sync Error", summary.last_sync_error),
 		]);
@@ -200,8 +201,7 @@
 					field.$wrapper.append(`<p><button class="btn btn-default" data-marketplace-action="refresh">${frappe.utils.escape_html(__(refresh[1]))}</button></p>`);
 				}
 				if (should_offer_erpnext_sync(summary)) {
-					const label = summary.erpnext_sales_order ? "Update ERPNext Order" : "Send to ERPNext";
-					field.$wrapper.append(`<p><button class="btn btn-primary" data-marketplace-action="sync">${frappe.utils.escape_html(__(label))}</button></p>`);
+					field.$wrapper.append(`<p><button class="btn btn-primary" data-marketplace-action="sync">${frappe.utils.escape_html(__("Retry Sync"))}</button></p>`);
 				}
 				field.$wrapper.off("click.mi_marketplace").on("click.mi_marketplace", "[data-marketplace-action]", (event) => {
 					if (event.currentTarget.getAttribute("data-marketplace-action") === "refresh") {

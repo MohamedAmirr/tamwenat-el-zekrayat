@@ -17,6 +17,7 @@ from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.services.marketplace_attention import BOSTA_PLATFORM, get_attention_items
 from marketplace_integrations.services.marketplace_channels import get_channel_status
+from marketplace_integrations.services.sync_status import NEEDS_ACTION
 from marketplace_integrations.tests.utils import make_role_user
 
 # Same structural stand-in connection the other tests use: permissions and these services only
@@ -89,6 +90,29 @@ class IntegrationTestPlatformAccess(IntegrationTestCase):
 			references = {item["reference_name"] for item in get_attention_items()}
 		self.assertIn(self.orders["Talabat"], references)
 		self.assertNotIn(self.orders["Shopify"], references)
+
+	def test_needs_action_rows_are_scoped_to_the_platform_user_but_not_to_administrator(self):
+		for name in self.orders.values():
+			frappe.db.set_value(
+				"Marketplace Order", name, "erpnext_sync_status", NEEDS_ACTION, update_modified=False
+			)
+		user = self.make_user("Needs Action Talabat", "Talabat User")
+
+		def needs_action_references():
+			return {
+				item["reference_name"]
+				for item in get_attention_items()
+				if item["problem_type"] == NEEDS_ACTION
+			}
+
+		with as_user(user):
+			platform_user_rows = needs_action_references()
+		with as_user("Administrator"):
+			administrator_rows = needs_action_references()
+
+		self.assertIn(self.orders["Talabat"], platform_user_rows)
+		self.assertNotIn(self.orders["Shopify"], platform_user_rows)
+		self.assertTrue({self.orders["Talabat"], self.orders["Shopify"]} <= administrator_rows)
 
 	def test_talabat_user_sees_only_talabat_channel_rows(self):
 		user = self.make_user("Channel Talabat", "Talabat User")

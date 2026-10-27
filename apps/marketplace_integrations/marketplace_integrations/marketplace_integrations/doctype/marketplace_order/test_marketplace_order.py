@@ -158,7 +158,7 @@ class IntegrationTestMarketplaceOrder(IntegrationTestCase):
         self.assertEqual(frappe.parse_json(order.additional_fees)["holiday_fee"], 2.0)
         self.assertEqual(order.promotion_status, "AVAILABLE")
         self.assertIsNone(order.erpnext_sales_order)
-        self.assertEqual(order.erpnext_sync_status, "Not Synced")
+        self.assertEqual(order.erpnext_sync_status, "Syncing")
 
         unit_line = next(row for row in order.items if row.external_item_id == "line-unit-001")
         kg_line = next(row for row in order.items if row.external_item_id == "line-kg-001")

@@ -15,7 +15,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_to_date, nowdate
 
-from marketplace_integrations.integrations.noon import fulfillment
+from marketplace_integrations.integrations.noon import expected_change, fulfillment
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 
 # A minimal but structurally valid single-page PDF (proper xref table/startxref
@@ -873,6 +873,44 @@ class IntegrationTestNoonMarkOutOfStock(IntegrationTestNoonFulfillmentBase):
 			fields=["status"],
 		)
 		self.assertEqual([log.status for log in logs], ["Success"])
+
+	def test_worker_records_the_expected_change_marker_and_its_own_refresh_leaves_it(self):
+		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
+		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
+			enqueue.return_value = MagicMock()
+			fulfillment.mark_out_of_stock(order.name, ["1"])
+		with (
+			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
+			patch(
+				"marketplace_integrations.integrations.noon.fulfillment.get_fbpi_order",
+				return_value={"fbpi_order_nr": self.fbpi_order_nr, "items": [_confirmed_acknowledged(1)]},
+			),
+			patch(
+				"marketplace_integrations.integrations.noon.fulfillment.import_order",
+				return_value=(order, []),
+			) as import_order,
+		):
+			client_class.return_value.request.return_value = MagicMock(status_code=200)
+			fulfillment.run_mark_out_of_stock(order.name, ["1"])
+
+		self.assertIs(import_order.call_args.kwargs["echo_guard"], False)
+		marker = frappe.db.get_value(
+			"Marketplace Order", order.name, ["expected_change_hash", "expected_change_scope"], as_dict=True
+		)
+		self.assertEqual(marker.expected_change_hash, expected_change.sent_hash(["1"]))
+		self.assertEqual(frappe.parse_json(marker.expected_change_scope), ["1"])
+
+	def test_worker_sets_no_marker_when_noon_rejects_the_call(self):
+		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
+		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
+			enqueue.return_value = MagicMock()
+			fulfillment.mark_out_of_stock(order.name, ["1"])
+		with patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class:
+			client_class.return_value.request.return_value = MagicMock(status_code=500)
+			client_class.return_value.error_message.return_value = "Noon unavailable"
+			fulfillment.run_mark_out_of_stock(order.name, ["1"])
+
+		self.assertFalse(frappe.db.get_value("Marketplace Order", order.name, "expected_change_hash"))
 
 	def test_worker_releases_reservation_after_noon_error(self):
 		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])

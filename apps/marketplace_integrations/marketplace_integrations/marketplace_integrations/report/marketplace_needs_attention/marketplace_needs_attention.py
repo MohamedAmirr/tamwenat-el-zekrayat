@@ -69,6 +69,15 @@ def get_columns():
 			"width": 150,
 		},
 		{"label": _("What Happened"), "fieldname": "explanation", "fieldtype": "Data", "width": 380},
+		{"label": _("Action State"), "fieldname": "action_state", "fieldtype": "Data", "width": 130},
+		{"label": _("Linked Document Type"), "fieldname": "linked_doctype", "fieldtype": "Data", "width": 130},
+		{
+			"label": _("Linked Document"),
+			"fieldname": "linked_document",
+			"fieldtype": "Dynamic Link",
+			"options": "linked_doctype",
+			"width": 150,
+		},
 		{"label": _("Detected"), "fieldname": "detected_at", "fieldtype": "Datetime", "width": 160},
 		{"label": _("Next Action"), "fieldname": "next_action", "fieldtype": "Data", "width": 120},
 	]

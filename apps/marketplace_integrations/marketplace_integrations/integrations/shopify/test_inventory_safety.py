@@ -636,7 +636,7 @@ class IntegrationTestShopifyOutOfOrderWebhooks(ShopifyStockOrderFixture, Integra
 		order.reload()
 		self.assertTrue(results[0]["ok"])
 		self.assertTrue(results[0]["skipped"])
-		self.assertEqual(order.erpnext_sync_status, "Not Synced")
+		self.assertEqual(order.erpnext_sync_status, "Cancelled")
 		self.assertEqual(self.sales_orders(order_gid), [])
 		self.assertEqual(self.snapshot()["sales_order"], sales_orders_before)
 
@@ -651,9 +651,10 @@ class IntegrationTestShopifyOutOfOrderWebhooks(ShopifyStockOrderFixture, Integra
 
 		order = self.marketplace_order(order_gid)
 		self.assertEqual(self.sales_orders(order_gid), [])
-		# Current behavior: every processed webhook adds one Success "skipped" row.
+		# Every processed webhook adds one log row; the default payload is a PAID order, so the
+		# paid cancellation is a Needs Action (Invalid) row, never a Sales Order.
 		statuses = frappe.get_all("Marketplace Sync Log", {"marketplace_order": order.name}, pluck="status")
-		self.assertEqual(statuses, ["Success"] * 3)
+		self.assertEqual(statuses, ["Invalid"] * 3)
 
 		self.assertNotIn(order.name, _stuck_reconciliation_candidates(500))
 		sweep_stuck_sales_order_reconciliations()

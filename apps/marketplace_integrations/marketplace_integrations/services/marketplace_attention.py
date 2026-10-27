@@ -17,7 +17,8 @@ bulk queries - never one query per order.
 
 Problem sources (``problem_type``):
 
-- Sync Error / Modified After Sync: Marketplace Order.erpnext_sync_status.
+- Sync Error / Needs Action: Marketplace Order.erpnext_sync_status (#364). A Needs Action row also
+  carries the sync action state and a link to the blocking or prepared document.
 - Unmapped Items: computed live from the order's items against enabled
   Marketplace Product Mappings, with the same eligibility and lookup key as
   services/sales_order_sync.py (Talabat/Noon ``external_sku``, Shopify
@@ -73,15 +74,13 @@ from marketplace_integrations.integrations.shopify.webhooks import MAX_WEBHOOK_D
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_product_mapping.marketplace_product_mapping import (
 	compute_mapping_identity_key,
 )
+from marketplace_integrations.services.sync_status import CANCELLED, NEEDS_ACTION, SYNC_ERROR, SYNCED
 from marketplace_integrations.services.sales_order_sync import (
 	FINAL_ITEM_STATUSES,
 	NOON_ELIGIBLE_EXTERNAL_STATUS,
 	NOON_INELIGIBLE_INTEGRATION_STATUS,
-	_modified_after_sync_message,
 )
 
-SYNC_ERROR = "Sync Error"
-MODIFIED_AFTER_SYNC = "Modified After Sync"
 UNMAPPED_ITEMS = "Unmapped Items"
 ORDER_IMPORT_ERROR = "Order Import Error"
 FULFILLMENT_ERROR = "Fulfillment Error"
@@ -106,7 +105,7 @@ BOSTA_MAX_AGE_DAYS = 60
 
 PROBLEM_TYPES = [
 	SYNC_ERROR,
-	MODIFIED_AFTER_SYNC,
+	NEEDS_ACTION,
 	UNMAPPED_ITEMS,
 	ORDER_IMPORT_ERROR,
 	FULFILLMENT_ERROR,
@@ -137,7 +136,7 @@ NEXT_VIEW_ERROR = "View Error"
 IMPORT_ERROR_ORDER_ID_KEYS = ("order_gid", "fbpi_order_nr", "order_id")
 
 EXPLANATION_MAX_LENGTH = 200
-# A Modified After Sync explanation is the stored sync message, which is capped at this length.
+# A Needs Action explanation is the stored sync message, which is capped at this length.
 SYNC_MESSAGE_MAX_LENGTH = 500
 CHUNK_SIZE = 500
 MAX_LISTED_SKUS = 5
@@ -173,7 +172,7 @@ def get_attention_items(filters=None):
 		return []
 
 	collectors = [
-		({SYNC_ERROR, MODIFIED_AFTER_SYNC}, _collect_order_status_items),
+		({SYNC_ERROR, NEEDS_ACTION}, _collect_order_status_items),
 		({UNMAPPED_ITEMS}, _collect_unmapped_items),
 		({ORDER_IMPORT_ERROR}, _collect_import_errors),
 		({FULFILLMENT_ERROR}, _collect_fulfillment_errors),
@@ -261,6 +260,9 @@ def _item(
 		"next_action": next_action,
 		"next_action_reference": extra.get("next_action_reference"),
 		"next_action_mapping": extra.get("next_action_mapping"),
+		"action_state": extra.get("action_state"),
+		"linked_doctype": extra.get("linked_doctype"),
+		"linked_document": extra.get("linked_document"),
 	}
 
 
@@ -312,7 +314,7 @@ def _get_orders_by_name(names, fields):
 def _collect_order_status_items(accounts):
 	orders = _get_orders(
 		accounts,
-		{"erpnext_sync_status": ["in", [SYNC_ERROR, MODIFIED_AFTER_SYNC]]},
+		{"erpnext_sync_status": ["in", [SYNC_ERROR, NEEDS_ACTION]]},
 		[
 			"name",
 			"marketplace_account",
@@ -320,11 +322,24 @@ def _collect_order_status_items(accounts):
 			"last_sync_error",
 			"last_erpnext_sync_on",
 			"modified",
+			"sync_action_state",
+			"sync_blocking_doctype",
+			"sync_blocking_document",
+			"sync_prepared_doctype",
+			"sync_prepared_document",
 		],
 	)
 	items = []
 	for order in orders:
 		account = accounts[order.marketplace_account]
+		# The prepared draft (when there is one) is the document to act on; else the blocker.
+		linked_doctype = order.sync_prepared_doctype or order.sync_blocking_doctype
+		linked_document = order.sync_prepared_document or order.sync_blocking_document
+		extra = {
+			"action_state": order.sync_action_state,
+			"linked_doctype": linked_doctype if linked_document else None,
+			"linked_document": linked_document,
+		}
 		if order.erpnext_sync_status == SYNC_ERROR:
 			items.append(
 				_item(
@@ -335,19 +350,21 @@ def _collect_order_status_items(accounts):
 					order.last_sync_error or _("ERPNext Sales Order sync failed."),
 					order.last_erpnext_sync_on or order.modified,
 					NEXT_RETRY,
+					**extra,
 				)
 			)
 		else:
 			items.append(
 				_item(
-					MODIFIED_AFTER_SYNC,
+					NEEDS_ACTION,
 					account,
 					"Marketplace Order",
 					order.name,
-					order.last_sync_error or _modified_after_sync_message(),
+					order.last_sync_error or _("The marketplace order needs your action."),
 					order.modified,
 					NEXT_OPEN_ORDER,
 					explanation_max_length=SYNC_MESSAGE_MAX_LENGTH,
+					**extra,
 				)
 			)
 	return items
@@ -382,7 +399,7 @@ def _collect_unmapped_items(accounts):
 	orders = _get_orders(
 		enabled_accounts,
 		{
-			"erpnext_sync_status": ["not in", ["Synced", "Cancelled"]],
+			"erpnext_sync_status": ["not in", [SYNCED, CANCELLED]],
 			"cancelled_at": ["is", "not set"],
 		},
 		["name", "marketplace_account", "received_on", "creation"],

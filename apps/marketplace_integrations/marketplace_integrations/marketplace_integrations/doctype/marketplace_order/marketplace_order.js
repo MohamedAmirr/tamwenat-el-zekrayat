@@ -889,10 +889,13 @@ function load_erpnext_sync_status(frm) {
 			}
 			frm.doc.erpnext_sync_status = message.status;
 			frm.doc.last_sync_error = message.last_sync_error || null;
+			frm.doc.sync_action_state = message.sync_action_state || null;
 			// `modified` is deliberately never patched here: on a dirty form that was also saved
 			// server-side, Frappe's own "modified since you opened it" check must still fire.
-			frm.refresh_fields(["erpnext_sync_status", "last_sync_error"]);
+			frm.refresh_fields(["erpnext_sync_status", "last_sync_error", "sync_action_state"]);
+			add_sync_action_indicator(frm);
 			add_erpnext_sync_action(frm);
+			add_confirm_goods_received_action(frm);
 		});
 }
 
@@ -902,10 +905,11 @@ function should_offer_erpnext_sync(order) {
 	return !(order.erpnext_sales_order && order.erpnext_sync_status === "Synced");
 }
 
+// #364: the manual sync is a fallback, not a required step: the app re-checks an order by itself
+// after a relevant ERPNext change, so the button is "Retry Sync" for every state it is offered in.
 function add_erpnext_sync_action(frm) {
 	if (!should_offer_erpnext_sync(frm.doc)) return;
-	const label = frm.doc.erpnext_sales_order ? __("Update ERPNext Order") : __("Send to ERPNext");
-	frm.add_custom_button(label, () => {
+	frm.add_custom_button(__("Retry Sync"), () => {
 		frappe
 			.call({
 				method: "marketplace_integrations.api.marketplace_orders.sync_to_erpnext",
@@ -958,12 +962,73 @@ const TALABAT_STATUS_COLORS = {
 };
 
 const ERPNEXT_SYNC_STATUS_COLORS = {
-	"Not Synced": "gray",
+	Syncing: "blue",
 	Synced: "green",
-	"Modified After Sync": "orange",
+	"Needs Action": "orange",
 	"Sync Error": "red",
 	Cancelled: "gray",
 };
+
+const SYNC_ACTION_STATE_COLORS = {
+	"Waiting for User": "orange",
+	"Awaiting Receipt": "orange",
+	"Draft Prepared": "blue",
+	"Recheck Queued": "blue",
+	Resolved: "green",
+};
+
+// #364: the Needs Action sub-state (what the order is waiting for) next to the status indicator.
+function add_sync_action_indicator(frm) {
+	const state = frm.doc.sync_action_state;
+	if (!state || !frm.dashboard || !frm.dashboard.add_indicator) return;
+	frm.dashboard.add_indicator(
+		__("Sync action: {0}", [frappe.utils.escape_html(__(state))]),
+		SYNC_ACTION_STATE_COLORS[state] || "gray"
+	);
+}
+
+// Server-checked as well (api/marketplace_orders.py::confirm_goods_received); this only hides the button.
+const GOODS_RECEIPT_ROLES = ["Stock Manager", "System Manager"];
+
+function should_offer_confirm_goods_received(order) {
+	return (
+		order.erpnext_sync_status === "Needs Action" &&
+		order.sync_action_state === "Awaiting Receipt" &&
+		frappe.user.has_role(GOODS_RECEIPT_ROLES)
+	);
+}
+
+function add_confirm_goods_received_action(frm) {
+	if (!should_offer_confirm_goods_received(frm.doc)) return;
+	frm.add_custom_button(__("Confirm Goods Received"), () => {
+		frappe.confirm(
+			__(
+				"Confirm that the returned goods were physically received. A draft return will be prepared for your review; nothing is submitted."
+			),
+			() => {
+				frappe
+					.call({
+						method: "marketplace_integrations.api.marketplace_orders.confirm_goods_received",
+						args: { marketplace_order: frm.doc.name },
+						freeze: true,
+						freeze_message: __("Preparing the draft return..."),
+					})
+					.then((response) => {
+						const message = (response && response.message) || {};
+						if (message.prepared_document) {
+							frappe.show_alert({
+								message: frappe.utils.escape_html(
+									__("Draft prepared: {0}", [message.prepared_document])
+								),
+								indicator: "green",
+							});
+						}
+						frm.reload_doc();
+					});
+			}
+		);
+	});
+}
 
 function get_status_indicator(status, color_by_status) {
 	return {
@@ -1218,6 +1283,10 @@ if (typeof module !== "undefined") {
 	module.exports = {
 		add_clear_edit_marker_button,
 		should_offer_erpnext_sync,
+		should_offer_confirm_goods_received,
+		add_confirm_goods_received_action,
+		add_sync_action_indicator,
+		SYNC_ACTION_STATE_COLORS,
 		add_order_actions,
 		build_cart_update_items,
 		cancel_order,

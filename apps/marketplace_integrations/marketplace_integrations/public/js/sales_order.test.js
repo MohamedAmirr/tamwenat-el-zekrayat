@@ -25,7 +25,7 @@ function load({
 	shipment = null,
 	shipment_fails = false,
 	defaults_fails = false,
-	marketplace_summary = { name: "MO-1", platform: "Shopify", reference: "#SHOP-1", erpnext_sync_status: "Not Synced", erpnext_sales_order: "" },
+	marketplace_summary = { name: "MO-1", platform: "Shopify", reference: "#SHOP-1", erpnext_sync_status: "Syncing", erpnext_sales_order: "" },
 } = {}) {
 	const calls = [];
 	const edit_calls = [];
@@ -186,7 +186,7 @@ test("linked Sales Orders load the marketplace summary and render escaped values
 	const { handlers, marketplace_calls } = load({
 		marketplace_summary: {
 			name: "MO-1", platform: "Shopify", reference: "<img src=x onerror=alert(1)>",
-			erpnext_sync_status: "Not Synced", erpnext_sales_order: "",
+			erpnext_sync_status: "Syncing", erpnext_sales_order: "",
 			payment_transactions: [{ kind: "SALE", status: "FAILURE", gateway: "<script>bad</script>", amount: "12" }],
 			amounts: { order_total: 12, currency: "EGP" },
 		},
@@ -199,7 +199,7 @@ test("linked Sales Orders load the marketplace summary and render escaped values
 	assert.match(frm.marketplace_tab.html, /&lt;img/);
 	assert.match(frm.marketplace_tab.html, /&lt;script&gt;bad/);
 	assert.doesNotMatch(frm.marketplace_tab.html, /<img|<script>/);
-	assert.match(frm.marketplace_tab.html, /Send to ERPNext/);
+	assert.match(frm.marketplace_tab.html, /Retry Sync/);
 });
 
 test("unlinked Sales Orders hide and clear the marketplace tab", async () => {
@@ -224,7 +224,7 @@ test("linked Sales Orders keep the tab visible without exposing an unreadable or
 
 test("marketplace sync action uses the existing endpoint and reloads the Sales Order", async () => {
 	const { handlers, calls } = load({
-		marketplace_summary: { name: "MO-1", platform: "Talabat", erpnext_sync_status: "Modified After Sync", erpnext_sales_order: "SAL-ORD-1" },
+		marketplace_summary: { name: "MO-1", platform: "Talabat", erpnext_sync_status: "Needs Action", erpnext_sales_order: "SAL-ORD-1" },
 	});
 	const frm = make_frm({ docstatus: 0 });
 	await handlers["Sales Order"].refresh(frm);

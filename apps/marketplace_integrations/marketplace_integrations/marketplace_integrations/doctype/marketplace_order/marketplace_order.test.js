@@ -9,7 +9,7 @@ global.__ = (message, args) => {
 global.frappe = {
 	// Resolves synchronously, but only for get_erpnext_sync_status - the call
 	// load_erpnext_sync_status() makes, whose own .then() is what adds the
-	// async "Send to ERPNext"/"Update ERPNext Order" button - so
+	// async "Retry Sync" button - so
 	// apply_platform_gating()'s full Talabat control set can be asserted by
 	// name in a synchronous test, not just "more than one button got added".
 	// get_item_presentation() (load_item_presentation()) is deliberately left
@@ -25,7 +25,7 @@ global.frappe = {
 				String(opts.method || "").includes("get_erpnext_sync_status") &&
 				typeof resolve === "function"
 			) {
-				resolve({ message: { status: "Not Synced" } });
+				resolve({ message: { status: "Syncing" } });
 			}
 			return { then: () => {} };
 		},
@@ -37,6 +37,7 @@ global.frappe = {
 const {
 	add_clear_edit_marker_button,
 	should_offer_erpnext_sync,
+	should_offer_confirm_goods_received,
 	add_order_actions,
 	build_cart_update_items,
 	cancel_order,
@@ -141,8 +142,8 @@ test("Talabat and ERPNext status indicators use the agreed standard colors", () 
 		label: "Synced",
 		color: "green",
 	});
-	assert.deepEqual(get_status_indicator("Modified After Sync", ERPNEXT_SYNC_STATUS_COLORS), {
-		label: "Modified After Sync",
+	assert.deepEqual(get_status_indicator("Needs Action", ERPNEXT_SYNC_STATUS_COLORS), {
+		label: "Needs Action",
 		color: "orange",
 	});
 	assert.deepEqual(get_status_indicator("Sync Error", ERPNEXT_SYNC_STATUS_COLORS), {
@@ -361,7 +362,7 @@ test("add_status_indicators escapes an untrusted external_status value before it
 	const frm = {
 		doc: {
 			external_status: "<img src=x onerror=alert(1)>",
-			erpnext_sync_status: "Not Synced",
+			erpnext_sync_status: "Syncing",
 		},
 		dashboard: { add_indicator: (label, color) => indicators.push({ label, color }) },
 	};
@@ -403,7 +404,7 @@ test("apply_platform_gating shows the full Talabat action set for a Talabat orde
 		platform: "Talabat",
 		external_status: "RECEIVED",
 		transport_type: "VENDOR_DELIVERY",
-		erpnext_sync_status: "Not Synced",
+		erpnext_sync_status: "Syncing",
 		items: [],
 	});
 
@@ -412,16 +413,16 @@ test("apply_platform_gating shows the full Talabat action set for a Talabat orde
 	// The exact expected Talabat control set for a RECEIVED,
 	// VENDOR_DELIVERY order - asserted by name, not just a count, so a
 	// regression that silently drops or renames one of these (e.g. the
-	// async "Send to ERPNext" button added from load_erpnext_sync_status()'s
+	// async "Retry Sync" button added from load_erpnext_sync_status()'s
 	// own .then()) is actually caught.
 	// load_erpnext_sync_status()'s frappe.call resolves synchronously in this
-	// test harness, so "Send to ERPNext" is added before the rest of
+	// test harness, so "Retry Sync" is added before the rest of
 	// apply_platform_gating()'s Talabat branch runs - a real form load
 	// resolves it asynchronously instead, so the real UI's button order can
 	// differ; this test cares about the exact SET of buttons, not their
 	// real-world order.
 	assert.deepEqual(frm_calls.custom_buttons, [
-		"Send to ERPNext",
+		"Retry Sync",
 		"Refresh from Talabat",
 		"Update Cart",
 		"Dispatch",
@@ -429,7 +430,7 @@ test("apply_platform_gating shows the full Talabat action set for a Talabat orde
 	]);
 	// The Talabat + ERPNext dashboard indicators from add_status_indicators().
 	assert.ok(frm_calls.indicators.some((indicator) => indicator.label === "Talabat: RECEIVED"));
-	assert.ok(frm_calls.indicators.some((indicator) => indicator.label === "ERPNext: Not Synced"));
+	assert.ok(frm_calls.indicators.some((indicator) => indicator.label === "ERPNext: Syncing"));
 	// Never the Financial/Fulfillment indicator pair shown to non-Talabat
 	// platforms.
 	assert.ok(!frm_calls.indicators.some((indicator) => indicator.label.startsWith("Financial:")));
@@ -475,7 +476,7 @@ test("apply_platform_gating shows only Refresh from Shopify and the indicator pa
 	]);
 });
 
-test("apply_platform_gating shows Send to ERPNext for an unsynced Shopify order", () => {
+test("apply_platform_gating shows Retry Sync for an unsynced Shopify order", () => {
 	frm_calls = { custom_buttons: [], indicators: [] };
 	const frm = make_frm({
 		platform: "Shopify",
@@ -485,7 +486,7 @@ test("apply_platform_gating shows Send to ERPNext for an unsynced Shopify order"
 
 	apply_platform_gating(frm);
 
-	assert.ok(frm_calls.custom_buttons.includes("Send to ERPNext"));
+	assert.ok(frm_calls.custom_buttons.includes("Retry Sync"));
 	assert.ok(frm_calls.custom_buttons.includes("Refresh from Shopify"));
 });
 
@@ -507,7 +508,7 @@ function run_status_load({ saved, dirty }) {
 	global.frappe.call = () => ({
 		then: (resolve) => {
 			resolve({
-				message: { status: "Modified After Sync", last_sync_error: "changed", saved },
+				message: { status: "Needs Action", last_sync_error: "changed", saved },
 			});
 			return { then: () => {} };
 		},
@@ -531,7 +532,7 @@ test("load_erpnext_sync_status applies status without reload or modified change 
 	const frm = run_status_load({ saved: true, dirty: true });
 	assert.equal(frm.reload_calls, 0);
 	assert.equal(frm.doc.modified, "2026-01-01 00:00:00");
-	assert.equal(frm.doc.erpnext_sync_status, "Modified After Sync");
+	assert.equal(frm.doc.erpnext_sync_status, "Needs Action");
 });
 
 test("load_erpnext_sync_status applies status without reload when the server did not save", () => {
@@ -539,7 +540,7 @@ test("load_erpnext_sync_status applies status without reload when the server did
 		const frm = run_status_load({ saved: false, dirty });
 		assert.equal(frm.reload_calls, 0);
 		assert.equal(frm.doc.modified, "2026-01-01 00:00:00");
-		assert.equal(frm.doc.erpnext_sync_status, "Modified After Sync");
+		assert.equal(frm.doc.erpnext_sync_status, "Needs Action");
 		assert.equal(frm.doc.last_sync_error, "changed");
 	}
 });
@@ -763,13 +764,23 @@ test("Clear edit marker is offered only to a System Manager while a marker is se
 test("the Marketplace Order form and the Sales Order tab offer the ERPNext sync under the same rule", () => {
 	const sales_order_rule = require("../../../public/js/sales_order.js").should_offer_erpnext_sync;
 	for (const order of [
-		{ erpnext_sales_order: "", erpnext_sync_status: "Not Synced" },
+		{ erpnext_sales_order: "", erpnext_sync_status: "Syncing" },
 		{ erpnext_sales_order: "SO-1", erpnext_sync_status: "Synced" },
-		{ erpnext_sales_order: "SO-1", erpnext_sync_status: "Modified After Sync" },
+		{ erpnext_sales_order: "SO-1", erpnext_sync_status: "Needs Action" },
 		{ erpnext_sales_order: "", erpnext_sync_status: "Synced" },
 		{ erpnext_sales_order: "SO-1", erpnext_sync_status: "Sync Error" },
 		{ erpnext_sales_order: "", erpnext_sync_status: "Cancelled" },
 	]) {
 		assert.equal(should_offer_erpnext_sync(order), sales_order_rule(order), JSON.stringify(order));
 	}
+});
+
+test("Confirm Goods Received is offered only while Awaiting Receipt, to a stock or system manager", () => {
+	const order = { erpnext_sync_status: "Needs Action", sync_action_state: "Awaiting Receipt" };
+	global.frappe.user = { has_role: (roles) => roles.includes("Stock Manager") };
+	assert.equal(should_offer_confirm_goods_received(order), true);
+	assert.equal(should_offer_confirm_goods_received({ ...order, sync_action_state: "Draft Prepared" }), false);
+	assert.equal(should_offer_confirm_goods_received({ ...order, erpnext_sync_status: "Synced" }), false);
+	global.frappe.user = { has_role: () => false };
+	assert.equal(should_offer_confirm_goods_received(order), false);
 });

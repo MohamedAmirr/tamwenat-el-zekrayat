@@ -238,6 +238,40 @@ class IntegrationTestMarketplaceOutbound(IntegrationTestCase):
 		self.assertEqual(frappe.parse_json(logs[0].request_data)["action"], "platform_cancel")
 		self.assertEqual(frappe.parse_json(logs[0].request_data)["cancellation_reason"], "TOO_BUSY")
 
+	def test_talabat_request_stores_the_expected_change_marker_with_the_cancel_marker(self):
+		from marketplace_integrations.services import echo_guard
+
+		order = self._linked_order("RECEIVED")
+		raw = self._raw_cancelled_order(order)
+		with (
+			patch("marketplace_integrations.api.talabat_orders.talabat_orders.update_order", return_value=raw),
+			patch.object(frappe.db, "commit"),
+		):
+			outbound.request_platform_cancel(self.fixture.name, "TOO_BUSY")
+
+		values = frappe.db.get_value(
+			"Marketplace Order", order.name, ["expected_change_hash", "outbound_cancelled_on"], as_dict=True
+		)
+		self.assertEqual(
+			values.expected_change_hash,
+			echo_guard.talabat_sent_hash({"status": "CANCELLED", "cancellation": {"reason": "TOO_BUSY"}}),
+		)
+		self.assertIsNotNone(values.outbound_cancelled_on)
+
+	def test_talabat_request_leaves_no_expected_change_marker_when_the_platform_rejects(self):
+		order = self._linked_order("RECEIVED")
+		with (
+			patch(
+				"marketplace_integrations.api.talabat_orders.talabat_orders.update_order",
+				side_effect=frappe.ValidationError("rejected"),
+			),
+			patch.object(frappe.db, "commit"),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				outbound.request_platform_cancel(self.fixture.name, "TOO_BUSY")
+
+		self.assertFalse(frappe.db.get_value("Marketplace Order", order.name, "expected_change_hash"))
+
 	def test_shopify_request_commits_the_marker_then_refreshes_by_order_gid(self):
 		order = self._linked_order("RECEIVED", platform="Shopify")
 		job = {"job_id": "gid://shopify/Job/1"}

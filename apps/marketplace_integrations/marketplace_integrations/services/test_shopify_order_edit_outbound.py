@@ -706,7 +706,7 @@ class IntegrationTestShopifyOrderEditOutbound(IntegrationTestCase):
 		result, order = self._rebaseline([self._line(LINE_ID, row, 2)])
 
 		self.assertEqual(result, {"ok": False})
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 		self.assertIsNone(order.outbound_edit_fingerprint)
 
 	def test_rebaseline_marks_modified_after_sync_when_the_rows_cannot_be_paired(self):
@@ -716,7 +716,7 @@ class IntegrationTestShopifyOrderEditOutbound(IntegrationTestCase):
 		result, order = self._rebaseline(refreshed)
 
 		self.assertEqual(result, {"ok": False})
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 		self.assertIn("do not match", order.last_sync_error)
 		self.assertIsNone(order.outbound_edit_fingerprint)
 
@@ -769,7 +769,7 @@ class IntegrationTestShopifyOrderEditOutbound(IntegrationTestCase):
 
 	def test_an_in_flight_marker_is_never_synced_and_says_the_outcome_is_unknown(self):
 		order = self._status_with("in_flight", 1)
-		self.assertEqual(order.erpnext_sync_status, "Modified After Sync")
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 		self.assertIn("outcome is unknown", order.last_sync_error)
 		self.assertEqual(order.outbound_edit_fingerprint, "f" * 64)
 

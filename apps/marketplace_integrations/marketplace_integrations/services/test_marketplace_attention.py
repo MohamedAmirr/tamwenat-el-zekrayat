@@ -34,7 +34,7 @@ from marketplace_integrations.services.marketplace_attention import (
 	PAYMENT_ERROR,
 	PAYMENT_EXCESS,
 	FULFILLMENT_ERROR,
-	MODIFIED_AFTER_SYNC,
+	NEEDS_ACTION,
 	NOON_FULFILLMENT,
 	NOON_RETURN_UNLINKED,
 	ORDER_IMPORT_ERROR,
@@ -306,7 +306,7 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		errored = self.make_order(account, erpnext_sync_status="Sync Error", last_sync_error="No warehouse")
 		modified = self.make_order(
 			account,
-			erpnext_sync_status="Modified After Sync",
+			erpnext_sync_status="Needs Action",
 			last_sync_error="Requested quantity is below the quantity already delivered in ERPNext.",
 		)
 		self.make_order(account, erpnext_sync_status="Synced")
@@ -319,7 +319,7 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		self.assertEqual(rows[errored.name]["explanation"], "No warehouse")
 		self.assertEqual(rows[errored.name]["reference_doctype"], "Marketplace Order")
 		self.assertEqual(rows[errored.name]["platform"], "Talabat")
-		self.assertEqual(rows[modified.name]["problem_type"], MODIFIED_AFTER_SYNC)
+		self.assertEqual(rows[modified.name]["problem_type"], NEEDS_ACTION)
 		self.assertEqual(rows[modified.name]["next_action"], "Open Order")
 		self.assertEqual(
 			rows[modified.name]["explanation"],
@@ -327,21 +327,61 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		)
 		self.assertTrue(rows[modified.name]["detected_at"])
 
+	def test_a_cancelled_order_is_never_listed_as_unmapped_or_needing_action(self):
+		account = self.make_talabat_account()
+		order = self.make_order(
+			account, items=[self.talabat_item("SKU-NOT-MAPPED")], erpnext_sync_status="Cancelled"
+		)
+		self.assertNotIn(order.name, {row["reference_name"] for row in self.items_for(account)})
+
+	def test_needs_action_row_carries_the_action_state_and_the_linked_document(self):
+		account = self.make_talabat_account()
+		waiting = self.make_order(
+			account,
+			erpnext_sync_status="Needs Action",
+			last_sync_error="Confirm the goods were received.",
+			sync_action_state="Awaiting Receipt",
+		)
+		prepared = self.make_order(
+			account,
+			erpnext_sync_status="Needs Action",
+			sync_action_state="Draft Prepared",
+		)
+		# Set directly: the named documents need not exist for the report to link them.
+		frappe.db.set_value(
+			"Marketplace Order",
+			prepared.name,
+			{
+				"sync_blocking_doctype": "Payment Entry",
+				"sync_blocking_document": "PE-BLOCKER",
+				"sync_prepared_doctype": "Delivery Note",
+				"sync_prepared_document": "MAT-DN-DRAFT",
+			},
+		)
+		rows = {row["reference_name"]: row for row in self.items_for(account, NEEDS_ACTION)}
+
+		self.assertEqual(rows[waiting.name]["action_state"], "Awaiting Receipt")
+		self.assertIsNone(rows[waiting.name]["linked_document"])
+		self.assertEqual(rows[prepared.name]["action_state"], "Draft Prepared")
+		# The prepared draft wins over the blocker.
+		self.assertEqual(rows[prepared.name]["linked_doctype"], "Delivery Note")
+		self.assertEqual(rows[prepared.name]["linked_document"], "MAT-DN-DRAFT")
+
 	def test_cancelled_sales_order_with_an_active_platform_order_shows_the_platform_instruction(self):
 		"""#181: no new problem type; the planner message (with the platform instruction) is the
-		explanation of a Modified After Sync row, in full and not truncated."""
+		explanation of a Needs Action row, in full and not truncated."""
 		account = self.make_talabat_account()
 		base = "The linked ERPNext Sales Order is no longer an active submitted document."
 		instruction = platform_instruction(
 			frappe._dict(platform="Talabat", external_status="RECEIVED", outbound_cancelled_on=None)
 		)
 		order = self.make_order(
-			account, erpnext_sync_status="Modified After Sync", last_sync_error=f"{base} {instruction}"
+			account, erpnext_sync_status="Needs Action", last_sync_error=f"{base} {instruction}"
 		)
 
 		rows = {row["reference_name"]: row for row in self.items_for(account)}
 
-		self.assertEqual(rows[order.name]["problem_type"], MODIFIED_AFTER_SYNC)
+		self.assertEqual(rows[order.name]["problem_type"], NEEDS_ACTION)
 		self.assertEqual(rows[order.name]["next_action"], "Open Order")
 		self.assertEqual(rows[order.name]["explanation"], f"{base} {instruction}")
 		self.assertIn("Cancel the order on Talabat", rows[order.name]["explanation"])
@@ -350,7 +390,7 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		account = self.make_talabat_account()
 		message = ("The marketplace refunded this order, but it was already delivered. " * 7).strip()
 		self.assertGreater(len(message), 300)
-		order = self.make_order(account, erpnext_sync_status="Modified After Sync", last_sync_error=message)
+		order = self.make_order(account, erpnext_sync_status="Needs Action", last_sync_error=message)
 
 		rows = {row["reference_name"]: row for row in self.items_for(account)}
 
@@ -1007,13 +1047,13 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		talabat = self.make_talabat_account()
 		noon = self.make_noon_account()
 		self.make_order(talabat, erpnext_sync_status="Sync Error")
-		self.make_order(noon, erpnext_sync_status="Modified After Sync")
+		self.make_order(noon, erpnext_sync_status="Needs Action")
 
 		self.assertEqual({r["platform"] for r in get_attention_items({"account": talabat.name})}, {"Talabat"})
 		noon_rows = [r for r in get_attention_items({"platform": "Noon"}) if r["account"] == noon.name]
-		self.assertEqual([r["problem_type"] for r in noon_rows], [MODIFIED_AFTER_SYNC])
+		self.assertEqual([r["problem_type"] for r in noon_rows], [NEEDS_ACTION])
 		self.assertEqual(
-			get_attention_items({"account": talabat.name, "problem_type": MODIFIED_AFTER_SYNC}), []
+			get_attention_items({"account": talabat.name, "problem_type": NEEDS_ACTION}), []
 		)
 
 	def test_counts_group_orders_and_non_order_problems_per_account(self):
