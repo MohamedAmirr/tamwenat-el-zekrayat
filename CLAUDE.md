@@ -44,7 +44,7 @@ The legacy `talabat_integration` app has been fully migrated and removed (tracke
 
 ## Which agent to use
 
-Typical flow per sub-issue: `feature-planner` (plan it) → `frappe-dev` (build it) → `frappe-test` (test + lint it) → `frappe-review` (review it) → `git-ops` (commit/PR it).
+Typical flow per sub-issue: `feature-planner` (plan it) → `frappe-dev` (build it) → `frappe-review` (review it) → `frappe-test` (test + lint it) → `git-ops` (commit/PR it). Review comes before testing so findings are fixed once and tests run only on the reviewed code.
 
 - Planning a new feature before building it → `feature-planner` agent (opus — this is a judgment call worth spending on). Breaks it into an Epic + a few dependency-ordered sub-issues per `docs/issue-conventions.md`, then hands off to `git-ops` to actually create them — no need to re-explain the convention each time.
 - Container/bench operations (start/stop, logs, migrate, backup, bench console, site management) → `frappe-ops` agent. Keeps verbose docker/bench output out of the main conversation.
