@@ -63,6 +63,7 @@ import json
 
 import frappe
 from frappe import _
+from frappe.query_builder.functions import Lower
 from frappe.utils import cstr, flt, get_datetime, now_datetime
 
 from marketplace_integrations.integrations.noon import handover_state
@@ -420,16 +421,95 @@ def _log_fulfillment(order, action, status, request_data=None, response_data=Non
 # ---------------------------------------------------------------------------
 
 
-def create_shipment(marketplace_order_name, mp_item_nrs, awb_source="Noon"):
+AWB_NR_MAX_LENGTH = 140  # Data column length of both AWB Nr fields
+
+
+def _awb_already_used_message(awb_nr):
+	# Deliberately does not name the other order.
+	return _("AWB {0} is already in use.").format(frappe.bold(frappe.utils.escape_html(awb_nr)))
+
+
+def _pool_awb_exists_ignoring_case(marketplace_account, awb_nr):
+	noon_awb = frappe.qb.DocType("Noon AWB")
+	return bool(
+		frappe.qb.from_(noon_awb)
+		.select(noon_awb.name)
+		.where(noon_awb.marketplace_account == marketplace_account)
+		.where(Lower(noon_awb.awb_nr) == awb_nr.lower())
+		.limit(1)
+		.run()
+	)
+
+
+def _record_typed_awb(order, account, awb_nr, integration_shipment_nr):
+	"""Reserve a sticker AWB typed or scanned by the user (the order is locked).
+
+	Rejected, ignoring letter case, when the AWB is already on any shipment AWB row of an
+	order on the same account (any shipment status) or on a ``Noon AWB`` pool row of the
+	account (Available or Used). Otherwise it is inserted as a ``Used`` ``Noon AWB`` row,
+	so the pool's unique key rejects an exact-case simultaneous request on another order
+	at DB level. Residual gap: two simultaneous requests differing only in letter case are
+	not blocked at DB level (the identity key stays case-sensitive so existing pool rows
+	keep matching their own key)."""
+	from marketplace_integrations.marketplace_integrations.doctype.noon_awb.noon_awb import (
+		compute_awb_identity_key,
+	)
+
+	if len(awb_nr) > AWB_NR_MAX_LENGTH:
+		frappe.throw(_("AWB Nr cannot be longer than {0} characters.").format(AWB_NR_MAX_LENGTH))
+	lowered = awb_nr.lower()
+	shipment_awb = frappe.qb.DocType("Marketplace Order Shipment AWB")
+	parents = (
+		frappe.qb.from_(shipment_awb)
+		.select(shipment_awb.parent)
+		.where(shipment_awb.parenttype == "Marketplace Order")
+		.where(Lower(shipment_awb.awb_nr) == lowered)
+		.run(pluck=True)
+	)
+	if parents and frappe.db.exists(
+		"Marketplace Order", {"name": ["in", parents], "marketplace_account": order.marketplace_account}
+	):
+		frappe.throw(_awb_already_used_message(awb_nr))
+	if _pool_awb_exists_ignoring_case(order.marketplace_account, awb_nr) or frappe.db.exists(
+		"Noon AWB", {"awb_identity_key": compute_awb_identity_key(order.marketplace_account, awb_nr)}
+	):
+		frappe.throw(_awb_already_used_message(awb_nr))
+	try:
+		# ignore_permissions: the endpoint already checked write on the Marketplace Order,
+		# and the pool's own generate() inserts Noon AWB rows the same way.
+		frappe.get_doc(
+			{
+				"doctype": "Noon AWB",
+				"marketplace_account": order.marketplace_account,
+				"awb_nr": awb_nr,
+				"country_code": account.noon_country_code,
+				"status": "Used",
+				"marketplace_order": order.name,
+				"integration_shipment_nr": integration_shipment_nr,
+				"used_on": now_datetime(),
+			}
+		).insert(ignore_permissions=True)
+	except (frappe.UniqueValidationError, frappe.DuplicateEntryError):
+		# Counter-named doctype: the unique awb_identity_key collision is a
+		# UniqueValidationError with a "must be unique" message queued.
+		frappe.clear_messages()
+		frappe.throw(_awb_already_used_message(awb_nr))
+
+
+def create_shipment(marketplace_order_name, mp_item_nrs, awb_source="Noon", awb_nr=None):
 	"""Request path: allocate a shipment number, reject any unit already in
 	an active shipment, write Pending shipment/unit/AWB rows, commit, then
-	enqueue the Noon write (#146 decision 13/14/20)."""
+	enqueue the Noon write (#146 decision 13/14/20).
+
+	``awb_nr`` is an optional AWB printed on a Noon sticker. When given (spaces-only
+	counts as empty) it is recorded as the shipment's AWB; otherwise the AWB is
+	claimed or fetched by the worker as before."""
 	# Noon is the only courier: every new shipment takes a Noon AWB. Shipments
 	# already stored with awb_source "Own Courier" stay readable and retryable.
 	if awb_source != "Noon":
 		frappe.throw(_("New shipments can only use a Noon AWB."))
 	order = _lock_and_load_order(marketplace_order_name)
-	_account_and_client(order)
+	account, _client = _account_and_client(order)
 
 	mp_item_nrs = [cstr(nr).strip() for nr in (mp_item_nrs or []) if cstr(nr).strip()]
 	if not mp_item_nrs:
@@ -446,6 +526,9 @@ def create_shipment(marketplace_order_name, mp_item_nrs, awb_source="Noon"):
 
 
 	integration_shipment_nr = _next_shipment_number(order)
+	awb_nr = cstr(awb_nr).strip()
+	if awb_nr:
+		_record_typed_awb(order, account, awb_nr, integration_shipment_nr)
 	order.append(
 		"noon_shipments",
 		{
@@ -465,6 +548,17 @@ def create_shipment(marketplace_order_name, mp_item_nrs, awb_source="Noon"):
 				"integration_shipment_nr": integration_shipment_nr,
 				"mp_item_nr": mp_item_nr,
 				"partner_sku": shippable[mp_item_nr],
+			},
+		)
+	if awb_nr:
+		order.append(
+			"noon_shipment_awbs",
+			{
+				"integration_shipment_nr": integration_shipment_nr,
+				"courier": NOON_COURIER,
+				"awb_nr": awb_nr,
+				"source": "Noon",
+				"status": "Pending",
 			},
 		)
 	order.save()
@@ -678,7 +772,10 @@ def run_create_shipment(marketplace_order_name, integration_shipment_nr):
 		return
 
 	# Decision 14: a Noon-generated AWB is fetched/saved/committed exactly
-	# once, before CreateShipment, and reused on every retry.
+	# once, before CreateShipment, and reused on every retry. A row may already
+	# exist at this point because the user typed the AWB from a Noon sticker in
+	# create_shipment(); then the pool claim and GetNoonLogisticsAWBs are skipped
+	# and every retry resends that same AWB.
 	awb_rows = [
 		row
 		for row in order.noon_shipment_awbs or []

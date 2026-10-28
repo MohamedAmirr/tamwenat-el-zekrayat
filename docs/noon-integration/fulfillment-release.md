@@ -156,9 +156,11 @@ is not supported by this release.
   (`action`, `integration_shipment_nr`, notes) are unchanged because Needs
   Attention parses them. Noon-sourced error text is shown unchanged.
 - **Noon is the only courier.** Every new shipment gets a Noon AWB (the
-  pre-generated pool first, else one `GetNoonLogisticsAWBs` call); the Create
-  Shipment dialog has no AWB source, courier or AWB number fields, and
-  `create_shipment` refuses any source other than Noon. **Add AWB** is Noon's
+  pre-generated pool first, else one `GetNoonLogisticsAWBs` call), unless the user
+  types or scans the AWB printed on a Noon sticker into the optional **AWB Nr**
+  field of the Create Shipment dialog (see "Pre-printed sticker AWB" below); the
+  dialog has no AWB source or courier field, and `create_shipment` refuses any
+  source other than Noon. **Add AWB** is Noon's
   `AddShipmentCourierAwbs`, meant for adding a replacement AWB when warehouse
   scanning of the current one fails: the user types the new AWB number and the
   Courier field is a one-option Select (Noon). Noon documents `courier` as a
@@ -192,9 +194,9 @@ is not supported by this release.
   queued Mark Out of Stock reservation (`noon_pending_oos_units`) can be
   recovered the same way via **Release Stuck Out of Stock Reservation**.
 - A Noon AWB is chosen once per shipment and reused on every retry — it
-  is never regenerated or swapped. It comes from the pre-generated pool when one
-  is available, otherwise from a single-AWB Noon call (see "Noon AWB pool"
-  below).
+  is never regenerated or swapped. It is the sticker AWB typed in the dialog when
+  there is one, else it comes from the pre-generated pool when one is available,
+  otherwise from a single-AWB Noon call (see "Noon AWB pool" below).
 - Every fulfillment call is enqueued on the `long` queue and deduplicated by
   job ID — a second click while an action is already queued/running for the
   same shipment is a no-op toast, not a duplicate job. For Mark Out of Stock,
@@ -383,8 +385,11 @@ relied on in production:
 9. **Error body shape per endpoint** — confirm `client.error_message()`
    produces a usable message for each of the seven fulfillment endpoints,
    not just the order-import endpoints #145 already validated this against.
+10. **CreateShipment accepts an AWB not returned by GetNoonLogisticsAWBs
+    (pre-printed sticker).** The sticker AWB path (#385) sends an AWB the app
+    never fetched; confirm Noon accepts it and attaches it to the shipment.
 
-Do not roll this out to production Noon fulfillment before these nine items
+Do not roll this out to production Noon fulfillment before these ten items
 have been checked against a real Noon account.
 
 ## Noon AWB pool (bulk AWB pre-generation)
@@ -412,12 +417,36 @@ have been checked against a real Noon account.
   through the unchanged path (appended as the shipment's AWB row, reused on
   retry). An empty pool falls back to the previous qty-1 `GetNoonLogisticsAWBs`
   call. Lock handling around Noon HTTP calls is unchanged.
+- **A typed sticker AWB bypasses the claim.** When the AWB is already on the
+  shipment's AWB row, `run_create_shipment()` skips both the claim and
+  `GetNoonLogisticsAWBs` (the `not awb_rows` guard), and a retry resends the same AWB.
+  See "Pre-printed sticker AWB".
 - **A claimed AWB never returns to the pool.** A discarded, cancelled or failed
   shipment keeps consuming the AWB it claimed; Discard Shipment does not release
   it. A worker that dies between the claim and writing the shipment's AWB row
   leaves that AWB `Used` with the order/shipment recorded; the retry reuses it.
 - Unverified (no live Noon call was made): whether Noon rate-limits or caps large
   quantities, and whether pre-generated AWBs expire.
+
+## Pre-printed sticker AWB (#385)
+
+The Create Shipment dialog has one optional **AWB Nr** field (type or scan the AWB on
+the Noon sticker; empty means a Noon AWB as before). The client sends `awb_nr` only
+when filled; spaces-only counts as empty. `create_shipment()` then, under the order lock:
+
+- rejects more than 140 characters (the column length);
+- rejects an AWB already on any shipment AWB row of an order on the same Marketplace
+  Account, whatever the shipment status; the message does not name the other order;
+- inserts a `Noon AWB` row for it (status `Used`, order and shipment set), so the
+  unique `awb_identity_key` rejects a pool match (Available or Used) and a
+  simultaneous request on another order at database level; a duplicate-key error
+  becomes the same translated rejection;
+- writes one `noon_shipment_awbs` row in the same save (courier `noon`, source Noon,
+  status Pending).
+
+The worker is unchanged: the existing AWB row means no pool claim and no
+`GetNoonLogisticsAWBs`, and Retry resends the same AWB (decision 14). Whether Noon accepts
+an AWB it did not return is verification item 10.
 
 ## Order-level invoice (UploadFbpiOrderInvoice)
 
