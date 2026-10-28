@@ -317,6 +317,14 @@
 						columns: 1,
 						reqd: 1,
 					},
+					{
+						fieldname: "awb_nr",
+						fieldtype: "Data",
+						label: __("AWB Nr"),
+						description: __(
+							"Type or scan the AWB on the Noon sticker. Leave empty to use a Noon AWB."
+						),
+					},
 				],
 				primary_action_label: __("Create"),
 				primary_action(values) {
@@ -327,14 +335,17 @@
 						});
 						return;
 					}
+					const args = {
+						marketplace_order: ctx.marketplace_order,
+						mp_item_nrs: mp_item_nrs_from_unit_indices(units, values.units),
+					};
+					const awb_nr = (values.awb_nr || "").trim();
+					if (awb_nr) args.awb_nr = awb_nr;
 					dialog.hide();
 					frappe
 						.call({
 							method: API + "create_shipment",
-							args: {
-								marketplace_order: ctx.marketplace_order,
-								mp_item_nrs: mp_item_nrs_from_unit_indices(units, values.units),
-							},
+							args,
 							freeze: true,
 							freeze_message: __("Queuing shipment creation..."),
 						})

@@ -12,10 +12,14 @@ locked plan's facts table (``docs/noon-integration/noon_api_full.md``).
 from unittest.mock import MagicMock, patch
 
 import frappe
+from frappe.model.document import Document
 from frappe.tests import IntegrationTestCase
-from frappe.utils import add_to_date, nowdate
+from frappe.utils import add_to_date, cstr, now_datetime, nowdate
 
-from marketplace_integrations.integrations.noon import expected_change, fulfillment
+from marketplace_integrations.integrations.noon import awb_pool, expected_change, fulfillment
+from marketplace_integrations.marketplace_integrations.doctype.noon_awb.noon_awb import (
+	compute_awb_identity_key,
+)
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 
 # A minimal but structurally valid single-page PDF (proper xref table/startxref
@@ -1553,3 +1557,341 @@ class IntegrationTestNoonReadableNames(IntegrationTestNoonFulfillmentBase):
 		self.assertEqual(data["shipment_label"], "Shipment 4")
 		self.assertEqual(data["items"], ["Hand Soap 500ml (SKU-001)"])
 		self.assertEqual(data["order_reference"], self.order.platform_order_reference or "")
+
+
+# ---------------------------------------------------------------------------
+# #385: AWB typed or scanned from a Noon sticker on the request path.
+# ---------------------------------------------------------------------------
+
+_ENQUEUE = "marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue"
+_CLAIM = "marketplace_integrations.integrations.noon.fulfillment.claim_pool_awb"
+_CLIENT = "marketplace_integrations.integrations.noon.fulfillment.NoonClient"
+
+
+def _delete_noon_account_fixtures(account):
+	frappe.db.delete("Noon AWB", {"marketplace_account": account.name})
+	# delete_doc (not db.delete) so the child rows of Marketplace Order go too
+	for order_name in frappe.get_all("Marketplace Order", filters={"marketplace_account": account.name}, pluck="name"):
+		frappe.delete_doc("Marketplace Order", order_name, ignore_permissions=True, force=True)
+	frappe.db.delete("Marketplace Sync Log", filters={"marketplace_account": account.name})
+	frappe.delete_doc("Marketplace Account", account.name, ignore_permissions=True, force=True)
+	frappe.delete_doc("Noon Connection", account.connection, ignore_permissions=True, force=True)
+	frappe.db.commit()
+
+
+def _add_noon_awb(account, awb_nr, status, marketplace_order=None):
+	return frappe.get_doc(
+		{
+			"doctype": "Noon AWB",
+			"marketplace_account": account.name,
+			"awb_nr": awb_nr,
+			"country_code": account.noon_country_code,
+			"status": status,
+			"marketplace_order": marketplace_order,
+			"generated_on": now_datetime(),
+		}
+	).insert(ignore_permissions=True)
+
+
+class IntegrationTestNoonTypedAwbRequestPath(IntegrationTestNoonFulfillmentBase):
+	"""#385: create_shipment(..., awb_nr) records a typed AWB instead of claiming one."""
+
+	def setUp(self):
+		super().setUp()
+		self.order = _make_fulfillment_order(
+			self.account,
+			self.fbpi_order_nr,
+			[_confirmed_acknowledged(1), _confirmed_acknowledged(2, "SKU-002")],
+		)
+		self.shipment_nr = f"{self.fbpi_order_nr}-1"
+
+	def _create(self, order, awb_nr, mp_item_nrs=("1",)):
+		with patch(_ENQUEUE) as enqueue:
+			enqueue.return_value = MagicMock()
+			result = fulfillment.create_shipment(order.name, list(mp_item_nrs), "Noon", awb_nr)
+		return result, enqueue
+
+	def _noon_awb_count(self):
+		return frappe.db.count("Noon AWB", {"marketplace_account": self.account.name})
+
+	def _assert_order_untouched(self):
+		self.order.reload()
+		self.assertEqual(len(self.order.noon_shipments), 0)
+		self.assertEqual(len(self.order.noon_shipment_units), 0)
+		self.assertEqual(len(self.order.noon_shipment_awbs), 0)
+
+	def test_empty_and_spaces_only_awb_keep_todays_behavior(self):
+		for awb_nr, unit in (("", "1"), ("   ", "2")):
+			with self.subTest(awb_nr=awb_nr):
+				_result, enqueue = self._create(self.order, awb_nr, [unit])
+				enqueue.assert_called_once()
+
+		self.order.reload()
+		self.assertEqual([row.status for row in self.order.noon_shipments], ["Pending", "Pending"])
+		self.assertEqual({row.awb_source for row in self.order.noon_shipments}, {"Noon"})
+		self.assertEqual(len(self.order.noon_shipment_awbs), 0)
+		self.assertEqual(self._noon_awb_count(), 0)
+
+	def test_filled_awb_writes_shipment_units_pending_awb_and_a_used_noon_awb_row(self):
+		result, enqueue = self._create(self.order, "NOON-STK-1001")
+		enqueue.assert_called_once()
+		self.assertEqual(result["integration_shipment_nr"], self.shipment_nr)
+		self.assertTrue(result["queued"])
+
+		self.order.reload()
+		self.assertEqual(len(self.order.noon_shipments), 1)
+		shipment = self.order.noon_shipments[0]
+		self.assertEqual((shipment.status, shipment.awb_source), ("Pending", "Noon"))
+		self.assertEqual([row.mp_item_nr for row in self.order.noon_shipment_units], ["1"])
+
+		self.assertEqual(len(self.order.noon_shipment_awbs), 1)
+		awb = self.order.noon_shipment_awbs[0]
+		self.assertEqual(
+			(awb.integration_shipment_nr, awb.courier, awb.awb_nr, awb.source, awb.status),
+			(self.shipment_nr, "noon", "NOON-STK-1001", "Noon", "Pending"),
+		)
+
+		pool_rows = frappe.get_all(
+			"Noon AWB",
+			filters={"marketplace_account": self.account.name},
+			fields=["awb_nr", "status", "marketplace_order", "integration_shipment_nr", "used_on", "country_code"],
+		)
+		self.assertEqual(len(pool_rows), 1)
+		row = pool_rows[0]
+		self.assertEqual(row.awb_nr, "NOON-STK-1001")
+		self.assertEqual(row.status, "Used")
+		self.assertEqual(row.marketplace_order, self.order.name)
+		self.assertEqual(row.integration_shipment_nr, self.shipment_nr)
+		self.assertIsNotNone(row.used_on)
+		self.assertEqual(row.country_code, "ae")
+
+	def test_awb_is_trimmed_before_it_is_stored(self):
+		self._create(self.order, "  NOON-TRIM-1 \t")
+		self.order.reload()
+		self.assertEqual(self.order.noon_shipment_awbs[0].awb_nr, "NOON-TRIM-1")
+		self.assertEqual(
+			frappe.db.get_value("Noon AWB", {"marketplace_account": self.account.name}, "awb_nr"),
+			"NOON-TRIM-1",
+		)
+		self.assertEqual(
+			frappe.db.get_value("Noon AWB", {"marketplace_account": self.account.name}, "awb_identity_key"),
+			compute_awb_identity_key(self.account.name, "NOON-TRIM-1"),
+		)
+
+	def test_awb_longer_than_140_characters_is_rejected_and_writes_nothing(self):
+		with patch(_ENQUEUE) as enqueue, self.assertRaises(frappe.ValidationError) as raised:
+			fulfillment.create_shipment(self.order.name, ["1"], "Noon", "A" * 141)
+		self.assertIn("140", str(raised.exception))
+		enqueue.assert_not_called()
+		self._assert_order_untouched()
+		self.assertEqual(self._noon_awb_count(), 0)
+
+	def test_awb_of_exactly_140_characters_is_accepted(self):
+		awb_nr = "B" * 140
+		result, _enqueue = self._create(self.order, f"  {awb_nr}  ")
+		self.assertTrue(result["queued"])
+		self.order.reload()
+		self.assertEqual(self.order.noon_shipment_awbs[0].awb_nr, awb_nr)
+
+	def test_awb_already_on_another_order_of_the_same_account_is_rejected_whatever_its_status(self):
+		other = _make_fulfillment_order(
+			self.account,
+			f"{self.fbpi_order_nr}-B",
+			[_confirmed_acknowledged(n, f"SKU-{n:03d}") for n in range(1, 5)],
+		)
+		for unit, status in zip(["1", "2", "3", "4"], ["Pending", "Created", "Error", "Cancelled"], strict=True):
+			with self.subTest(status=status):
+				_create_result, _enqueue = self._create(other, f"DUP-{status}", [unit])
+				other.reload()
+				frappe.db.set_value("Marketplace Order Shipment", other.noon_shipments[-1].name, "status", status)
+				with patch(_ENQUEUE) as enqueue, self.assertRaises(frappe.ValidationError) as raised:
+					fulfillment.create_shipment(self.order.name, ["1"], "Noon", f"DUP-{status}")
+				self.assertEqual(str(raised.exception), fulfillment._awb_already_used_message(f"DUP-{status}"))
+				enqueue.assert_not_called()
+
+		self._assert_order_untouched()
+		self.assertEqual(self._noon_awb_count(), 4)
+
+	def test_awb_on_an_order_row_alone_is_still_rejected(self):
+		"""The duplicate check also reads Marketplace Order shipment AWB rows, not only the pool."""
+		other = _make_fulfillment_order(self.account, f"{self.fbpi_order_nr}-B", [_confirmed_acknowledged(1)])
+		self._create(other, "ROW-ONLY-1")
+		frappe.db.delete("Noon AWB", {"marketplace_account": self.account.name, "awb_nr": "ROW-ONLY-1"})
+
+		with patch(_ENQUEUE) as enqueue, self.assertRaises(frappe.ValidationError):
+			fulfillment.create_shipment(self.order.name, ["1"], "Noon", "ROW-ONLY-1")
+		enqueue.assert_not_called()
+		self._assert_order_untouched()
+
+	def test_same_awb_on_another_account_is_accepted(self):
+		other_account = _make_noon_account(f"Typed AWB Other {frappe.generate_hash(length=8)}")
+		self.addCleanup(_delete_noon_account_fixtures, other_account)
+		self._create(self.order, "SHARED-1")
+
+		other_order = _make_fulfillment_order(other_account, f"{self.fbpi_order_nr}-C", [_confirmed_acknowledged(1)])
+		result, _enqueue = self._create(other_order, "SHARED-1")
+		self.assertTrue(result["queued"])
+		self.assertEqual(frappe.db.count("Noon AWB", {"marketplace_account": other_account.name}), 1)
+		self.assertEqual(self._noon_awb_count(), 1)
+
+	def test_awb_on_an_available_pool_row_is_rejected_and_the_row_stays_available(self):
+		_add_noon_awb(self.account, "POOL-DUP-1", "Available")
+		with patch(_ENQUEUE) as enqueue, self.assertRaises(frappe.ValidationError):
+			fulfillment.create_shipment(self.order.name, ["1"], "Noon", "POOL-DUP-1")
+		enqueue.assert_not_called()
+		self._assert_order_untouched()
+		self.assertEqual(
+			frappe.db.get_value("Noon AWB", {"awb_nr": "POOL-DUP-1", "marketplace_account": self.account.name}, "status"),
+			"Available",
+		)
+		self.assertEqual(awb_pool.count_available(self.account.name), 1)
+
+	def test_awb_on_a_used_pool_row_is_rejected(self):
+		_add_noon_awb(self.account, "POOL-USED-1", "Used")
+		with patch(_ENQUEUE) as enqueue, self.assertRaises(frappe.ValidationError):
+			fulfillment.create_shipment(self.order.name, ["1"], "Noon", "POOL-USED-1")
+		enqueue.assert_not_called()
+		self._assert_order_untouched()
+		self.assertEqual(self._noon_awb_count(), 1)
+
+	def test_unique_index_collision_during_insert_gives_the_same_rejection_and_writes_nothing(self):
+		"""Another request inserts the same AWB between the pre-checks and this insert;
+		the real insert hits the unique awb_identity_key index."""
+		_add_noon_awb(self.account, "RACE-1", "Used")
+		real_exists = frappe.db.exists
+
+		def exists_without_noon_awb(doctype, *args, **kwargs):
+			if doctype == "Noon AWB":
+				return False
+			return real_exists(doctype, *args, **kwargs)
+
+		with (
+			patch.object(frappe.db, "exists", exists_without_noon_awb),
+			patch.object(fulfillment, "_pool_awb_exists_ignoring_case", return_value=False),
+			patch(_ENQUEUE) as enqueue,
+			self.assertRaises(frappe.ValidationError) as raised,
+		):
+			fulfillment.create_shipment(self.order.name, ["1"], "Noon", "RACE-1")
+		self.assertEqual(str(raised.exception), fulfillment._awb_already_used_message("RACE-1"))
+		self.assertFalse(
+			[m for m in frappe.get_message_log() if "must be unique" in cstr(m)],
+			"the framework's 'must be unique' message must not leak",
+		)
+		enqueue.assert_not_called()
+		self._assert_order_untouched()
+		self.assertEqual(self._noon_awb_count(), 1)
+
+	def test_awb_comparison_ignores_letter_case_against_pool_rows_and_other_orders(self):
+		other_account = _make_noon_account(f"Typed AWB Case Other {frappe.generate_hash(length=8)}")
+		self.addCleanup(_delete_noon_account_fixtures, other_account)
+		_add_noon_awb(self.account, "case-avail-1", "Available")
+		_add_noon_awb(self.account, "CASE-USED-1", "Used")
+		other = _make_fulfillment_order(self.account, f"{self.fbpi_order_nr}-B", [_confirmed_acknowledged(1)])
+		self._create(other, "Case-Row-1")
+		frappe.db.delete("Noon AWB", {"marketplace_account": self.account.name, "awb_nr": "Case-Row-1"})
+		for typed in ("CASE-AVAIL-1", "case-used-1", "CASE-ROW-1", "case-row-1"):
+			with self.subTest(typed=typed):
+				with patch(_ENQUEUE) as enqueue, self.assertRaises(frappe.ValidationError):
+					fulfillment.create_shipment(self.order.name, ["1"], "Noon", typed)
+				enqueue.assert_not_called()
+		self._assert_order_untouched()
+
+		# same account only: another account may use the same AWB in any case
+		other_order = _make_fulfillment_order(other_account, f"{self.fbpi_order_nr}-C", [_confirmed_acknowledged(1)])
+		result, _enqueue = self._create(other_order, "CASE-ROW-1")
+		self.assertTrue(result["queued"])
+
+
+class IntegrationTestNoonTypedAwbWorker(IntegrationTestNoonFulfillmentBase):
+	"""#385: the worker sends a typed AWB as-is and never claims or fetches one."""
+
+	def setUp(self):
+		super().setUp()
+		self.order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
+		with patch(_ENQUEUE) as enqueue:
+			enqueue.return_value = MagicMock()
+			fulfillment.create_shipment(self.order.name, ["1"], "Noon", "NOON-STK-7")
+		self.shipment_nr = f"{self.fbpi_order_nr}-1"
+
+	def _patch_refresh(self):
+		return (
+			patch(
+				"marketplace_integrations.integrations.noon.fulfillment.import_order",
+				return_value=(self.order, []),
+			),
+			patch(
+				"marketplace_integrations.integrations.noon.fulfillment.get_fbpi_order",
+				return_value={"fbpi_order_nr": self.fbpi_order_nr, "items": [_confirmed_acknowledged(1)]},
+			),
+		)
+
+	def test_worker_claims_no_pool_row_and_fetches_no_noon_awb(self):
+		_add_noon_awb(self.account, "POOL-UNTOUCHED-1", "Available")
+		import_patch, get_patch = self._patch_refresh()
+		with (
+			import_patch,
+			get_patch,
+			patch(_CLAIM) as claim,
+			patch(_CLIENT) as client_class,
+		):
+			client = client_class.return_value
+			client.request.side_effect = [MagicMock(status_code=404), MagicMock(status_code=200)]
+			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
+
+		claim.assert_not_called()
+		paths = [call.args[1] for call in client.request.call_args_list]
+		self.assertNotIn(fulfillment.NOON_LOGISTICS_AWBS_GET_PATH, paths)
+		create_body = client.request.call_args_list[-1].kwargs["json"]
+		self.assertEqual(create_body["awbs"], [{"courier": "noon", "awb_nr": "NOON-STK-7"}])
+
+		self.order.reload()
+		self.assertEqual(self.order.noon_shipments[0].status, "Created")
+		self.assertEqual([row.awb_nr for row in self.order.noon_shipment_awbs], ["NOON-STK-7"])
+		self.assertEqual(
+			frappe.db.get_value("Noon AWB", {"awb_nr": "POOL-UNTOUCHED-1", "marketplace_account": self.account.name}, "status"),
+			"Available",
+		)
+		self.assertEqual(awb_pool.count_available(self.account.name), 1)
+
+	def test_retry_of_an_error_shipment_resends_the_same_awb(self):
+		import_patch, get_patch = self._patch_refresh()
+		with (
+			import_patch,
+			get_patch,
+			patch(_CLIENT) as client_class,
+		):
+			client = client_class.return_value
+			client.error_message.return_value = "bad"
+			client.request.side_effect = [MagicMock(status_code=404), MagicMock(status_code=400)]
+			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
+		self.order.reload()
+		self.assertEqual(self.order.noon_shipments[0].status, "Error")
+		first_create_body = client.request.call_args_list[-1].kwargs["json"]
+
+		import_patch2, get_patch2 = self._patch_refresh()
+		with (
+			import_patch2,
+			get_patch2,
+			patch(_CLAIM) as claim,
+			patch(_CLIENT) as client_class2,
+		):
+			client2 = client_class2.return_value
+			client2.request.side_effect = [MagicMock(status_code=404), MagicMock(status_code=200)]
+			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
+
+		claim.assert_not_called()
+		paths = [call.args[1] for call in client2.request.call_args_list]
+		self.assertNotIn(fulfillment.NOON_LOGISTICS_AWBS_GET_PATH, paths)
+		retry_create_body = client2.request.call_args_list[-1].kwargs["json"]
+		self.assertEqual(retry_create_body["awbs"], first_create_body["awbs"])
+		self.assertEqual(retry_create_body["awbs"], [{"courier": "noon", "awb_nr": "NOON-STK-7"}])
+
+		self.order.reload()
+		self.assertEqual(self.order.noon_shipments[0].status, "Created")
+		self.assertEqual(len(self.order.noon_shipment_awbs), 1)
+		self.assertEqual(self.order.noon_shipment_awbs[0].awb_nr, "NOON-STK-7")
+		self.assertEqual(
+			frappe.db.count("Noon AWB", {"marketplace_account": self.account.name, "awb_nr": "NOON-STK-7"}),
+			1,
+		)
+

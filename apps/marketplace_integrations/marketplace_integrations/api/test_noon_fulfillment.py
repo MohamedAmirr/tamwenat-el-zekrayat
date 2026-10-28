@@ -10,7 +10,7 @@ actually a Noon order, then delegates to
 covered by integrations/noon/test_fulfillment.py).
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
@@ -29,6 +29,11 @@ from marketplace_integrations.api.noon_fulfillment import (
 	retry_order_invoice,
 	upload_invoice,
 	upload_order_invoice,
+)
+from marketplace_integrations.integrations.noon.test_fulfillment import (
+	_confirmed_acknowledged,
+	_delete_noon_account_fixtures,
+	_make_fulfillment_order,
 )
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 from marketplace_integrations.tests.utils import make_role_user
@@ -184,14 +189,14 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 	def test_create_shipment_delegates_and_parses_json_list(self, mock_fn):
 		mock_fn.return_value = {"integration_shipment_nr": "ORD-1", "queued": True}
 		result = create_shipment(self.order.name, '["1", "2"]', "Noon")
-		mock_fn.assert_called_once_with(self.order.name, ["1", "2"], "Noon")
+		mock_fn.assert_called_once_with(self.order.name, ["1", "2"], "Noon", None)
 		self.assertEqual(result, {"integration_shipment_nr": "ORD-1", "queued": True})
 
 	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.create_shipment")
 	def test_create_shipment_awb_source_defaults_to_noon(self, mock_fn):
 		mock_fn.return_value = {"integration_shipment_nr": "ORD-1", "queued": True}
 		create_shipment(self.order.name, '["1"]')
-		mock_fn.assert_called_once_with(self.order.name, ["1"], "Noon")
+		mock_fn.assert_called_once_with(self.order.name, ["1"], "Noon", None)
 
 	def test_create_shipment_refuses_own_courier(self):
 		with self.assertRaises(frappe.ValidationError):
@@ -259,3 +264,41 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 		result = release_stuck_oos_reservation(self.order.name)
 		mock_fn.assert_called_once_with(self.order.name)
 		self.assertEqual(result, {"released": ["1"]})
+
+
+_ENQUEUE = "marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue"
+
+
+class IntegrationTestNoonTypedAwbEndpoint(IntegrationTestCase):
+	"""#385: the Desk-facing create_shipment endpoint with a typed AWB (permission boundary)."""
+
+	def setUp(self):
+		suffix = frappe.generate_hash(length=8)
+		self.account = _make_noon_account(f"Typed AWB Endpoint {suffix}")
+		self.order = _make_fulfillment_order(self.account, f"ORD-AWB-API-{suffix}", [_confirmed_acknowledged(1)])
+
+	def tearDown(self):
+		_delete_noon_account_fixtures(self.account)
+
+	def test_noon_user_with_write_can_create_a_shipment_with_a_typed_awb(self):
+		email, _role = make_role_user(self, "Noon Typed AWB Writer", {"Marketplace Order": ["read", "write"]})
+		frappe.get_doc("User", email).add_roles("Noon User")
+		with self.set_user(email), patch(_ENQUEUE) as enqueue:
+			enqueue.return_value = MagicMock()
+			result = create_shipment(self.order.name, '["1"]', "Noon", "NOON-API-1")
+		self.assertTrue(result["queued"])
+		self.assertEqual(
+			frappe.db.get_value(
+				"Noon AWB", {"awb_nr": "NOON-API-1", "marketplace_account": self.account.name}, "status"
+			),
+			"Used",
+		)
+
+	def test_user_without_write_is_refused_before_the_awb_is_validated(self):
+		email, _role = make_role_user(self, "Noon Typed AWB Reader", {"Marketplace Order": ["read"]})
+		with self.set_user(email), patch(_ENQUEUE) as enqueue, self.assertRaises(frappe.PermissionError):
+			create_shipment(self.order.name, '["1"]', "Noon", "A" * 141)
+		enqueue.assert_not_called()
+		self.assertEqual(frappe.db.count("Noon AWB", {"marketplace_account": self.account.name}), 0)
+		self.assertEqual(frappe.db.count("Marketplace Order Shipment", {"parent": self.order.name}), 0)
+

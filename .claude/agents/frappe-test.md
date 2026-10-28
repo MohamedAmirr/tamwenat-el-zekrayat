@@ -1,6 +1,6 @@
 ---
 name: frappe-test
-description: Use to write test files for new/changed doctypes and app code, run them, and run any configured linter. Use proactively after frappe-dev implements a sub-issue, before it's handed to frappe-review or considered done. Runs bench run-tests in the dev bench container and any linter found in the app (ruff/flake8/pre-commit) — fixes trivial lint failures itself, reports test failures rather than silently patching around them.
+description: Use to write test files for new/changed doctypes and app code, run them, and run any configured linter. Use proactively after frappe-dev's work has been reviewed by frappe-review and its findings addressed, before it's considered done. Runs bench run-tests in the dev bench container and any linter found in the app (ruff/flake8/pre-commit) — fixes trivial lint failures itself, reports test failures rather than silently patching around them.
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: haiku
 ---

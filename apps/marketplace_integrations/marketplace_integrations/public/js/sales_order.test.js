@@ -2058,7 +2058,7 @@ test("a button opens its dialog and calls the endpoint with the linked Marketpla
 	await settle();
 	const create = dialogs[dialogs.length - 1];
 	assert.equal(create.config.title, "Create Noon Shipment");
-	assert.deepEqual(create.config.fields.map((f) => f.fieldname), ["units"]);
+	assert.deepEqual(create.config.fields.map((f) => f.fieldname), ["units", "awb_nr"]);
 	create.config.primary_action({ units: ["1"] });
 	await settle();
 	const call = noon_calls[noon_calls.length - 1];

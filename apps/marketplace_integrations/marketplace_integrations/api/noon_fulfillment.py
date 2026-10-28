@@ -79,11 +79,11 @@ def _shipment_summaries(doc):
 
 
 @frappe.whitelist(methods=["POST"])
-def create_shipment(marketplace_order: str, mp_item_nrs, awb_source: str = "Noon"):
+def create_shipment(marketplace_order: str, mp_item_nrs, awb_source: str = "Noon", awb_nr: str | None = None):
 	_get_noon_order(marketplace_order)
 	if isinstance(mp_item_nrs, str):
 		mp_item_nrs = frappe.parse_json(mp_item_nrs)
-	return fulfillment.create_shipment(marketplace_order, mp_item_nrs, awb_source)
+	return fulfillment.create_shipment(marketplace_order, mp_item_nrs, awb_source, awb_nr)
 
 
 @frappe.whitelist(methods=["POST"])

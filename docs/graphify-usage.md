@@ -35,10 +35,10 @@ Rules:
 
 Before opening a PR, in this order:
 
-1. Build and test the change.
+1. Build the change, then review it (`frappe-review`) and fix findings, then test and lint it (`frappe-test`). Review comes before testing so tests run once on the reviewed code.
 2. Update every doc the change affects in the same branch: the relevant `docs/` pages (for example `docs/marketplace-integrations/architecture.md`, `docs/shopify/README.md`), `docs/user-actions.md` rows (migrate, backfill, manual steps) and any issue or convention text that is now wrong.
 3. Refresh the graph: `graphify update .` (code), then the semantic `/graphify . --update` when docs changed. For a long doc such as `architecture.md`, extract it in several line-range chunks so the whole file is read, not just the top.
-4. Review (`frappe-review`), fix findings, then open the PR with `gh pr create --base dev`.
+4. Open the PR with `gh pr create --base dev`.
 
 The graph is local and git-ignored, so the refresh is not part of the diff; it is a checklist step so the next session's queries match the merged code and docs. Do not leave the docs or graph refresh as a follow-up the user has to ask for.
 

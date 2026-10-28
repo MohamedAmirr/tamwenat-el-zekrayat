@@ -1932,3 +1932,6 @@ Mark units Out of Stock,تعليم الوحدات كنفدت من المخزون
 Upload shipment invoice,رفع فاتورة الشحنة
 Upload order invoice,رفع فاتورة الطلب
 Release Out of Stock reservation,تحرير حجز النفاد من المخزون
+"Type or scan the AWB on the Noon sticker. Leave empty to use a Noon AWB.","اكتب أو امسح رقم بوليصة الشحن (AWB) المطبوع على ملصق Noon. اتركه فارغًا لاستخدام بوليصة شحن من Noon."
+AWB {0} is already in use.,بوليصة الشحن (AWB) {0} مستخدمة بالفعل.
+AWB Nr cannot be longer than {0} characters.,يجب ألا يزيد رقم بوليصة الشحن (AWB) عن {0} حرفًا.
