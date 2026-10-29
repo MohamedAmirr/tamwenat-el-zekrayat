@@ -180,12 +180,12 @@ def guard_changes(doc):
 		)
 	if cstr(before.get("transporter")) != cstr(doc.get("transporter")):
 		frappe.throw(
-			_("The transporter cannot be changed after the Noon shipment was started."),
+			_("The carrier cannot be changed after the Noon shipment was started."),
 			title=_("Noon shipment"),
 		)
 	if cstr(before.get("lr_no")) != cstr(doc.get("lr_no")):
 		frappe.throw(
-			_("The AWB (LR No) cannot be changed after the Noon shipment was started."),
+			_("The AWB / Tracking No cannot be changed after the Noon shipment was started."),
 			title=_("Noon shipment"),
 		)
 	if _rows(before) != _rows(doc):
@@ -308,7 +308,7 @@ def _fail_safely(delivery_note, order_name, message):
 def _run(delivery_note, order_name):
 	transporter = transporter_name()
 	if not transporter:
-		raise _Refused(_("Supplier Noon (transporter) does not exist. Run bench migrate."))
+		raise _Refused(_("Supplier Noon (carrier) does not exist. Run bench migrate."))
 	# Lock order is always Delivery Note first, then Marketplace Order (handover_state's on_trash
 	# handler does the same). Nothing but locking reads sits between the two locks, and a person's
 	# save of the note either finished before this lock or waits and then sees the shipment row.
