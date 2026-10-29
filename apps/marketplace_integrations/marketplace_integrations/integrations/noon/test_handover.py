@@ -486,14 +486,14 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 		finally:
 			frappe.set_user("Administrator")
 
-	def test_endpoint_needs_create_on_delivery_note(self):
+	def test_endpoint_is_retired_and_drafts_nothing(self):
+		"""#391: the Delivery Note comes first now; the endpoint refuses (after its permission check)."""
 		fx, order, nr = self._shipped_order([("A", 1)], ["A"])
 		email, _role = make_role_user(self, "Noon Writer", {"Marketplace Order": ["write"]})
-		# The platform role lets the order check pass, so the refusal below is the Delivery Note one.
 		frappe.get_doc("User", email).add_roles("Noon User")
 		frappe.set_user(email)
 		try:
-			with self.assertRaises(frappe.PermissionError):
+			with self.assertRaises(frappe.ValidationError):
 				noon_fulfillment.mark_handed_over(order, nr)
 		finally:
 			frappe.set_user("Administrator")

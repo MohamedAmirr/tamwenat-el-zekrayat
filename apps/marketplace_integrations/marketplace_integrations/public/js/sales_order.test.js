@@ -1813,7 +1813,11 @@ test("a submitted Noon Sales Order gets the Noon Fulfillment group with one butt
 		noon_state: { actions: NOON_ALL_ACTIONS, cancelled_on_noon: false, shipments: noon_shipments() },
 	});
 	assert.deepEqual(required.filter((a) => a.endsWith("noon_fulfillment.js")), ["/assets/marketplace_integrations/js/noon_fulfillment.js"]);
-	assert.deepEqual(frm.buttons.map((b) => b.label), NOON_ALL_ACTIONS.map((a) => NOON_LABELS[a]));
+	// #391: Create Shipment and Mark Handed Over are retired (shipments come from a Delivery Note).
+	assert.deepEqual(
+		frm.buttons.map((b) => b.label),
+		NOON_ALL_ACTIONS.filter((a) => !["create_shipment", "mark_handed_over"].includes(a)).map((a) => NOON_LABELS[a])
+	);
 	assert.ok(frm.buttons.every((b) => b.group === "Noon Fulfillment"));
 	assert.equal(noon_calls.length, 1);
 	assert.equal(noon_calls[0].method, "marketplace_integrations.api.noon_fulfillment.get_available_actions");
@@ -2024,10 +2028,10 @@ test("the shipments summary lists every Delivery Note of a shipment", () => {
 
 test("a Closed submitted Noon Sales Order keeps the Noon Fulfillment buttons (the server decides)", async () => {
 	const { frm } = await refresh_noon(
-		{ noon_state: { actions: ["create_shipment", "mark_handed_over"], shipments: [] } },
+		{ noon_state: { actions: ["mark_out_of_stock", "retry"], shipments: [] } },
 		noon_so({ status: "Closed" })
 	);
-	assert.deepEqual(frm.buttons.map((b) => b.label), ["Create Shipment", "Mark Handed Over"]);
+	assert.deepEqual(frm.buttons.map((b) => b.label), ["Mark Out of Stock", "Retry"]);
 });
 
 test("Add AWB dialog: Courier is a one-option Noon Select sending lowercase noon", async () => {
@@ -2053,27 +2057,9 @@ test("a button opens its dialog and calls the endpoint with the linked Marketpla
 		noon_state: { actions: ["create_shipment", "cancel_shipment", "mark_handed_over", "release_stuck_oos_reservation"], shipments: noon_shipments() },
 	});
 	const by_label = Object.fromEntries(frm.buttons.map((b) => [b.label, b.action]));
-
-	by_label["Create Shipment"]();
-	await settle();
-	const create = dialogs[dialogs.length - 1];
-	assert.equal(create.config.title, "Create Noon Shipment");
-	assert.deepEqual(create.config.fields.map((f) => f.fieldname), ["units", "awb_nr"]);
-	create.config.primary_action({ units: ["1"] });
-	await settle();
-	const call = noon_calls[noon_calls.length - 1];
-	assert.equal(call.method, "marketplace_integrations.api.noon_fulfillment.create_shipment");
-	assert.deepEqual(call.args, { marketplace_order: "MO-NOON", mp_item_nrs: ["2"] });
-	assert.equal(frm.reloads, 1);
-
-	by_label["Mark Handed Over"]();
-	const handover = dialogs[dialogs.length - 1];
-	assert.equal(handover.config.title, "Mark Noon Shipment Handed Over");
-	handover.config.primary_action({ integration_shipment_nr: "ORD-1" });
-	await settle();
-	const handed = noon_calls[noon_calls.length - 1];
-	assert.equal(handed.method, "marketplace_integrations.api.noon_fulfillment.mark_handed_over");
-	assert.deepEqual(handed.args, { marketplace_order: "MO-NOON", integration_shipment_nr: "ORD-1" });
+	// #391: the old Create Shipment / Mark Handed Over buttons are not offered any more.
+	assert.equal(by_label["Create Shipment"], undefined);
+	assert.equal(by_label["Mark Handed Over"], undefined);
 
 	by_label["Cancel Shipment"]();
 	dialogs[dialogs.length - 1].config.primary_action({ integration_shipment_nr: "ORD-1" });

@@ -1935,3 +1935,60 @@ Release Out of Stock reservation,تحرير حجز النفاد من المخز�
 "Type or scan the AWB on the Noon sticker. Leave empty to use a Noon AWB.","اكتب أو امسح رقم بوليصة الشحن (AWB) المطبوع على ملصق Noon. اتركه فارغًا لاستخدام بوليصة شحن من Noon."
 AWB {0} is already in use.,بوليصة الشحن (AWB) {0} مستخدمة بالفعل.
 AWB Nr cannot be longer than {0} characters.,يجب ألا يزيد رقم بوليصة الشحن (AWB) عن {0} حرفًا.
+Pending,معلّق
+Carrier Error,خطأ شركة الشحن
+Noon shipment,شحنة Noon
+The transporter cannot be changed after the Noon shipment was started.,لا يمكن تغيير شركة النقل بعد بدء شحنة Noon.
+"Items, quantities and rows cannot be changed after the Noon shipment was started. They must match the units sent to Noon.",لا يمكن تغيير العناصر والكميات والصفوف بعد بدء شحنة Noon. يجب أن تطابق الوحدات المُرسلة إلى Noon.
+"The Noon shipment of this Delivery Note is not Created yet, so it cannot be submitted.",لم يتم إنشاء شحنة Noon الخاصة بمذكرة التسليم هذه بعد، لذلك لا يمكن اعتمادها.
+Unexpected error while creating the Noon shipment; see the Error Log.,خطأ غير متوقع أثناء إنشاء شحنة Noon؛ راجع سجل الأخطاء.
+The Noon shipment is {0}; check the order's Noon Fulfillment.,شحنة Noon في حالة {0}؛ راجع تنفيذ Noon للطلب.
+Item {0} has no enabled Noon product mapping for a SKU on this order.,لا يوجد ربط منتج Noon مفعّل للعنصر {0} مع أي SKU في هذا الطلب.
+Item {0} is mapped to more than one Noon SKU on this order ({1}).,العنصر {0} مربوط بأكثر من SKU واحد في Noon ضمن هذا الطلب ({1}).
+The quantity of Item {0} must be a whole number of units.,يجب أن تكون كمية العنصر {0} عددًا صحيحًا من الوحدات.
+"Item {0} needs {1} shippable unit(s) of SKU {2}, but only {3} are available.",يحتاج العنصر {0} إلى {1} وحدة قابلة للشحن من SKU {2}، لكن المتاح {3} فقط.
+This Delivery Note has no carrier shipment to retry.,لا توجد شحنة شركة شحن لإعادة المحاولة في مذكرة التسليم هذه.
+Noon shipments are now created from a Delivery Note. Open the Sales Order and use Create > Delivery Note.,تُنشأ شحنات Noon الآن من مذكرة التسليم. افتح أمر البيع واستخدم إنشاء > مذكرة تسليم.
+{0} failed on order {1} (Delivery Note {2}): {3},فشل {0} في الطلب {1} (مذكرة التسليم {2}): {3}
+ (Delivery Note: {0}), (مذكرة التسليم: {0})
+Creating the Noon shipment...,جارٍ إنشاء شحنة Noon...
+Noon shipment created. AWB: {0},تم إنشاء شحنة Noon. AWB: {0}
+Noon shipment failed: {0},فشلت شحنة Noon: {0}
+Retry Noon Shipment,إعادة محاولة شحنة Noon
+Retrying the Noon shipment...,جارٍ إعادة محاولة شحنة Noon...
+The Noon shipment is still being created. You can retry if it is not finished after {0} minutes.,لا تزال شحنة Noon قيد الإنشاء. يمكنك إعادة المحاولة إن لم تنتهِ بعد {0} دقيقة.
+The AWB (LR No) cannot be changed after the Noon shipment was started.,لا يمكن تغيير AWB (رقم LR) بعد بدء شحنة Noon.
+Supplier Noon (transporter) does not exist. Run bench migrate.,المورد Noon (شركة النقل) غير موجود. شغّل bench migrate.
+not found,غير موجودة
+"The Noon shipment of {0}, which this Delivery Note amends, is not Cancelled yet.",لم يتم إلغاء شحنة Noon الخاصة بـ {0}، الذي تعدّله مذكرة التسليم هذه، بعد.
+Noon could not be reached. Try again.,تعذّر الوصول إلى Noon. حاول مرة أخرى.
+Draft Delivery Note(s) {0} have a live Noon shipment. Cancel the Noon shipment and delete or cancel the Delivery Note first.,لدى مذكرات التسليم المسودة {0} شحنة Noon نشطة. ألغِ شحنة Noon واحذف مذكرة التسليم أو ألغِها أولًا.
+This Delivery Note has no Created Noon shipment.,لا توجد شحنة Noon منشأة لمذكرة التسليم هذه.
+This shipment has a Delivery Note. Do this from the Delivery Note instead.,لهذه الشحنة مذكرة تسليم. نفّذ هذا الإجراء من مذكرة التسليم بدلًا من ذلك.
+Cancelling the Noon shipment...,جارٍ إلغاء شحنة Noon...
+Please wait. The Delivery Note will continue once Noon has cancelled the shipment.,يرجى الانتظار. ستستمر مذكرة التسليم بعد أن تلغي Noon الشحنة.
+Noon refused to cancel the shipment,رفضت Noon إلغاء الشحنة
+The Delivery Note was not changed.,لم تتغير مذكرة التسليم.
+The Noon shipment is cancelled. You can now delete this Delivery Note.,تم إلغاء شحنة Noon. يمكنك الآن حذف مذكرة التسليم هذه.
+Retry AWB or Invoice,إعادة محاولة AWB أو الفاتورة
+Upload Shipment Invoice,رفع فاتورة الشحنة
+Close,إغلاق
+"The Noon shipment of this Delivery Note must be cancelled first. On the Delivery Note form use Cancel (a dialog cancels the Noon shipment first), or on a draft the Cancel Noon Shipment button, then cancel or delete the note.",يجب إلغاء شحنة Noon الخاصة بمذكرة التسليم هذه أولًا. في نموذج مذكرة التسليم استخدم إلغاء (يفتح حوارًا يلغي شحنة Noon أولًا)، أو في المسودة زر إلغاء شحنة Noon، ثم ألغِ المذكرة أو احذفها.
+"The Noon shipment of this Delivery Note may already exist on Noon. Use Retry Noon Shipment first (once it is Created it can be cancelled), or, if Noon keeps rejecting it, the Discard Noon Shipment button on the Delivery Note form.",قد تكون شحنة Noon الخاصة بمذكرة التسليم هذه موجودة بالفعل لدى Noon. استخدم إعادة محاولة شحنة Noon أولًا (وبعد إنشائها يمكن إلغاؤها)، أو، إذا استمرت Noon في رفضها، زر تجاهل شحنة Noon في نموذج مذكرة التسليم.
+"This Delivery Note cannot be cancelled until its Noon shipment is cancelled: use Cancel, which cancels the Noon shipment first.",لا يمكن إلغاء مذكرة التسليم هذه قبل إلغاء شحنة Noon الخاصة بها: استخدم إلغاء، فهو يلغي شحنة Noon أولًا.
+"This Delivery Note cannot be cancelled or deleted until its Noon shipment is cancelled: use the Cancel Noon Shipment button, then delete it.",لا يمكن إلغاء مذكرة التسليم هذه أو حذفها قبل إلغاء شحنة Noon الخاصة بها: استخدم زر إلغاء شحنة Noon ثم احذفها.
+Discard the failed Noon shipment? Nothing is sent to Noon: if Noon created it anyway it keeps existing there. Then use Retry Noon Shipment or delete this Delivery Note.,هل تريد تجاهل شحنة Noon الفاشلة؟ لن يُرسل شيء إلى Noon: وإذا كانت Noon قد أنشأتها فستبقى موجودة لديها. بعد ذلك استخدم إعادة محاولة شحنة Noon أو احذف مذكرة التسليم هذه.
+Discarding the Noon shipment...,جارٍ تجاهل شحنة Noon...
+Only a draft Delivery Note with a failed Noon shipment can be discarded.,يمكن تجاهل الشحنة فقط في مذكرة تسليم مسودة فشلت شحنة Noon الخاصة بها.
+Only a shipment in Error can be discarded. A Created shipment must be cancelled on Noon (Cancel Noon Shipment).,يمكن تجاهل الشحنة التي في حالة خطأ فقط. الشحنة المنشأة يجب إلغاؤها لدى Noon (إلغاء شحنة Noon).
+"Only a draft Delivery Note with a failed, cancelled or stuck Noon shipment can be retried.",يمكن إعادة المحاولة فقط لمذكرة تسليم مسودة فشلت شحنة Noon الخاصة بها أو أُلغيت أو تعثرت.
+"The Noon shipment was cancelled. Use Retry Noon Shipment to create a new one, or delete this Delivery Note.",تم إلغاء شحنة Noon. استخدم إعادة محاولة شحنة Noon لإنشاء شحنة جديدة، أو احذف مذكرة التسليم هذه.
+The Noon shipment of this Delivery Note is being cancelled.,يجري إلغاء شحنة Noon الخاصة بمذكرة التسليم هذه.
+Closing this dialog or reloading the page does not stop the Noon cancel once it has started. The Delivery Note itself is then still not cancelled: open it and cancel it again.,إغلاق هذه النافذة أو إعادة تحميل الصفحة لا يوقف إلغاء Noon بعد بدئه. وتبقى مذكرة التسليم نفسها غير ملغاة: افتحها وألغِها مرة أخرى.
+Cancelled,ملغاة
+Discarded,متجاهَل
+The carrier status cannot be changed by hand after the Noon shipment was started.,لا يمكن تغيير حالة شركة الشحن يدويًا بعد بدء شحنة Noon.
+The Noon shipment is still being created. Try again in a moment.,لا تزال شحنة Noon قيد الإنشاء. حاول مرة أخرى بعد قليل.
+"A Noon shipment retry is in progress for this Delivery Note. Wait for it to finish, then try again.",هناك إعادة محاولة لشحنة Noon قيد التنفيذ لمذكرة التسليم هذه. انتظر حتى تنتهي ثم حاول مرة أخرى.
+The Noon shipment was not cancelled,لم يتم إلغاء شحنة Noon
+The Noon shipment is still live and no cancel is running. Close this and try again.,لا تزال شحنة Noon نشطة ولا يوجد إلغاء قيد التنفيذ. أغلق هذه النافذة وحاول مرة أخرى.

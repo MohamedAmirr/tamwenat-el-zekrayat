@@ -198,6 +198,11 @@ def clear_deleted_delivery_note(doc, method=None):
 	The unresolved record is left as it is.
 	"""
 	try:
+		# No Delivery Note lock here on purpose. A note created from a Delivery Note-first Noon
+		# shipment is locked (note, then order) by delivery_note_shipment.guard_cancel_or_delete, which
+		# runs before this handler. An old-flow note keeps the order-then-note order that
+		# fulfillment.retry_unresolved_handovers uses (it holds the order lock, then saves the draft
+		# note), so locking the note first here would invert that order and could deadlock.
 		names = [doc.name] + ([doc.amended_from] if doc.get("amended_from") else [])
 		rows = {}
 		for name in names:

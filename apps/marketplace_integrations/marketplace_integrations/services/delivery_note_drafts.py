@@ -113,6 +113,8 @@ def create_draft_delivery_note(marketplace_order, units, queue_sync=True, expect
 				target = _merge_into_draft(add_to, delivery_note.items)
 				result["added_to_existing"] = True
 			else:
+				# #391: this draft is for a shipment that already exists; not a Delivery Note-first note.
+				delivery_note.flags.skip_carrier_shipment = True
 				delivery_note.insert()
 				target = delivery_note
 			result["delivery_note"] = target.name
@@ -144,6 +146,7 @@ def _merge_into_draft(name, rows):
 			current.stock_qty = flt(current.qty) * (flt(current.conversion_factor) or 1)
 		else:
 			target.append("items", row.as_dict(no_default_fields=True))
+	target.flags.skip_carrier_shipment = True  # #391: see create_draft_delivery_note
 	target.save()
 	return target
 
