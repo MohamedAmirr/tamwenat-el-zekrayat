@@ -20,6 +20,7 @@ Keep this file short. Load these on demand rather than re-deriving them:
 - `docs/frappe-best-practices.md` — cross-cutting Frappe rules: permissions, data integrity, background work, verification, version compatibility, and "Test site vs dev site".
 - `docs/ui-customization.md` — Desk UI customization: workspace/sidebar, forms, lists, reports, custom pages.
 - `docs/marketplace-integrations/architecture.md` — target shared marketplace architecture: connection/account/mapping/inventory boundaries, import shapes, and migration rules. Read this for all new marketplace work.
+- `docs/marketplace-integrations/delivery-note-first.md` — decided 2026-10-29 fulfillment direction: a draft Delivery Note created from the Sales Order triggers the platform/carrier adapter (Noon first, then Bosta). Prefer ERPNext native features. Read before any shipment/Delivery Note work.
 - `docs/talabat-integration/architecture.md` — historical map of the now-removed legacy `talabat_integration` app. Closed Talabat issues and this doc remain evidence of proven behavior/security decisions; consult them when touching Talabat code in `marketplace_integrations` so proven behavior isn't rediscovered or lost.
 - `docs/frappe-cloud-publish.md` — `dev`/`prod` branch model and `scripts/publish-prod.sh --pr`: publishes `apps/marketplace_integrations` as the root of the PR-only default branch `prod` so Frappe Cloud can install it.
 - `docs/ci.md` — GitHub Actions CI: Stage 1 checks (PRs into `dev`), how to run them locally, required-check name, Stage 2 notes.

@@ -25,6 +25,11 @@
 	// Noon is the only courier; the value Noon documents for its own AWBs.
 	const NOON_COURIER = "noon";
 
+	// #391: shipments are created from a draft Delivery Note (Create > Delivery Note), so the
+	// old Create Shipment and Mark Handed Over buttons are no longer shown (the endpoints refuse).
+	// The dialogs below stay until the old code is removed (sub-issue 3 of #392).
+	const RETIRED_ACTIONS = ["create_shipment", "mark_handed_over"];
+
 	// A context is rebuilt on every form refresh from the get_available_actions result.
 	function build_context(frm, state) {
 		return {
@@ -106,8 +111,8 @@
 
 	function render_noon_fulfillment_buttons(frm, ctx, available_actions) {
 		const group = __("Noon Fulfillment");
-		const buttons = noon_fulfillment_buttons(ctx).filter((button) =>
-			can_use_noon_fulfillment(button.action)
+		const buttons = noon_fulfillment_buttons(ctx).filter(
+			(button) => !RETIRED_ACTIONS.includes(button.action) && can_use_noon_fulfillment(button.action)
 		);
 		select_noon_fulfillment_buttons(buttons, available_actions).forEach((button) =>
 			frm.add_custom_button(button.label, button.click, group)

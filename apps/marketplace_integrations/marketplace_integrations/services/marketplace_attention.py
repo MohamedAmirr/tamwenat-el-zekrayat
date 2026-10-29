@@ -1048,14 +1048,33 @@ def _collect_fulfillment_errors(accounts):
 		):
 			references[order.name] = order.platform_order_reference
 
+	# #391: Delivery Notes named by refusals logged before any shipment existed; one lookup for all.
+	logged_notes = {
+		cstr(parts_of(log)[2].get("delivery_note")).strip() for log in errors
+	} - {""}
+	open_notes = set()
+	for chunk in _chunks(logged_notes):
+		open_notes.update(
+			frappe.get_all(
+				"Delivery Note",
+				filters={"name": ["in", chunk], "docstatus": 0, "custom_carrier_status": "Error"},
+				pluck="name",
+			)
+		)
+
 	items = []
 	seen = set()
 	for log in errors:
-		action, shipment, _data = parts_of(log)
+		action, shipment, data = parts_of(log)
 		key = (log.marketplace_order, action, shipment)
-		if key in seen:
+		# #391: a refusal before any shipment exists is logged against the Delivery Note
+		# it came from; it is open only while that draft note still shows the error.
+		note = cstr(data.get("delivery_note")).strip()
+		if note and note not in open_notes:
 			continue
-		seen.add(key)
+		if (key, note) in seen:
+			continue
+		seen.add((key, note))
 		stamp = stamp_of(log)
 		resolved_by = [last_success.get(key)]
 		if shipment:
@@ -1066,15 +1085,19 @@ def _collect_fulfillment_errors(accounts):
 			continue
 		label = _fulfillment_action_label(action)
 		message = _fulfillment_message(log) or _("{0} failed - open the order.").format(label)
+		order_reference = references.get(log.marketplace_order) or log.marketplace_order or ""
+		explanation = (
+			_("{0} failed on order {1} (Delivery Note {2}): {3}").format(label, order_reference, note, message)
+			if note
+			else _("{0} failed on order {1}: {2}").format(label, order_reference, message)
+		)
 		items.append(
 			_item(
 				FULFILLMENT_ERROR,
 				accounts[log.marketplace_account],
 				"Marketplace Sync Log",
 				log.name,
-				_("{0} failed on order {1}: {2}").format(
-					label, references.get(log.marketplace_order) or log.marketplace_order or "", message
-				),
+				explanation,
 				log.attempted_at or log.creation,
 				NEXT_VIEW_ERROR,
 			)
@@ -1153,6 +1176,7 @@ def _collect_noon_rollups(accounts):
 				"pending_oos": 0,
 				"stuck_pending": 0,
 				"not_handed_over": 0,
+				"notes": [],
 			},
 		)
 
@@ -1175,12 +1199,15 @@ def _collect_noon_rollups(accounts):
 		# must not keep the order flagged.
 		filters={"status": ["not in", ["Cancelled", "Discarded"]]},
 		or_filters={"status": ["in", NOON_SHIPMENT_ATTENTION_STATUSES], "invoice_status": "Error"},
-		fields=["parent", "status", "invoice_status"],
+		fields=["parent", "status", "invoice_status", "delivery_note"],
 		limit_page_length=0,
 	)
 	for shipment in shipments:
 		entry = rollup(shipment.parent)
 		entry["shipments"] += 1
+		# #391: name the Delivery Note a problem shipment was created from.
+		if shipment.delivery_note and shipment.delivery_note not in entry["notes"]:
+			entry["notes"].append(shipment.delivery_note)
 		if shipment.status in NOON_SHIPMENT_ATTENTION_STATUSES:
 			if entry["worst"] != "Error":
 				entry["worst"] = shipment.status
@@ -1233,6 +1260,8 @@ def _collect_noon_rollups(accounts):
 			text = _("{0} shipment(s) need attention").format(entry["shipments"])
 			if entry["worst"]:
 				text += _(" (worst: {0})").format(_(entry["worst"]))
+			if entry["notes"]:
+				text += _(" (Delivery Note: {0})").format(", ".join(entry["notes"]))
 			parts.append(text)
 		if entry["invoice_errors"]:
 			parts.append(_("{0} invoice upload(s) failed").format(entry["invoice_errors"]))
