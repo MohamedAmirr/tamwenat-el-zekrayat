@@ -63,6 +63,7 @@ import json
 
 import frappe
 from frappe import _
+from frappe.query_builder.functions import Lower
 from frappe.utils import cstr, flt, get_datetime, now_datetime
 
 from marketplace_integrations.integrations.noon import handover_state
@@ -113,7 +114,7 @@ def _order_invoice_job_id(order_name, idempotency_key):
 # ---------------------------------------------------------------------------
 
 
-def _lock_and_load_order(marketplace_order_name):
+def _lock_and_load_order(marketplace_order_name, commit_first=True, as_system=False):
 	"""Lock, then load, one Marketplace Order row (#146 decision 10).
 
 	Round-5 fix (review finding #1): commits HERE, immediately before the
@@ -136,9 +137,15 @@ def _lock_and_load_order(marketplace_order_name):
 	this commit placement by hand. See ``docs/frappe-conventions.md`` for the
 	general rule this fixes.
 	"""
-	frappe.db.commit()
+	if commit_first:
+		# False only for the Delivery Note-first worker, which commits and locks the Delivery Note
+		# row itself first (nothing but locking reads between that lock and this one).
+		frappe.db.commit()
 	frappe.db.get_value("Marketplace Order", marketplace_order_name, "name", for_update=True)
 	order = frappe.get_doc("Marketplace Order", marketplace_order_name)
+	# as_system: the Delivery Note entry points (delivery_note_shipment.py) checked document-level
+	# permission on the note and write the order as the system (a Stock User has no Marketplace Order rights).
+	order.flags.ignore_permissions = bool(as_system)
 	if order.platform != "Noon":
 		frappe.throw(_("Marketplace Order {0} is not a Noon order.").format(order.name))
 	return order
@@ -319,11 +326,15 @@ def get_available_actions(order):
 		actions += ["create_shipment", "mark_out_of_stock"]
 
 	created = [row for row in shipments if row.status == "Created"]
+	# #393: for a shipment with a Delivery Note, Add AWB, the shipment invoice and their Retry live on
+	# the note; only shipments without one keep them here.
+	plain = [row for row in created if not shipment_has_note(row)]
 	if created:
 		# cancel_shipment() refuses while a Delivery Note of the shipment is live.
 		if any(not _live_delivery_notes(row) for row in created):
 			actions.append("cancel_shipment")
-		actions.append("add_awb")
+		if plain:
+			actions.append("add_awb")
 	# mark_handed_over(): a Created shipment with no live draft/submitted Delivery Note yet, or
 	# with handed-over units still unresolved (#368).
 	if any(not _handed_over(row) or handover_state.load_entries(row) for row in created):
@@ -331,7 +342,7 @@ def get_available_actions(order):
 	# upload_invoice() also refuses while an upload is already Pending, and
 	# (no mixing) while an order-level invoice is Pending/Uploaded.
 	if not _order_invoice_blocks_shipment_invoice(order) and any(
-		row.invoice_status != "Pending" for row in created
+		row.invoice_status != "Pending" for row in plain
 	):
 		actions.append("upload_invoice")
 	if (
@@ -344,14 +355,14 @@ def get_available_actions(order):
 	# Mirrors retry(): Pending/Error re-run CreateShipment, Cancel Pending
 	# re-runs CancelShipment, and a Created shipment can retry a Pending
 	# AWB added through Add AWB or a Pending/Error invoice.
-	created_nrs = {row.integration_shipment_nr for row in created}
+	plain_nrs = {row.integration_shipment_nr for row in plain}
 	if (
 		statuses & {"Pending", "Error", "Cancel Pending"}
 		or any(
-			row.integration_shipment_nr in created_nrs and row.status == "Pending"
+			row.integration_shipment_nr in plain_nrs and row.status == "Pending"
 			for row in order.noon_shipment_awbs or []
 		)
-		or any(row.invoice_status in ("Pending", "Error") for row in created)
+		or any(row.invoice_status in ("Pending", "Error") for row in plain)
 	):
 		actions.append("retry")
 	if created and order.noon_order_invoice_status in ("Pending", "Error"):
@@ -389,7 +400,9 @@ def _with_readable_keys(order, request_data):
 	return {**readable, **request_data}
 
 
-def _log_fulfillment(order, action, status, request_data=None, response_data=None, traceback_text=None):
+def _log_fulfillment(
+	order, action, status, request_data=None, response_data=None, traceback_text=None, commit=True
+):
 	"""One committed Marketplace Sync Log row per Noon fulfillment call
 	(#146 decision 21). Never includes invoice bytes - callers are
 	responsible for keeping ``request_data`` free of them."""
@@ -412,7 +425,8 @@ def _log_fulfillment(order, action, status, request_data=None, response_data=Non
 			"traceback": traceback_text,
 		}
 	).insert(ignore_permissions=True)
-	frappe.db.commit()
+	if commit:  # False inside a caller's own transaction (a Delivery Note cancel/delete guard)
+		frappe.db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -420,16 +434,144 @@ def _log_fulfillment(order, action, status, request_data=None, response_data=Non
 # ---------------------------------------------------------------------------
 
 
-def create_shipment(marketplace_order_name, mp_item_nrs, awb_source="Noon"):
+AWB_NR_MAX_LENGTH = 140  # Data column length of both AWB Nr fields
+
+
+def _awb_already_used_message(awb_nr):
+	# Deliberately does not name the other order.
+	return _("AWB {0} is already in use.").format(frappe.bold(frappe.utils.escape_html(awb_nr)))
+
+
+def _pool_awb_exists_ignoring_case(marketplace_account, awb_nr):
+	noon_awb = frappe.qb.DocType("Noon AWB")
+	return bool(
+		frappe.qb.from_(noon_awb)
+		.select(noon_awb.name)
+		.where(noon_awb.marketplace_account == marketplace_account)
+		.where(Lower(noon_awb.awb_nr) == awb_nr.lower())
+		.limit(1)
+		.run()
+	)
+
+
+def _record_typed_awb(order, account, awb_nr, integration_shipment_nr):
+	"""Reserve a sticker AWB typed or scanned by the user (the order is locked).
+
+	Rejected, ignoring letter case, when the AWB is already on any shipment AWB row of an
+	order on the same account (any shipment status) or on a ``Noon AWB`` pool row of the
+	account (Available or Used). Otherwise it is inserted as a ``Used`` ``Noon AWB`` row,
+	so the pool's unique key rejects an exact-case simultaneous request on another order
+	at DB level. Residual gap: two simultaneous requests differing only in letter case are
+	not blocked at DB level (the identity key stays case-sensitive so existing pool rows
+	keep matching their own key)."""
+	from marketplace_integrations.marketplace_integrations.doctype.noon_awb.noon_awb import (
+		compute_awb_identity_key,
+	)
+
+	if len(awb_nr) > AWB_NR_MAX_LENGTH:
+		frappe.throw(_("AWB Nr cannot be longer than {0} characters.").format(AWB_NR_MAX_LENGTH))
+	lowered = awb_nr.lower()
+	shipment_awb = frappe.qb.DocType("Marketplace Order Shipment AWB")
+	parents = (
+		frappe.qb.from_(shipment_awb)
+		.select(shipment_awb.parent)
+		.where(shipment_awb.parenttype == "Marketplace Order")
+		.where(Lower(shipment_awb.awb_nr) == lowered)
+		.run(pluck=True)
+	)
+	if parents and frappe.db.exists(
+		"Marketplace Order", {"name": ["in", parents], "marketplace_account": order.marketplace_account}
+	):
+		frappe.throw(_awb_already_used_message(awb_nr))
+	if _pool_awb_exists_ignoring_case(order.marketplace_account, awb_nr) or frappe.db.exists(
+		"Noon AWB", {"awb_identity_key": compute_awb_identity_key(order.marketplace_account, awb_nr)}
+	):
+		frappe.throw(_awb_already_used_message(awb_nr))
+	try:
+		# ignore_permissions: the endpoint already checked write on the Marketplace Order,
+		# and the pool's own generate() inserts Noon AWB rows the same way.
+		frappe.get_doc(
+			{
+				"doctype": "Noon AWB",
+				"marketplace_account": order.marketplace_account,
+				"awb_nr": awb_nr,
+				"country_code": account.noon_country_code,
+				"status": "Used",
+				"marketplace_order": order.name,
+				"integration_shipment_nr": integration_shipment_nr,
+				"used_on": now_datetime(),
+			}
+		).insert(ignore_permissions=True)
+	except (frappe.UniqueValidationError, frappe.DuplicateEntryError):
+		# Counter-named doctype: the unique awb_identity_key collision is a
+		# UniqueValidationError with a "must be unique" message queued.
+		frappe.clear_messages()
+		frappe.throw(_awb_already_used_message(awb_nr))
+
+
+def add_pending_shipment(order, account, units, awb_nr=None, delivery_note=None):
+	"""Append a Pending shipment with its unit rows (and a typed sticker AWB row) to ``order``
+	(locked by the caller, which also saves and commits) and return its shipment number.
+
+	``units`` is ``[{"mp_item_nr", "partner_sku"}, ...]`` already checked as shippable.
+	``delivery_note`` (Delivery Note-first flow, ``delivery_note_shipment.py``) is recorded on
+	the shipment row. A typed AWB is checked and reserved by ``_record_typed_awb`` (it throws
+	when the AWB is used elsewhere)."""
+	integration_shipment_nr = _next_shipment_number(order)
+	awb_nr = cstr(awb_nr).strip()
+	if awb_nr:
+		_record_typed_awb(order, account, awb_nr, integration_shipment_nr)
+	shipment = order.append(
+		"noon_shipments",
+		{
+			"integration_shipment_nr": integration_shipment_nr,
+			"status": "Pending",
+			"awb_source": "Noon",
+			# Explicit: an appended child row without `creation` inherits the
+			# PARENT's creation on save, which would make the #164 stuck-Pending
+			# age count from the order's import time instead of this shipment's.
+			"creation": now_datetime(),
+		},
+	)
+	if delivery_note:
+		handover_state.record_note(shipment, delivery_note)
+	for unit in units:
+		order.append(
+			"noon_shipment_units",
+			{
+				"integration_shipment_nr": integration_shipment_nr,
+				"mp_item_nr": unit["mp_item_nr"],
+				"partner_sku": unit["partner_sku"],
+			},
+		)
+	if awb_nr:
+		order.append(
+			"noon_shipment_awbs",
+			{
+				"integration_shipment_nr": integration_shipment_nr,
+				"courier": NOON_COURIER,
+				"awb_nr": awb_nr,
+				"source": "Noon",
+				"status": "Pending",
+			},
+		)
+	return integration_shipment_nr
+
+
+def create_shipment(marketplace_order_name, mp_item_nrs, awb_source="Noon", awb_nr=None):
 	"""Request path: allocate a shipment number, reject any unit already in
 	an active shipment, write Pending shipment/unit/AWB rows, commit, then
-	enqueue the Noon write (#146 decision 13/14/20)."""
+	enqueue the Noon write (#146 decision 13/14/20).
+
+	``awb_nr`` is an optional AWB printed on a Noon sticker. When given (spaces-only
+	counts as empty) it is recorded as the shipment's AWB; otherwise the AWB is
+	claimed or fetched by the worker as before."""
 	# Noon is the only courier: every new shipment takes a Noon AWB. Shipments
 	# already stored with awb_source "Own Courier" stay readable and retryable.
 	if awb_source != "Noon":
 		frappe.throw(_("New shipments can only use a Noon AWB."))
 	order = _lock_and_load_order(marketplace_order_name)
-	_account_and_client(order)
+	account, _client = _account_and_client(order)
 
 	mp_item_nrs = [cstr(nr).strip() for nr in (mp_item_nrs or []) if cstr(nr).strip()]
 	if not mp_item_nrs:
@@ -444,29 +586,8 @@ def create_shipment(marketplace_order_name, mp_item_nrs, awb_source="Noon"):
 			)
 		)
 
-
-	integration_shipment_nr = _next_shipment_number(order)
-	order.append(
-		"noon_shipments",
-		{
-			"integration_shipment_nr": integration_shipment_nr,
-			"status": "Pending",
-			"awb_source": awb_source,
-			# Explicit: an appended child row without `creation` inherits the
-			# PARENT's creation on save, which would make the #164 stuck-Pending
-			# age count from the order's import time instead of this shipment's.
-			"creation": now_datetime(),
-		},
-	)
-	for mp_item_nr in mp_item_nrs:
-		order.append(
-			"noon_shipment_units",
-			{
-				"integration_shipment_nr": integration_shipment_nr,
-				"mp_item_nr": mp_item_nr,
-				"partner_sku": shippable[mp_item_nr],
-			},
-		)
+	units = [{"mp_item_nr": nr, "partner_sku": shippable[nr]} for nr in mp_item_nrs]
+	integration_shipment_nr = add_pending_shipment(order, account, units, awb_nr)
 	order.save()
 	frappe.db.commit()
 
@@ -678,7 +799,10 @@ def run_create_shipment(marketplace_order_name, integration_shipment_nr):
 		return
 
 	# Decision 14: a Noon-generated AWB is fetched/saved/committed exactly
-	# once, before CreateShipment, and reused on every retry.
+	# once, before CreateShipment, and reused on every retry. A row may already
+	# exist at this point because the user typed the AWB from a Noon sticker in
+	# create_shipment(); then the pool claim and GetNoonLogisticsAWBs are skipped
+	# and every retry resends that same AWB.
 	awb_rows = [
 		row
 		for row in order.noon_shipment_awbs or []
@@ -964,31 +1088,53 @@ def _shipment_status_changed_message(expected_status, actual_status):
 # ---------------------------------------------------------------------------
 
 
-def cancel_shipment(marketplace_order_name, integration_shipment_nr):
+def cancel_shipment(marketplace_order_name, integration_shipment_nr, delivery_note=None, as_system=False):
 	"""Request path (#146 decision 17): only ``Created`` shipments can be
 	cancelled. The UI warns the caller that Noon also cancels the
 	shipment's units - this function itself does not re-derive that
-	warning."""
-	order = _lock_and_load_order(marketplace_order_name)
+	warning.
+
+	``delivery_note`` (#393) is the Delivery Note entry point
+	(``delivery_note_shipment.cancel_for_note``): the note's own cancel or delete is what is being
+	prepared, so the "still has a live Delivery Note" refusal does not apply, a ``Cancel Pending``
+	shipment (a refused or failed earlier attempt) may be sent again, and the job also updates the
+	note afterwards (``delivery_note_shipment.run_cancel``)."""
+	order = _lock_and_load_order(marketplace_order_name, as_system=as_system)
 	_account_and_client(order)
 	shipment = _find_shipment_row(order, integration_shipment_nr)
-	if not shipment or shipment.status != "Created":
+	allowed = ("Created", "Cancel Pending") if delivery_note else ("Created",)
+	if not shipment or shipment.status not in allowed:
 		frappe.throw(_("Shipment {0} is not in a cancellable state.").format(integration_shipment_nr))
-	_refuse_while_delivery_note_is_live(shipment)
+	if not delivery_note:
+		_refuse_while_delivery_note_is_live(shipment)
 	shipment.status = "Cancel Pending"
+	shipment.last_error = None
 	order.save()
 	frappe.db.commit()
 
+	if delivery_note:
+		from marketplace_integrations.integrations.noon import delivery_note_shipment
+
+		method = delivery_note_shipment.run_cancel
+		extra = {"delivery_note": delivery_note}
+	else:
+		method, extra = run_cancel_shipment, {}
 	job = frappe.enqueue(
-		run_cancel_shipment,
+		method,
 		queue="long",
 		timeout=300,
 		job_id=f"{RQ_JOB_PREFIX}-{order.name}-{integration_shipment_nr}-cancel",
 		deduplicate=True,
 		marketplace_order_name=order.name,
 		integration_shipment_nr=integration_shipment_nr,
+		**extra,
 	)
 	return {"queued": job is not None}
+
+
+def _is_definite_refusal(status_code):
+	"""A 4xx answer other than 408/429 means Noon refused; anything else may or may not have acted."""
+	return 400 <= status_code < 500 and status_code not in (408, 429)
 
 
 def run_cancel_shipment(marketplace_order_name, integration_shipment_nr):
@@ -1046,6 +1192,11 @@ def run_cancel_shipment(marketplace_order_name, integration_shipment_nr):
 		return
 	if response.status_code != 200:
 		shipment.last_error = client.error_message(response)[:500]
+		if shipment_has_note(shipment) and _is_definite_refusal(response.status_code):
+			# #393: Noon answered "no" (a 4xx), so the shipment still stands: back to Created with the
+			# error, and the Delivery Note keeps working. A 5xx, timeout or 429 stays Cancel Pending
+			# (unknown outcome). Shipments without a note keep the old behaviour.
+			shipment.status = "Created"
 		order.save()
 		frappe.db.commit()
 		_log_fulfillment(
@@ -1080,6 +1231,14 @@ def _handed_over(shipment):
 	"""True once the shipment has a live Delivery Note or was recorded as handed over (its units
 	were already covered by a Delivery Note someone else made)."""
 	return bool(_live_delivery_notes(shipment) or shipment.handed_over_on)
+
+
+def shipment_has_note(shipment):
+	"""True for a shipment created from a Delivery Note (#391/#393): it has a note and was never
+	recorded as handed over. Only these do Add AWB, the shipment invoice and their Retry on the note.
+	An old-flow shipment whose note came from Mark Handed Over has ``handed_over_on`` set and keeps its
+	Sales Order actions."""
+	return bool(handover_state.shipment_notes(shipment)) and not shipment.get("handed_over_on")
 
 
 def _refuse_while_delivery_note_is_live(shipment):
@@ -1348,9 +1507,9 @@ def release_stuck_oos_reservation(marketplace_order_name):
 # ---------------------------------------------------------------------------
 
 
-def add_awb(marketplace_order_name, integration_shipment_nr, courier, awb_nr):
+def add_awb(marketplace_order_name, integration_shipment_nr, courier, awb_nr, as_system=False):
 	"""Request path (#146 decision 16): only ``Created`` shipments."""
-	order = _lock_and_load_order(marketplace_order_name)
+	order = _lock_and_load_order(marketplace_order_name, as_system=as_system)
 	_account_and_client(order)
 	shipment = _find_shipment_row(order, integration_shipment_nr)
 	if not shipment or shipment.status != "Created":
@@ -1807,12 +1966,12 @@ def _shipment_invoices_block_order_invoice(order):
 	return any(row.invoice_status in ("Pending", "Uploaded") for row in order.noon_shipments or [])
 
 
-def upload_invoice(marketplace_order_name, integration_shipment_nr, file_url, invoice_nr, issued_at):
+def upload_invoice(marketplace_order_name, integration_shipment_nr, file_url, invoice_nr, issued_at, as_system=False):
 	"""Request path (#146 decision 19): only ``Created`` shipments. Reads
 	and validates the File here (never logs its bytes), generates a fresh
 	idempotency key for this explicit upload action, and writes Pending
 	invoice state before enqueuing the actual Noon call."""
-	order = _lock_and_load_order(marketplace_order_name)
+	order = _lock_and_load_order(marketplace_order_name, as_system=as_system)
 	_account_and_client(order)
 	shipment = _find_shipment_row(order, integration_shipment_nr)
 	if not shipment or shipment.status != "Created":
@@ -2150,13 +2309,31 @@ def retry_order_invoice(marketplace_order_name):
 # ---------------------------------------------------------------------------
 
 
-def retry(marketplace_order_name, integration_shipment_nr):
+def retry(marketplace_order_name, integration_shipment_nr, as_system=False):
 	"""Re-run a Pending/Error shipment's last action (#146 decision 20)."""
-	order = _lock_and_load_order(marketplace_order_name)
+	order = _lock_and_load_order(marketplace_order_name, as_system=as_system)
 	shipment = _find_shipment_row(order, integration_shipment_nr)
 	if not shipment:
 		frappe.throw(_("Shipment {0} was not found.").format(integration_shipment_nr))
 
+	note = shipment.delivery_note if shipment_has_note(shipment) else None
+	if note and frappe.db.get_value("Delivery Note", note, "docstatus") == 0 and shipment.status in (
+		"Pending",
+		"Error",
+		"Cancel Pending",
+	):
+		# #391/#393: a shipment created from a Delivery Note is retried through that note (same job
+		# ids and write-back), so the note and the shipment cannot diverge and only one job runs.
+		# Writing the note needs its own permission, not only the Marketplace Order's.
+		from marketplace_integrations.integrations.noon import delivery_note_shipment
+
+		frappe.has_permission("Delivery Note", "write", doc=note, throw=True)
+		frappe.db.commit()  # release the order lock: the note is always locked before the order
+		if shipment.status == "Cancel Pending":
+			# the cancel job of the note (run_cancel) shares this job id with run_cancel_shipment, so a
+			# plain re-queue here could pre-empt it and leave the note un-updated
+			return delivery_note_shipment.resend_cancel(note, order.name, integration_shipment_nr)
+		return delivery_note_shipment.requeue(note)
 	if shipment.status in ("Pending", "Error"):
 		job = frappe.enqueue(
 			run_create_shipment,

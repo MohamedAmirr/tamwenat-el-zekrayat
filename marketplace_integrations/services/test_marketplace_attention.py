@@ -785,6 +785,8 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		account = self.make_noon_account()
 		order = self.make_order(account, platform_order_reference="21873645")
 		no_reference = self.make_order(account)
+		# Marketplace Order.before_save refills an empty reference with external_order_id, so blank it in the DB.
+		frappe.db.set_value("Marketplace Order", no_reference.name, "platform_order_reference", "", update_modified=False)
 		verbs = {
 			"CreateShipment": "Create shipment",
 			"GetShipment": "Check shipment on Noon",

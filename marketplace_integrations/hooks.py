@@ -41,6 +41,7 @@ app_include_css = "/assets/marketplace_integrations/css/bosta_state.css"
 # include js in doctype views
 doctype_js = {
 	"Sales Order": "public/js/sales_order.js",
+	"Delivery Note": "public/js/delivery_note.js",
 	"Bosta Shipment": "public/js/bosta_shipment.js",
 }
 doctype_list_js = {"Sales Order": "public/js/sales_order_list.js"}
@@ -165,10 +166,24 @@ _RECHECK_EVENTS = {
 # also runs the handler that clears that link (it never raises). on_cancel keeps the link on
 # purpose: the amend flow re-links through amended_from (integrations/noon/handover_state.py).
 _HANDOVER_CLEAR_HANDLER = "marketplace_integrations.integrations.noon.handover_state.clear_deleted_delivery_note"
+# #391: Delivery Note-first Noon fulfillment (services/carrier_shipments.py). after_insert only queues
+# the shipment job (enqueue_after_commit, deduplicated job id): it never raises and makes no HTTP call.
+# validate, before_submit, before_cancel and on_trash (#393) are deliberate refusals, so they do raise:
+# transporter, lr_no, carrier status and items locked once the shipment is started; no submit until it is
+# Created; no cancel or delete while its Noon shipment is live (a shipment that never reached Noon is
+# discarded locally). The Sales Order before_cancel refuses while a draft note has a live shipment. All
+# only touch Delivery Notes of a submitted Noon Sales Order.
+_CARRIER_GUARD = "marketplace_integrations.services.carrier_shipments.guard_cancel_or_delete"
 doc_events = {
 	"Delivery Note": {
 		**_RECHECK_EVENTS,
-		"on_trash": [_RECHECK_HANDLER, _HANDOVER_CLEAR_HANDLER],
+		# The guard comes first: it refuses (or discards a shipment that never reached Noon) before
+		# the handover handler resets the shipment's note link.
+		"on_trash": [_CARRIER_GUARD, _RECHECK_HANDLER, _HANDOVER_CLEAR_HANDLER],
+		"before_cancel": _CARRIER_GUARD,
+		"after_insert": "marketplace_integrations.services.carrier_shipments.queue_shipment",
+		"validate": "marketplace_integrations.services.carrier_shipments.validate_delivery_note",
+		"before_submit": "marketplace_integrations.services.carrier_shipments.require_shipment_created",
 	},
 	"Sales Invoice": _RECHECK_EVENTS,
 	"Payment Entry": _RECHECK_EVENTS,
@@ -180,6 +195,8 @@ doc_events = {
 		"on_trash": "marketplace_integrations.services.noon_item_edit_guard.block_row_remove",
 	},
 	"Sales Order": {
+		# #393: ERPNext only blocks on submitted links; a draft Delivery Note with a live Noon shipment must block too.
+		"before_cancel": "marketplace_integrations.services.carrier_shipments.refuse_sales_order_cancel",
 		"on_update_after_submit": _RECHECK_HANDLER,
 		"on_cancel": _RECHECK_HANDLER,
 	},
@@ -210,8 +227,8 @@ doc_events = {
 # polling, never a document hook. api/test_talabat_catalog.py's
 # test_no_catalog_document_events_are_registered depends on this app registering
 # no doc_events for the catalog doctypes; do not add one for them here. The
-# only doc_events are the #364 Marketplace Order re-check handlers and the #368 Noon Sales
-# Order Item row check above.
+# only doc_events are the #364 Marketplace Order re-check handlers, the #368 Noon Sales
+# Order Item row check and the #391/#393 Delivery Note and Sales Order carrier handlers above.
 scheduler_events = {
 	"hourly": [
 		"marketplace_integrations.integrations.shopify.webhooks.retry_errored_webhook_deliveries",
@@ -360,6 +377,8 @@ fixtures = [
 					"Sales Order-custom_bosta_delivery_status",
 					"Payment Entry-custom_marketplace_order",
 					"Payment Entry-custom_marketplace_transaction_id",
+					"Delivery Note-custom_carrier_status",
+					"Delivery Note-custom_carrier_error",
 				],
 			]
 		],
