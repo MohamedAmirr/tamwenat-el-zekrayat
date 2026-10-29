@@ -1938,7 +1938,7 @@ AWB Nr cannot be longer than {0} characters.,يجب ألا يزيد رقم بو�
 Pending,معلّق
 Carrier Error,خطأ شركة الشحن
 Noon shipment,شحنة Noon
-The transporter cannot be changed after the Noon shipment was started.,لا يمكن تغيير شركة النقل بعد بدء شحنة Noon.
+The carrier cannot be changed after the Noon shipment was started.,لا يمكن تغيير شركة الشحن بعد بدء شحنة Noon.
 "Items, quantities and rows cannot be changed after the Noon shipment was started. They must match the units sent to Noon.",لا يمكن تغيير العناصر والكميات والصفوف بعد بدء شحنة Noon. يجب أن تطابق الوحدات المُرسلة إلى Noon.
 "The Noon shipment of this Delivery Note is not Created yet, so it cannot be submitted.",لم يتم إنشاء شحنة Noon الخاصة بمذكرة التسليم هذه بعد، لذلك لا يمكن اعتمادها.
 Unexpected error while creating the Noon shipment; see the Error Log.,خطأ غير متوقع أثناء إنشاء شحنة Noon؛ راجع سجل الأخطاء.
@@ -1957,8 +1957,8 @@ Noon shipment failed: {0},فشلت شحنة Noon: {0}
 Retry Noon Shipment,إعادة محاولة شحنة Noon
 Retrying the Noon shipment...,جارٍ إعادة محاولة شحنة Noon...
 The Noon shipment is still being created. You can retry if it is not finished after {0} minutes.,لا تزال شحنة Noon قيد الإنشاء. يمكنك إعادة المحاولة إن لم تنتهِ بعد {0} دقيقة.
-The AWB (LR No) cannot be changed after the Noon shipment was started.,لا يمكن تغيير AWB (رقم LR) بعد بدء شحنة Noon.
-Supplier Noon (transporter) does not exist. Run bench migrate.,المورد Noon (شركة النقل) غير موجود. شغّل bench migrate.
+The AWB / Tracking No cannot be changed after the Noon shipment was started.,لا يمكن تغيير رقم بوليصة الشحن / التتبع بعد بدء شحنة Noon.
+Supplier Noon (carrier) does not exist. Run bench migrate.,المورد Noon (شركة الشحن) غير موجود. شغّل bench migrate.
 not found,غير موجودة
 "The Noon shipment of {0}, which this Delivery Note amends, is not Cancelled yet.",لم يتم إلغاء شحنة Noon الخاصة بـ {0}، الذي تعدّله مذكرة التسليم هذه، بعد.
 Noon could not be reached. Try again.,تعذّر الوصول إلى Noon. حاول مرة أخرى.
@@ -1992,3 +1992,5 @@ The Noon shipment is still being created. Try again in a moment.,لا تزال �
 "A Noon shipment retry is in progress for this Delivery Note. Wait for it to finish, then try again.",هناك إعادة محاولة لشحنة Noon قيد التنفيذ لمذكرة التسليم هذه. انتظر حتى تنتهي ثم حاول مرة أخرى.
 The Noon shipment was not cancelled,لم يتم إلغاء شحنة Noon
 The Noon shipment is still live and no cancel is running. Close this and try again.,لا تزال شحنة Noon نشطة ولا يوجد إلغاء قيد التنفيذ. أغلق هذه النافذة وحاول مرة أخرى.
+Carrier,شركة الشحن
+AWB / Tracking No,رقم بوليصة الشحن / التتبع
