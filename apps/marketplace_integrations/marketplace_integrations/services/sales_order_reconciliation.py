@@ -260,6 +260,13 @@ def plan(previous, current, evidence, erp_state):
 	  reverted.  ``outbound_edit_in_flight``: the edit's outcome is unknown; in the same
 	  situation the order needs attention, never ``NO_ACTION``.  Both are judged only after the
 	  inactive-order and cancellation branches.
+	- ``partial_line_update``: the marketplace may change one line while others are already
+	  delivered or billed (Noon, #390).  The whole-order delivery/billing blocks for an update
+	  become per-line checks on the changed lines only (new quantity not below the line's
+	  delivered or billed quantity); cancellation branches are unchanged.
+	  ``fulfillment_started_qty``: ``{external_item_id: units}`` per line, how many units
+	  already started fulfillment; with ``partial_line_update`` a line may drop to that
+	  quantity instead of being blocked whole.
 	- ``inactive_order_instruction``: merchant-readable text appended to the "no longer an
 	  active submitted document" advisory (what to do on the marketplace).
 	- ``source``: where the evidence comes from (e.g. ``"marketplace"``); informational.
@@ -484,7 +491,12 @@ def plan(previous, current, evidence, erp_state):
 			changes,
 			reasons.CANCELLED_FULLY_DELIVERED,
 		)
-	if changes or cancelling:
+	partial_update = bool(evidence.get("partial_line_update")) and not cancelling
+	if partial_update:
+		line_block = _partial_line_block(previous_items, current_items, erp_lines, changes, erp_state)
+		if line_block:
+			return line_block
+	elif changes or cancelling:
 		# Delivery/billing only blocks when something would actually change; an
 		# unchanged, equivalent billed or delivered order is simply NO_ACTION.
 		for external_item_id, previous_line in previous_items.items():
@@ -556,7 +568,7 @@ def plan(previous, current, evidence, erp_state):
 				CLOSE_REMAINDER, _("Only the outstanding Sales Order remainder can be closed."), changes
 			)
 
-	if _has_execution(erp_state):
+	if _has_execution(erp_state) and not partial_update:
 		message = _("ERPNext delivery or billing execution blocks an automatic submitted-order update")
 		named = [_documents(erp_state, "Delivery Note"), _documents(erp_state, "Sales Invoice")]
 		named = "; ".join(documents for documents in named if documents)
@@ -580,6 +592,60 @@ def plan(previous, current, evidence, erp_state):
 		_("The submitted Sales Order changes are eligible for ERPNext validation."),
 		changes,
 	)
+
+
+def _partial_line_block(previous_items, current_items, erp_lines, changes, erp_state):
+	"""``NEEDS_ATTENTION`` when a changed line would go below what ERPNext already delivered or billed.
+
+	Used when the marketplace may change one line while others are delivered or billed
+	(``partial_line_update``): only changed lines are judged, a removed line counts as
+	quantity 0, and an added line has no ERP row yet.  ERPNext drops a row only when its
+	quantity is 0 (the row is left out of ``trans_items``), and refuses a cut below the
+	delivered or billed quantity, so this names the line first.
+	"""
+	qty_precision = (erp_state.get("precision") or {}).get("qty")
+	changed = sorted(
+		{
+			change["external_item_id"]
+			for change in changes
+			if change["kind"] in ("line_changed", "item_removed")
+		}
+	)
+	for external_item_id in changed:
+		previous_line = previous_items.get(external_item_id) or {}
+		if flt(previous_line.get("qty")) <= 0:
+			continue  # never had an ERP row
+		erp_line = erp_lines.get(previous_line.get("sales_order_item"))
+		if not erp_line:
+			return _attention(
+				_("The reconciled Sales Order line is missing from ERPNext."), changes, reasons.SO_LINE_MISSING
+			)
+		new_qty = flt((current_items.get(external_item_id) or {}).get("qty"), qty_precision)
+		if new_qty < flt(erp_line.get("delivered_qty"), qty_precision):
+			return _attention(
+				_("Marketplace line {0} would go below the quantity already delivered in ERPNext.").format(
+					external_item_id
+				),
+				changes,
+				reasons.QTY_BELOW_DELIVERED,
+			)
+		if flt(erp_line.get("billed_amt")):
+			# The billed quantity is not stored on the row: derive it from the billed amount.
+			rate = flt(erp_line.get("rate"))
+			billed_qty = (
+				min(flt(erp_line.get("qty")), flt(erp_line.get("billed_amt")) / rate)
+				if rate
+				else flt(erp_line.get("qty"))
+			)
+			if new_qty < flt(billed_qty, qty_precision):
+				return _attention(
+					_("Marketplace line {0} would go below the quantity already billed in ERPNext.").format(
+						external_item_id
+					),
+					changes,
+					reasons.ALREADY_BILLED,
+				)
+	return None
 
 
 def _projected_total_after_line_changes(previous, current, erp_state):
@@ -715,6 +781,14 @@ def _same_value(previous, current):
 	return str(previous) == str(current)
 
 
+def _line_values_changed(previous, current):
+	"""True when a line's quantity or money differs between two snapshot lines."""
+	return any(
+		not _same_value((previous or {}).get(field), (current or {}).get(field))
+		for field in ("qty", "effective_rate", "fulfilled_total_price")
+	)
+
+
 def _effectively_equivalent(previous_items, current_items, erp_lines, precision=None):
 	"""Define convergence once, per marketplace line and its ERP row.
 
@@ -763,10 +837,19 @@ def _lifecycle_block_reason(evidence, changes):
 	"""
 	if "lifecycle_permits_change" not in evidence and not evidence.get("fulfillment_started"):
 		return None
+	partial = bool(evidence.get("partial_line_update"))
+	# A removed line is a quantity change to 0; judged only for partial updates (it was not before).
+	qty_changes = {
+		change["external_item_id"]: (0 if change["kind"] == "item_removed" else flt(change.get("current")))
+		for change in changes
+		if (change.get("kind") == "line_changed" and change.get("field") == "qty")
+		or (partial and change.get("kind") == "item_removed")
+	}
 	changes = [
 		change
 		for change in changes
-		if change.get("kind") == "line_changed" and change.get("field") in _MARKETPLACE_SOURCED_LINE_FIELDS
+		if (change.get("kind") == "line_changed" and change.get("field") in _MARKETPLACE_SOURCED_LINE_FIELDS)
+		or (partial and change.get("kind") == "item_removed")
 	]
 	if not changes:
 		return None
@@ -775,12 +858,15 @@ def _lifecycle_block_reason(evidence, changes):
 	if permits is False:
 		return reason or _("The marketplace order can no longer change, so the change was not applied.")
 	started = evidence.get("fulfillment_started")
+	started_qty = evidence.get("fulfillment_started_qty") if evidence.get("partial_line_update") else None
 	for change in changes:
 		line_started = (
 			started.get(cstr(change.get("external_item_id")).strip())
 			if isinstance(started, dict)
 			else bool(started)
 		)
+		if line_started and _qty_stays_at_or_above_started(change, qty_changes, started_qty):
+			continue
 		if line_started:
 			return reason or _(
 				"Marketplace line {0} already started fulfillment, so its change was not applied."
@@ -788,6 +874,18 @@ def _lifecycle_block_reason(evidence, changes):
 	if permits is None:
 		return reason or _("The marketplace order stage is unknown, so the change was not applied.")
 	return None
+
+
+def _qty_stays_at_or_above_started(change, qty_changes, started_qty):
+	"""True when the line's new quantity still covers every unit that already started fulfillment.
+
+	Only for a line the evidence gives a started quantity for (``partial_line_update``); the
+	line's price fields follow its quantity, so they do not block it on their own.
+	"""
+	external_item_id = change["external_item_id"]
+	if not isinstance(started_qty, dict) or external_item_id not in started_qty:
+		return False
+	return external_item_id in qty_changes and qty_changes[external_item_id] >= flt(started_qty[external_item_id])
 
 
 def _inactive_order_converged(erp_state):
@@ -926,6 +1024,11 @@ def _execute_update(sales_order, previous, current):
 				f"The Sales Order row for marketplace line {external_item_id} was not found."
 			)
 		line_rows[external_item_id] = row.name
+		# A delivered or billed row whose marketplace line did not change is listed as it is:
+		# every kept row must be listed, and ERPNext refuses a rate change on a billed row.
+		keep_row = (flt(row.delivered_qty) or flt(row.billed_amt)) and not _line_values_changed(
+			previous_items.get(external_item_id), line
+		)
 		trans_items.append(
 			{
 				"docname": row.name,
@@ -933,8 +1036,8 @@ def _execute_update(sales_order, previous, current):
 				# update_child_qty_rate assigns description = d.get("description"), so
 				# omitting it wipes the row's description.
 				"description": row.description,
-				"qty": flt(line.get("qty")),
-				"rate": flt(line.get("effective_rate"), 6),
+				"qty": flt(row.qty) if keep_row else flt(line.get("qty")),
+				"rate": flt(row.rate, 6) if keep_row else flt(line.get("effective_rate"), 6),
 				"uom": row.uom,
 				"conversion_factor": row.conversion_factor,
 				"delivery_date": cstr(row.delivery_date) if row.delivery_date else None,

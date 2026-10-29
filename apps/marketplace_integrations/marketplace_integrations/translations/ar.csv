@@ -1084,7 +1084,6 @@ Noon cookies are managed by the client.,ملفات تعريف الارتباط �
 Noon created the destination but returned no destination code. Refresh status.,أنشأت Noon الوجهة لكنها لم تُرجع رمز الوجهة. حدّث الحالة.
 Noon did not return a status for this item.,لم تُرجع Noon حالة لهذا العنصر.
 Noon fulfillment action queued. Refresh this document to see the results.,تمت إضافة إجراء تنفيذ Noon إلى قائمة الانتظار. حدّث هذا المستند لرؤية النتائج.
-"Noon fulfillment has already started for every line, so the change was not applied.",بدأ تنفيذ Noon بالفعل لكل البنود، لذا لم يُطبَّق التغيير.
 Noon order refresh queued. Refresh this document to see the results.,تمت إضافة تحديث طلب Noon إلى قائمة الانتظار. حدّث هذا المستند لرؤية النتائج.
 Noon order {0} country {1} does not match Marketplace Account {2}'s Noon Country Code {3}.,دولة طلب Noon {0} ({1}) لا تطابق رمز دولة Noon لحساب السوق {2} ({3}).
 Noon order {0} is not a Noon-marketplace order.,طلب Noon {0} ليس طلبًا من سوق Noon.
@@ -1887,12 +1886,8 @@ Noon order items are locked,أصناف طلب Noon مقفلة
 Mark Handed Over,وضع علامة تم التسليم
 Not added: {0},لم تتم الإضافة: {0}
 No Delivery Note was created.,لم يتم إنشاء مذكرة تسليم.
-Draft Delivery Note {0} created. Review and submit it.,تم إنشاء مسودة مذكرة التسليم {0}. راجعها ثم اعتمدها.
-Delivery Note {0} already exists for this shipment.,مذكرة التسليم {0} موجودة بالفعل لهذه الشحنة.
 No Created shipments on this order are waiting to be marked handed over.,لا توجد شحنات منشأة في هذا الطلب بانتظار وضع علامة تم التسليم.
 Mark Noon Shipment Handed Over,وضع علامة تم تسليم شحنة Noon
-This creates one draft Delivery Note for the shipment's units. Nothing is sent to Noon and the Delivery Note is not submitted.,سيُنشئ هذا مسودة مذكرة تسليم واحدة لوحدات الشحنة. لن يُرسل شيء إلى Noon ولن تُعتمد مذكرة التسليم.
-Creating the draft Delivery Note...,جارٍ إنشاء مسودة مذكرة التسليم...
 Items and quantities of a Noon order cannot be changed here. Use the Noon Fulfillment buttons on this Sales Order (Mark Out of Stock or Cancel Shipment).,لا يمكن تغيير أصناف وكميات طلب Noon هنا. استخدم أزرار تنفيذ Noon في أمر البيع هذا (وضع علامة نفاد المخزون أو إلغاء الشحنة).
 Handed Over On,تاريخ التسليم
 Delivery Note,مذكرة التسليم
@@ -1907,12 +1902,9 @@ When the unresolved handover units were first recorded (#368).,وقت تسجيل
 Noon Shipments,شحنات Noon
 AWB,بوليصة الشحن
 Not added,لم تُضف
-The draft Delivery Note Mark Handed Over created for this shipment (#368). A second click creates none while it exists and is not cancelled. Deleting the Delivery Note clears this field.,مسودة مذكرة التسليم التي أنشأها إجراء وضع علامة تم التسليم لهذه الشحنة (#368). لا تُنشأ مذكرة ثانية ما دامت موجودة وغير ملغاة. حذف مذكرة التسليم يمسح هذا الحقل.
 Delivery Notes,مذكرات التسليم
-"Every Delivery Note created for this shipment (#368), as a JSON list. The first one is also in Delivery Note. A retry adds rows to the first note while it is a draft and starts a new draft only once it is submitted.",كل مذكرات التسليم المنشأة لهذه الشحنة (#368) كقائمة JSON. الأولى موجودة أيضًا في حقل مذكرة التسليم. تضيف إعادة المحاولة صفوفًا إلى المذكرة الأولى ما دامت مسودة، ولا تبدأ مسودة جديدة إلا بعد اعتمادها.
 Shipment {0} still has a live Delivery Note ({1}). Delete or cancel that Delivery Note first.,لا تزال للشحنة {0} مذكرة تسليم قائمة ({1}). احذف مذكرة التسليم هذه أو ألغها أولًا.
 Delivery Note {0} is not a draft.,مذكرة التسليم {0} ليست مسودة.
-Units added to the draft Delivery Note {0}. Review and submit it.,تمت إضافة الوحدات إلى مسودة مذكرة التسليم {0}. راجعها ثم اعتمدها.
 {0} shipment(s) created but not marked handed over for over {1} hour(s),{0} شحنة منشأة لم يوضع عليها علامة تم التسليم منذ أكثر من {1} ساعة
 Bosta shipments cannot be created for {0} orders: {0} fulfils its own orders.,لا يمكن إنشاء شحنات Bosta لطلبات {0}: {0} تتولى تنفيذ طلباتها بنفسها.
 "Bosta is not used for {0} orders, so none of the selected Sales Orders can be sent to Bosta.",لا تُستخدم Bosta لطلبات {0}، لذلك لا يمكن إرسال أي من أوامر البيع المحددة إلى Bosta.
@@ -1935,3 +1927,50 @@ Release Out of Stock reservation,تحرير حجز النفاد من المخز�
 "Type or scan the AWB on the Noon sticker. Leave empty to use a Noon AWB.","اكتب أو امسح رقم بوليصة الشحن (AWB) المطبوع على ملصق Noon. اتركه فارغًا لاستخدام بوليصة شحن من Noon."
 AWB {0} is already in use.,بوليصة الشحن (AWB) {0} مستخدمة بالفعل.
 AWB Nr cannot be longer than {0} characters.,يجب ألا يزيد رقم بوليصة الشحن (AWB) عن {0} حرفًا.
+"Older data only (#390): the Delivery Note of this shipment is now recorded on each unit row, and this field is no longer written.",بيانات قديمة فقط (#390): تُسجَّل مذكرة التسليم الآن على كل صف وحدة ولم يعد هذا الحقل يُكتب.
+"Older data only (#390): a JSON list of the Delivery Notes of this shipment. The Delivery Note is now recorded on each unit row, and this field is no longer written.",بيانات قديمة فقط (#390): قائمة JSON بمذكرات تسليم هذه الشحنة. تُسجَّل مذكرة التسليم الآن على كل صف وحدة ولم يعد هذا الحقل يُكتب.
+"Why the shipment's draft Delivery Note could not be submitted (#390), for example not enough stock. The draft stays; the next import or Mark Handed Over tries again. Cleared when the note is submitted.",سبب تعذّر اعتماد مسودة مذكرة التسليم للشحنة (#390)، مثل عدم كفاية المخزون. تبقى المسودة وتعيد المحاولة عملية الاستيراد التالية أو وضع علامة تم التسليم. يُمسح عند اعتماد المذكرة.
+The Delivery Note this unit is on (#390): one note per shipment. The unit counts as covered while that note is a draft or submitted. Deleting the Delivery Note clears this field.,مذكرة التسليم التي تضمّ هذه الوحدة (#390): مذكرة واحدة لكل شحنة. تُعدّ الوحدة مغطاة ما دامت المذكرة مسودة أو معتمدة. حذف مذكرة التسليم يمسح هذا الحقل.
+{0} Delivery Note(s) could not be submitted,تعذّر اعتماد {0} مذكرة تسليم
+Shipped on Noon but not in a Created shipment: {0},مشحونة على Noon لكنها ليست ضمن شحنة منشأة: {0}
+Shipped but not on the submitted Delivery Note: {0},مشحونة لكنها ليست على مذكرة التسليم المعتمدة: {0}
+The Delivery Note could not be submitted.,تعذّر اعتماد مذكرة التسليم.
+"Delivery Note {0} of shipment {1} is already submitted, so the remaining units cannot be added to it.",مذكرة التسليم {0} للشحنة {1} معتمدة بالفعل، لذلك لا يمكن إضافة الوحدات المتبقية إليها.
+Delivery Note {0} could not be submitted and stays a draft: {1},تعذّر اعتماد مذكرة التسليم {0} وستبقى مسودة: {1}
+Delivery Note {0} submitted.,تم اعتماد مذكرة التسليم {0}.
+"This puts every unit of the shipment that is not on a Delivery Note yet on the shipment's Delivery Note and submits it, so stock leaves the warehouse in ERPNext. Nothing is sent to Noon.",سيضع هذا كل وحدة في الشحنة ليست على مذكرة تسليم بعد على مذكرة تسليم الشحنة ويعتمدها، فيخرج المخزون من المخزن في ERPNext. لا يُرسل شيء إلى Noon.
+Submitting the Delivery Note...,جارٍ اعتماد مذكرة التسليم...
+"The draft Sales Invoice made from the submitted Delivery Notes of this order (#377). Written only by services/noon_sales_invoice.py; the app never submits it and never uploads it to Noon.","مسودة فاتورة المبيعات المنشأة من مذكرات التسليم المعتمدة لهذا الطلب (#377). تُكتب فقط عبر services/noon_sales_invoice.py؛ لا يعتمدها التطبيق ولا يرفعها إلى Noon."
+"Why the Sales Invoice could not be created or extended (#377). The next submitted Delivery Note or sync tries again. Cleared on success.","سبب تعذّر إنشاء فاتورة المبيعات أو استكمالها (#377). تعيد المحاولة مذكرة التسليم المعتمدة التالية أو المزامنة التالية. يُمسح عند النجاح."
+Sales Invoice Error,خطأ فاتورة المبيعات
+The Sales Invoice could not be created: {0},تعذّر إنشاء فاتورة المبيعات: {0}
+Delivery Notes not on the submitted Sales Invoice: {0},مذكرات تسليم ليست على فاتورة المبيعات المعتمدة: {0}
+The Sales Invoice could not be created.,تعذّر إنشاء فاتورة المبيعات.
+Sales Invoice,فاتورة المبيعات
+Marketplace line {0} would go below the quantity already delivered in ERPNext.,سيصبح البند {0} في السوق أقل من الكمية التي تم تسليمها مسبقًا في ERPNext.
+Marketplace line {0} would go below the quantity already billed in ERPNext.,سيصبح البند {0} في السوق أقل من الكمية التي تمت فوترتها مسبقًا في ERPNext.
+Shipped {0}/{1},تم شحن {0}/{1}
+{0} of {1} units shipped,تم شحن {0} من {1} وحدة
+No units.,لا توجد وحدات.
+Noon Status,حالة Noon
+On the Delivery Note,على مذكرة التسليم
+No Sales Invoice yet.,لا توجد فاتورة مبيعات بعد.
+No shipments yet.,لا توجد شحنات بعد.
+Noon fulfillment is not available for this order.,تنفيذ Noon غير متاح لهذا الطلب.
+Yes,نعم
+No,لا
+Qty,الكمية
+Cancelled,ملغي
+Delivery Status,حالة التسليم
+"Latest delivery state: Shipped n/m for Noon, the Bosta state for Bosta. Display only; it does not affect accounting.",آخر حالة تسليم: تم شحن ن/م لطلبات Noon، وحالة Bosta لطلبات Bosta. للعرض فقط ولا تؤثر على المحاسبة.
+"Shipment {0} was handed over. Cancel it on Noon first, then cancel the linked Delivery Note, then cancel the Sales Order.",تم تسليم الشحنة {0}. ألغِها على Noon أولاً، ثم ألغِ مذكرة التسليم المرتبطة، ثم ألغِ أمر البيع.
+Shipment {0} is {1} on Noon. Use Cancel on Noon on the Sales Order and cancel the Sales Order once every shipment is Cancelled.,الشحنة {0} في حالة {1} على Noon. استخدم إلغاء على Noon في أمر البيع، ثم ألغِ أمر البيع بعد أن تصبح كل الشحنات ملغاة.
+Cancel the Noon shipments first,ألغِ شحنات Noon أولاً
+Cancel on Noon,إلغاء على Noon
+These Created shipments will be cancelled on Noon. Noon also cancels their units.,ستُلغى شحنات Noon التالية (تم الإنشاء) على Noon، وتلغي Noon وحداتها أيضاً.
+Not cancelled because a Delivery Note is live: {0}. Cancel that Delivery Note first.,لم تُلغَ لأن مذكرة التسليم سارية: {0}. ألغِ مذكرة التسليم أولاً.
+Units that are not in a shipment are not changed on Noon.,الوحدات غير الموجودة في أي شحنة لا تتغير على Noon.
+"The Sales Order cancel completes only after Noon confirms: when every shipment shows Cancelled, cancel the Sales Order again.",لا يكتمل إلغاء أمر البيع إلا بعد تأكيد Noon: عندما تظهر كل الشحنات ملغاة، ألغِ أمر البيع مرة أخرى.
+Queued {0} shipment(s). Not queued: {1},تمت جدولة {0} شحنة. لم تُجدول: {1}
+Cancellation of {0} shipment(s) queued on Noon. Cancel the Sales Order after they show Cancelled.,تمت جدولة إلغاء {0} شحنة على Noon. ألغِ أمر البيع بعد أن تظهر ملغاة.
+No Created shipment can be cancelled on Noon.,لا توجد شحنة بحالة تم الإنشاء يمكن إلغاؤها على Noon.

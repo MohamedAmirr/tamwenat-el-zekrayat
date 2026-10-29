@@ -1206,6 +1206,93 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 			},
 		)
 
+	# -- Noon shipped units (#390) ----------------------------------------
+
+	def shipped_item(self):
+		return {
+			"external_item_id": f"n-{frappe.generate_hash(length=6)}",
+			"external_sku": "SKU-1",
+			"external_status": "CONFIRMED",
+			"integration_status": "SHIPPED",
+			"current_quantity": 1,
+		}
+
+	def make_shipped_order(self, account, shipment_status, payload_nrs=("1",), unit_nrs=("1",)):
+		payload = {
+			"items": [
+				{
+					"mp_item_nr": nr,
+					"partner_sku": "SKU-1",
+					"mp_status": "MP_ITEM_STATUS_CONFIRMED",
+					"integration_status": "INTEGRATION_ITEM_STATUS_SHIPPED",
+				}
+				for nr in payload_nrs
+			]
+		}
+		return self.make_order(
+			account,
+			items=[self.shipped_item()],
+			shipments=[{"integration_shipment_nr": "S-1", "status": shipment_status, "awb_source": "Noon"}],
+			latest_payload=frappe.as_json(payload),
+			noon_shipment_units=[
+				{"integration_shipment_nr": "S-1", "mp_item_nr": nr, "partner_sku": "SKU-1"} for nr in unit_nrs
+			],
+		)
+
+	def test_a_shipped_unit_outside_a_created_shipment_is_a_finding_that_clears(self):
+		account = self.make_noon_account()
+		order = self.make_shipped_order(account, "Pending")
+
+		rows = self.items_for(account, NOON_FULFILLMENT)
+
+		self.assertEqual([row["reference_name"] for row in rows], [order.name])
+		self.assertIn("Shipped on Noon but not in a Created shipment: SKU-1 / 1", rows[0]["explanation"])
+		# The shipment becomes Created: the unit is inside one and gets its note, so the row clears.
+		shipment = frappe.get_doc("Marketplace Order", order.name).noon_shipments[0]
+		frappe.db.set_value(shipment.doctype, shipment.name, "status", "Created")
+		self.assertEqual(
+			[r for r in self.items_for(account, NOON_FULFILLMENT) if "Shipped on Noon" in r["explanation"]], []
+		)
+
+	def test_a_shipped_unit_missing_from_every_shipment_is_a_finding(self):
+		account = self.make_noon_account()
+		self.make_shipped_order(account, "Created", payload_nrs=("1", "2"), unit_nrs=("1",))
+
+		rows = self.items_for(account, NOON_FULFILLMENT)
+
+		self.assertEqual(len(rows), 1)
+		self.assertIn("SKU-1 / 2", rows[0]["explanation"])
+		self.assertNotIn("SKU-1 / 1", rows[0]["explanation"])
+
+	def test_a_shipped_unit_that_cannot_join_the_submitted_note_names_the_unit_and_the_note(self):
+		account = self.make_noon_account()
+		order = self.make_shipped_order(account, "Created")
+		with patch.object(handover_state, "submitted_note", return_value="MAT-DN-9"):
+			rows = self.items_for(account, NOON_FULFILLMENT)
+		self.assertEqual([row["reference_name"] for row in rows], [order.name])
+		self.assertIn("Shipped but not on the submitted Delivery Note: SKU-1 / 1 (MAT-DN-9)", rows[0]["explanation"])
+		# Nothing submitted yet: the next import drafts it, so there is no finding.
+		self.assertEqual(self.items_for(account, NOON_FULFILLMENT), [])
+
+	def test_a_delivery_note_submit_failure_is_a_finding(self):
+		account = self.make_noon_account()
+		order = self.make_order(
+			account,
+			shipments=[
+				{
+					"integration_shipment_nr": "S-1",
+					"status": "Created",
+					"awb_source": "Noon",
+					"delivery_note_error": "not enough stock",
+				}
+			],
+		)
+
+		rows = self.items_for(account, NOON_FULFILLMENT)
+
+		self.assertEqual([row["reference_name"] for row in rows], [order.name])
+		self.assertIn("1 Delivery Note(s) could not be submitted", rows[0]["explanation"])
+
 	def test_counts_for_no_accounts_is_empty(self):
 		self.assertEqual(get_attention_counts([]), {})
 

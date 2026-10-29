@@ -27,7 +27,7 @@ function load({
 	defaults_fails = false,
 	noon_state = { actions: [], cancelled_on_noon: false, shipments: [] },
 	noon_fails = false,
-	can_create_delivery_note = true,
+	can_submit_delivery_note = true,
 	marketplace_summary = { name: "MO-1", platform: "Shopify", reference: "#SHOP-1", erpnext_sync_status: "Syncing", erpnext_sales_order: "" },
 } = {}) {
 	const calls = [];
@@ -49,7 +49,7 @@ function load({
 			can_read: (doctype) =>
 				doctype === "Bosta Shipment" ? bosta_read : can_read && doctype === "Marketplace Order",
 			can_write: () => can_write,
-			can_create: (doctype) => can_create_delivery_note && doctype === "Delivery Note",
+			can_submit: (doctype) => can_submit_delivery_note && doctype === "Delivery Note",
 		},
 		ui: {
 			form: {
@@ -160,9 +160,11 @@ function make_frm(doc, { close_sales_order } = {}) {
 	const indicators = [];
 	const tab = { html: "", handler: null, visible: undefined, body_visible: undefined };
 	const marketplace_tab = { html: "", handler: null, visible: undefined, body_visible: undefined };
+	const noon_tab = { html: "", handler: null, visible: undefined, body_visible: undefined };
 	const frm = {
 		tab,
 		marketplace_tab,
+		noon_tab,
 		toggle_display: (field, visible) => {
 			if (field === "custom_marketplace_order_tab") marketplace_tab.visible = visible;
 			if (field === "custom_marketplace_order_html") marketplace_tab.body_visible = visible;
@@ -170,7 +172,14 @@ function make_frm(doc, { close_sales_order } = {}) {
 			if (field === "custom_bosta_delivery_html") tab.body_visible = visible;
 		},
 		get_field: (name) => {
-			const target = name === "custom_marketplace_order_html" ? marketplace_tab : name === "custom_bosta_delivery_html" ? tab : null;
+			const target =
+				name === "custom_marketplace_order_html"
+					? marketplace_tab
+					: name === "custom_bosta_delivery_html"
+					? tab
+					: name === "custom_noon_fulfillment_html"
+					? noon_tab
+					: null;
 			if (!target) return null;
 			return {
 				$wrapper: {
@@ -1783,20 +1792,20 @@ test("the tab shows cancellation, received, last update and last sync values", (
 // ---- Noon fulfillment on the Sales Order form (moved from the Marketplace Order form) ----
 
 const NOON_ALL_ACTIONS = [
-	"create_shipment", "mark_out_of_stock", "cancel_shipment", "add_awb", "mark_handed_over", "upload_invoice",
+	"create_shipment", "mark_out_of_stock", "cancel_shipment", "cancel_on_noon", "add_awb", "mark_handed_over", "upload_invoice",
 	"upload_order_invoice", "retry", "retry_order_invoice", "discard_shipment", "release_stuck_oos_reservation",
 ];
 const NOON_LABELS = {
-	create_shipment: "Create Shipment", mark_out_of_stock: "Mark Out of Stock", cancel_shipment: "Cancel Shipment",
+	create_shipment: "Create Shipment", mark_out_of_stock: "Mark Out of Stock", cancel_shipment: "Cancel Shipment", cancel_on_noon: "Cancel on Noon",
 	add_awb: "Add AWB", mark_handed_over: "Mark Handed Over", upload_invoice: "Upload Invoice",
 	upload_order_invoice: "Upload Order Invoice", retry: "Retry", retry_order_invoice: "Retry Order Invoice",
 	discard_shipment: "Discard Shipment", release_stuck_oos_reservation: "Release Stuck Out of Stock Reservation",
 };
 const noon_so = (extra = {}) => ({ custom_marketplace_platform: "Noon", custom_marketplace_order: "MO-NOON", ...extra });
 const noon_shipments = () => [
-	{ integration_shipment_nr: "ORD-1", status: "Created", awbs: [{ courier: "Aramex", awb_nr: "AWB-1" }], delivery_note: "", handed_over: false, unresolved: [] },
+	{ integration_shipment_nr: "ORD-1", status: "Created", awbs: [{ courier: "Aramex", awb_nr: "AWB-1" }], delivery_note: "", handed_over: false, can_mark_handed_over: true, unresolved: [] },
 	{ integration_shipment_nr: "ORD-2", status: "Error", awbs: [], delivery_note: "", handed_over: false, unresolved: [] },
-	{ integration_shipment_nr: "ORD-3", status: "Created", awbs: [], delivery_note: "MAT-DN-1", delivery_notes: ["MAT-DN-1", "MAT-DN-3"], handed_over: true, unresolved: ["SKU-9: not on the Sales Order"] },
+	{ integration_shipment_nr: "ORD-3", status: "Created", awbs: [], delivery_notes: [{ name: "MAT-DN-1", state: "Draft" }, { name: "MAT-DN-3", state: "Submitted" }], handed_over: true, can_mark_handed_over: true, unresolved: ["SKU-9: not on the Sales Order"] },
 	{ integration_shipment_nr: "ORD-4", status: "Created", awbs: [], delivery_note: "MAT-DN-2", handed_over: true, unresolved: [] },
 ];
 
@@ -1866,9 +1875,9 @@ test("without write permission on Marketplace Order nothing is shown; without re
 	assert.equal(no_read.noon_calls.length, 0);
 });
 
-test("Mark Handed Over is hidden without create permission on Delivery Note", async () => {
+test("Mark Handed Over is hidden without submit permission on Delivery Note", async () => {
 	const { frm } = await refresh_noon({
-		can_create_delivery_note: false,
+		can_submit_delivery_note: false,
 		noon_state: { actions: ["retry", "mark_handed_over"], shipments: [] },
 	});
 	assert.deepEqual(frm.buttons.map((b) => b.label), ["Retry"]);
@@ -1879,39 +1888,55 @@ test("a failed fulfillment call adds nothing and does not break the refresh", as
 	assert.deepEqual(frm.buttons, []);
 });
 
-test("the Marketplace Order tab lists Noon shipments with escaped values and a Delivery Note link", async () => {
+test("the Noon Fulfillment tab lists a block per shipment with escaped values, an items table and a Delivery Note link", async () => {
 	const shipments = [
-		{ integration_shipment_nr: "<img src=x>", status: "Created", awbs: [{ courier: "<b>Ar</b>", awb_nr: "A&1" }], delivery_note: "MAT/DN 1", unresolved: ["<script>x</script>: unmapped"] },
+		{
+			integration_shipment_nr: "<img src=x>", status: "Created", awbs: [{ courier: "<b>Ar</b>", awb_nr: "A&1" }],
+			delivery_notes: [{ name: "MAT/DN 1", state: "Draft" }], unit_count: 3, shipped_count: 2,
+			units: [{ item_name: "<i>Soap</i>", sku: "S&1", qty: 2, status: "INTEGRATION_ITEM_STATUS_SHIPPED", on_note: true }],
+			unresolved: ["<script>x</script>: unmapped"],
+		},
+		{ integration_shipment_nr: "ORD-2", status: "Created", awbs: [], delivery_notes: [], unit_count: 0, shipped_count: 0, units: [], unresolved: [] },
 	];
 	const { frm } = await refresh_noon({
-		marketplace_summary: { name: "MO-NOON", platform: "Noon", reference: "N-1", erpnext_sync_status: "Synced", erpnext_sales_order: "SAL-ORD-1" },
-		noon_state: { actions: [], shipments },
+		noon_state: { actions: [], shipments, sales_invoice: { name: "ACC-SINV-1", state: "Draft" } },
 	});
-	const html = frm.marketplace_tab.html;
-	assert.match(html, /Noon Shipments/);
+	const html = frm.noon_tab.html;
 	assert.match(html, /&lt;img src&#x3D;x&gt;/);
 	assert.match(html, /&lt;b&gt;Ar&lt;\/b&gt; A&amp;1/);
-	assert.match(html, /<a href="\/app\/delivery-note\/MAT%2FDN%201">MAT\/DN 1<\/a>/);
+	assert.match(html, /<a href="\/app\/delivery-note\/MAT%2FDN%201">MAT\/DN 1<\/a> \(Draft\)/);
+	assert.match(html, /<a href="\/app\/sales-invoice\/ACC-SINV-1">ACC-SINV-1<\/a> \(Draft\)/);
+	assert.match(html, /2 of 3 units shipped/);
+	assert.match(html, /<td>&lt;i&gt;Soap&lt;\/i&gt;<\/td><td>S&amp;1<\/td><td>2<\/td><td>Shipped<\/td><td>Yes<\/td>/);
 	assert.match(html, /&lt;script&gt;x&lt;\/script&gt;: unmapped/);
-	assert.doesNotMatch(html, /<img|<script/);
+	assert.equal((html.match(/<h5 title=/g) || []).length, 2); // one block per shipment
+	assert.doesNotMatch(html, /<img|<script|<i>/);
 });
 
-test("non-Noon orders and Noon orders without shipments show no shipments block", async () => {
+test("the Noon Fulfillment tab shows an empty state, an unavailable state and no invoice name when none is readable", async () => {
+	const empty = await refresh_noon({ noon_state: { actions: [], shipments: [], sales_invoice: null } });
+	assert.match(empty.frm.noon_tab.html, /No Sales Invoice yet\./);
+	assert.match(empty.frm.noon_tab.html, /No shipments yet\./);
+	const failed = await refresh_noon({ noon_fails: true });
+	assert.match(failed.frm.noon_tab.html, /Noon fulfillment is not available for this order\./);
+});
+
+test("the Marketplace Order tab no longer lists Noon shipments and non-Noon orders leave the Noon tab empty", async () => {
+	const noon = await refresh_noon({
+		marketplace_summary: { name: "MO-NOON", platform: "Noon", reference: "N-1", erpnext_sync_status: "Synced", erpnext_sales_order: "SAL-ORD-1" },
+		noon_state: { actions: [], shipments: noon_shipments() },
+	});
+	assert.doesNotMatch(noon.frm.marketplace_tab.html, /Noon Shipments|<th>Shipment<\/th>/);
 	const shopify = await refresh_noon({
 		noon_state: { actions: [], shipments: noon_shipments() },
 	}, noon_so({ custom_marketplace_platform: "Shopify" }));
-	assert.doesNotMatch(shopify.frm.marketplace_tab.html, /Noon Shipments/);
-	const empty = await refresh_noon({
-		marketplace_summary: { name: "MO-NOON", platform: "Noon", reference: "N-1", erpnext_sync_status: "Synced", erpnext_sales_order: "SAL-ORD-1" },
-		noon_state: { actions: [], shipments: [] },
-	});
-	assert.doesNotMatch(empty.frm.marketplace_tab.html, /Noon Shipments/);
+	assert.equal(shopify.frm.noon_tab.html, "");
 });
 
 test("dialog options come from the shipments and escape shipment numbers", async () => {
 	const { frm } = await refresh_noon({ noon_state: { actions: NOON_ALL_ACTIONS, shipments: noon_shipments() } });
 	const noon = global.frappe.marketplace_integrations.noon_fulfillment;
-	const ctx = noon.build_context(frm, { shipments: [{ integration_shipment_nr: "<i>1</i>", status: "Created", delivery_note: "", unresolved: [] }, ...noon_shipments()] });
+	const ctx = noon.build_context(frm, { shipments: [{ integration_shipment_nr: "<i>1</i>", status: "Created", delivery_note: "", can_mark_handed_over: true, unresolved: [] }, ...noon_shipments()] });
 	assert.equal(ctx.marketplace_order, "MO-NOON");
 	assert.equal(ctx.sales_order, "SAL-ORD-1");
 	assert.equal(noon.noon_created_shipment_options(ctx)[0].label, "Shipment &lt;i&gt;1&lt;/i&gt; - Created");
@@ -1919,7 +1944,7 @@ test("dialog options come from the shipments and escape shipment numbers", async
 	assert.deepEqual(noon.noon_created_shipment_options(ctx).map((o) => o.value), ["<i>1</i>", "ORD-1", "ORD-3", "ORD-4"]);
 	// Error and Cancel Pending only
 	assert.deepEqual(noon.noon_discardable_shipment_options(ctx).map((o) => o.value), ["ORD-2"]);
-	// Created and not handed over yet, or with unresolved units
+	// Created and the server says Mark Handed Over has something to do (a draft to submit or uncovered units)
 	assert.deepEqual(noon.noon_handover_shipment_options(ctx).map((o) => o.value), ["<i>1</i>", "ORD-1", "ORD-3"]);
 });
 
@@ -1956,35 +1981,17 @@ test("unit checklist labels: mapped name, unmapped SKU fallback, repeated SKU co
 	assert.doesNotMatch(options[0].label.replace(/title="[^"]*"/, ""), /N1/);
 });
 
-test("the shipments summary shows Shipment n with a tooltip, an Items column and Noon AWBs", () => {
-	load();
-	const { noon_shipments_html } = require("./noon_fulfillment.js");
-	global.frappe.utils.escape_html = escape_html;
-	const html = noon_shipments_html([
-		{
-			integration_shipment_nr: "ORD-12-3",
-			status: "Created",
-			awbs: [{ courier: "noon", awb_nr: "N123" }, { courier: "Aramex", awb_nr: "A9" }],
-			items: [{ label: "Hand Soap 500ml (SKU-001)", qty: 2 }, { label: "SKU-009", qty: 1 }],
-			delivery_notes: [],
-			unresolved: [],
-		},
-	]);
-	assert.match(html, /<th>Items<\/th>/);
-	assert.match(html, /<td title="ORD-12-3">Shipment 3<\/td>/);
-	assert.match(html, /Hand Soap 500ml \(SKU-001\) x2, SKU-009 x1/);
-	assert.match(html, /Noon N123, Aramex A9/);
-});
-
-test("noon_handover_alert reports created, existing, nothing created and skipped units", () => {
+test("noon_handover_alert reports submitted, submit failure, nothing created and skipped units", () => {
 	load();
 	const { noon_handover_alert } = require("./noon_fulfillment.js");
-	assert.deepEqual(noon_handover_alert({ delivery_note: "DN-1", created: true, unresolved: [] }), {
-		message: "Draft Delivery Note DN-1 created. Review and submit it.",
+	assert.deepEqual(noon_handover_alert({ delivery_note: "DN-1", created: true, submitted: true, unresolved: [] }), {
+		message: "Delivery Note DN-1 submitted.",
 		indicator: "green",
 	});
-	assert.match(noon_handover_alert({ delivery_note: "DN-1", created: false, unresolved: [] }).message, /already exists/);
-	const partial = noon_handover_alert({ delivery_note: "DN-1", created: true, unresolved: [{ text: "X: no enabled product mapping", reason: "unmapped" }] });
+	const failed = noon_handover_alert({ delivery_note: "DN-1", submitted: false, submit_error: "Not enough stock", unresolved: [] });
+	assert.equal(failed.indicator, "red");
+	assert.match(failed.message, /DN-1 could not be submitted and stays a draft: Not enough stock/);
+	const partial = noon_handover_alert({ delivery_note: "DN-1", created: true, submitted: true, unresolved: [{ text: "X: no enabled product mapping", reason: "unmapped" }] });
 	assert.equal(partial.indicator, "orange");
 	assert.match(partial.message, /Not added: X: no enabled product mapping/);
 	assert.doesNotMatch(partial.message, /sync was queued/);
@@ -1993,10 +2000,6 @@ test("noon_handover_alert reports created, existing, nothing created and skipped
 	assert.match(none.message, /No Delivery Note was created\./);
 	assert.match(none.message, /sync was queued/);
 	assert.equal(noon_handover_alert(undefined).indicator, "orange");
-	assert.match(
-		noon_handover_alert({ delivery_note: "DN-1", created: false, added_to_existing: true, unresolved: [] }).message,
-		/Units added to the draft Delivery Note DN-1/
-	);
 });
 
 test("noon_handover_alert escapes Noon-sourced unit text and the Delivery Note name", () => {
@@ -2013,13 +2016,25 @@ test("noon_handover_alert escapes Noon-sourced unit text and the Delivery Note n
 	assert.match(alert.message, /DN&lt;1&gt;/);
 });
 
-test("the shipments summary lists every Delivery Note of a shipment", () => {
+test("the Noon tab shows Shipment n with a tooltip, Noon AWBs, every Delivery Note and an escaped submit error", () => {
 	load();
-	const { noon_shipments_html } = require("./noon_fulfillment.js");
+	const { noon_fulfillment_tab_html } = require("./noon_fulfillment.js");
 	global.frappe.utils.escape_html = escape_html;
-	const html = noon_shipments_html(noon_shipments());
-	assert.match(html, /MAT-DN-1<\/a>, <a href="\/app\/delivery-note\/MAT-DN-3">MAT-DN-3/);
-	assert.match(html, /MAT-DN-2/);
+	const html = noon_fulfillment_tab_html({
+		shipments: [
+			{
+				integration_shipment_nr: "ORD-12-3", status: "Created",
+				awbs: [{ courier: "noon", awb_nr: "N123" }, { courier: "Aramex", awb_nr: "A9" }],
+				delivery_notes: [{ name: "MAT-DN-1", state: "Submitted" }, { name: "MAT-DN-3", state: "Draft" }],
+				delivery_note_error: "<b>no stock</b>", units: [], unresolved: [],
+			},
+		],
+	});
+	assert.match(html, /<h5 title="ORD-12-3">Shipment 3 /);
+	assert.match(html, /Noon N123, Aramex A9/);
+	assert.match(html, /MAT-DN-1<\/a> \(Submitted\), <a href="\/app\/delivery-note\/MAT-DN-3">MAT-DN-3<\/a> \(Draft\)/);
+	assert.match(html, /<p class="text-danger">&lt;b&gt;no stock&lt;\/b&gt;<\/p>/);
+	assert.doesNotMatch(html, /<b>/);
 });
 
 test("a Closed submitted Noon Sales Order keeps the Noon Fulfillment buttons (the server decides)", async () => {

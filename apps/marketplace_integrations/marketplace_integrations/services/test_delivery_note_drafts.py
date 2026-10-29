@@ -12,6 +12,7 @@ from marketplace_integrations.services import sync_status
 from marketplace_integrations.services.delivery_note_drafts import (
 	create_draft_delivery_note as service_create,
 )
+from marketplace_integrations.services.delivery_note_drafts import submit_note
 from marketplace_integrations.tests.handover_fixture import SubmittedOrderFixture
 from marketplace_integrations.tests.utils import make_role_user
 
@@ -54,7 +55,7 @@ class IntegrationTestDraftDeliveryNote(IntegrationTestNoonFulfillmentBase):
 		self.assertTrue(result["delivery_note"])
 		self.assertEqual(fx.delivery_notes(), [result["delivery_note"]])
 		dn = frappe.get_doc("Delivery Note", result["delivery_note"])
-		self.assertEqual(dn.docstatus, 0)  # never submitted
+		self.assertEqual(dn.docstatus, 0)  # create_draft_delivery_note never submits
 		self.assertEqual([(row.item_code, row.qty) for row in dn.items], [(fx.items["A"].name, 2)])
 		self.assertEqual(dn.items[0].so_detail, fx.row_for("A").name)
 
@@ -247,3 +248,34 @@ class IntegrationTestDraftDeliveryNote(IntegrationTestNoonFulfillmentBase):
 		finally:
 			frappe.set_user("Administrator")
 		self.assertEqual(fx.delivery_notes(), [])
+
+	# ---- submit_note (#390) ------------------------------------------------------------------
+
+	def test_submit_note_submits_a_draft(self):
+		fx = self._order([("A", 2)])
+		name = _create(fx.marketplace_order.name, [{"external_sku": "A", "qty": 2}])["delivery_note"]
+		self.assertEqual(submit_note(name), name)
+		self.assertEqual(frappe.db.get_value("Delivery Note", name, "docstatus"), 1)
+		with self.assertRaises(frappe.ValidationError):
+			submit_note(name)  # no longer a draft
+
+	def test_a_failed_submit_leaves_the_draft_untouched(self):
+		fx = self._order([("A", 2)])
+		name = _create(fx.marketplace_order.name, [{"external_sku": "A", "qty": 2}])["delivery_note"]
+		with patch("frappe.model.document.Document.submit", side_effect=frappe.ValidationError("Not enough stock")):
+			with self.assertRaises(frappe.ValidationError):
+				submit_note(name)
+		self.assertEqual(frappe.db.get_value("Delivery Note", name, "docstatus"), 0)
+		self.assertTrue(frappe.db.exists("Delivery Note", name))
+
+	def test_submit_note_needs_submit_permission(self):
+		fx = self._order([("A", 1)])
+		name = _create(fx.marketplace_order.name, [{"external_sku": "A", "qty": 1}])["delivery_note"]
+		email, _role = make_role_user(self, "DN Creator", {"Delivery Note": ["create", "write"]})
+		frappe.set_user(email)
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				submit_note(name)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("Delivery Note", name, "docstatus"), 0)

@@ -43,7 +43,10 @@ Problem sources (``problem_type``):
   blocks any further attempt), so it is NOT counted by get_attention_counts()
   and never drives the account level.
 - Noon Fulfillment: ONE rollup row per Noon order (shipment Error / Cancel
-  Pending / invoice upload Error, or units pending Out of Stock), plus (#164)
+  Pending / invoice upload Error, a shipment's Delivery Note that could not be submitted
+  (``delivery_note_error``, #390), a SHIPPED unit that is not in a Created shipment or that cannot
+  go on the shipment's already submitted Delivery Note (#390), a failed draft Sales Invoice or
+  Delivery Notes left off a submitted one (#377), or units pending Out of Stock), plus (#164)
   shipments stuck in Pending longer than NOON_PENDING_SHIPMENT_STUCK_HOURS, Created shipments
   nobody marked handed over for NOON_HANDOVER_REMINDER_HOURS (#368),
   measured from the shipment row's creation. The Error / Cancel Pending /
@@ -79,6 +82,7 @@ from marketplace_integrations.integrations.shopify.webhooks import MAX_WEBHOOK_D
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_product_mapping.marketplace_product_mapping import (
 	compute_mapping_identity_key,
 )
+from marketplace_integrations.services.noon_sales_invoice import uninvoiced_notes
 from marketplace_integrations.services.sales_order_sync import (
 	FINAL_ITEM_STATUSES,
 	NOON_ELIGIBLE_EXTERNAL_STATUS,
@@ -1136,6 +1140,106 @@ def _pending_oos_count(value):
 	return len(units) if isinstance(units, list) else 0
 
 
+def _unit_labels(items):
+	"""``SKU / mp_item_nr`` of up to ``MAX_LISTED_SKUS`` payload units, for an explanation."""
+	labels = [
+		f"{cstr(item.get('partner_sku')).strip()} / {cstr(item.get('mp_item_nr')).strip()}"
+		for item in items[:MAX_LISTED_SKUS]
+	]
+	more = len(items) - MAX_LISTED_SKUS
+	return ", ".join(labels) + (f" (+{more})" if more > 0 else "")
+
+
+def _note_units(order_names):
+	"""``{order: [unit rows with a Delivery Note]}`` for the given Marketplace Orders."""
+	by_order = {}
+	for names in _chunks(sorted(order_names)):
+		for row in frappe.get_list(
+			"Marketplace Order Shipment Unit",
+			parent_doctype="Marketplace Order",
+			filters={"parent": ["in", names], "delivery_note": ["!=", ""]},
+			fields=["parent", "integration_shipment_nr", "mp_item_nr", "delivery_note"],
+			limit_page_length=0,
+		):
+			by_order.setdefault(row.parent, []).append(row)
+	return by_order
+
+
+def _shipped_unit_problems(noon_accounts):
+	"""``{order: {"outside": [...], "after_submit": [...]}}`` for Noon orders with a SHIPPED unit
+	(``handover_state.shipped_problems``), in a fixed number of bulk queries (#390).  Orders with no
+	SHIPPED unit row are never loaded."""
+	parents = {
+		row.parent
+		for row in frappe.get_list(
+			"Marketplace Order Item",
+			parent_doctype="Marketplace Order",
+			filters={"integration_status": "SHIPPED"},
+			fields=["parent"],
+			limit_page_length=0,
+		)
+	}
+	problems = {}
+	for names in _chunks(sorted(parents)):
+		orders = _get_orders_by_name(names, ["name", "marketplace_account", "platform", "latest_payload"])
+		orders = [o for o in orders if o.platform == "Noon" and o.marketplace_account in noon_accounts]
+		if not orders:
+			continue
+		order_names = [o.name for o in orders]
+		shipments = {}
+		for row in frappe.get_list(
+			"Marketplace Order Shipment",
+			parent_doctype="Marketplace Order",
+			filters={"parent": ["in", order_names], "status": "Created"},
+			fields=["parent", "integration_shipment_nr", "status"],
+			limit_page_length=0,
+		):
+			shipments.setdefault(row.parent, []).append(row)
+		units = {}
+		for row in frappe.get_list(
+			"Marketplace Order Shipment Unit",
+			parent_doctype="Marketplace Order",
+			filters={"parent": ["in", order_names]},
+			fields=["parent", "integration_shipment_nr", "mp_item_nr", "delivery_note"],
+			limit_page_length=0,
+		):
+			units.setdefault(row.parent, []).append(row)
+		for order in orders:
+			found = handover_state.shipped_problems(
+				handover_state.payload_items(order.latest_payload), shipments.get(order.name, []), units.get(order.name, [])
+			)
+			if found["outside"] or found["after_submit"]:
+				problems[order.name] = found
+	return problems
+
+
+def _sales_invoice_problems(noon_accounts):
+	"""``{order: {"error": text or None, "notes": [Delivery Note, ...]}}`` for Noon orders whose
+	draft Sales Invoice failed (#377), or whose invoice is submitted or cancelled while submitted
+	Delivery Notes are still not billed."""
+	orders = _get_orders(
+		noon_accounts,
+		{"platform": "Noon"},
+		["name", "erpnext_sales_order", "noon_sales_invoice", "noon_sales_invoice_error"],
+		or_filters={"noon_sales_invoice_error": ["!=", ""], "noon_sales_invoice": ["!=", ""]},
+	)
+	docstatus = {}
+	for names in _chunks(sorted({o.noon_sales_invoice for o in orders if o.noon_sales_invoice})):
+		for row in frappe.get_list(
+			"Sales Invoice", filters={"name": ["in", names]}, fields=["name", "docstatus"], limit_page_length=0
+		):
+			docstatus[row.name] = row.docstatus
+	problems = {}
+	for order in orders:
+		notes = []
+		if order.noon_sales_invoice and docstatus.get(order.noon_sales_invoice) in (1, 2):
+			notes = uninvoiced_notes(order.erpnext_sales_order)
+		error = order.noon_sales_invoice_error or None
+		if error or notes:
+			problems[order.name] = {"error": error, "notes": notes}
+	return problems
+
+
 def _collect_noon_rollups(accounts):
 	noon_accounts = {name: account for name, account in accounts.items() if account.platform == "Noon"}
 	if not noon_accounts:
@@ -1153,6 +1257,11 @@ def _collect_noon_rollups(accounts):
 				"pending_oos": 0,
 				"stuck_pending": 0,
 				"not_handed_over": 0,
+				"note_errors": 0,
+				"outside": [],
+				"after_submit": [],
+				"invoice_error": None,
+				"uninvoiced_notes": [],
 			},
 		)
 
@@ -1174,8 +1283,12 @@ def _collect_noon_rollups(accounts):
 		# Cancelled / Discarded shipments are closed: an old invoice error on one
 		# must not keep the order flagged.
 		filters={"status": ["not in", ["Cancelled", "Discarded"]]},
-		or_filters={"status": ["in", NOON_SHIPMENT_ATTENTION_STATUSES], "invoice_status": "Error"},
-		fields=["parent", "status", "invoice_status"],
+		or_filters={
+			"status": ["in", NOON_SHIPMENT_ATTENTION_STATUSES],
+			"invoice_status": "Error",
+			"delivery_note_error": ["!=", ""],
+		},
+		fields=["parent", "status", "invoice_status", "delivery_note_error"],
 		limit_page_length=0,
 	)
 	for shipment in shipments:
@@ -1186,6 +1299,8 @@ def _collect_noon_rollups(accounts):
 				entry["worst"] = shipment.status
 		if shipment.invoice_status == "Error":
 			entry["invoice_errors"] += 1
+		if shipment.delivery_note_error:
+			entry["note_errors"] += 1
 
 	# #164: Pending shipments older than the threshold (Created / Cancelled /
 	# Discarded / Error / Cancel Pending are not Pending, so they never match).
@@ -1213,12 +1328,25 @@ def _collect_noon_rollups(accounts):
 			"handed_over_on": ["is", "not set"],
 			"creation": ["<=", add_to_date(now_datetime(), hours=-NOON_HANDOVER_REMINDER_HOURS)],
 		},
-		fields=["parent", "delivery_note", "delivery_notes"],
+		fields=["parent", "integration_shipment_nr"],
 		limit_page_length=0,
 	)
+	note_units = _note_units({shipment.parent for shipment in unhanded})
 	for shipment in unhanded:
-		if not handover_state.live_notes(shipment):
+		if not handover_state.live_notes(note_units.get(shipment.parent, []), shipment.integration_shipment_nr):
 			rollup(shipment.parent)["not_handed_over"] += 1
+
+	# #377: a failed draft Sales Invoice, or Delivery Notes left out of a submitted/cancelled one.
+	for order_name, invoice in _sales_invoice_problems(noon_accounts).items():
+		entry = rollup(order_name)
+		entry["invoice_error"] = invoice["error"]
+		entry["uninvoiced_notes"] = invoice["notes"]
+
+	# #390: SHIPPED units that get no Delivery Note.
+	for order_name, problems in _shipped_unit_problems(noon_accounts).items():
+		entry = rollup(order_name)
+		entry["outside"] = problems["outside"]
+		entry["after_submit"] = problems["after_submit"]
 
 	if not rollups:
 		return []
@@ -1246,6 +1374,28 @@ def _collect_noon_rollups(accounts):
 			parts.append(
 				_("{0} shipment(s) created but not marked handed over for over {1} hour(s)").format(
 					entry["not_handed_over"], NOON_HANDOVER_REMINDER_HOURS
+				)
+			)
+		if entry["note_errors"]:
+			parts.append(_("{0} Delivery Note(s) could not be submitted").format(entry["note_errors"]))
+		if entry["outside"]:
+			parts.append(
+				_("Shipped on Noon but not in a Created shipment: {0}").format(_unit_labels(entry["outside"]))
+			)
+		if entry["after_submit"]:
+			parts.append(
+				_("Shipped but not on the submitted Delivery Note: {0}").format(
+					"; ".join(
+						f"{_unit_labels([item])} ({note})" for item, note in entry["after_submit"][:MAX_LISTED_SKUS]
+					)
+				)
+			)
+		if entry["invoice_error"]:
+			parts.append(_("The Sales Invoice could not be created: {0}").format(entry["invoice_error"]))
+		if entry["uninvoiced_notes"]:
+			parts.append(
+				_("Delivery Notes not on the submitted Sales Invoice: {0}").format(
+					", ".join(entry["uninvoiced_notes"][:MAX_LISTED_SKUS])
 				)
 			)
 		if entry["pending_oos"]:

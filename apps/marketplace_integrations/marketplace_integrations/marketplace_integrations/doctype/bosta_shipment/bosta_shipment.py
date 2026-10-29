@@ -179,10 +179,19 @@ class BostaShipment(Document):
 		self._sync_sales_order_bosta_state()
 
 	def _sync_sales_order_bosta_state(self):
-		"""Mirror the same active-first shipment selection used by the Sales Order summary."""
-		if not self.sales_order or not frappe.db.exists(
-			"Custom Field", "Sales Order-custom_bosta_delivery_status"
-		):
+		"""Mirror the same active-first shipment selection used by the Sales Order summary.
+
+		The state is written to ``custom_bosta_delivery_status`` and (#378) to the platform-neutral
+		``custom_delivery_status`` that the Sales Order list shows.
+		"""
+		if not self.sales_order:
+			return
+		fields = [
+			fieldname
+			for fieldname in ("custom_bosta_delivery_status", "custom_delivery_status")
+			if frappe.db.exists("Custom Field", f"Sales Order-{fieldname}")
+		]
+		if not fields:
 			return
 		rows = frappe.get_all(
 			"Bosta Shipment",
@@ -192,11 +201,11 @@ class BostaShipment(Document):
 			limit_page_length=0,
 		)
 		state = sales_order_delivery_status(rows)
-		if frappe.db.get_value("Sales Order", self.sales_order, "custom_bosta_delivery_status") != state:
+		current = frappe.db.get_value("Sales Order", self.sales_order, fields, as_dict=True)
+		changed = {fieldname: state for fieldname in fields if current.get(fieldname) != state}
+		if changed:
 			# This is a derived display field; don't run Sales Order accounting or update modified.
-			frappe.db.set_value(
-				"Sales Order", self.sales_order, "custom_bosta_delivery_status", state, update_modified=False
-			)
+			frappe.db.set_value("Sales Order", self.sales_order, changed, update_modified=False)
 
 	def _block_system_field_writes(self):
 		"""System-set fields are writable only by server code (``flags.bosta_system_write``,

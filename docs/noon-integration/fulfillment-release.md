@@ -15,17 +15,23 @@ below). The reconciliation Script Report is not built (findings are Needs Attent
 - A "Noon Fulfillment" button group on the **Sales Order** form (submitted
   Sales Order linked to a Noon Marketplace Order): Create Shipment,
   Cancel Shipment, Add AWB, Mark Out of Stock (UpdateOrder), Upload Shipment
-  Invoice (or one order-level invoice), and Retry. The Marketplace Order keeps
-  the Noon Fulfillment tab as read-only audit data (shipment, unit and AWB
-  tables). The buttons call the same endpoints as before, so they still need
+  Invoice (or one order-level invoice), and Retry. The Sales Order also has a
+  **Noon Fulfillment tab** (#378, Noon orders only): its Sales Invoice, then one block
+  per shipment with status, AWB, Delivery Note (link with draft/submitted state), `n of m
+  units shipped` and an items table (item, SKU, qty, Noon unit status, on the Delivery
+  Note yes/no). The Marketplace Order keeps its Noon Fulfillment tab as read-only audit
+  data (shipment, unit and AWB tables). The buttons call the same endpoints as before, so they still need
   write permission on the Marketplace Order. All of it is backed by three new child doctypes (`Marketplace
   Order Shipment`, `...Unit`, `...AWB`) and a `Fulfillment` sync_type on
   `Marketplace Sync Log`.
-- No ERPNext stock or accounting side effects from the Noon calls: no Sales
-  Invoice, Payment Entry, Credit Note, or stock ledger entry is ever created
-  by any fulfillment action. The one ERPNext document a fulfillment action can
-  create is the **draft** Delivery Note of Mark Handed Over (#368, see "Mark
-  Handed Over" below); it is never submitted by the app.
+- No ERPNext stock or accounting side effects from the Noon calls: no Payment
+  Entry, Credit Note, or stock ledger entry is created by a Noon call. The ERPNext
+  documents a fulfillment action can create are the shipment's one **Delivery Note**
+  (#368, #390): drafted as units become `INTEGRATION_ITEM_STATUS_SHIPPED` and submitted
+  when every active unit is SHIPPED, or by Mark Handed Over (see "Mark Handed Over"
+  below), and (#377) the Sales Order's one draft **Sales Invoice** built from the submitted
+  notes (see "Draft Sales Invoice" below). The app never submits the invoice and never
+  uploads it to Noon.
 
 ## Setup
 
@@ -37,7 +43,7 @@ below). The reconciliation Script Report is not built (findings are Needs Attent
    linked to a Marketplace Order whose `platform` is `Noon` (they used to be on
    the Marketplace Order form; none are there now). They are hidden for a user
    without write permission on Marketplace Order, and Mark Handed Over is also
-   hidden without create permission on Delivery Note. The client code is
+   hidden without submit permission on Delivery Note (it submits the note). The client code is
    `public/js/noon_fulfillment.js`, loaded with `frappe.require` by
    `public/js/sales_order.js` only for such a Sales Order. The Marketplace Order
    tab on the Sales Order also lists the shipments read-only (number, status,
@@ -50,8 +56,9 @@ below). The reconciliation Script Report is not built (findings are Needs Attent
    shipment; Upload Invoice needs a Created shipment with no invoice upload
    Pending; Retry needs a Pending, Error or Cancel Pending shipment, or a
    Created one with a Pending added AWB or a Pending/Error invoice;
-   Mark Handed Over needs a Created shipment that is not handed over yet (no live
-   Delivery Note, no recorded handover) or that still has unresolved handover units;
+   Mark Handed Over needs a Created shipment with a draft Delivery Note to submit or
+   units no live Delivery Note covers yet, and is not offered once the shipment's note is
+   submitted;
    Cancel Shipment and Discard Shipment are not offered while the shipment's Delivery Note
    is live; Discard Shipment needs an Error or Cancel Pending shipment; Release Stuck
    Out of Stock Reservation needs a pending reservation. With no applicable
@@ -98,12 +105,13 @@ Setup, per Noon Connection:
    to the right connection/account — no separate configuration is needed for
    that resolution.
 
-For `FBPI::ORDER_SYNC` this receiver never parses `payload` (see
-`docs/noon-integration/event-notifications.md`; `RETURNS::REFERENCE_UPDATE` is
-covered under Returns below) — a handled event only re-triggers the
-existing #145 order-import job for the resolved account, which re-fetches
-current order state from Noon's own API rather than trusting anything in
-the notification body.
+For `FBPI::ORDER_SYNC` this receiver reads only `payload.order_nr`, and only as a lookup
+key (see `docs/noon-integration/event-notifications.md`; `RETURNS::REFERENCE_UPDATE` is
+covered under Returns below). If a Marketplace Order for (account, `order_nr`) exists, the
+event queues the deduplicated per-order GetFbpiOrder refresh
+(`orders.enqueue_order_refresh`); otherwise it re-triggers the existing #145 order-import
+job for the resolved account. Either way current order state is re-fetched from Noon's
+own API rather than trusting anything in the notification body.
 
 **Accepted delay when an import is already running:** a webhook event that
 arrives while that account's import job is already queued/running does not
@@ -216,16 +224,22 @@ on sync. Since #179/#180 the reconciliation planner can cancel, close the
 remainder of, or update the quantities of a submitted Sales Order (and reopen a
 Closed one first) when a unit later goes `OUT_OF_STOCK` or `CANCELLED` (via
 Noon's own action, our own `Mark Out of Stock`, or our own `Cancel Shipment`),
-but only while nothing was delivered or billed and no affected line has started
-fulfillment; every other case is left as a `Modified After Sync` advisory for a
-person (delivered or billed orders need a return or credit note).
+and, since #390, judges each changed line on its own rather than blocking the whole
+order once Delivery Notes exist. An out-of-stock mark after a delivery or shipment
+removes or reduces the Sales Order line automatically: this covers a line removed
+while another line is already delivered, and a line cut down to its started or
+delivered quantity. A cut below the delivered, billed or started quantity ends as
+Needs Attention naming the line; every other case the planner cannot act on is left
+as a `Modified After Sync` advisory for a person (delivered or billed goods need a
+return or credit note).
 
 What surfaces this:
 - #178 part 3: the poll now also bumps the Sales Order sync debounce when a
   LINKED order's evidence fingerprint changed (units cancelled/out of stock/
   shipped, shipment membership), and `integrations/noon/order_reconciliation.py`
   turns the per-unit states into reconciliation evidence (full cancellation,
-  per-line fulfillment started, unknown stage for `UNSPECIFIED`). A `Noon Return`
+  per-line fulfillment started, the `fulfillment_started_qty` per line and the
+  `partial_line_update` flag (#390), unknown stage for `UNSPECIFIED`). A `Noon Return`
   linked to the order is `return` evidence (#164); an own `Mark Out of Stock` is not
   distinguishable from a customer cancel. The ERP side is still corrected
   manually only when the planner cannot act (see above).
@@ -258,39 +272,82 @@ anything else the planner reports as `Modified After Sync` is a **manual
 accounting action**. Cancelling a Noon order from ERPNext is not supported
 (#181 reports Noon as blocked: no order-level cancel).
 
-## Mark Handed Over and the item lock (#368)
+## Delivery Notes, Mark Handed Over and the item lock (#368, #390)
 
-**Mark Handed Over** is a manual action on a `Created` shipment. The checked-in
-Noon spec has no handover endpoint, so it makes **no Noon call** and is
-synchronous (no queue). It sends the shipment's units (one per `Marketplace
-Order Shipment Unit`, by `partner_sku`) to the shared service
-`services/delivery_note_drafts.py`, which maps them through the Marketplace
-Product Mapping, caps them at what the Sales Order still has undelivered
-(including existing draft Delivery Notes) and creates a draft Delivery Note
-through ERPNext's own mapper (a Product Bundle is unpacked by ERPNext). A person
-reviews and submits it; the app never does. The user needs write permission on
-the Marketplace Order and create permission on Delivery Note (both checked server
-side). The shipment row records `handed_over_on` and `delivery_note` (read-only).
+**One Delivery Note per shipment (#390).** A Noon shipment has exactly one Delivery
+Note. `Marketplace Order Shipment Unit.delivery_note` (a read-only Link) records which
+units are on it; a unit is **covered** while that note is live (draft, submitted, or the
+draft that amends a cancelled one: `handover_state.live_note`). The shipment fields
+`delivery_note` and `delivery_notes` are no longer written; they stay read-only for older
+data (the backfill patch `backfill_noon_unit_delivery_notes` copies a live note of such a
+shipment onto its unit rows that are still empty, except the units listed as unresolved).
 
-- Idempotent per shipment: once the shipment has a live Delivery Note (or was
-  recorded as handed over) and nothing is unresolved, a second click returns it and
-  creates nothing. `delivery_note` is a Link (the first note) and `delivery_notes`
-  lists every note created for the shipment. A Delivery Note `on_trash` handler
-  (`handover_state.clear_deleted_delivery_note`) locks the parent Marketplace Order,
-  clears the link, the list and `handed_over_on` first (so a wrong draft can still be
-  deleted) and bumps the order's `modified`; the next click drafts the whole shipment
-  again, and units another live note still covers count as resolved. Cancelling a note
-  keeps the link (the amend flow: a note that `amended_from` the cancelled one counts as
-  the shipment's live note).
+**Automatic path.** After every order import, `queue_shipped_units_if_needed` queues
+`fulfillment.process_shipped_units` (`enqueue_after_commit`, `job_id`
+`marketplace-noon-fulfillment-<order>-shipped`, deduplicated) when a Created shipment has a
+SHIPPED unit (`integration_status` in `latest_payload`) that is not covered, or all its
+active units are SHIPPED while its note is still a draft. The job runs as Administrator
+(it is queued by the import or the webhook, detached from any session), waits until the
+Sales Order is submitted, and per Created shipment (own savepoint):
+
+- puts the uncovered SHIPPED units on the shipment's draft through the shared service
+  (the first ones create it, later ones are added), and
+- submits that draft (`delivery_note_drafts.submit_note`, inside a savepoint) when every
+  active unit is SHIPPED. Active means not cancelled (`mp_status` CANCELLED) and not
+  `OUT_OF_STOCK`, so a unit that was cancelled or went out of stock before the rest
+  shipped is left out. A draft from an earlier Mark Handed Over is the shipment's draft.
+- A submit failure (for example not enough stock) keeps the draft, stores the escaped
+  error in `Marketplace Order Shipment.delivery_note_error` and shows a Noon Fulfillment
+  row in Needs Attention; the next import or Mark Handed Over tries again.
+- A SHIPPED unit that cannot go on the note because it is already submitted gets no new
+  note; Needs Attention names the unit and the note. Same for a unit that becomes
+  resolvable (mapped, on the order) after the submit: while the note is a draft a retry
+  adds it, after the submit the unresolved record turns final and the order shows it in
+  Needs Action. This replaces #368's "a retry starts a new draft once the first is
+  submitted".
+- A SHIPPED unit that is not in a Created shipment of the order (no unit row, or the
+  shipment is Pending, Error, Cancel Pending, Cancelled or Discarded) gets no Delivery
+  Note; Needs Attention names it until it is in a Created shipment and covered, or is no
+  longer SHIPPED. These rows are computed live (`handover_state.shipped_problems`); a fixed
+  number of queries reads only the orders that have a SHIPPED item row.
+
+**Trade-off.** Stock does not leave the warehouse in ERPNext until the whole shipment is
+SHIPPED (or Mark Handed Over is used); until then its units sit on a draft Delivery Note.
+Make sure the Sales Order warehouse has stock, or the submit fails and shows in Needs
+Attention.
+
+**Mark Handed Over** is the manual "all shipped" override on a `Created` shipment. The
+checked-in Noon spec has no handover endpoint, so it makes **no Noon call** and is
+synchronous (no queue). It puts **every uncovered unit** of the shipment (SHIPPED or not,
+one per `Marketplace Order Shipment Unit`, by `partner_sku`) on the shipment's draft
+through the shared service `services/delivery_note_drafts.py`, which maps them through
+the Marketplace Product Mapping, caps them at what the Sales Order still has undelivered
+(including existing draft Delivery Notes) and builds the draft with ERPNext's own mapper
+(a Product Bundle is unpacked by ERPNext), then **submits** the draft. The user needs
+write permission on the Marketplace Order and **submit** permission on Delivery Note
+(`frappe.has_permission("Delivery Note", "submit", throw=True)` on the server; the button
+is hidden without it). The shipment row records `handed_over_on`.
+
+- Idempotent per shipment: with nothing uncovered and no draft, a second click returns
+  the existing note and creates nothing. A shipment whose note is already submitted but
+  still has an uncovered unit is refused (one note per shipment). A submit failure is
+  returned as `submit_error` and stored in `delivery_note_error`.
+- A Delivery Note `on_trash` handler (`handover_state.clear_deleted_delivery_note`)
+  locks the parent Marketplace Order, clears `delivery_note` on the unit rows that track
+  the note (and the legacy shipment fields), resets `handed_over_on` when no unit of the
+  shipment is left on a note (so a wrong draft can still be deleted) and bumps the
+  order's `modified`. The units are uncovered: the next import drafts the shipped ones
+  again, Mark Handed Over drafts them all. Cancelling a note keeps the link (the amend
+  flow: a note that `amended_from` the cancelled one counts as live).
 - Units that could not be drafted (no enabled mapping; Item not on the Sales
   Order; the platform order has more units of the Item than the Sales Order row
   quantity, an "excess") are stored on the shipment (`skipped_units`) and keep the
   order in Needs Action (`DELIVERY_NOTE_UNITS_SKIPPED`) until they are drafted,
   covered, or the shipment is Cancelled or Discarded; a later save, sync or re-check
-  cannot clear it. The other units still get their draft. A click while a record
-  exists retries just those units. A mapping save and every Sales Order sync retry
-  them automatically (each shipment in its own savepoint; a failure is logged; when
-  the Sales Order is not submitted the entries become final). When the Sales Order is
+  cannot clear it. The other units still get their note. A mapping save and every Sales
+  Order sync retry them automatically while the note is a draft (each shipment in its
+  own savepoint; a failure is logged; when the Sales Order is not submitted the entries
+  become final); a retry never submits. When the Sales Order is
   behind the platform order a normal sync is queued first and the order shows Syncing
   until it has run. Details and the conflict rules:
   `docs/marketplace-integrations/sync-status.md`, Group E.
@@ -298,11 +355,9 @@ side). The shipment row records `handed_over_on` and `delivery_note` (read-only)
   by a draft or submitted Delivery Note on the matching Sales Order row counts as
   resolved when the Sales Order row quantity is at least the units the platform order
   holds (the Sales Order is not behind), and the retry clears the record and the
-  Needs Action. Only the part the Sales Order really lacks stays an excess.
-- **A retry extends the first note.** Leftover units are added to the shipment's first
-  Delivery Note while it is still a draft (rows of the same Sales Order row get their
-  quantity raised). Only when the first note is submitted does the retry create a new
-  draft, and the shipment then tracks every note it created.
+  Needs Action. Only the part the Sales Order really lacks stays an excess. Such a unit
+  has no `delivery_note` link, so a shipment recorded this way keeps `handed_over_on` and
+  the import keeps re-checking its SHIPPED units (harmless: nothing more is drafted).
 - **Cancel Shipment and Discard Shipment are refused while a Delivery Note of the
   shipment is live** (draft or submitted, not cancelled or deleted): the message tells
   the user to delete or cancel that Delivery Note first. The Sales Order buttons are
@@ -312,7 +367,8 @@ side). The shipment row records `handed_over_on` and `delivery_note` (read-only)
   Fulfillment row) lists a Created shipment with no `handed_over_on` and no live
   Delivery Note older than `NOON_HANDOVER_REMINDER_HOURS` (36, chosen by the user,
   measured from the shipment row's creation). It clears when `handed_over_on` is set
-  or the shipment is Cancelled or Discarded. Nothing is detected automatically.
+  or the shipment is Cancelled or Discarded. A Delivery Note created automatically when
+  the units became SHIPPED counts as handed over, as a draft or submitted.
 
 **Item lock.** A submitted Sales Order linked to a Noon order refuses changes to
 item, quantity, rate and row add or remove (`services/noon_item_edit_guard.py`, a check on the Sales Order Item rows (`before_update_after_submit`, `before_insert`, `on_trash`), because `update_child_qty_rate` changes the rows before it saves the parent),
@@ -324,12 +380,15 @@ stay editable. Shopify and Talabat orders are not affected.
 
 Unverified against a real Noon account: the handover signal itself (verification
 item 2), and which statuses Noon reports after CreateShipment (item 6 of the
-user's checklist for this issue). Mark Handed Over does not depend on either: it is a
-manual record.
+user's checklist for this issue). The automatic path of #390 relies on
+`INTEGRATION_ITEM_STATUS_SHIPPED` meaning the unit left the warehouse; the user chose to
+rely on it before it is verified. Mark Handed Over does not depend on it: it is a manual
+override.
 
 **What the checked-in Noon contract says about shipment and order state (checked 2026-10-28).**
-State reaches us only by fetching: `FBPI::ORDER_SYNC` triggers the import and the receiver
-never parses the payload (it carries just `order_nr`), and `ListFbpiOrders` / `GetFbpiOrder`
+State reaches us only by fetching: `FBPI::ORDER_SYNC` triggers the import (or, since #390,
+the refresh of the one order its `order_nr` names; the receiver reads nothing else from the
+payload), and `ListFbpiOrders` / `GetFbpiOrder`
 return, per unit (`items[]`): `mp_item_nr`, `partner_sku`, `mp_status`
 (`MP_ITEM_STATUS_UNSPECIFIED`, `_CONFIRMED`, `_CANCELLED`), `integration_status`
 (`INTEGRATION_ITEM_STATUS_UNSPECIFIED`, `_ACKNOWLEDGED`, `_OUT_OF_STOCK`, `_SHIPPED`),
@@ -341,6 +400,19 @@ no status field. There is no DELIVERED, handover or pickup value anywhere in the
 what CreateShipment or a handover produces (verification items 2 and 6): whether it
 appears after CreateShipment, after a physical handover or later is unverified. So no
 documented field is known to say "handed over to Noon", and none is relied on.
+
+## Cancelling the Sales Order: wait for Noon (#376)
+
+Design note: `docs/noon-integration/sales-order-cancel.md`. A Noon Sales Order cannot be cancelled
+while a shipment is Pending, Created, Cancel Pending or Error (Cancelled and Discarded never block):
+`services/noon_cancel_guard.py`, `before_cancel` on Sales Order, rules in
+`fulfillment.sales_order_cancel_blockers`. A handed-over shipment (`handed_over_on` or a live Delivery
+Note) gets its own message (cancel on Noon, then the Delivery Note). The button **Cancel on Noon**
+(action `cancel_on_noon`, `api/noon_fulfillment.py::get_cancel_on_noon_preview` and
+`cancel_created_shipments`) asks for confirmation and queues the existing `cancel_shipment` for every
+Created shipment; the user cancels the Sales Order once the shipments show Cancelled. Units outside a
+shipment are not touched and nothing is marked out of stock. Close is not guarded. The planner's
+cancel (customer cancelled on Noon) passes through `frappe.flags.marketplace_syncing_orders`.
 
 ## Real-world verification checklist
 
@@ -448,6 +520,30 @@ The worker is unchanged: the existing AWB row means no pool claim and no
 `GetNoonLogisticsAWBs`, and Retry resends the same AWB (decision 14). Whether Noon accepts
 an AWB it did not return is verification item 10.
 
+## Draft Sales Invoice (#377)
+
+`services/noon_sales_invoice.py` keeps ONE draft Sales Invoice per Noon Sales Order,
+stored in the read-only `Marketplace Order.noon_sales_invoice`. `fulfillment._submit_shipment_draft`
+queues `sync_sales_invoice` after a shipment's Delivery Note is **submitted** (never for a
+draft note; Mark Handed Over and the SHIPPED worker both go through it), `enqueue_after_commit`,
+`job_id` per Sales Order, deduplicated, running as Administrator. The job locks the
+Marketplace Order row, then the Sales Order row, and then:
+
+- no invoice: ERPNext's `make_sales_invoice` mapper builds a draft from the first submitted,
+  not yet invoiced Delivery Note (`update_stock` 0, so a credit note, #262, works);
+- invoice still a draft: the rows of every other submitted note that has no row on a live
+  invoice and is not fully billed are appended (the mapper caps each row at what the note still
+  has unbilled, so nothing is billed twice);
+- invoice submitted or cancelled: nothing is added; Needs Attention (Noon Fulfillment) names the
+  submitted notes not yet invoiced until they are billed by hand;
+- failure: the escaped error is stored in `noon_sales_invoice_error`, shown in Needs
+  Attention, and retried by the next note submit or the next order import.
+
+A draft invoice makes a marketplace-driven Sales Order cancel wait
+(`hold_cancel_for_draft_documents`, `DRAFT_DOCUMENTS_BLOCK_CANCEL`) until the invoice is
+submitted, cancelled or deleted. Nothing is sent to Noon: the manual Upload Shipment Invoice
+and Upload Order Invoice below are unchanged (a user-picked PDF).
+
 ## Order-level invoice (UploadFbpiOrderInvoice)
 
 An alternative to per-shipment invoices for merchants who issue one invoice
@@ -487,9 +583,7 @@ shipment invoice (private PDF attachment, Invoice Nr, Issued At).
   `UploadFbpiOrderInvoice` were added later; see "Noon AWB pool" and
   "Order-level invoice".)
 - Automatic Sales Order amendment after delivery (cancellation of an
-  undelivered, unbilled order is done by the reconciliation planner, #179), automatic
-  Delivery Notes (only the manual draft of Mark Handed Over, #368), Sales
-  Invoice, Payment Entry, Credit Note, or stock ledger entries. (A draft Sales
+  undelivered, unbilled order is done by the reconciliation planner, #179), Sales Invoice (#377), Payment Entry, Credit Note, or stock ledger entries. (A draft Sales
   Return and draft Credit Note are created later only by the user actions in
   the returns section, #261/#262.)
 - A Noon webhook/event-notification receiver was #145's own deferral at the

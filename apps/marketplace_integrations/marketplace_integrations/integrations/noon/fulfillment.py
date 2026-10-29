@@ -64,7 +64,7 @@ import json
 import frappe
 from frappe import _
 from frappe.query_builder.functions import Lower
-from frappe.utils import cstr, flt, get_datetime, now_datetime
+from frappe.utils import cstr, escape_html, flt, get_datetime, now_datetime, strip_html
 
 from marketplace_integrations.integrations.noon import handover_state
 from marketplace_integrations.integrations.noon.awb_pool import claim_pool_awb
@@ -84,8 +84,9 @@ from marketplace_integrations.integrations.noon.constants import (
 from marketplace_integrations.integrations.noon.expected_change import record_out_of_stock
 from marketplace_integrations.integrations.noon.orders import get_order as get_fbpi_order
 from marketplace_integrations.integrations.noon.orders import import_order
-from marketplace_integrations.services.delivery_note_drafts import create_draft_delivery_note
+from marketplace_integrations.services.delivery_note_drafts import create_draft_delivery_note, submit_note
 from marketplace_integrations.services.mappings import resolve_item, resolve_mapping_and_item
+from marketplace_integrations.services.noon_sales_invoice import queue_sales_invoice
 
 RQ_JOB_PREFIX = "marketplace-noon-fulfillment"
 # The only courier: the value Noon documents for AWBs it generated.
@@ -322,12 +323,15 @@ def get_available_actions(order):
 	created = [row for row in shipments if row.status == "Created"]
 	if created:
 		# cancel_shipment() refuses while a Delivery Note of the shipment is live.
-		if any(not _live_delivery_notes(row) for row in created):
-			actions.append("cancel_shipment")
+		if any(not _live_delivery_notes(order, row) for row in created):
+			actions += ["cancel_shipment", "cancel_on_noon"]
 		actions.append("add_awb")
-	# mark_handed_over(): a Created shipment with no live draft/submitted Delivery Note yet, or
-	# with handed-over units still unresolved (#368).
-	if any(not _handed_over(row) or handover_state.load_entries(row) for row in created):
+	# mark_handed_over(): a Created shipment with a draft Delivery Note to submit or units no live
+	# Delivery Note covers yet (#390). It submits the note, so the session user needs Delivery Note
+	# submit permission; the server checks that too.
+	if any(_can_mark_handed_over(order, row) for row in created) and frappe.has_permission(
+		"Delivery Note", "submit"
+	):
 		actions.append("mark_handed_over")
 	# upload_invoice() also refuses while an upload is already Pending, and
 	# (no mixing) while an order-level invoice is Pending/Uploaded.
@@ -358,7 +362,9 @@ def get_available_actions(order):
 	if created and order.noon_order_invoice_status in ("Pending", "Error"):
 		actions.append("retry_order_invoice")
 
-	if any(row.status in _DISCARDABLE_SHIPMENT_STATUSES and not _live_delivery_notes(row) for row in shipments):
+	if any(
+		row.status in _DISCARDABLE_SHIPMENT_STATUSES and not _live_delivery_notes(order, row) for row in shipments
+	):
 		actions.append("discard_shipment")
 	if _pending_oos_units(order):
 		actions.append("release_stuck_oos_reservation")
@@ -1071,7 +1077,7 @@ def cancel_shipment(marketplace_order_name, integration_shipment_nr):
 	shipment = _find_shipment_row(order, integration_shipment_nr)
 	if not shipment or shipment.status != "Created":
 		frappe.throw(_("Shipment {0} is not in a cancellable state.").format(integration_shipment_nr))
-	_refuse_while_delivery_note_is_live(shipment)
+	_refuse_while_delivery_note_is_live(order, shipment)
 	shipment.status = "Cancel Pending"
 	order.save()
 	frappe.db.commit()
@@ -1164,23 +1170,96 @@ def run_cancel_shipment(marketplace_order_name, integration_shipment_nr):
 
 
 # ---------------------------------------------------------------------------
+# Cancelling the Sales Order: wait for Noon (#376, docs/noon-integration/sales-order-cancel.md)
+# ---------------------------------------------------------------------------
+
+
+def sales_order_cancel_blockers(order):
+	"""Translated reasons the linked Sales Order may not be cancelled yet; empty when it may.
+
+	Every shipment that is not Cancelled or Discarded blocks: a handed-over one (``handed_over_on``
+	or a live Delivery Note) with the "cancel on Noon, then the Delivery Note" instruction, any
+	other (Pending, Created, Cancel Pending, Error) with its status. Shipment numbers come from
+	Noon-sourced text and are escaped, the reasons are thrown into HTML."""
+	blockers = []
+	for shipment in order.noon_shipments or []:
+		if shipment.status not in _ACTIVE_SHIPMENT_STATUSES:
+			continue
+		nr = escape_html(cstr(shipment.integration_shipment_nr))
+		if _handed_over(order, shipment):
+			blockers.append(
+				_(
+					"Shipment {0} was handed over. Cancel it on Noon first, then cancel the linked Delivery Note, then cancel the Sales Order."
+				).format(nr)
+			)
+		else:
+			blockers.append(
+				_(
+					"Shipment {0} is {1} on Noon. Use Cancel on Noon on the Sales Order and cancel the Sales Order once every shipment is Cancelled."
+				).format(nr, _(shipment.status))
+			)
+	return blockers
+
+
+def get_cancel_on_noon_preview(order):
+	"""Read-only text source of the Cancel on Noon dialog: the Created shipments that will be
+	cancelled (``created``), those skipped because a Delivery Note is live (``skipped``), each with
+	its items, and the reasons the Sales Order cancel is still refused (``blockers``)."""
+	items = shipment_items(order)
+	created, skipped = [], []
+	for shipment in order.noon_shipments or []:
+		if shipment.status != "Created":
+			continue
+		nr = shipment.integration_shipment_nr
+		entry = {"integration_shipment_nr": nr, "items": items.get(nr, [])}
+		(skipped if _live_delivery_notes(order, shipment) else created).append(entry)
+	return {"created": created, "skipped": skipped, "blockers": sales_order_cancel_blockers(order)}
+
+
+def cancel_created_shipments(marketplace_order_name):
+	"""Queue the existing ``cancel_shipment`` for every Created shipment of the order.
+
+	Units not in a shipment are not touched and nothing is marked out of stock. A shipment with a
+	live Delivery Note is skipped (``cancel_shipment`` refuses it). One shipment failing to queue does
+	not stop the others. Returns ``{"queued": [nr], "skipped": [nr], "failed": [{nr, error}]}``;
+	each ``cancel_shipment`` call commits, so what was queued stays queued."""
+	order = _lock_and_load_order(marketplace_order_name)
+	candidates, skipped = [], []
+	for shipment in order.noon_shipments or []:
+		if shipment.status != "Created":
+			continue
+		nr = shipment.integration_shipment_nr
+		(skipped if _live_delivery_notes(order, shipment) else candidates).append(nr)
+	frappe.db.commit()
+	queued, failed = [], []
+	for nr in candidates:
+		try:
+			cancel_shipment(marketplace_order_name, nr)
+			queued.append(nr)
+		except Exception as exc:
+			frappe.db.rollback()
+			failed.append({"integration_shipment_nr": nr, "error": strip_html(cstr(exc)).strip()})
+	return {"queued": queued, "skipped": skipped, "failed": failed}
+
+
+# ---------------------------------------------------------------------------
 # Mark handed over (#368)
 # ---------------------------------------------------------------------------
 
 
-def _live_delivery_notes(shipment):
+def _live_delivery_notes(order, shipment):
 	"""Live (draft or submitted) Delivery Notes of the shipment; see ``handover_state.live_notes``."""
-	return handover_state.live_notes(shipment)
+	return handover_state.live_notes(order.noon_shipment_units, shipment.integration_shipment_nr)
 
 
-def _handed_over(shipment):
+def _handed_over(order, shipment):
 	"""True once the shipment has a live Delivery Note or was recorded as handed over (its units
 	were already covered by a Delivery Note someone else made)."""
-	return bool(_live_delivery_notes(shipment) or shipment.handed_over_on)
+	return bool(_live_delivery_notes(order, shipment) or shipment.handed_over_on)
 
 
-def _refuse_while_delivery_note_is_live(shipment):
-	live = _live_delivery_notes(shipment)
+def _refuse_while_delivery_note_is_live(order, shipment):
+	live = _live_delivery_notes(order, shipment)
 	if live:
 		frappe.throw(
 			_(
@@ -1189,12 +1268,38 @@ def _refuse_while_delivery_note_is_live(shipment):
 		)
 
 
+def _uncovered_rows(order, integration_shipment_nr):
+	"""Unit rows of the shipment that no live Delivery Note covers."""
+	rows = handover_state.unit_rows(order.noon_shipment_units, integration_shipment_nr)
+	return [row for row in rows if not handover_state.is_covered(row)]
+
+
+def _can_mark_handed_over(order, shipment):
+	"""Mark Handed Over has something to do: a draft to submit, or uncovered units to add.  Nothing
+	when the shipment's note is already submitted (a unit that is left then goes to Needs Attention)
+	or when it was recorded as handed over with nothing unresolved."""
+	nr = shipment.integration_shipment_nr
+	units = order.noon_shipment_units
+	if handover_state.draft_note(units, nr):
+		return True
+	if handover_state.submitted_note(units, nr):
+		return False
+	if not _uncovered_rows(order, nr):
+		return False
+	return not shipment.handed_over_on or bool(handover_state.load_entries(shipment))
+
+
 def _shipment_units(order, integration_shipment_nr):
 	return [
 		{"external_sku": cstr(row.partner_sku).strip(), "qty": 1}
 		for row in order.noon_shipment_units or []
 		if row.integration_shipment_nr == integration_shipment_nr
 	]
+
+
+def _row_units(rows):
+	"""Service units for unit rows; ``row`` lets ``_draft_and_record`` link the row to the note."""
+	return [{"external_sku": cstr(row.partner_sku).strip(), "qty": 1, "row": row} for row in rows]
 
 
 def _entry_units(entries):
@@ -1206,6 +1311,25 @@ def _entry_units(entries):
 		else {"item": e.get("item") or "", "qty": e.get("qty")}
 		for e in entries
 	]
+
+
+def _entry_unit_rows(order, shipment, entries):
+	"""Units of the stored entries, each backed by an uncovered unit row of the shipment with the
+	same SKU where there is one (so the row can be linked to the note).  Entry quantity beyond the
+	rows stays a plain unit, as before."""
+	free = _uncovered_rows(order, shipment.integration_shipment_nr)
+	units = []
+	for entry in entries:
+		sku = cstr(entry.get("external_sku")).strip()
+		need = int(flt(entry.get("qty")))
+		matching = [row for row in free if cstr(row.partner_sku).strip() == sku][:need]
+		for row in matching:
+			free.remove(row)
+		units.extend(_row_units(matching))
+		if need > len(matching):
+			rest = dict(entry, qty=need - len(matching))
+			units.extend(_entry_units([rest]))
+	return units
 
 
 def _entry_key(entry):
@@ -1228,28 +1352,52 @@ def _expected_units(order):
 	return counts
 
 
-def _draft_and_record(order, shipment, units, after_sync=False, queue_sync=True):
-	"""Run the shared service for ``units`` and update the shipment row's records (in memory).
+def _link_units(order, units, delivered, note):
+	"""Record ``note`` on the unit rows that the service really put on it (in memory).
 
-	Rows are added to the shipment's first Delivery Note while it is still a draft; once it is
-	submitted a new draft is created, and the shipment tracks every note (``record_note``).
-	Units that a Delivery Note already covers (the Sales Order is not behind the platform order)
-	count as resolved.  Replaces the shipment's unresolved record with what is still unresolved:
-	an entry becomes ``final`` (kept in Needs Action) when its reason is ``unmapped``, it already
-	was final, or ``after_sync`` says the Sales Order sync it waited for has run.  Returns the
-	service result.
+	``delivered`` is ``{item: qty}``; each row takes one of its Item's quantity, in order, so units
+	the service left out (unmapped, not on the order, excess, covered by someone else's note) stay
+	unlinked and uncovered.
 	"""
-	previous = {_entry_key(e): e for e in handover_state.load_entries(shipment)}
-	live = _live_delivery_notes(shipment)
-	add_to = live[0] if live and frappe.db.get_value("Delivery Note", live[0], "docstatus") == 0 else None
+	budget = dict(delivered)
+	items = {}
+	for unit in units:
+		row = unit.get("row")
+		if row is None:
+			continue
+		sku = unit["external_sku"]
+		if sku not in items:
+			items[sku] = resolve_item(order.marketplace_account, sku)
+		item = items[sku]
+		if item and flt(budget.get(item)) >= 1:
+			handover_state.record_note([row], note)
+			budget[item] = flt(budget[item]) - 1
+
+
+def _draft_and_record(order, shipment, units, after_sync=False, queue_sync=True):
+	"""Run the shared service for ``units`` and update the shipment's records (in memory).
+
+	Rows are added to the shipment's draft Delivery Note when it has one, else a new draft is
+	created; the callers never call this for a shipment whose note is already submitted (one note
+	per shipment, #390).  Each unit row that really went on the note gets it as ``delivery_note``.
+	Units that a Delivery Note already covers (the Sales Order is not behind the platform order)
+	count as resolved.  Replaces the unresolved record of the SKUs/Items in ``units`` with what is
+	still unresolved (records of other SKUs stay): an entry becomes ``final`` (kept in Needs Action)
+	when its reason is ``unmapped``, it already was final, or ``after_sync`` says the Sales Order
+	sync it waited for has run.  Returns the service result.
+	"""
+	previous_entries = handover_state.load_entries(shipment)
+	previous = {_entry_key(e): e for e in previous_entries}
+	add_to = handover_state.draft_note(order.noon_shipment_units, shipment.integration_shipment_nr)
 	result = create_draft_delivery_note(
 		order, units, queue_sync=queue_sync, expected_units=_expected_units(order), add_to=add_to
 	)
 	if result["delivery_note"]:
-		handover_state.record_note(shipment, result["delivery_note"])
+		_link_units(order, units, result["delivered"], result["delivery_note"])
 	if (result["delivery_note"] or result["covered"]) and not shipment.handed_over_on:
 		shipment.handed_over_on = now_datetime()
-	remaining = []
+	passed = {u.get("external_sku") or u.get("item") or "" for u in units}
+	remaining = [e for e in previous_entries if _entry_key(e) not in passed]
 	for entry in result["unresolved"]:
 		prior = previous.get(_entry_key(entry))
 		entry["final"] = bool(
@@ -1260,44 +1408,192 @@ def _draft_and_record(order, shipment, units, after_sync=False, queue_sync=True)
 	return result
 
 
-def mark_handed_over(marketplace_order_name, integration_shipment_nr):
-	"""Record that a Created shipment's units were handed over and draft its Delivery Note.
+def _submit_shipment_draft(order, integration_shipment_nr, draft):
+	"""Save ``order``, submit the shipment's draft Delivery Note and record the outcome.
+	Returns ``(order, error)``: ``order`` is a fresh copy, ``error`` is None on success.
 
-	Noon's checked-in API has no handover endpoint, so this makes no Noon call: it is a manual
-	action that calls the shared draft Delivery Note service
-	(``services/delivery_note_drafts.py``) with the shipment's units, then stores the time and
-	the Delivery Note name on the shipment row.  Nothing is submitted.  Idempotent per shipment:
-	once the shipment has a live Delivery Note (or was recorded as handed over) and nothing is
-	unresolved, a second call returns it and creates nothing.  Units the service could not draft
-	are stored on the shipment (``handover_state``) and keep the order in Needs Action until they
-	are drafted; a click while such a record exists retries just those units, adding them to the
-	first Delivery Note while that is still a draft.  Deleting the shipment's Delivery Note resets
-	its tracking, so the whole shipment is drafted again (units another live note covers count as
-	resolved, so nothing is delivered twice).  Runs synchronously under the order lock.
+	The order is saved first so the unit links and records are stored.  The submit runs in a
+	savepoint (``submit_note``), so a failure (for example not enough stock) leaves the draft
+	exactly as it was; the escaped error is stored in ``delivery_note_error`` and the next
+	trigger tries again.  A submit queues a Sales Order re-check (``doc_events`` on the Delivery
+	Note) that writes the order row directly, so the order is loaded again before
+	``delivery_note_error`` is written: saving the stale copy would undo that queued re-check.
 	"""
+	order.flags.skip_sync_status_update = True
+	order.save()
+	error = None
+	try:
+		submit_note(draft)
+	except Exception as exc:
+		message = escape_html(strip_html(cstr(exc)).strip() or _("The Delivery Note could not be submitted."))
+		error = message[:500]
+	order = frappe.get_doc("Marketplace Order", order.name)
+	shipment = _find_shipment_row(order, integration_shipment_nr)
+	if (shipment.delivery_note_error or None) != error:
+		shipment.delivery_note_error = error
+		order.flags.skip_sync_status_update = True
+		order.save()
+	if not error and order.erpnext_sales_order:
+		# #377: a submitted note goes onto the order's draft Sales Invoice (never for a draft note).
+		queue_sales_invoice(order.name, order.erpnext_sales_order)
+	return order, error
+
+
+def mark_handed_over(marketplace_order_name, integration_shipment_nr):
+	"""Manual "all shipped" override: put every uncovered unit of a Created shipment on its draft
+	Delivery Note, then submit it (#390; was draft-only in #368).
+
+	Noon's checked-in API has no handover endpoint, so this makes no Noon call.  The user needs
+	Delivery Note submit permission (checked here).  Every uncovered unit (SHIPPED or not) goes to
+	the shipment's draft through the shared service (``services/delivery_note_drafts.py``); the
+	draft, including one an earlier import made, is then submitted.  A submit failure keeps the
+	draft, stores the error on the shipment (``delivery_note_error``) and is returned as
+	``submit_error``.  Idempotent: a shipment with nothing uncovered and no draft returns its
+	existing note and creates nothing.  A shipment whose note is already submitted but still has
+	uncovered units is refused (one note per shipment).  Units the service could not draft are
+	stored on the shipment (``handover_state``) and keep the order in Needs Action until they are
+	drafted.  Deleting the draft uncovers its units.  Runs synchronously under the order lock.
+	"""
+	frappe.has_permission("Delivery Note", "submit", throw=True)
 	order = _lock_and_load_order(marketplace_order_name)
 	shipment = _find_shipment_row(order, integration_shipment_nr)
 	if not shipment or shipment.status != "Created":
 		frappe.throw(_("Shipment {0} is not in a state that can be marked handed over.").format(integration_shipment_nr))
-	handed = _handed_over(shipment)
-	entries = handover_state.load_entries(shipment)
-	if handed and not entries:
-		live = _live_delivery_notes(shipment)
-		return {"delivery_note": live[0] if live else None, "created": False, "unresolved": []}
+	units = order.noon_shipment_units
+	rows = _uncovered_rows(order, integration_shipment_nr)
+	draft = handover_state.draft_note(units, integration_shipment_nr)
+	if rows and not draft:
+		submitted = handover_state.submitted_note(units, integration_shipment_nr)
+		if submitted:
+			frappe.throw(
+				_("Delivery Note {0} of shipment {1} is already submitted, so the remaining units cannot be added to it.").format(
+					submitted, integration_shipment_nr
+				)
+			)
+	if not rows and not draft:
+		live = _live_delivery_notes(order, shipment)
+		return {
+			"delivery_note": live[0] if live else None,
+			"created": False,
+			"submitted": False,
+			"submit_error": None,
+			"unresolved": [dict(e, text=handover_state.entry_text(e)) for e in handover_state.load_entries(shipment)],
+		}
 
-	units = _entry_units(entries) if handed else _shipment_units(order, integration_shipment_nr)
-	result = _draft_and_record(order, shipment, units)
-	# The status is kept by handover_state.reassert() on this save; skip the re-plan so it
-	# cannot run before the record is final.
-	order.flags.skip_sync_status_update = True
-	order.save()
+	result = _draft_and_record(order, shipment, _row_units(rows)) if rows else None
+	draft = handover_state.draft_note(units, integration_shipment_nr)
+	submit_error = None
+	if draft:
+		order, submit_error = _submit_shipment_draft(order, integration_shipment_nr, draft)
+		shipment = _find_shipment_row(order, integration_shipment_nr)
+	else:
+		# The status is kept by handover_state.reassert() on this save; skip the re-plan so it
+		# cannot run before the record is final.
+		order.flags.skip_sync_status_update = True
+		order.save()
 	frappe.db.commit()
 	return {
-		"delivery_note": result["delivery_note"],
-		"created": bool(result["delivery_note"]) and not result["added_to_existing"],
-		"added_to_existing": result["added_to_existing"],
+		"delivery_note": draft,
+		"created": bool(result and result["delivery_note"]) and not result["added_to_existing"],
+		"added_to_existing": bool(result and result["added_to_existing"]),
+		"submitted": bool(draft) and not submit_error,
+		"submit_error": submit_error,
 		"unresolved": [dict(e, text=handover_state.entry_text(e)) for e in handover_state.load_entries(shipment)],
 	}
+
+
+def _sales_order_submitted(order):
+	return bool(
+		order.erpnext_sales_order and frappe.db.get_value("Sales Order", order.erpnext_sales_order, "docstatus") == 1
+	)
+
+
+def queue_shipped_units(marketplace_order_name):
+	"""Queue ``process_shipped_units`` for one order (deduplicated per order, after commit)."""
+	return frappe.enqueue(
+		process_shipped_units,
+		queue="long",
+		timeout=600,
+		enqueue_after_commit=True,
+		job_id=f"{RQ_JOB_PREFIX}-{marketplace_order_name}-shipped",
+		deduplicate=True,
+		marketplace_order=marketplace_order_name,
+	)
+
+
+def queue_shipped_units_if_needed(order):
+	"""Called by ``import_order`` after the order is saved: queue ``process_shipped_units`` when a
+	Created shipment has a SHIPPED unit no live Delivery Note covers, or all its active units are
+	SHIPPED while its note is still a draft (#390)."""
+	payload = handover_state.payload_items(order.latest_payload)
+	if handover_state.shipped_work_pending(payload, order.noon_shipments or [], order.noon_shipment_units or []):
+		queue_shipped_units(order.name)
+	if order.get("noon_sales_invoice_error") and order.erpnext_sales_order:
+		queue_sales_invoice(order.name, order.erpnext_sales_order)  # #377: retry a failed invoice
+
+
+def process_shipped_units(marketplace_order):
+	"""Background job (#390): one Delivery Note per shipment from the units Noon reports SHIPPED.
+
+	Per Created shipment: SHIPPED units that no live note covers go onto the shipment's draft (the
+	first ones create it); when every active unit (not cancelled, not out of stock) is SHIPPED the
+	draft is submitted.  A shipment whose note is already submitted gets no second note; its
+	leftover SHIPPED units show in Needs Attention (``services/marketplace_attention.py``).  Waits
+	(does nothing) until the Sales Order is submitted; the next import queues it again.
+
+	Runs as the system, like ``retry_unresolved_handovers``: it is queued by the import or the
+	webhook, detached from any session, and must create and submit Delivery Notes whatever the
+	user whose action triggered the import may do.  Each shipment runs in its own savepoint; a
+	failure is logged and the shipment is retried by the next trigger.
+	"""
+	if not frappe.db.exists("Marketplace Order", marketplace_order):
+		return
+	frappe.set_user("Administrator")
+	order = _lock_and_load_order(marketplace_order)
+	if not _sales_order_submitted(order):
+		frappe.db.commit()
+		return
+	payload = handover_state.payload_items(order.latest_payload)
+	for nr in [row.integration_shipment_nr for row in order.noon_shipments or [] if row.status == "Created"]:
+		savepoint = "noon_shipped_units"
+		frappe.db.savepoint(savepoint)
+		try:
+			order = _process_shipped_shipment(order, nr, payload)
+			frappe.db.release_savepoint(savepoint)
+		except Exception:
+			frappe.db.rollback(save_point=savepoint)
+			frappe.log_error(
+				title="Noon shipped units failed", message=f"{order.name} {nr}\n{frappe.get_traceback()}"
+			)
+			order = frappe.get_doc("Marketplace Order", marketplace_order)
+	frappe.db.commit()
+
+
+def _process_shipped_shipment(order, integration_shipment_nr, payload):
+	"""Draft the shipment's uncovered SHIPPED units and submit when all active units are SHIPPED.
+	Saves the order when it changed anything and returns it (a fresh copy after a submit, see
+	``_submit_shipment_draft``)."""
+	nr = integration_shipment_nr
+	shipment = _find_shipment_row(order, nr)
+	units = order.noon_shipment_units
+	plan = handover_state.shipment_plan(payload, handover_state.unit_rows(units, nr))
+	changed = False
+	draft = handover_state.draft_note(units, nr)
+	shipped = [row for row in plan["shipped"] if not handover_state.is_covered(row)]
+	if shipped and (draft or not handover_state.submitted_note(units, nr)):
+		_draft_and_record(order, shipment, _row_units(shipped))
+		draft = handover_state.draft_note(units, nr)
+		changed = True
+	if draft and plan["all_shipped"]:
+		order, _error = _submit_shipment_draft(order, nr, draft)
+		return order
+	if not draft and shipment.delivery_note_error:
+		shipment.delivery_note_error = None  # the draft is gone, so there is nothing left to retry
+		changed = True
+	if changed:
+		order.flags.skip_sync_status_update = True
+		order.save()
+	return order
 
 
 def retry_unresolved_handovers(marketplace_order, after_sync=False):
@@ -1313,7 +1609,9 @@ def retry_unresolved_handovers(marketplace_order, after_sync=False):
 	``after_sync`` marks entries that are still unresolved as final, so the order goes to Needs
 	Action.  Each shipment is retried in its own savepoint: a failure is logged and the shipment
 	keeps its record.  When the Sales Order is not submitted a retry cannot help, so the entries
-	become final at once.
+	become final at once.  #390: units are added to the shipment's draft only; once its note is
+	submitted nothing is added (one note per shipment) and the entries become final, so the order
+	shows them in Needs Action.  A retry never submits.
 	"""
 	if not frappe.db.exists("Marketplace Order", marketplace_order):
 		return
@@ -1327,27 +1625,38 @@ def retry_unresolved_handovers(marketplace_order, after_sync=False):
 		entries = handover_state.load_entries(shipment)
 		if not entries or shipment.status != "Created":
 			continue
+		nr = shipment.integration_shipment_nr
 		if sales_order_docstatus != 1:
 			for entry in entries:
 				entry["final"] = True
 			handover_state.store_entries(shipment, entries)
 			changed = True
 			continue
-		covers_all = sum(flt(e.get("qty")) for e in entries) >= len(
-			_shipment_units(order, shipment.integration_shipment_nr)
-		)
-		if not _handed_over(shipment) and not covers_all:
+		covers_all = sum(flt(e.get("qty")) for e in entries) >= len(_shipment_units(order, nr))
+		if not _handed_over(order, shipment) and not covers_all:
 			if after_sync:
 				for entry in entries:
 					entry["final"] = True
 				handover_state.store_entries(shipment, entries)
 				changed = True
 			continue
+		if not handover_state.draft_note(order.noon_shipment_units, nr) and handover_state.submitted_note(
+			order.noon_shipment_units, nr
+		):
+			for entry in entries:
+				entry["final"] = True
+			handover_state.store_entries(shipment, entries)
+			changed = True
+			continue
 		savepoint = "noon_handover_retry"
 		frappe.db.savepoint(savepoint)
 		try:
 			_draft_and_record(
-				order, shipment, _entry_units(entries), after_sync=after_sync, queue_sync=not after_sync
+				order,
+				shipment,
+				_entry_unit_rows(order, shipment, entries),
+				after_sync=after_sync,
+				queue_sync=not after_sync,
 			)
 			frappe.db.release_savepoint(savepoint)
 			changed = True
@@ -1408,7 +1717,7 @@ def discard_shipment(marketplace_order_name, integration_shipment_nr):
 				integration_shipment_nr
 			)
 		)
-	_refuse_while_delivery_note_is_live(shipment)
+	_refuse_while_delivery_note_is_live(order, shipment)
 	shipment.status = "Discarded"
 	shipment.last_error = None
 	handover_state.clear_entries(shipment)  # a discarded shipment no longer owes a Delivery Note

@@ -23,6 +23,10 @@ status-grouped Marketplace Order Item id):
   Noon documents no outcome for ``Cancel Pending`` (a CancelShipment call is in
   flight for a shipment that was ``Created``); it is counted as started until the
   cancellation is confirmed;
+- ``fulfillment_started_qty`` counts those started units per line and
+  ``partial_line_update`` tells the planner that a changed line is judged on its own
+  (delivered/billed/started quantity) instead of the whole order being blocked (#390);
+  ``lifecycle_permits_change`` is therefore never ``False`` for a recognized order;
 - full cancellation = no eligible unit remains;
 - an unrecognized status (``UNSPECIFIED`` or a future value; Noon documents no
   meaning for it) makes the stage unknown instead of being guessed.
@@ -114,6 +118,7 @@ def build_evidence(order):
 
 	in_started_shipment = _started_shipment_mp_item_nrs(order)
 	started = {}
+	started_qty = {}
 	has_eligible = False
 	has_unknown = False
 	any_started = False
@@ -135,8 +140,15 @@ def build_evidence(order):
 		any_started = any_started or unit_started
 		line_key = f"sku:{cstr(unit.get('partner_sku')).strip()}"
 		started[line_key] = started.get(line_key, False) or unit_started
+		# Every started unit counts, eligible or not: a line may not drop below them.
+		started_qty[line_key] = started_qty.get(line_key, 0) + (1 if unit_started else 0)
 
-	evidence = {"source": "marketplace", "fulfillment_started": started}
+	evidence = {
+		"source": "marketplace",
+		"fulfillment_started": started,
+		"fulfillment_started_qty": started_qty,
+		"partial_line_update": True,
+	}
 	if has_return:
 		evidence["return"] = True
 	if has_unknown:
@@ -151,12 +163,8 @@ def build_evidence(order):
 		if any_started:
 			evidence["cancelled_after_fulfillment"] = True
 		return evidence
-	if all(started.values()):
-		evidence["lifecycle_permits_change"] = False
-		evidence["lifecycle_reason"] = _(
-			"Noon fulfillment has already started for every line, so the change was not applied."
-		)
-	else:
-		# Before or partway through fulfillment: a changed line is judged on its own flag.
-		evidence["lifecycle_permits_change"] = True
+	# Before or partway through fulfillment: a changed line is judged on its own started
+	# quantity (``fulfillment_started_qty``), so a line may drop to the units that already
+	# started; an out-of-stock mark on the last unit of a partly shipped line is such a drop.
+	evidence["lifecycle_permits_change"] = True
 	return evidence

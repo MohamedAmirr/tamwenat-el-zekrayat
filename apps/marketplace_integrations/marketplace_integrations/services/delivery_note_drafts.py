@@ -6,8 +6,10 @@
 No marketplace action creates a Delivery Note outside Bosta, so ERPNext stock never moves for
 the other platforms.  ``create_draft_delivery_note()`` is the one place that turns "these units
 left the warehouse" into ONE draft Delivery Note on the order's Sales Order.  A person submits
-it; nothing here ever submits.  The per-platform code only decides the trigger and which units
-to hand over (Noon: ``integrations/noon/fulfillment.py::mark_handed_over``; Shopify and
+it.  ``create_draft_delivery_note()`` itself never submits; ``submit_note()`` submits one draft
+inside a savepoint (#390) and is called by the per-platform code that decides when (Noon: when
+every active unit of a shipment is SHIPPED, or Mark Handed Over).  The per-platform code decides
+the trigger and which units to hand over (Noon: ``integrations/noon/fulfillment.py``; Shopify and
 Talabat have no caller yet because their triggers are undecided).  Bosta keeps its own
 Delivery Note path.
 
@@ -125,6 +127,28 @@ def create_draft_delivery_note(marketplace_order, units, queue_sync=True, expect
 
 		queue_resync_in_memory(order, RESYNC_TRIGGER)
 	return result
+
+
+def submit_note(name):
+	"""Submit the draft Delivery Note ``name`` inside a savepoint and return its name (#390).
+
+	Needs submit permission on Delivery Note (checked here).  On failure (for example not enough
+	stock) the savepoint is rolled back, so the draft stays exactly as it was, and the error is
+	raised for the caller to record.  The caller owns the transaction: nothing is committed here.
+	"""
+	frappe.has_permission("Delivery Note", "submit", throw=True)
+	savepoint = "delivery_note_submit_" + frappe.generate_hash(length=8)
+	frappe.db.savepoint(savepoint)
+	try:
+		note = frappe.get_doc("Delivery Note", name)
+		if note.docstatus != 0:
+			frappe.throw(_("Delivery Note {0} is not a draft.").format(name))
+		note.submit()
+	except Exception:
+		frappe.db.rollback(save_point=savepoint)
+		raise
+	frappe.db.release_savepoint(savepoint)
+	return name
 
 
 def _merge_into_draft(name, rows):

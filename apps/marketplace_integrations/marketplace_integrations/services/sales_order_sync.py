@@ -324,6 +324,13 @@ def _sync_sales_order(marketplace_order, trigger_source):
 			frappe.db.rollback(save_point=_FRESH_SALES_ORDER_SAVEPOINT)
 			raise
 		result = _save_success(order, current_hash, sales_order, updated=False, snapshot=snapshot)
+		if order.platform == "Noon":
+			# #378: the list's Delivery Status is otherwise written only by the Noon order import, so a
+			# Sales Order created by this sync would stay blank until the next import. Lock order is the
+			# import's: this Marketplace Order (locked above), then the Sales Order.
+			from marketplace_integrations.integrations.noon.orders import write_delivery_status
+
+			write_delivery_status(order.name, sales_order.name)
 		result = _flag_compensating_evidence_on_new_order(order, sales_order, snapshot) or result
 		_create_sync_log(order, trigger_source, "Success", snapshot, result)
 		return result

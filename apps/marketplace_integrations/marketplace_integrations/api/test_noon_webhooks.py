@@ -8,7 +8,13 @@ from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api import noon_webhooks
 from marketplace_integrations.integrations.noon import orders, returns
-from marketplace_integrations.integrations.noon.orders import _ORDER_IMPORT_RQ_JOB_PREFIX, run_order_import
+from marketplace_integrations.integrations.noon.orders import (
+	_ORDER_IMPORT_RQ_JOB_PREFIX,
+	_ORDER_REFRESH_RQ_JOB_PREFIX,
+	run_order_import,
+	run_order_refresh,
+)
+from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 
 _PRIVATE_KEY = (
 	"-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0Z3VS5JJcds1xfn8fH9gFKvKHxsXNpKZDqz5Fng0Z5HqL8H7"
@@ -246,6 +252,70 @@ class IntegrationTestNoonWebhookReceiver(IntegrationTestCase):
 		self.assertEqual(enqueue.call_count, 3)
 		job_ids = {call.kwargs["job_id"] for call in enqueue.call_args_list}
 		self.assertEqual(job_ids, {f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{self.account.name}"})
+
+	def _imported_order(self, order_nr):
+		order = upsert_marketplace_order(
+			self.account.name,
+			{
+				"external_order_id": order_nr,
+				"received_on": frappe.utils.nowdate(),
+				"latest_payload": {"items": []},
+				"items": [],
+			},
+		)
+		frappe.db.commit()
+		return order
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_order_sync_for_an_imported_order_queues_one_deduplicated_refresh_of_that_order(self, enqueue):
+		order = self._imported_order(f"ORD-WH-{frappe.generate_hash(length=8)}")
+		envelope = _envelope(self.connection, payload={"order_nr": order.external_order_id})
+
+		self._call_webhook(envelope, "test-webhook-secret")
+
+		enqueue.assert_called_once_with(
+			run_order_refresh,
+			queue="long",
+			timeout=3600,
+			job_id=f"{_ORDER_REFRESH_RQ_JOB_PREFIX}-{order.name}",
+			deduplicate=True,
+			marketplace_order_name=order.name,
+		)
+		log = frappe.get_last_doc(
+			"Marketplace Sync Log",
+			filters={"marketplace_account": self.account.name, "trigger_source": "Noon Webhook"},
+		)
+		self.assertEqual(
+			frappe.parse_json(log.request_data),
+			{
+				"message_id": envelope["metadata"]["message_id"],
+				"event_type": "FBPI::ORDER_SYNC",
+				"import_queued": False,
+				"refresh_queued": True,
+			},
+		)
+
+	@patch.object(orders.frappe, "enqueue", return_value=None)
+	def test_a_redelivered_order_sync_queues_nothing_extra(self, enqueue):
+		order = self._imported_order(f"ORD-WH-{frappe.generate_hash(length=8)}")
+		self._call_webhook(_envelope(self.connection, payload={"order_nr": order.external_order_id}), "test-webhook-secret")
+		# Only the refresh job id was used (a duplicate returns None), never the account import.
+		self.assertEqual(
+			{call.kwargs["job_id"] for call in enqueue.call_args_list}, {f"{_ORDER_REFRESH_RQ_JOB_PREFIX}-{order.name}"}
+		)
+		log = frappe.get_last_doc(
+			"Marketplace Sync Log",
+			filters={"marketplace_account": self.account.name, "trigger_source": "Noon Webhook"},
+		)
+		self.assertEqual(frappe.parse_json(log.request_data)["refresh_queued"], False)
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_an_unknown_or_unusable_order_nr_queues_the_account_import(self, enqueue):
+		for payload in ({"order_nr": "NO-SUCH-ORDER"}, {"order_nr": 12345}, {"order_nr": "  "}, {}):
+			enqueue.reset_mock()
+			self._call_webhook(_envelope(self.connection, payload=payload or None), "test-webhook-secret")
+			enqueue.assert_called_once()
+			self.assertEqual(enqueue.call_args.args[0], run_order_import, payload)
 
 	@patch.object(orders.frappe, "enqueue")
 	def test_payload_contents_are_never_read_stored_or_logged(self, enqueue):

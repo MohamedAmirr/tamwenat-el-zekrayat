@@ -5,7 +5,8 @@
 
 Triggered by the hourly poll, a manual Desk action, and the
 ``FBPI::ORDER_SYNC`` webhook (``api/noon_webhooks.py``, #163), which queues
-this same deduplicated import without reading the event payload.
+this same deduplicated import, or (#390) the per-order refresh when the event's
+``order_nr`` names an order already imported.
 ``poll_all_accounts()`` is the hourly ``hooks.py``
 scheduler entry; ``queue_order_import()``/``run_order_import()`` are the
 manual Desk-triggered equivalent, both funnelled through the same
@@ -331,7 +332,63 @@ def import_order(account, raw_order, bump_trigger_source="Noon Order Import", ec
 	else:
 		bump_if_linked_order_changed(order.name, fingerprint_before, bump_trigger_source)
 
+	# #390: SHIPPED units get their Delivery Note in a background job (lazy import: fulfillment
+	# imports this module).
+	from marketplace_integrations.integrations.noon.fulfillment import queue_shipped_units_if_needed
+
+	queue_shipped_units_if_needed(order)
+	write_delivery_status(order.name, order.erpnext_sales_order)
+
 	return order, unmapped_skus
+
+
+def delivery_status_text(rows):
+	"""``Shipped <n>/<total>`` (English; the list translates it) for Marketplace Order Item ``rows`` (#378), or ``""`` when no unit is
+	Sales-Order-eligible.  The total counts the eligible units (the same rule as
+	``has_eligible_units``), the numerator those among them Noon reports SHIPPED.  Each row counts
+	``current_quantity`` units."""
+	from marketplace_integrations.services.sales_order_sync import (
+		NOON_ELIGIBLE_EXTERNAL_STATUS,
+		NOON_INELIGIBLE_INTEGRATION_STATUS,
+	)
+
+	shipped = 0
+	total = 0
+	for row in rows:
+		if (
+			row.external_status != NOON_ELIGIBLE_EXTERNAL_STATUS
+			or row.integration_status == NOON_INELIGIBLE_INTEGRATION_STATUS
+		):
+			continue
+		quantity = int(flt(row.current_quantity))
+		if quantity <= 0:
+			continue
+		total += quantity
+		if row.integration_status == "SHIPPED":
+			shipped += quantity
+	# Stored in English on purpose: sales_order_list.js translates it for the viewer.
+	return f"Shipped {shipped}/{total}" if total else ""
+
+
+def write_delivery_status(order_name, sales_order):
+	"""Store the order's ``Shipped n/m`` on its Sales Order (``custom_delivery_status``, #378).
+
+	A derived display field, so it is written with ``update_modified=False`` and nothing is
+	validated.  The caller holds the Marketplace Order lock; the Sales Order row lock is taken here
+	(the same order as the sync).  Does nothing without a Sales Order or before the Custom Field
+	exists.
+	"""
+	if not sales_order or not frappe.get_meta("Sales Order").has_field("custom_delivery_status"):
+		return
+	rows = frappe.get_all(
+		"Marketplace Order Item",
+		filters={"parenttype": "Marketplace Order", "parent": order_name},
+		fields=["external_status", "integration_status", "current_quantity"],
+	)
+	text = delivery_status_text(rows)
+	frappe.db.get_value("Sales Order", sales_order, "name", for_update=True)
+	if (frappe.db.get_value("Sales Order", sales_order, "custom_delivery_status") or "") != text:
+		frappe.db.set_value("Sales Order", sales_order, "custom_delivery_status", text, update_modified=False)
 
 
 def has_eligible_units(order_name):
@@ -852,15 +909,21 @@ def queue_order_refresh(marketplace_order_name):
 	"""
 	doc = frappe.get_doc("Marketplace Order", marketplace_order_name)
 	doc.check_permission("write")
-	job = frappe.enqueue(
+	return {"queued": enqueue_order_refresh(doc.name) is not None}
+
+
+def enqueue_order_refresh(marketplace_order_name):
+	"""Queue the deduplicated ``run_order_refresh`` job with no permission check; for the caller
+	that has already authenticated its request (the Noon webhook, #390). Returns the job, or
+	``None`` when an identical job is already queued or running."""
+	return frappe.enqueue(
 		run_order_refresh,
 		queue="long",
 		timeout=3600,
-		job_id=f"{_ORDER_REFRESH_RQ_JOB_PREFIX}-{doc.name}",
+		job_id=f"{_ORDER_REFRESH_RQ_JOB_PREFIX}-{marketplace_order_name}",
 		deduplicate=True,
-		marketplace_order_name=doc.name,
+		marketplace_order_name=marketplace_order_name,
 	)
-	return {"queued": job is not None}
 
 
 def run_order_refresh(marketplace_order_name):

@@ -6,7 +6,7 @@
 // submitted Sales Order linked to a Noon Marketplace Order, so the dialogs live in exactly one
 // place. Every action calls the whitelisted api.noon_fulfillment endpoints with the linked
 // Marketplace Order name; those endpoints still check write on that document, and Mark Handed
-// Over still needs create on Delivery Note. The buttons are only a convenience: they are hidden
+// Over still needs submit on Delivery Note (it submits the shipment's note). The buttons are only a convenience: they are hidden
 // without those permissions and the server remains the real gate.
 //
 // Which actions show is decided server-side by api.noon_fulfillment.get_available_actions (the
@@ -42,10 +42,10 @@
 		return buttons.filter((button) => available_actions.includes(button.action));
 	}
 
-	// Mark Handed Over drafts a Delivery Note, so it also needs create permission on that doctype.
+	// Mark Handed Over submits the shipment's Delivery Note, so it also needs submit permission on that doctype.
 	function can_use_noon_fulfillment(action) {
 		if (!frappe.model.can_write("Marketplace Order")) return false;
-		if (action === "mark_handed_over") return Boolean(frappe.model.can_create("Delivery Note"));
+		if (action === "mark_handed_over") return Boolean(frappe.model.can_submit("Delivery Note"));
 		return true;
 	}
 
@@ -65,6 +65,12 @@
 				action: "cancel_shipment",
 				label: __("Cancel Shipment"),
 				click: () => show_noon_cancel_shipment_dialog(ctx),
+			},
+			// #376: cancels every Created shipment on Noon so the Sales Order can then be cancelled.
+			{
+				action: "cancel_on_noon",
+				label: __("Cancel on Noon"),
+				click: () => show_noon_cancel_on_noon_dialog(ctx),
 			},
 			{ action: "add_awb", label: __("Add AWB"), click: () => show_noon_add_awb_dialog(ctx) },
 			{
@@ -146,51 +152,83 @@
 			);
 	}
 
-	// Compact read-only list of the shipments for the Marketplace Order tab. Empty string when
-	// there is nothing to show.
-	function noon_shipments_html(shipments) {
-		if (!Array.isArray(shipments) || !shipments.length) return "";
+	// "INTEGRATION_ITEM_STATUS_SHIPPED" -> "Shipped": Noon's own unit status, shown as Noon sends it
+	// (not translated: it is Noon vocabulary), empty when the unit is not in the payload.
+	function noon_unit_status_text(status) {
+		const text = String(status || "")
+			.replace(/^INTEGRATION_ITEM_STATUS_/, "")
+			.replace(/_/g, " ")
+			.toLowerCase();
+		return text.charAt(0).toUpperCase() + text.slice(1);
+	}
+
+	// A Delivery Note or Sales Invoice link with its draft/submitted state; the server only sends a
+	// name the user may read (#378), so a missing document renders as nothing.
+	function noon_document_link(route, document) {
+		if (!document || !document.name) return "";
 		const escape = frappe.utils.escape_html;
-		const rows = shipments
-			.map((shipment) => {
-				const awbs = (shipment.awbs || [])
-					.map((awb) =>
-						escape(
-							[awb.courier === "noon" ? "Noon" : awb.courier, awb.awb_nr].filter(Boolean).join(" ")
-						)
-					)
-					.join(", ");
-				const items = (shipment.items || [])
-					.map((item) => escape(`${item.label} x${item.qty}`))
-					.join(", ");
-				// Every Delivery Note created for the shipment (the first one alone for older data).
-				const notes = (shipment.delivery_notes || []).length
-					? shipment.delivery_notes
-					: shipment.delivery_note
-					? [shipment.delivery_note]
-					: [];
-				const delivery_note = notes
-					.map(
-						(name) =>
-							`<a href="/app/delivery-note/${encodeURIComponent(name)}">${escape(name)}</a>`
-					)
-					.join(", ");
-				const unresolved = (shipment.unresolved || []).map((text) => escape(text)).join("; ");
-				return `<tr><td title="${escape(shipment.integration_shipment_nr || "")}">${escape(
-					noon_shipment_label(shipment.integration_shipment_nr)
-				)}</td><td>${items}</td><td>${escape(
-					__(shipment.status || "")
-				)}</td><td>${awbs}</td><td>${delivery_note}</td><td>${unresolved}</td></tr>`;
-			})
+		return `<a href="/app/${route}/${encodeURIComponent(document.name)}">${escape(document.name)}</a> (${escape(
+			__(document.state || "Draft")
+		)})`;
+	}
+
+	function noon_shipment_block_html(shipment) {
+		const escape = frappe.utils.escape_html;
+		const awbs = (shipment.awbs || [])
+			.map((awb) => escape([awb.courier === "noon" ? "Noon" : awb.courier, awb.awb_nr].filter(Boolean).join(" ")))
+			.join(", ");
+		const notes = (shipment.delivery_notes || []).map((note) => noon_document_link("delivery-note", note)).join(", ");
+		const facts = [
+			`${escape(__("AWB"))}: ${awbs || "-"}`,
+			`${escape(__("Delivery Note"))}: ${notes || "-"}`,
+			escape(__("{0} of {1} units shipped", [shipment.shipped_count || 0, shipment.unit_count || 0])),
+		].join(" &middot; ");
+		const note_error = shipment.delivery_note_error
+			? `<p class="text-danger">${escape(shipment.delivery_note_error)}</p>`
+			: "";
+		const unresolved = (shipment.unresolved || []).length
+			? `<p>${escape(__("Not added"))}: ${shipment.unresolved.map((text) => escape(text)).join("; ")}</p>`
+			: "";
+		const rows = (shipment.units || [])
+			.map(
+				(unit) =>
+					`<tr><td>${escape(unit.item_name || "")}</td><td>${escape(unit.sku || "")}</td><td>${escape(
+						unit.qty
+					)}</td><td>${escape(noon_unit_status_text(unit.status))}</td><td>${escape(
+						unit.on_note ? __("Yes") : __("No")
+					)}</td></tr>`
+			)
 			.join("");
+		const table = rows
+			? `<table class="table table-bordered"><thead><tr><th>${escape(__("Item"))}</th><th>${escape(
+					__("SKU")
+				)}</th><th>${escape(__("Qty"))}</th><th>${escape(__("Noon Status"))}</th><th>${escape(
+					__("On the Delivery Note")
+				)}</th></tr></thead><tbody>${rows}</tbody></table>`
+			: `<p class="text-muted">${escape(__("No units."))}</p>`;
 		return (
-			`<h5>${escape(__("Noon Shipments"))}</h5>` +
-			`<table class="table table-bordered"><thead><tr><th>${escape(__("Shipment"))}</th><th>${escape(__("Items"))}</th><th>${escape(
-				__("Status")
-			)}</th><th>${escape(__("AWB"))}</th><th>${escape(__("Delivery Note"))}</th><th>${escape(
-				__("Not added")
-			)}</th></tr></thead><tbody>${rows}</tbody></table>`
+			`<h5 title="${escape(shipment.integration_shipment_nr || "")}">${escape(
+				noon_shipment_label(shipment.integration_shipment_nr)
+			)} <span class="indicator-pill grey">${escape(__(shipment.status || ""))}</span></h5>` +
+			`<p>${facts}</p>${note_error}${unresolved}${table}`
 		);
+	}
+
+	// Content of the Sales Order's Noon Fulfillment tab (#378): the Sales Invoice, then one block
+	// per shipment. `state` is the get_available_actions result, or null when it could not be
+	// loaded (no permission, draft Sales Order, a failed call).
+	function noon_fulfillment_tab_html(state) {
+		const escape = frappe.utils.escape_html;
+		if (!state) return `<p class="text-muted">${escape(__("Noon fulfillment is not available for this order."))}</p>`;
+		const invoice = noon_document_link("sales-invoice", state.sales_invoice);
+		const invoice_html = `<h5>${escape(__("Sales Invoice"))}</h5><p>${
+			invoice || `<span class="text-muted">${escape(__("No Sales Invoice yet."))}</span>`
+		}</p>`;
+		const shipments = state.shipments || [];
+		const shipments_html = shipments.length
+			? shipments.map(noon_shipment_block_html).join("")
+			: `<p class="text-muted">${escape(__("No shipments yet."))}</p>`;
+		return invoice_html + shipments_html;
 	}
 
 	// {queued: bool} is the shape every api.noon_fulfillment endpoint that enqueues returns (a
@@ -447,26 +485,119 @@
 		dialog.show();
 	}
 
-	// #368: Created shipments not handed over yet (no live Delivery Note, no recorded handover), or with
-	// unresolved handover units.
+	// #376: HTML of the confirmation. Everything from the server is Noon-sourced text and escaped.
+	function noon_cancel_on_noon_html(preview) {
+		const escape = frappe.utils.escape_html;
+		const rows = (preview.created || [])
+			.map((shipment) => {
+				const items = (shipment.items || [])
+					.map((item) => `${escape(item.label)} x ${escape(item.qty)}`)
+					.join(", ");
+				return `<li>${escape(noon_shipment_label(shipment.integration_shipment_nr))}${
+					items ? ` - ${items}` : ""
+				}</li>`;
+			})
+			.join("");
+		const skipped = (preview.skipped || [])
+			.map((shipment) => noon_shipment_label(shipment.integration_shipment_nr))
+			.join(", ");
+		return (
+			`<p>${escape(__("These Created shipments will be cancelled on Noon. Noon also cancels their units."))}</p>` +
+			`<ul>${rows}</ul>` +
+			(skipped
+				? `<p>${escape(
+						__("Not cancelled because a Delivery Note is live: {0}. Cancel that Delivery Note first.", [skipped])
+				  )}</p>`
+				: "") +
+			`<p>${escape(__("Units that are not in a shipment are not changed on Noon."))}</p>` +
+			`<p>${escape(
+				__("The Sales Order cancel completes only after Noon confirms: when every shipment shows Cancelled, cancel the Sales Order again.")
+			)}</p>`
+		);
+	}
+
+	// Pure step for testing: the alert for the cancel_created_shipments result
+	// ({queued, skipped, failed[{integration_shipment_nr, error}]}). Errors are escaped, the alert renders HTML.
+	function noon_cancel_on_noon_alert(result) {
+		result = result || {};
+		const escape = frappe.utils.escape_html;
+		const failed = result.failed || [];
+		if (failed.length) {
+			const details = failed
+				.map((entry) => `${escape(entry.integration_shipment_nr)}: ${escape(entry.error)}`)
+				.join("; ");
+			return {
+				message: __("Queued {0} shipment(s). Not queued: {1}", [(result.queued || []).length, details]),
+				indicator: "orange",
+			};
+		}
+		return {
+			message: __(
+				"Cancellation of {0} shipment(s) queued on Noon. Cancel the Sales Order after they show Cancelled.",
+				[(result.queued || []).length]
+			),
+			indicator: "blue",
+		};
+	}
+
+	function show_noon_cancel_on_noon_dialog(ctx) {
+		frappe
+			.call({
+				method: API + "get_cancel_on_noon_preview",
+				args: { marketplace_order: ctx.marketplace_order },
+			})
+			.then((r) => {
+				const preview = r.message || {};
+				if (!(preview.created || []).length) {
+					frappe.msgprint({
+						message: __("No Created shipment can be cancelled on Noon."),
+						indicator: "orange",
+					});
+					return;
+				}
+				const dialog = new frappe.ui.Dialog({
+					title: __("Cancel on Noon"),
+					fields: [{ fieldtype: "HTML", fieldname: "preview", options: noon_cancel_on_noon_html(preview) }],
+					primary_action_label: __("Cancel on Noon"),
+					primary_action() {
+						dialog.hide();
+						frappe
+							.call({
+								method: API + "cancel_created_shipments",
+								args: { marketplace_order: ctx.marketplace_order },
+								freeze: true,
+								freeze_message: __("Queuing shipment cancellation..."),
+							})
+							.then((result) => {
+								frappe.show_alert(noon_cancel_on_noon_alert(result.message));
+								ctx.reload();
+							});
+					},
+					secondary_action_label: __("Not now"),
+					secondary_action() {
+						dialog.hide();
+					},
+				});
+				dialog.show();
+			});
+	}
+
+	// #368, #390: Created shipments with a draft Delivery Note to submit or units no live Delivery
+	// Note covers yet (decided by the server: can_mark_handed_over).
 	function noon_handover_shipment_options(ctx) {
 		return (ctx.shipments || [])
-			.filter(
-				(shipment) =>
-					shipment.status === "Created" &&
-					(!shipment.handed_over || (shipment.unresolved || []).length)
-			)
+			.filter((shipment) => shipment.status === "Created" && shipment.can_mark_handed_over)
 			.map(shipment_option);
 	}
 
 	// Pure step for testing: the alert shown for the mark_handed_over result
-	// ({delivery_note, created, unresolved[{text, reason}]}). Nothing here is submitted and no
-	// Noon call is made. Units that could not be drafted stay on the shipment and keep the order
-	// in Needs Action (or Syncing while a Sales Order sync is pending).
+	// ({delivery_note, created, added_to_existing, submitted, submit_error, unresolved[{text, reason}]}).
+	// No Noon call is made. Units that could not be put on the note stay on the shipment and keep
+	// the order in Needs Action (or Syncing while a Sales Order sync is pending).
 	function noon_handover_alert(result) {
 		result = result || {};
 		const unresolved = result.unresolved || [];
-		// entry.text carries Noon-sourced SKUs: escaped here, the alert renders HTML.
+		// entry.text and submit_error carry Noon-sourced text: escaped here, the alert renders HTML.
 		const escape = frappe.utils.escape_html;
 		let skipped = unresolved.length
 			? " " +
@@ -485,16 +616,19 @@
 				indicator: "orange",
 			};
 		}
+		if (result.submit_error) {
+			return {
+				message:
+					__("Delivery Note {0} could not be submitted and stays a draft: {1}", [
+						escape(result.delivery_note),
+						escape(result.submit_error),
+					]) + skipped,
+				indicator: "red",
+			};
+		}
 		return {
 			message:
-				(result.created
-					? __("Draft Delivery Note {0} created. Review and submit it.", [escape(result.delivery_note)])
-					: result.added_to_existing
-					? __("Units added to the draft Delivery Note {0}. Review and submit it.", [
-							escape(result.delivery_note),
-					  ])
-					: __("Delivery Note {0} already exists for this shipment.", [escape(result.delivery_note)])) +
-				skipped,
+				__("Delivery Note {0} submitted.", [escape(result.delivery_note)]) + skipped,
 			indicator: skipped ? "orange" : "green",
 		};
 	}
@@ -516,7 +650,7 @@
 					fieldtype: "HTML",
 					options: `<p class="text-muted">${frappe.utils.escape_html(
 						__(
-							"This creates one draft Delivery Note for the shipment's units. Nothing is sent to Noon and the Delivery Note is not submitted."
+							"This puts every unit of the shipment that is not on a Delivery Note yet on the shipment's Delivery Note and submits it, so stock leaves the warehouse in ERPNext. Nothing is sent to Noon."
 						)
 					)}</p>`,
 				},
@@ -539,7 +673,7 @@
 							integration_shipment_nr: values.integration_shipment_nr,
 						},
 						freeze: true,
-						freeze_message: __("Creating the draft Delivery Note..."),
+						freeze_message: __("Submitting the Delivery Note..."),
 					})
 					.then((r) => {
 						frappe.show_alert(noon_handover_alert(r.message));
@@ -832,7 +966,8 @@
 		build_context,
 		can_use_noon_fulfillment,
 		noon_fulfillment_buttons,
-		noon_shipments_html,
+		noon_fulfillment_tab_html,
+		noon_unit_status_text,
 		noon_unit_checklist_options,
 		mp_item_nrs_from_unit_indices,
 		noon_created_shipment_options,
@@ -843,6 +978,9 @@
 		show_noon_create_shipment_dialog,
 		show_noon_mark_handed_over_dialog,
 		show_noon_cancel_shipment_dialog,
+		show_noon_cancel_on_noon_dialog,
+		noon_cancel_on_noon_html,
+		noon_cancel_on_noon_alert,
 		run_noon_release_stuck_oos_reservation,
 	};
 

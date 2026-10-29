@@ -96,7 +96,7 @@ The app never invents a missing identity, overwrites an ambiguous baseline or cl
 | 12 | All lines zero, already delivered | Needs Action |
 | 15 | Requested quantity below the delivered quantity | Needs Action |
 | 16 | Already billed, Sales Invoice exists | Needs Action (accounting decision) |
-| 17 | Delivery or billing blocks the submitted-order update | Needs Action |
+| 17 | Delivery or billing blocks the submitted-order update (Noon judges each changed line instead: only a cut below its delivered, billed or started quantity is Needs Action, #390) | Needs Action |
 
 **Receipt gate.** A marketplace `return`, `refund` or `cancelled` event does not prove goods were received, and neither does a Bosta status. The order waits in Needs Action with action state Awaiting Receipt. A user with the Stock Manager or System Manager role who also has write permission on Marketplace Order (a platform role such as Talabat User or Noon User; Stock Manager alone is not enough) presses **Confirm Goods Received** on the Marketplace Order (the whitelisted method checks the role and the write permission on the server and records `receipt_confirmed_by` and `receipt_confirmed_on`). The app then:
 
@@ -117,7 +117,7 @@ A second click or a repeated event creates no second draft: an existing draft or
 
 The app does not override a deliberate manual close, delete drafts or reallocate advances.
 
-### Group E: draft Delivery Note units left off (#368)
+### Group E: Delivery Note units left off (#368, #390)
 
 | Case | Handling |
 |---|---|
@@ -129,8 +129,8 @@ The shared draft Delivery Note service (`services/delivery_note_drafts.py`) retu
 - While a shipment that is not Cancelled or Discarded has a final entry, `Marketplace Order.before_save` re-applies Needs Action with this code on every save, also when the sync skips its re-plan. So a later save, sync or re-check cannot clear it.
 - An `unmapped` entry is final at once. A `not_on_order` or `excess` entry becomes final only after a sync has run and the retry still cannot place the units; until then the order shows Syncing.
 - It never overwrites a different Sync Error or Needs Action reason, and it is never lost: when the other reason clears, the next save shows this one again. When both exist, Sync Error is shown first, then the other Needs Action.
-- The record clears when the units are drafted (a manual Mark Handed Over, or the automatic retry), when they are already covered by a Delivery Note someone made by hand on the matching Sales Order row (the Sales Order row quantity is at least the units the platform order holds, so the Sales Order is not behind; the retry does not turn covered units into an excess), or when the shipment is Cancelled or Discarded. The Needs Action instruction may say to add the units to a Delivery Note by hand: that now resolves it. Leftover units are added to the shipment's first Delivery Note while it is a draft; once it is submitted a new draft is created and the shipment tracks every note. The order then drops this reason and is queued for a normal sync that recomputes the real status.
-- Automatic retry (`fulfillment.retry_unresolved_handovers`, queued after commit, runs as the system): after a Marketplace Product Mapping save (`sales_order_recheck.bump_orders_for_mapping`) and after every successful Sales Order sync of an order that has a record. It retries only shipments that still have a live Delivery Note (or whose record covers every unit); a shipment whose Delivery Note was deleted waits for a manual Mark Handed Over, which drafts the whole shipment again. The sync-triggered retry never queues another sync, so the chain cannot loop.
+- The record clears when the units are drafted (a manual Mark Handed Over, or the automatic retry), when they are already covered by a Delivery Note someone made by hand on the matching Sales Order row (the Sales Order row quantity is at least the units the platform order holds, so the Sales Order is not behind; the retry does not turn covered units into an excess), or when the shipment is Cancelled or Discarded. The Needs Action instruction may say to add the units to a Delivery Note by hand: that now resolves it. Leftover units are added to the shipment's Delivery Note while it is a draft. Since #390 a shipment has one note and Mark Handed Over submits it, so once the note is submitted nothing is added: the retry marks the entries final (Needs Action) and a SHIPPED unit that is left over is listed in Needs Attention (no sync status). The order then drops this reason and is queued for a normal sync that recomputes the real status.
+- Automatic retry (`fulfillment.retry_unresolved_handovers`, queued after commit, runs as the system): after a Marketplace Product Mapping save (`sales_order_recheck.bump_orders_for_mapping`) and after every successful Sales Order sync of an order that has a record. It retries only shipments that still have a live draft Delivery Note (or whose record covers every unit); a shipment whose Delivery Note was deleted waits for the next import (SHIPPED units) or a manual Mark Handed Over, which drafts all uncovered units again. The retry never submits. The sync-triggered retry never queues another sync, so the chain cannot loop.
 
 "Excess" for Noon means: the units of an Item in the order's Created shipments, minus that Item's Sales Order row quantity, when the Sales Order cannot place the shipment's units (row quantity minus `delivered_qty` minus draft Delivery Note quantity is too small). A shortfall that fits inside the Sales Order row quantity is covered by other Delivery Notes and is not an excess. A quantity capped to zero is therefore reported, never silently dropped, so delivered quantities never disagree with the Sales Order.
 

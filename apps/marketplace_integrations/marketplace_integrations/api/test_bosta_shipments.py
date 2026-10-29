@@ -27,10 +27,14 @@ class IntegrationTestBostaShipmentSummary(BostaFixtureMixin, IntegrationTestCase
 	"""get_sales_order_shipment on a real database (#246); no HTTP is involved."""
 
 	def test_sales_order_bosta_status_is_a_read_only_list_and_standard_filter_field(self):
-		field = frappe.get_meta("Sales Order").get_field("custom_bosta_delivery_status")
+		field = frappe.get_meta("Sales Order").get_field("custom_delivery_status")
 		self.assertTrue(field.read_only)
 		self.assertTrue(field.in_list_view)
 		self.assertTrue(field.in_standard_filter)
+		# The Bosta-only field stays, but the list shows the platform-neutral one (#378).
+		bosta_field = frappe.get_meta("Sales Order").get_field("custom_bosta_delivery_status")
+		self.assertTrue(bosta_field.read_only)
+		self.assertFalse(bosta_field.in_list_view)
 
 	def _shipment(self, order, status, **values):
 		fields = {
@@ -182,6 +186,7 @@ class IntegrationTestBostaShipmentSummary(BostaFixtureMixin, IntegrationTestCase
 
 		self.assertEqual(summary["name"], active.name)
 		self.assertEqual(frappe.db.get_value("Sales Order", order.name, "custom_bosta_delivery_status"), "Delivered")
+		self.assertEqual(frappe.db.get_value("Sales Order", order.name, "custom_delivery_status"), "Delivered")
 		frappe.db.set_value("Sales Order", order.name, "custom_bosta_delivery_status", "", update_modified=False)
 		from marketplace_integrations.patches.v0_0.backfill_sales_order_bosta_delivery_status import execute
 

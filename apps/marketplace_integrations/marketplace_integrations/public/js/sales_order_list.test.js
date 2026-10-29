@@ -310,3 +310,14 @@ test("Bosta delivery status renders as a translated, escaped color pill and pres
 	);
 	assert.equal(settings.formatters.custom_bosta_delivery_status(""), "");
 });
+
+test("Delivery Status shows Noon's Shipped n/m translated with a color, and Bosta states as before", () => {
+	const { settings } = load();
+	const format = settings.formatters.custom_delivery_status;
+	assert.equal(format("Shipped 2/3"), '<span class="indicator-pill blue">Shipped 2/3</span>');
+	assert.equal(format("Shipped 3/3"), '<span class="indicator-pill green">Shipped 3/3</span>');
+	assert.equal(format("Shipped 0/3"), '<span class="indicator-pill orange">Shipped 0/3</span>');
+	assert.equal(format("Delivered"), '<span class="indicator-pill green">Delivered</span>');
+	assert.equal(format(""), "");
+	assert.equal(format("Shipped x/3"), '<span class="indicator-pill grey">Shipped x/3</span>');
+});

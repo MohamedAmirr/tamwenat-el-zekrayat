@@ -19,6 +19,10 @@ Sales Order is behind the platform order, so a sync is queued first; they only b
 after a sync has run and the retry still cannot place them.  Until then the order shows Syncing,
 which ``reassert()`` leaves alone.
 
+#390: the Delivery Note of a shipment is recorded per unit (``Marketplace Order Shipment Unit.
+delivery_note``), so a unit is covered while that note is live.  The shipment fields
+``delivery_note`` / ``delivery_notes`` are no longer written.
+
 Conflicts: ``reassert()`` never overwrites a different Sync Error or Needs Action reason.  When
 that reason clears the order is Synced and the next save re-applies this one.  Sync Error is
 therefore shown before this Needs Action.
@@ -38,6 +42,7 @@ from marketplace_integrations.services.sync_status import SYNCED
 
 INACTIVE_SHIPMENT_STATUSES = ("Cancelled", "Discarded")
 SHIPMENT_DOCTYPE = "Marketplace Order Shipment"
+UNIT_DOCTYPE = "Marketplace Order Shipment Unit"
 
 
 def load_entries(shipment):
@@ -123,31 +128,26 @@ def reassert(order):
 		queue_resync_in_memory(order, RESYNC_TRIGGER)
 
 
-def shipment_notes(shipment):
-	"""Names of every Delivery Note recorded for the shipment: the ``delivery_note`` link (the
-	first one) and the ``delivery_notes`` JSON list (all of them)."""
+def unit_rows(units, integration_shipment_nr):
+	"""The unit rows (``Marketplace Order Shipment Unit``) of one shipment."""
+	return [row for row in units or [] if row.get("integration_shipment_nr") == integration_shipment_nr]
+
+
+def shipment_notes(units, integration_shipment_nr):
+	"""Names of the Delivery Notes recorded on the shipment's unit rows (#390), first-seen order.
+	``units`` is any iterable of rows with ``integration_shipment_nr`` and ``delivery_note``."""
 	names = []
-	raw = cstr(shipment.get("delivery_notes")).strip()
-	if raw:
-		try:
-			listed = frappe.parse_json(raw)
-		except ValueError:
-			listed = []
-		names = [n for n in listed if isinstance(n, str)] if isinstance(listed, list) else []
-	first = cstr(shipment.get("delivery_note")).strip()
-	if first and first not in names:
-		names.insert(0, first)
+	for row in unit_rows(units, integration_shipment_nr):
+		name = cstr(row.get("delivery_note")).strip()
+		if name and name not in names:
+			names.append(name)
 	return names
 
 
-def record_note(shipment, name):
-	"""Record ``name`` on the shipment row (in memory); the first note is also the Link field."""
-	names = shipment_notes(shipment)
-	if name not in names:
-		names.append(name)
-	shipment.delivery_notes = frappe.as_json(names)
-	if not shipment.get("delivery_note"):
-		shipment.delivery_note = name
+def record_note(rows, name):
+	"""Record ``name`` on the given unit rows (in memory); the caller saves the order."""
+	for row in rows:
+		row.delivery_note = name
 
 
 def live_note(name):
@@ -165,61 +165,186 @@ def live_note(name):
 	return None
 
 
-def live_notes(shipment):
+def live_notes(units, integration_shipment_nr):
 	"""Live Delivery Notes of the shipment (see ``live_note``), first note first."""
 	live = []
-	for name in shipment_notes(shipment):
+	for name in shipment_notes(units, integration_shipment_nr):
 		found = live_note(name)
 		if found and found not in live:
 			live.append(found)
 	return live
 
 
-def reset_delivery_note_tracking(shipment):
-	"""Forget the shipment's Delivery Notes (in memory)."""
-	shipment.delivery_note = None
-	shipment.delivery_notes = None
-	shipment.handed_over_on = None
+def is_covered(row):
+	"""True while the unit row's Delivery Note is live (draft, submitted or its amendment)."""
+	return bool(live_note(cstr(row.get("delivery_note")).strip()))
+
+
+def draft_note(units, integration_shipment_nr):
+	"""The shipment's live Delivery Note that is still a draft, else None."""
+	for name in live_notes(units, integration_shipment_nr):
+		if frappe.db.get_value("Delivery Note", name, "docstatus") == 0:
+			return name
+	return None
+
+
+def submitted_note(units, integration_shipment_nr):
+	"""The shipment's live submitted Delivery Note, else None."""
+	for name in live_notes(units, integration_shipment_nr):
+		if frappe.db.get_value("Delivery Note", name, "docstatus") == 1:
+			return name
+	return None
+
+
+# ---------------------------------------------------------------------------
+# SHIPPED units (#390)
+# ---------------------------------------------------------------------------
+
+STATUS_SHIPPED = "INTEGRATION_ITEM_STATUS_SHIPPED"
+STATUS_OUT_OF_STOCK = "INTEGRATION_ITEM_STATUS_OUT_OF_STOCK"
+MP_STATUS_CANCELLED = "MP_ITEM_STATUS_CANCELLED"
+
+
+def payload_items(latest_payload):
+	"""``items`` of a stored ``latest_payload`` (dict or JSON text); [] when unreadable."""
+	if isinstance(latest_payload, str):
+		try:
+			latest_payload = frappe.parse_json(latest_payload)
+		except ValueError:
+			return []
+	items = latest_payload.get("items") if isinstance(latest_payload, dict) else None
+	return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
+
+
+def _is_active(item):
+	"""A unit that still has to ship: not cancelled and not out of stock."""
+	return item.get("mp_status") != MP_STATUS_CANCELLED and item.get("integration_status") != STATUS_OUT_OF_STOCK
+
+
+def shipment_plan(payload, shipment_units):
+	"""``{"shipped": [unit rows SHIPPED on Noon], "all_shipped": bool}`` for one shipment.
+
+	``payload`` is ``payload_items()``; ``shipment_units`` the shipment's unit rows.  A unit absent
+	from the payload counts as active and not shipped.  ``all_shipped`` needs at least one active unit
+	and every active unit SHIPPED.
+	"""
+	by_nr = {cstr(i.get("mp_item_nr")).strip(): i for i in payload}
+	shipped = []
+	active = 0
+	active_shipped = 0
+	for row in shipment_units:
+		item = by_nr.get(cstr(row.get("mp_item_nr")).strip())
+		is_shipped = bool(item) and item.get("integration_status") == STATUS_SHIPPED
+		if is_shipped:
+			shipped.append(row)
+		if not item or _is_active(item):
+			active += 1
+			active_shipped += 1 if is_shipped else 0
+	return {"shipped": shipped, "all_shipped": bool(active) and active == active_shipped}
+
+
+def shipped_work_pending(payload, shipments, units):
+	"""True when a Created shipment has a SHIPPED unit no live Delivery Note covers, or has all its
+	active units SHIPPED while its note is still a draft (the trigger of ``process_shipped_units``)."""
+	for shipment in shipments:
+		if shipment.get("status") != "Created":
+			continue
+		nr = shipment.get("integration_shipment_nr")
+		rows = unit_rows(units, nr)
+		plan = shipment_plan(payload, rows)
+		if any(not is_covered(row) for row in plan["shipped"]):
+			return True
+		if plan["all_shipped"] and draft_note(units, nr):
+			return True
+	return False
+
+
+def shipped_problems(payload, shipments, units):
+	"""Shipped units that get no Delivery Note: ``{"outside": [item, ...], "after_submit":
+	[(item, note), ...]}`` (``item`` is the payload dict).
+
+	``outside``: SHIPPED but not a unit of a Created shipment.  ``after_submit``: SHIPPED, uncovered,
+	and the shipment's note is already submitted with no draft left to add to.
+	"""
+	created = {s.get("integration_shipment_nr") for s in shipments if s.get("status") == "Created"}
+	created_rows = {}
+	for row in units or []:
+		if row.get("integration_shipment_nr") in created:
+			created_rows.setdefault(cstr(row.get("mp_item_nr")).strip(), row)
+	outside = []
+	after_submit = []
+	for item in payload:
+		if item.get("integration_status") != STATUS_SHIPPED:
+			continue
+		row = created_rows.get(cstr(item.get("mp_item_nr")).strip())
+		if row is None:
+			outside.append(item)
+			continue
+		if is_covered(row):
+			continue
+		nr = row.get("integration_shipment_nr")
+		submitted = submitted_note(units, nr)
+		if submitted and not draft_note(units, nr):
+			after_submit.append((item, submitted))
+	return {"outside": outside, "after_submit": after_submit}
 
 
 def clear_deleted_delivery_note(doc, method=None):
-	"""``doc_events`` handler (Delivery Note ``on_trash``): forget the notes of the shipment rows
-	that track the deleted one.  Never raises.
+	"""``doc_events`` handler (Delivery Note ``on_trash``): clear the deleted note from the unit rows
+	(and the legacy shipment fields) that track it.  Never raises.
 
-	``Marketplace Order Shipment.delivery_note`` is a Link, and Frappe refuses to delete a
+	``Marketplace Order Shipment Unit.delivery_note`` is a Link, and Frappe refuses to delete a
 	document that is still linked, so the link must be cleared before that check.  The write is
 	a direct ``set_value`` inside the deleter's transaction on purpose (a queued write would come
 	too late) and it rolls back with that transaction.  The parent Marketplace Order row is
 	locked first and its ``modified`` is bumped, so a copy loaded earlier cannot save over the
-	change unnoticed.  Tracking is reset for the whole shipment (link, list and handed-over time):
-	the next Mark Handed Over drafts the shipment again, and units that another live Delivery
-	Note still covers count as resolved, so nothing is delivered twice.  A cancelled note keeps
-	its link on purpose (the amend flow re-links through ``amended_from``, see ``live_note``).
-	The unresolved record is left as it is.
+	change unnoticed.  The shipment's handed-over time is reset when no unit of it is left on a
+	Delivery Note: the units are uncovered again and the next import drafts the shipped ones (or
+	Mark Handed Over drafts them all), while units that another live Delivery Note covers keep
+	their link, so nothing is delivered twice.  A cancelled note keeps its link on purpose (the
+	amend flow re-links through ``amended_from``, see ``live_note``).  The unresolved record is
+	left as it is.  The legacy shipment fields ``delivery_note`` / ``delivery_notes`` (no longer
+	written, #390) are cleared too, so an older link never blocks the deletion.
 	"""
 	try:
 		names = [doc.name] + ([doc.amended_from] if doc.get("amended_from") else [])
-		rows = {}
+		parents = {}
 		for name in names:
-			for filters in (
-				{"delivery_note": name},
-				[["delivery_notes", "like", f'%"{name}"%']],
+			for row in frappe.get_all(
+				UNIT_DOCTYPE,
+				filters={"delivery_note": name},
+				fields=["name", "parent", "integration_shipment_nr"],
+				parent_doctype="Marketplace Order",
 			):
+				parents.setdefault(row.parent, {"units": [], "legacy": {}})["units"].append(row)
+			for filters in ({"delivery_note": name}, [["delivery_notes", "like", f'%"{name}"%']]):
 				for row in frappe.get_all(
-					SHIPMENT_DOCTYPE,
-					filters=filters,
-					fields=["name", "parent"],
-					parent_doctype="Marketplace Order",
+					SHIPMENT_DOCTYPE, filters=filters, fields=["name", "parent"], parent_doctype="Marketplace Order"
 				):
-					rows[row.name] = row.parent
-		for row_name, parent in rows.items():
+					parents.setdefault(row.parent, {"units": [], "legacy": {}})["legacy"][row.name] = row.parent
+		for parent, found in parents.items():
 			frappe.db.get_value("Marketplace Order", parent, "name", for_update=True)
-			frappe.db.set_value(
-				SHIPMENT_DOCTYPE,
-				row_name,
-				{"delivery_note": None, "delivery_notes": None, "handed_over_on": None},
-				update_modified=False,
-			)
+			shipments = set()
+			for row in found["units"]:
+				frappe.db.set_value(UNIT_DOCTYPE, row.name, "delivery_note", None, update_modified=False)
+				shipments.add(row.integration_shipment_nr)
+			for shipment_row in found["legacy"]:
+				frappe.db.set_value(
+					SHIPMENT_DOCTYPE,
+					shipment_row,
+					{"delivery_note": None, "delivery_notes": None},
+					update_modified=False,
+				)
+			for nr in shipments:
+				if not frappe.db.exists(
+					UNIT_DOCTYPE, {"parent": parent, "integration_shipment_nr": nr, "delivery_note": ["!=", ""]}
+				):
+					frappe.db.set_value(
+						SHIPMENT_DOCTYPE,
+						{"parent": parent, "integration_shipment_nr": nr},
+						{"handed_over_on": None, "delivery_note_error": None},
+						update_modified=False,
+					)
 			frappe.db.set_value("Marketplace Order", parent, "modified", now_datetime(), update_modified=False)
 	except Exception:
 		frappe.log_error(title="Noon handover: could not clear a Delivery Note link", message=frappe.get_traceback())

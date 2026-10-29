@@ -16,6 +16,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api.noon_fulfillment import (
+	_readable_document,
 	_shipment_summaries,
 	add_awb,
 	cancel_shipment,
@@ -134,19 +135,19 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			get_available_actions(self.order.name)
 
-	def test_shipment_summaries_list_awbs_delivery_note_and_unresolved_text(self):
+	def test_shipment_summaries_list_awbs_unresolved_text_and_no_units_for_a_bare_shipment(self):
 		doc = frappe._dict(
 			noon_shipments=[
 				frappe._dict(
 					integration_shipment_nr="ORD-1",
 					status="Created",
-					delivery_note="MAT-DN-0001",
 					skipped_units=frappe.as_json(
 						[{"external_sku": "SKU-1", "item": "ITEM-1", "qty": 1, "reason": "unmapped", "final": False}]
 					),
 				),
-				frappe._dict(integration_shipment_nr="ORD-2", status="Error", delivery_note=None, skipped_units=None),
+				frappe._dict(integration_shipment_nr="ORD-2", status="Error", skipped_units=None),
 			],
+			noon_shipment_units=[],
 			noon_shipment_awbs=[
 				frappe._dict(integration_shipment_nr="ORD-1", courier="Aramex", awb_nr="AWB-1"),
 			],
@@ -158,25 +159,76 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 					"integration_shipment_nr": "ORD-1",
 					"status": "Created",
 					"items": [],
+					"units": [],
+					"unit_count": 0,
+					"shipped_count": 0,
 					"awbs": [{"courier": "Aramex", "awb_nr": "AWB-1"}],
-					"delivery_note": "MAT-DN-0001",
-					"delivery_notes": ["MAT-DN-0001"],
-					# MAT-DN-0001 does not exist here, so it is not a live note and nothing was recorded.
+					"delivery_notes": [],
+					"delivery_note_error": "",
 					"handed_over": False,
+					"can_mark_handed_over": False,
 					"unresolved": ["SKU-1: no enabled product mapping"],
 				},
 				{
 					"integration_shipment_nr": "ORD-2",
 					"status": "Error",
 					"items": [],
+					"units": [],
+					"unit_count": 0,
+					"shipped_count": 0,
 					"awbs": [],
-					"delivery_note": "",
 					"delivery_notes": [],
+					"delivery_note_error": "",
 					"handed_over": False,
+					"can_mark_handed_over": False,
 					"unresolved": [],
 				},
 			],
 		)
+
+	def test_unit_table_counts_shipped_units_and_hides_documents_the_user_cannot_read(self):
+		payload = frappe.as_json(
+			{
+				"items": [
+					{"mp_item_nr": "1", "partner_sku": "A", "integration_status": "INTEGRATION_ITEM_STATUS_SHIPPED"},
+					{"mp_item_nr": "2", "partner_sku": "A", "integration_status": "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED"},
+					{"mp_item_nr": "3", "partner_sku": "B", "integration_status": "INTEGRATION_ITEM_STATUS_SHIPPED"},
+				]
+			}
+		)
+		unit = lambda nr, sku, note=None: frappe._dict(  # noqa: E731
+			integration_shipment_nr="ORD-1", mp_item_nr=nr, partner_sku=sku, delivery_note=note
+		)
+		doc = frappe._dict(
+			marketplace_account=self.order.marketplace_account,
+			latest_payload=payload,
+			noon_shipments=[frappe._dict(integration_shipment_nr="ORD-1", status="Created", skipped_units=None)],
+			noon_shipment_units=[unit("1", "A", "MAT-DN-GONE"), unit("2", "A"), unit("3", "B")],
+			noon_shipment_awbs=[],
+		)
+		summary = _shipment_summaries(doc)[0]
+		self.assertEqual((summary["unit_count"], summary["shipped_count"]), (3, 2))
+		# A deleted note is not listed and does not cover its unit.
+		self.assertEqual(summary["delivery_notes"], [])
+		self.assertEqual(
+			sorted((u["sku"], u["status"], u["qty"], u["on_note"]) for u in summary["units"]),
+			[
+				("A", "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED", 1, False),
+				("A", "INTEGRATION_ITEM_STATUS_SHIPPED", 1, False),
+				("B", "INTEGRATION_ITEM_STATUS_SHIPPED", 1, False),
+			],
+		)
+
+	def test_readable_document_returns_the_name_only_to_a_user_who_can_read_it(self):
+		note = frappe.get_all("Delivery Note", pluck="name", limit=1)
+		if not note:
+			self.skipTest("no Delivery Note on the test site")
+		self.assertEqual(_readable_document("Delivery Note", note[0])["name"], note[0])
+		self.assertIsNone(_readable_document("Delivery Note", "MAT-DN-DOES-NOT-EXIST"))
+		self.assertIsNone(_readable_document("Delivery Note", ""))
+		email, _role = make_role_user(self, "Noon Summary No Delivery Note", {"Marketplace Order": ["read"]})
+		with self.set_user(email):
+			self.assertIsNone(_readable_document("Delivery Note", note[0]))
 
 	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.get_shippable_units")
 	def test_get_shippable_units_delegates(self, mock_fn):

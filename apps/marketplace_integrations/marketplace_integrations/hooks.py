@@ -180,6 +180,8 @@ doc_events = {
 		"on_trash": "marketplace_integrations.services.noon_item_edit_guard.block_row_remove",
 	},
 	"Sales Order": {
+		# #376: wait for Noon - a Noon Sales Order cannot be cancelled while its shipments are open.
+		"before_cancel": "marketplace_integrations.services.noon_cancel_guard.block_cancel_while_shipments_are_open",
 		"on_update_after_submit": _RECHECK_HANDLER,
 		"on_cancel": _RECHECK_HANDLER,
 	},
@@ -358,6 +360,9 @@ fixtures = [
 					"Sales Order-custom_bosta_delivery_tab",
 					"Sales Order-custom_bosta_delivery_html",
 					"Sales Order-custom_bosta_delivery_status",
+					"Sales Order-custom_delivery_status",
+					"Sales Order-custom_noon_fulfillment_tab",
+					"Sales Order-custom_noon_fulfillment_html",
 					"Payment Entry-custom_marketplace_order",
 					"Payment Entry-custom_marketplace_transaction_id",
 				],

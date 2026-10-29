@@ -43,6 +43,7 @@
 	const BOSTA_TAB_FIELD = "custom_bosta_delivery_html";
 	const MARKETPLACE_TAB_BREAK_FIELD = "custom_marketplace_order_tab";
 	const MARKETPLACE_TAB_FIELD = "custom_marketplace_order_html";
+	const NOON_TAB_FIELD = "custom_noon_fulfillment_html";
 	const MARKETPLACE_SUMMARY_METHOD = "marketplace_integrations.api.sales_order_marketplace.get_marketplace_order_summary";
 	const MARKETPLACE_REFRESH_METHODS = {
 		Talabat: ["marketplace_integrations.api.talabat_orders.refresh_order", "Refresh from Talabat", "Refreshing from Talabat..."],
@@ -199,15 +200,7 @@
 					field.$wrapper.html(`<p class="text-muted">${frappe.utils.escape_html(__("Marketplace Order summary unavailable."))}</p>`);
 					return;
 				}
-				// The Noon shipments summary comes from the same call that drives the Noon
-				// Fulfillment buttons (load_noon_fulfillment), so wait for it before rendering.
-				const noon_state = summary.platform === "Noon" ? frm.__mi_noon_state || Promise.resolve(null) : Promise.resolve(null);
-				return noon_state.then((state) => {
-				if (request !== frm.__mi_marketplace_request || frm.doc.name !== sales_order) return;
-				const noon = noon_fulfillment_module();
-				let html = marketplace_summary_html(summary);
-				if (state && noon) html += noon.noon_shipments_html(state.shipments);
-				field.$wrapper.html(html);
+				field.$wrapper.html(marketplace_summary_html(summary));
 				const refresh = MARKETPLACE_REFRESH_METHODS[summary.platform];
 				if (refresh) {
 					field.$wrapper.append(`<p><button class="btn btn-default" data-marketplace-action="refresh">${frappe.utils.escape_html(__(refresh[1]))}</button></p>`);
@@ -232,7 +225,6 @@
 							frm.reload_doc();
 						});
 					}
-				});
 				});
 			},
 			() => {
@@ -1193,7 +1185,7 @@
 	// Noon fulfillment lives on the Sales Order form (the buttons and dialogs are in
 	// public/js/noon_fulfillment.js, loaded on demand). Only a submitted Sales Order linked to a
 	// Noon Marketplace Order gets it; every endpoint it calls still checks permission on the
-	// Marketplace Order. Sets frm.__mi_noon_state to the pending state so the Marketplace Order
+	// Marketplace Order. Sets frm.__mi_noon_state to the pending state so the Noon Fulfillment
 	// tab can list the shipments from the same call.
 	function load_noon_fulfillment(frm) {
 		frm.__mi_noon_state = null;
@@ -1215,6 +1207,26 @@
 		return state;
 	}
 
+	// #378: the Noon Fulfillment tab lists the Sales Invoice and one block per shipment. It uses
+	// the state load_noon_fulfillment fetched (the same call that drives the buttons), so it waits
+	// for it. The tab itself is shown by the field's depends_on (Noon platform only).
+	function render_noon_fulfillment_tab(frm) {
+		const field = frm.get_field && frm.get_field(NOON_TAB_FIELD);
+		if (!field || !field.$wrapper) return Promise.resolve();
+		if (!frm.doc || frm.doc.custom_marketplace_platform !== "Noon") {
+			field.$wrapper.html("");
+			return Promise.resolve();
+		}
+		const name = frm.doc.name;
+		const request = (frm.__mi_noon_tab_request = (frm.__mi_noon_tab_request || 0) + 1);
+		return (frm.__mi_noon_state || Promise.resolve(null)).then((state) => {
+			if (request !== frm.__mi_noon_tab_request || frm.doc.name !== name) return;
+			const noon = noon_fulfillment_module();
+			if (noon) field.$wrapper.html(noon.noon_fulfillment_tab_html(state));
+			else field.$wrapper.html(`<p class="text-muted">${frappe.utils.escape_html(__("Noon fulfillment is not available for this order."))}</p>`);
+		});
+	}
+
 	// #368: Noon has no order-level update, so the server refuses item, quantity and rate edits on a
 	// submitted Noon Sales Order (hooks.py, services/noon_item_edit_guard.py). This only tells the
 	// user why and where the supported actions are; the server check is the real gate.
@@ -1232,6 +1244,7 @@
 
 	function on_refresh(frm) {
 		load_noon_fulfillment(frm);
+		render_noon_fulfillment_tab(frm);
 		add_marketplace_order_tab(frm);
 		add_bosta_shipment_ux(frm);
 		if (!wrap_close_sales_order(frm)) {
@@ -1275,6 +1288,7 @@
 			add_bosta_shipment_ux,
 			add_noon_item_edit_hint,
 			load_noon_fulfillment,
+			render_noon_fulfillment_tab,
 			add_shopify_edit_button,
 			can_offer_shopify_edit,
 			shopify_edit_alert,

@@ -60,6 +60,18 @@
 		return `<span class="indicator-pill ${BOSTA_STATUS_COLORS[status] || "grey"}">${label}</span>`;
 	}
 
+	// Delivery Status column (#378): Noon stores "Shipped <n>/<total>" in English and it is shown
+	// translated here; every other value is a Bosta state, formatted as before.
+	function format_delivery_status(value) {
+		const status = String(value || "").trim();
+		const shipped = status.match(/^Shipped (\d+)\/(\d+)$/);
+		if (!shipped) return format_bosta_delivery_status(status);
+		const [done, total] = [Number(shipped[1]), Number(shipped[2])];
+		const color = done >= total ? "green" : done > 0 ? "blue" : "orange";
+		const label = frappe.utils.escape_html(__("Shipped {0}/{1}", [done, total]));
+		return `<span class="indicator-pill ${color}">${label}</span>`;
+	}
+
 	// The creator roles come from sales_order.js, so they are known once it has loaded.
 	function add_bulk_action(listview) {
 		return frappe.require(FORM_ASSET).then(() => {
@@ -355,6 +367,7 @@
 		settings.formatters = {
 			...(settings.formatters || {}),
 			custom_bosta_delivery_status: format_bosta_delivery_status,
+			custom_delivery_status: format_delivery_status,
 		};
 		// Marks the settings as already extended (bulk action and hover card), so loading this file
 		// again (route revisit, asset reload) never wraps onload twice.
@@ -374,6 +387,7 @@
 			add_hover_card,
 			add_bulk_action,
 			format_bosta_delivery_status,
+			format_delivery_status,
 			start,
 			selected_rows,
 			split_by_platform,

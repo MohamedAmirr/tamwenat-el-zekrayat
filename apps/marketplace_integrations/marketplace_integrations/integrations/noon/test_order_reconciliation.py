@@ -25,6 +25,7 @@ from marketplace_integrations.services.sales_order_reconciliation import (
 	NEEDS_ATTENTION,
 	NO_ACTION,
 	UNSUPPORTED_COMPENSATING_TRANSACTION,
+	UPDATE_SUBMITTED_ORDER,
 	plan,
 )
 
@@ -99,8 +100,28 @@ class UnitTestNoonOrderReconciliation(UnitTestCase):
 		evidence = build_evidence(_order([_unit("1", integration_status=SHIPPED)]))
 
 		self.assertEqual(evidence["fulfillment_started"], {"sku:SKU-A": True})
-		self.assertIs(evidence["lifecycle_permits_change"], False)
-		self.assertTrue(evidence["lifecycle_reason"])
+		# #390: the planner judges the changed line on its started quantity, not the whole order.
+		self.assertIs(evidence["lifecycle_permits_change"], True)
+		self.assertEqual(evidence["fulfillment_started_qty"], {"sku:SKU-A": 1})
+		self.assertIs(evidence["partial_line_update"], True)
+
+	def test_started_quantity_counts_shipped_and_shipment_units_per_line(self):
+		evidence = build_evidence(
+			_order(
+				[_unit("1", integration_status=SHIPPED), _unit("2"), _unit("3"), _unit("4", sku="SKU-B")],
+				[("S-1", "Created")],
+				[("S-1", "2")],
+			)
+		)
+
+		self.assertEqual(evidence["fulfillment_started_qty"], {"sku:SKU-A": 2, "sku:SKU-B": 0})
+
+	def test_a_started_unit_that_is_no_longer_eligible_still_counts(self):
+		evidence = build_evidence(
+			_order([_unit("1", mp_status=CANCELLED, integration_status=SHIPPED), _unit("2")])
+		)
+
+		self.assertEqual(evidence["fulfillment_started_qty"], {"sku:SKU-A": 1})
 
 	def test_either_source_means_started_when_shipped_and_shipment_tables_disagree(self):
 		# Unit 1 SHIPPED but only in a Cancelled shipment; unit 2 ACKNOWLEDGED but in a Created shipment.
@@ -241,7 +262,7 @@ class UnitTestNoonEvidenceThroughThePlanner(UnitTestCase):
 			],
 		}
 
-	def _erp_state(self, delivered_qty=0):
+	def _erp_state(self, delivered_qty=0, qty=2, billed_amt=0):
 		return {
 			"docstatus": 1,
 			"status": "To Deliver and Bill",
@@ -251,21 +272,40 @@ class UnitTestNoonEvidenceThroughThePlanner(UnitTestCase):
 					"item_code": "ITEM-A",
 					"uom": "Nos",
 					"warehouse": "W",
-					"qty": 2,
-					"amount": 20.0,
+					"qty": qty,
+					"amount": qty * 10.0,
+					"rate": 10.0,
 					"delivered_qty": delivered_qty,
-					"billed_amt": 0,
+					"billed_amt": billed_amt,
 				}
 			],
 			"precision": {},
 		}
 
-	def test_changed_line_that_started_fulfillment_needs_attention(self):
-		evidence = build_evidence(_order([_unit("1"), _unit("2")], [("S-1", "Created")], [("S-1", "1")]))
+	def test_changed_line_below_its_started_quantity_needs_attention(self):
+		# 3 units, 2 in a Created shipment: the line may not drop below 2.
+		evidence = build_evidence(
+			_order([_unit("1"), _unit("2"), _unit("3")], [("S-1", "Created")], [("S-1", "1"), ("S-1", "2")])
+		)
 
-		result = plan(self._snapshot(2), self._snapshot(1), evidence, self._erp_state())
+		result = plan(self._snapshot(3), self._snapshot(1), evidence, self._erp_state(qty=3))
 
 		self.assertEqual(result["outcome"], NEEDS_ATTENTION)
+
+	def test_changed_line_down_to_its_started_quantity_is_updated(self):
+		# 2 units, 1 shipped, 1 marked out of stock (now ineligible): 2 -> 1 is allowed.
+		evidence = build_evidence(
+			_order(
+				[
+					_unit("1", integration_status=SHIPPED),
+					_unit("2", integration_status=OUT_OF_STOCK, mp_status=CANCELLED),
+				]
+			)
+		)
+
+		result = plan(self._snapshot(2), self._snapshot(1), evidence, self._erp_state(delivered_qty=1))
+
+		self.assertEqual(result["outcome"], UPDATE_SUBMITTED_ORDER)
 
 	def test_unchanged_started_order_is_no_action(self):
 		evidence = build_evidence(_order([_unit("1", integration_status=SHIPPED), _unit("2")]))

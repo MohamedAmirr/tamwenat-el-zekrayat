@@ -1,8 +1,10 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-"""Noon "Mark Handed Over" tests (#368): the manual action drafts one Delivery Note through the
-shared service, records it on the shipment, is idempotent per shipment, and makes no Noon call.
+"""Noon "Mark Handed Over" tests (#368, #390): the manual action puts every uncovered unit on the
+shipment's one Delivery Note through the shared service, records it on the unit rows, submits it,
+is idempotent per shipment, and makes no Noon call.  Tests that need the note to stay a draft
+(retries, deletion) use ``_mark_draft``, where the submit fails on purpose.
 """
 
 from unittest.mock import MagicMock, patch
@@ -51,6 +53,15 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 		frappe.db.commit()
 		return fixture, order.name, nr
 
+	def _mark_draft(self, order, nr):
+		"""Mark Handed Over with a submit that fails, so the shipment's note stays a draft."""
+		with patch.object(fulfillment, "submit_note", side_effect=RuntimeError("no stock")):
+			return fulfillment.mark_handed_over(order, nr)
+
+	def _unit_notes(self, order, nr):
+		doc = frappe.get_doc("Marketplace Order", order)
+		return [row.delivery_note for row in doc.noon_shipment_units if row.integration_shipment_nr == nr]
+
 	def _shipment(self, order_name, nr):
 		order = frappe.get_doc("Marketplace Order", order_name)
 		return next(row for row in order.noon_shipments if row.integration_shipment_nr == nr)
@@ -62,12 +73,12 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 		noon_call.assert_not_called()  # the Noon spec has no handover endpoint
 
 		self.assertTrue(result["created"])
+		self.assertTrue(result["submitted"])
 		dn = frappe.get_doc("Delivery Note", result["delivery_note"])
-		self.assertEqual(dn.docstatus, 0)  # never submitted
+		self.assertEqual(dn.docstatus, 1)  # Mark Handed Over submits (#390)
 		self.assertEqual([(row.item_code, row.qty) for row in dn.items], [(fx.items["A"].name, 2)])
-		shipment = self._shipment(order, nr)
-		self.assertEqual(shipment.delivery_note, dn.name)
-		self.assertTrue(shipment.handed_over_on)
+		self.assertEqual(self._unit_notes(order, nr), [dn.name, dn.name])  # recorded per unit
+		self.assertTrue(self._shipment(order, nr).handed_over_on)
 
 	def test_second_call_creates_no_second_delivery_note(self):
 		fx, order, nr = self._shipped_order([("A", 3)], ["A", "A"])
@@ -80,7 +91,7 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 
 	def test_a_deleted_draft_can_be_replaced_without_over_delivering(self):
 		_fx, order, nr = self._shipped_order([("A", 2)], ["A", "A"])
-		first = fulfillment.mark_handed_over(order, nr)
+		first = self._mark_draft(order, nr)
 		frappe.delete_doc("Delivery Note", first["delivery_note"], force=True)
 		frappe.db.commit()
 		again = fulfillment.mark_handed_over(order, nr)
@@ -179,7 +190,7 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 
 	def test_a_mapping_save_retries_the_handover_and_clears_the_record(self):
 		fx, order, nr = self._shipped_order([("A", 2), ("B", 1)], ["A", "B"], unmapped=("B",))
-		fulfillment.mark_handed_over(order, nr)
+		self._mark_draft(order, nr)
 		self.assertEqual(self._status(order).sync_reason_code, reasons.DELIVERY_NOTE_UNITS_SKIPPED)
 		self.assertEqual(len(fx.delivery_notes()), 1)
 
@@ -221,7 +232,7 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 				_fx, order, nr = self._shipped_order(
 					[(sku, 2)], [sku, "NO-SUCH-SKU"], platform_order_id=f"ORD-HO-{how}-{frappe.generate_hash(length=6)}"
 				)
-				fulfillment.mark_handed_over(order, nr)
+				note = self._mark_draft(order, nr)["delivery_note"]
 				self.assertEqual(len(self._record(order, nr)), 1)
 				if how == "discard":
 					frappe.db.set_value(
@@ -230,7 +241,7 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 					# Refused while the shipment's Delivery Note is live; allowed once it is deleted.
 					with self.assertRaises(frappe.ValidationError):
 						fulfillment.discard_shipment(order, nr)
-					frappe.delete_doc("Delivery Note", self._shipment(order, nr).delivery_note)
+					frappe.delete_doc("Delivery Note", note)
 					fulfillment.discard_shipment(order, nr)
 				else:
 					client = MagicMock()
@@ -248,7 +259,7 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 		# "Excess": the shipment holds more units of an Item than the Sales Order row still has
 		# undelivered (row qty - delivered - drafts).
 		fx, order, nr = self._shipped_order([("A", 1)], ["A", "A"])
-		result = fulfillment.mark_handed_over(order, nr)
+		result = self._mark_draft(order, nr)
 		self.assertEqual([(e["reason"], e["qty"]) for e in result["unresolved"]], [("excess", 1)])
 		row = self._status(order)
 		self.assertEqual(row.erpnext_sync_status, sync_status.SYNCING)  # sync queued, not yet Needs Action
@@ -269,7 +280,7 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 
 	def test_excess_that_is_still_unmatched_after_the_sync_needs_action(self):
 		fx, order, nr = self._shipped_order([("A", 1)], ["A", "A"])
-		fulfillment.mark_handed_over(order, nr)
+		self._mark_draft(order, nr)
 		doc = self._save(order, skip_sync_status_update=True)
 		reasons.apply_synced(doc)  # the sync ended without adding the row
 		doc.save()
@@ -293,15 +304,14 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 		methods = [call.args[0] for call in enqueue.call_args_list]
 		self.assertIn("marketplace_integrations.integrations.noon.fulfillment.retry_unresolved_handovers", methods)
 
-	def test_deleting_a_linked_draft_delivery_note_clears_the_shipment_link(self):
+	def test_deleting_a_linked_draft_delivery_note_clears_the_unit_links(self):
 		_fx, order, nr = self._shipped_order([("A", 2)], ["A"])
-		result = fulfillment.mark_handed_over(order, nr)
-		self.assertEqual(self._shipment(order, nr).delivery_note, result["delivery_note"])
+		result = self._mark_draft(order, nr)
+		self.assertEqual(self._unit_notes(order, nr), [result["delivery_note"]])
 		frappe.delete_doc("Delivery Note", result["delivery_note"])  # no force: the link check applies
 		frappe.db.commit()
-		shipment = self._shipment(order, nr)
-		self.assertFalse(shipment.delivery_note)
-		self.assertFalse(shipment.handed_over_on)
+		self.assertEqual(self._unit_notes(order, nr), [None])
+		self.assertFalse(self._shipment(order, nr).handed_over_on)
 		self.assertIn(
 			"mark_handed_over", fulfillment.get_available_actions(frappe.get_doc("Marketplace Order", order))["actions"]
 		)
@@ -325,14 +335,14 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 
 	def test_units_covered_by_a_manual_delivery_note_clear_the_record(self):
 		fx, order, nr = self._shipped_order([("A", 1)], ["A", "A"])
-		fulfillment.mark_handed_over(order, nr)  # drafts 1, the second unit is an excess
+		first = self._mark_draft(order, nr)["delivery_note"]  # drafts 1, the second unit is an excess
 		self.assertEqual(len(self._record(order, nr)), 1)
 		# The Sales Order catches up; a person then makes a Delivery Note for the second unit.
 		frappe.db.set_value("Sales Order Item", fx.row_for("A").name, "qty", 2)
 		doc = frappe.get_doc("Marketplace Order", order)
 		manual = service_create(doc, [{"item": fx.items["A"].name, "qty": 1}])
 		self.assertTrue(manual["delivery_note"])
-		self.assertNotEqual(manual["delivery_note"], self._shipment(order, nr).delivery_note)
+		self.assertNotEqual(manual["delivery_note"], first)
 		doc = self._save(order, skip_sync_status_update=True)
 		reasons.apply_synced(doc)
 		doc.save()
@@ -358,11 +368,10 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 
 	# ---- later retries extend the first draft; every note is tracked --------------------------
 
-	def test_a_retry_after_the_first_note_is_submitted_creates_a_new_draft_and_tracks_both(self):
+	def test_a_retry_after_the_note_is_submitted_adds_nothing_and_goes_to_needs_action(self):
 		fx, order, nr = self._shipped_order([("A", 2), ("B", 1)], ["A", "B"], unmapped=("B",))
-		first = fulfillment.mark_handed_over(order, nr)["delivery_note"]
-		# Stand-in for a person submitting the first note.
-		frappe.db.set_value("Delivery Note", first, "docstatus", 1)
+		first = fulfillment.mark_handed_over(order, nr)["delivery_note"]  # submitted at once (#390)
+		self.assertEqual(frappe.db.get_value("Delivery Note", first, "docstatus"), 1)
 		with patch.object(frappe, "enqueue"):  # the mapping save would queue the retry itself
 			mapping = frappe.get_doc(
 				{
@@ -378,39 +387,35 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 
 		fulfillment.retry_unresolved_handovers(order)
 
-		shipment = self._shipment(order, nr)
-		notes = handover_state.shipment_notes(shipment)
-		self.assertEqual(len(notes), 2)
-		self.assertEqual(notes[0], first)
-		self.assertEqual(shipment.delivery_note, first)
-		self.assertEqual(frappe.db.get_value("Delivery Note", notes[1], "docstatus"), 0)
-		self.assertEqual([row.item_code for row in frappe.get_doc("Delivery Note", notes[1]).items], [fx.items["B"].name])
+		self.assertEqual(handover_state.shipment_notes(frappe.get_doc("Marketplace Order", order).noon_shipment_units, nr), [first])
+		self.assertEqual(len(fx.delivery_notes()), 1)  # no second note
+		self.assertTrue(self._record(order, nr)[0]["final"])
+		self.assertEqual(self._status(order).sync_reason_code, reasons.DELIVERY_NOTE_UNITS_SKIPPED)
 
-	def test_deleting_a_tracked_note_resets_the_shipment_and_bumps_the_order(self):
+	def test_deleting_a_tracked_note_uncovers_the_units_and_bumps_the_order(self):
 		_fx, order, nr = self._shipped_order([("A", 2)], ["A", "A"])
-		note = fulfillment.mark_handed_over(order, nr)["delivery_note"]
+		note = self._mark_draft(order, nr)["delivery_note"]
 		before = frappe.db.get_value("Marketplace Order", order, "modified")
 		frappe.delete_doc("Delivery Note", note)
-		shipment = self._shipment(order, nr)
-		self.assertFalse(shipment.delivery_note)
-		self.assertFalse(shipment.delivery_notes)
-		self.assertFalse(shipment.handed_over_on)
+		self.assertEqual(self._unit_notes(order, nr), [None, None])
+		self.assertFalse(self._shipment(order, nr).handed_over_on)
 		self.assertGreater(frappe.db.get_value("Marketplace Order", order, "modified"), before)
 
 	def test_a_cancelled_note_keeps_the_link_and_an_amended_draft_counts_as_live(self):
 		_fx, order, nr = self._shipped_order([("A", 2)], ["A", "A"])
 		first = fulfillment.mark_handed_over(order, nr)["delivery_note"]
 		frappe.db.set_value("Delivery Note", first, "docstatus", 2)  # stand-in for a cancel
-		shipment = self._shipment(order, nr)
-		self.assertEqual(shipment.delivery_note, first)  # on_cancel keeps the link
-		self.assertEqual(handover_state.live_notes(shipment), [])
+		units = frappe.get_doc("Marketplace Order", order).noon_shipment_units
+		self.assertEqual(handover_state.shipment_notes(units, nr), [first])  # on_cancel keeps the link
+		self.assertEqual(handover_state.live_notes(units, nr), [])
 		# Like ERPNext's amend flow: a draft copy of the cancelled note pointing back at it.
 		amended = frappe.copy_doc(frappe.get_doc("Delivery Note", first))
 		amended.docstatus = 0
 		amended.amended_from = first
 		amended.insert()
 		self.assertEqual(handover_state.live_note(first), amended.name)
-		self.assertEqual(handover_state.live_notes(self._shipment(order, nr)), [amended.name])
+		units = frappe.get_doc("Marketplace Order", order).noon_shipment_units
+		self.assertEqual(handover_state.live_notes(units, nr), [amended.name])
 
 	def test_remapped_sku_is_resolved_again_and_a_final_flag_survives_a_whole_redraft(self):
 		self.assertEqual(
@@ -418,10 +423,10 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 			[{"external_sku": "S", "qty": 1}, {"item": "I", "qty": 2}],
 		)
 		_fx, order, nr = self._shipped_order([("A", 1)], ["A", "A"])
-		fulfillment.mark_handed_over(order, nr)
+		note = self._mark_draft(order, nr)["delivery_note"]
 		fulfillment.retry_unresolved_handovers(order, after_sync=True)
 		self.assertTrue(self._record(order, nr)[0]["final"])
-		frappe.delete_doc("Delivery Note", self._shipment(order, nr).delivery_note)  # resets tracking
+		frappe.delete_doc("Delivery Note", note)  # uncovers the units
 		fulfillment.mark_handed_over(order, nr)  # the whole shipment is drafted again
 		self.assertTrue(self._record(order, nr)[0]["final"])
 
@@ -429,7 +434,7 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 
 	def test_a_failing_retry_is_logged_and_keeps_the_record(self):
 		_fx, order, nr = self._shipped_order([("A", 2), ("B", 1)], ["A", "B"], unmapped=("B",))
-		fulfillment.mark_handed_over(order, nr)
+		self._mark_draft(order, nr)
 		with patch.object(fulfillment, "_draft_and_record", side_effect=RuntimeError("boom")), patch.object(
 			frappe, "log_error"
 		) as log_error:
@@ -450,7 +455,7 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 
 	def test_cancel_shipment_is_refused_while_the_delivery_note_is_live(self):
 		_fx, order, nr = self._shipped_order([("A", 2)], ["A", "A"])
-		note = fulfillment.mark_handed_over(order, nr)["delivery_note"]
+		note = self._mark_draft(order, nr)["delivery_note"]
 		self.assertNotIn(
 			"cancel_shipment", fulfillment.get_available_actions(frappe.get_doc("Marketplace Order", order))["actions"]
 		)
@@ -467,14 +472,58 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 			with patch.object(frappe, "enqueue"):
 				self.assertTrue(fulfillment.cancel_shipment(order, nr)["queued"])
 
-	def test_action_is_offered_until_a_live_delivery_note_exists(self):
+	def test_action_is_offered_until_the_note_is_submitted(self):
 		_fx, order, nr = self._shipped_order([("A", 1)], ["A"])
 		actions = lambda: fulfillment.get_available_actions(frappe.get_doc("Marketplace Order", order))["actions"]  # noqa: E731
 		self.assertIn("mark_handed_over", actions())
-		result = fulfillment.mark_handed_over(order, nr)
+		note = self._mark_draft(order, nr)["delivery_note"]
+		self.assertIn("mark_handed_over", actions())  # a draft is left to submit
+		fulfillment.mark_handed_over(order, nr)
+		self.assertEqual(frappe.db.get_value("Delivery Note", note, "docstatus"), 1)
 		self.assertNotIn("mark_handed_over", actions())
-		frappe.delete_doc("Delivery Note", result["delivery_note"], force=True)
-		self.assertIn("mark_handed_over", actions())
+
+	def test_a_submit_failure_keeps_the_draft_stores_the_error_and_the_next_click_retries(self):
+		_fx, order, nr = self._shipped_order([("A", 1)], ["A"])
+		with patch.object(fulfillment, "submit_note", side_effect=RuntimeError("<b>no stock</b>")):
+			result = fulfillment.mark_handed_over(order, nr)
+		self.assertFalse(result["submitted"])
+		self.assertIn("no stock", result["submit_error"])
+		self.assertNotIn("<b>", result["submit_error"])  # stored escaped
+		self.assertEqual(frappe.db.get_value("Delivery Note", result["delivery_note"], "docstatus"), 0)
+		self.assertEqual(self._shipment(order, nr).delivery_note_error, result["submit_error"])
+
+		again = fulfillment.mark_handed_over(order, nr)
+		self.assertTrue(again["submitted"])
+		self.assertEqual(again["delivery_note"], result["delivery_note"])
+		self.assertFalse(self._shipment(order, nr).delivery_note_error)
+
+	def test_mark_handed_over_adds_to_a_draft_an_earlier_import_made_and_submits_it(self):
+		_fx, order, nr = self._shipped_order([("A", 3)], ["A", "A", "A"])
+		doc = frappe.get_doc("Marketplace Order", order)
+		draft = fulfillment._draft_and_record(doc, doc.noon_shipments[0], fulfillment._row_units(doc.noon_shipment_units[:1]))[
+			"delivery_note"
+		]
+		doc.save()
+		result = fulfillment.mark_handed_over(order, nr)
+		self.assertEqual(result["delivery_note"], draft)  # not a second note
+		self.assertFalse(result["created"])
+		note = frappe.get_doc("Delivery Note", draft)
+		self.assertEqual((note.docstatus, [row.qty for row in note.items]), (1, [3]))
+		self.assertEqual(self._unit_notes(order, nr), [draft] * 3)
+
+	def test_a_submitted_note_with_uncovered_units_refuses_mark_handed_over(self):
+		_fx, order, nr = self._shipped_order([("A", 2)], ["A", "A"])
+		note = fulfillment.mark_handed_over(order, nr)["delivery_note"]
+		# A second unit that no live note covers (for example added to the shipment later).
+		doc = frappe.get_doc("Marketplace Order", order)
+		doc.noon_shipment_units[1].delivery_note = None
+		doc.save()
+		with self.assertRaises(frappe.ValidationError) as caught:
+			fulfillment.mark_handed_over(order, nr)
+		self.assertIn(note, str(caught.exception))
+		self.assertNotIn(
+			"mark_handed_over", fulfillment.get_available_actions(frappe.get_doc("Marketplace Order", order))["actions"]
+		)
 
 	def test_endpoint_needs_write_on_the_order(self):
 		_fx, order, nr = self._shipped_order([("A", 1)], ["A"])
@@ -486,15 +535,38 @@ class IntegrationTestNoonMarkHandedOver(IntegrationTestNoonFulfillmentBase):
 		finally:
 			frappe.set_user("Administrator")
 
-	def test_endpoint_needs_create_on_delivery_note(self):
+	def test_endpoint_needs_submit_on_delivery_note_and_the_button_is_hidden(self):
 		fx, order, nr = self._shipped_order([("A", 1)], ["A"])
-		email, _role = make_role_user(self, "Noon Writer", {"Marketplace Order": ["write"]})
+		email, _role = make_role_user(
+			self, "Noon Writer", {"Marketplace Order": ["write"], "Delivery Note": ["create", "write"]}
+		)
 		# The platform role lets the order check pass, so the refusal below is the Delivery Note one.
 		frappe.get_doc("User", email).add_roles("Noon User")
 		frappe.set_user(email)
 		try:
 			with self.assertRaises(frappe.PermissionError):
 				noon_fulfillment.mark_handed_over(order, nr)
+			self.assertNotIn(
+				"mark_handed_over",
+				fulfillment.get_available_actions(frappe.get_doc("Marketplace Order", order))["actions"],
+			)
 		finally:
 			frappe.set_user("Administrator")
 		self.assertEqual(fx.delivery_notes(), [])
+
+	def test_a_user_with_submit_permission_can_mark_and_sees_the_button(self):
+		fx, order, nr = self._shipped_order([("A", 1)], ["A"])
+		email, _role = make_role_user(
+			self, "Noon Submitter", {"Marketplace Order": ["write"], "Delivery Note": ["create", "write", "submit"]}
+		)
+		frappe.get_doc("User", email).add_roles("Noon User")
+		frappe.set_user(email)
+		try:
+			self.assertIn(
+				"mark_handed_over",
+				fulfillment.get_available_actions(frappe.get_doc("Marketplace Order", order))["actions"],
+			)
+			result = noon_fulfillment.mark_handed_over(order, nr)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertTrue(result["submitted"])

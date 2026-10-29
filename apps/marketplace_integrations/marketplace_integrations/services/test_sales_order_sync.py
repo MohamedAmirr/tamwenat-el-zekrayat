@@ -3861,6 +3861,31 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(sales_order.custom_marketplace_order, order.name)
 		self.assertEqual(sales_order.custom_marketplace_platform, "Noon")
 
+	def test_noon_sync_writes_delivery_status_on_the_new_sales_order(self):
+		"""#378: the Sales Order created by the sync is never left with a blank Delivery Status."""
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(
+			account,
+			items=[
+				{
+					"external_item_id": "sku:SKU-NOON:MP_ITEM_STATUS_CONFIRMED:SHIPPED",
+					"external_sku": "SKU-NOON",
+					"external_status": "CONFIRMED",
+					"integration_status": "SHIPPED",
+					"current_quantity": 2,
+					"transaction_amount": 200.0,
+				}
+			],
+		)
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(
+			frappe.db.get_value("Sales Order", result["sales_order"], "custom_delivery_status"),
+			"Shipped 2/2",
+		)
+
 	def test_noon_uses_generic_account_customer(self):
 		"""Decision 4: Noon has no unique buyer key, so every order uses the
 		account's generic Customer - same non-Shopify path Talabat uses."""
@@ -5212,6 +5237,88 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertFalse(result["ok"])
 		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 		self.assertEqual(order.sync_reason_code, "QTY_BELOW_DELIVERED")
+		self.assertEqual(len(frappe.get_doc("Sales Order", sales_order.name).items), 2)
+
+	# --- #390: partial line update (Noon sends ``partial_line_update`` evidence) -----------------
+
+	PARTIAL_EVIDENCE = "marketplace_integrations.services.sales_order_sync._reconciliation_evidence"
+
+	def _two_line_talabat_order(self):
+		"""A synced two-line order (line-1 qty 2, line-2 qty 1) and its Sales Order rows by line."""
+		self._second_item_and_mapping()
+		order = self._make_order()
+		lines = [self._talabat_line("line-1", "SKU-UNIT", 2, 999), self._talabat_line("line-2", "SKU-TWO", 1, 50)]
+		self._reimport_talabat(order, lines)
+		sales_order = frappe.get_doc("Sales Order", sync_sales_order(order.name)["sales_order"])
+		first = next(row for row in sales_order.items if row.qty == 2)
+		second = next(row for row in sales_order.items if row.qty == 1)
+		return order, lines, sales_order, first, second
+
+	def _sync_with_partial_evidence(self, order):
+		with patch(self.PARTIAL_EVIDENCE, return_value={"partial_line_update": True}):
+			result = sync_sales_order(order.name)
+		order.reload()
+		return result
+
+	def test_partial_update_removes_an_undelivered_line_while_another_is_delivered(self):
+		order, lines, sales_order, first, second = self._two_line_talabat_order()
+		frappe.db.set_value("Sales Order Item", first.name, "delivered_qty", 2)
+		self._reimport_talabat(order, [lines[0], {**lines[1], "external_status": "NOT_FOUND"}])
+
+		result = self._sync_with_partial_evidence(order)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["reconciliation"]["outcome"], "UPDATE_SUBMITTED_ORDER")
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		rows = frappe.get_doc("Sales Order", sales_order.name).items
+		self.assertEqual([(row.name, row.qty, row.delivered_qty) for row in rows], [(first.name, 2, 2)])
+
+	def test_partial_update_reduces_a_partly_delivered_line_down_to_its_delivered_quantity(self):
+		order, lines, sales_order, first, second = self._two_line_talabat_order()
+		frappe.db.set_value("Sales Order Item", first.name, "delivered_qty", 1)
+		self._reimport_talabat(order, [self._talabat_line("line-1", "SKU-UNIT", 1, 499.5), lines[1]])
+
+		result = self._sync_with_partial_evidence(order)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		rows = {row.name: row.qty for row in frappe.get_doc("Sales Order", sales_order.name).items}
+		self.assertEqual(rows, {first.name: 1, second.name: 1})
+
+	def test_partial_update_below_the_delivered_quantity_needs_attention_and_changes_nothing(self):
+		order, lines, sales_order, first, second = self._two_line_talabat_order()
+		frappe.db.set_value("Sales Order Item", second.name, "delivered_qty", 1)
+		self._reimport_talabat(order, [lines[0], {**lines[1], "external_status": "NOT_FOUND"}])
+
+		result = self._sync_with_partial_evidence(order)
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
+		self.assertEqual(order.sync_reason_code, "QTY_BELOW_DELIVERED")
+		self.assertIn("line-2", result["reconciliation"]["message"])
+		self.assertEqual(len(frappe.get_doc("Sales Order", sales_order.name).items), 2)
+
+	def test_partial_update_below_the_billed_quantity_needs_attention(self):
+		order, lines, sales_order, first, second = self._two_line_talabat_order()
+		frappe.db.set_value("Sales Order Item", first.name, "billed_amt", 999)
+		self._reimport_talabat(order, [self._talabat_line("line-1", "SKU-UNIT", 1, 499.5), lines[1]])
+
+		result = self._sync_with_partial_evidence(order)
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(order.sync_reason_code, "ALREADY_BILLED")
+		self.assertIn("line-1", result["reconciliation"]["message"])
+
+	def test_without_partial_evidence_a_delivered_line_still_blocks_the_whole_update(self):
+		order, lines, sales_order, first, second = self._two_line_talabat_order()
+		frappe.db.set_value("Sales Order Item", first.name, "delivered_qty", 2)
+		self._reimport_talabat(order, [lines[0], {**lines[1], "external_status": "NOT_FOUND"}])
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(order.erpnext_sync_status, "Needs Action")
 		self.assertEqual(len(frappe.get_doc("Sales Order", sales_order.name).items), 2)
 
 	def test_row_change_erpnext_refuses_makes_the_whole_order_needs_action(self):

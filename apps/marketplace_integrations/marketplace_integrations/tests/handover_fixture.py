@@ -196,5 +196,15 @@ class SubmittedOrderFixture:
 		if frappe.db.get_value("Sales Order", self.name, "docstatus") == 1:
 			order = frappe.get_doc("Sales Order", self.name)
 			order.flags.ignore_permissions = True
-			order.cancel()
+			# #376: the Noon cancel guard refuses while a shipment is open; cleanup is not a user cancel.
+			syncing = frappe.flags.setdefault("marketplace_syncing_orders", set())
+			marker = order.get("custom_marketplace_order")
+			added = bool(marker) and marker not in syncing
+			if added:
+				syncing.add(marker)
+			try:
+				order.cancel()
+			finally:
+				if added:
+					syncing.discard(marker)
 		self._remove("Sales Order", self.name)

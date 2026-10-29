@@ -12,6 +12,7 @@ queue. No Noon HTTP call ever happens inside a Desk request.
 """
 
 import frappe
+from frappe.utils import cstr
 
 from marketplace_integrations.integrations.noon import fulfillment, handover_state
 
@@ -53,29 +54,90 @@ def get_available_actions(marketplace_order: str):
 	doc.check_permission("read")
 	if doc.platform != "Noon":
 		frappe.throw(frappe._("Marketplace Order {0} is not a Noon order.").format(doc.name))
-	return {**fulfillment.get_available_actions(doc), "shipments": _shipment_summaries(doc)}
+	return {
+		**fulfillment.get_available_actions(doc),
+		"shipments": _shipment_summaries(doc),
+		"sales_invoice": _readable_document("Sales Invoice", doc.get("noon_sales_invoice")),
+	}
+
+
+_DOCSTATUS_STATES = {0: "Draft", 1: "Submitted", 2: "Cancelled"}
+
+
+def _readable_document(doctype, name):
+	"""``{"name", "state"}`` of an existing document the session user may read, else ``None``.  A
+	document name is returned only to someone who can read it (#378); a deleted document is gone."""
+	name = cstr(name).strip()
+	if not name:
+		return None
+	docstatus = frappe.db.get_value(doctype, name, "docstatus")
+	if docstatus is None or not frappe.has_permission(doctype, "read", doc=name):
+		return None
+	return {"name": name, "state": _DOCSTATUS_STATES.get(docstatus, "Draft")}
+
+
+def _unit_summaries(doc, shipment_rows, payload, names):
+	"""Units of one shipment grouped by (SKU, Noon status, on a live Delivery Note): ``{"item_name",
+	"sku", "qty", "status", "on_note"}``.  ``status`` is Noon's ``integration_status`` from the
+	latest payload (``""`` when the unit is not in it)."""
+	grouped = {}
+	for row in shipment_rows:
+		sku = cstr(row.partner_sku).strip()
+		status = cstr((payload.get(cstr(row.mp_item_nr).strip()) or {}).get("integration_status"))
+		on_note = handover_state.is_covered(row)
+		entry = grouped.setdefault(
+			(sku, status, on_note),
+			{"item_name": names.get(sku, ""), "sku": sku, "qty": 0, "status": status, "on_note": on_note},
+		)
+		entry["qty"] += 1
+	return list(grouped.values())
 
 
 def _shipment_summaries(doc):
-	"""Display values of each shipment: status, units grouped by SKU (``Item name (SKU)`` x qty), AWBs, Delivery Note and the units that could not
-	be put on a Delivery Note (as text)."""
+	"""Display values of each shipment: status, units grouped by SKU (``Item name (SKU)`` x qty), AWBs,
+	the Delivery Notes recorded on its unit rows (only those the user may read, each with its
+	draft/submitted state), how many units Noon reports SHIPPED, the per-unit table of the Noon
+	Fulfillment tab (#378) and the units that could not be put on a Delivery Note (as text)."""
 	awbs = {}
-	for awb in doc.noon_shipment_awbs or []:
+	for awb in doc.get("noon_shipment_awbs") or []:
 		awbs.setdefault(awb.integration_shipment_nr, []).append({"courier": awb.courier, "awb_nr": awb.awb_nr})
-	items = fulfillment.shipment_items(doc)
-	return [
-		{
-			"integration_shipment_nr": row.integration_shipment_nr,
-			"status": row.status,
-			"items": items.get(row.integration_shipment_nr, []),
-			"awbs": awbs.get(row.integration_shipment_nr, []),
-			"delivery_note": row.delivery_note or "",
-			"delivery_notes": handover_state.shipment_notes(row),
-			"handed_over": fulfillment._handed_over(row),
-			"unresolved": [handover_state.entry_text(entry) for entry in handover_state.load_entries(row)],
-		}
-		for row in doc.noon_shipments or []
-	]
+	units = doc.get("noon_shipment_units") or []
+	payload = {
+		cstr(item.get("mp_item_nr")).strip(): item for item in handover_state.payload_items(doc.get("latest_payload"))
+	}
+	names = fulfillment.item_names_by_sku(doc, [row.partner_sku for row in units])
+	items = fulfillment.shipment_items(doc, names=names)
+	summaries = []
+	for row in doc.get("noon_shipments") or []:
+		nr = row.integration_shipment_nr
+		rows = handover_state.unit_rows(units, nr)
+		notes = [
+			note
+			for note in (_readable_document("Delivery Note", name) for name in handover_state.shipment_notes(units, nr))
+			if note
+		]
+		summaries.append(
+			{
+				"integration_shipment_nr": nr,
+				"status": row.status,
+				"items": items.get(nr, []),
+				"units": _unit_summaries(doc, rows, payload, names),
+				"unit_count": len(rows),
+				"shipped_count": sum(
+					1
+					for unit in rows
+					if (payload.get(cstr(unit.mp_item_nr).strip()) or {}).get("integration_status")
+					== handover_state.STATUS_SHIPPED
+				),
+				"awbs": awbs.get(nr, []),
+				"delivery_notes": notes,
+				"delivery_note_error": row.get("delivery_note_error") or "",
+				"handed_over": fulfillment._handed_over(doc, row),
+				"can_mark_handed_over": fulfillment._can_mark_handed_over(doc, row),
+				"unresolved": [handover_state.entry_text(entry) for entry in handover_state.load_entries(row)],
+			}
+		)
+	return summaries
 
 
 @frappe.whitelist(methods=["POST"])
@@ -93,10 +155,30 @@ def cancel_shipment(marketplace_order: str, integration_shipment_nr: str):
 
 
 @frappe.whitelist(methods=["POST"])
-def mark_handed_over(marketplace_order: str, integration_shipment_nr: str):
-	"""Manual handover of a Created shipment: drafts one Delivery Note (#368).
+def get_cancel_on_noon_preview(marketplace_order: str):
+	"""Read-only text source of the Cancel on Noon dialog (#376): the Created shipments that would be
+	cancelled, those skipped for a live Delivery Note and why the Sales Order cancel is refused. No Noon call."""
+	doc = frappe.get_doc("Marketplace Order", marketplace_order)
+	doc.check_permission("write")
+	if doc.platform != "Noon":
+		frappe.throw(frappe._("Marketplace Order {0} is not a Noon order.").format(doc.name))
+	return fulfillment.get_cancel_on_noon_preview(doc)
 
-	No Noon call. The shared service also needs create permission on Delivery Note and checks it.
+
+@frappe.whitelist(methods=["POST"])
+def cancel_created_shipments(marketplace_order: str):
+	"""Queue the Noon cancel of every Created shipment (#376). Units outside a shipment are untouched;
+	the Sales Order is cancelled by the user afterwards, once the shipments show Cancelled."""
+	_get_noon_order(marketplace_order)
+	return fulfillment.cancel_created_shipments(marketplace_order)
+
+
+@frappe.whitelist(methods=["POST"])
+def mark_handed_over(marketplace_order: str, integration_shipment_nr: str):
+	"""Manual "all shipped" override of a Created shipment: puts every uncovered unit on its Delivery
+	Note and submits it (#368, #390).
+
+	No Noon call. The user needs Delivery Note submit permission; the function checks it.
 	"""
 	_get_noon_order(marketplace_order)
 	return fulfillment.mark_handed_over(marketplace_order, integration_shipment_nr)

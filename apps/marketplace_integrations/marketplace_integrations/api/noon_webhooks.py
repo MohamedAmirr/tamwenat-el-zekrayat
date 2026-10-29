@@ -5,8 +5,10 @@
 
 Auth and envelope-shape validation finish synchronously so an invalid
 request never reaches a worker - no Noon HTTP call happens in the request
-itself. ``FBPI::ORDER_SYNC`` only queues the existing order import: its
-payload is checked to be an object but never parsed, stored or logged.
+itself. ``FBPI::ORDER_SYNC`` queues the existing order import, or (#390) the
+per-order GetFbpiOrder refresh when ``payload.order_nr`` names an order that is
+already imported; ``order_nr`` is only a lookup key and the rest of the payload
+is never parsed, stored or logged.
 ``RETURNS::REFERENCE_UPDATE`` (#263) reads ``payload.barcode``, queues a
 deduplicated return-reference lookup and stores the raw payload (capped) on
 a ``Return Lookup`` sync log row; every other event type is acknowledged
@@ -34,8 +36,11 @@ from marketplace_integrations.integrations.noon.constants import (
 	NOON_RETURN_REFERENCE_UPDATE_EVENT_TYPE,
 	NOON_WEBHOOK_SECRET_HEADER,
 )
-from marketplace_integrations.integrations.noon.orders import enqueue_order_import
+from marketplace_integrations.integrations.noon.orders import enqueue_order_import, enqueue_order_refresh
 from marketplace_integrations.integrations.noon.returns import queue_webhook_lookup
+from marketplace_integrations.marketplace_integrations.doctype.marketplace_order.marketplace_order import (
+	compute_order_identity_key,
+)
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -86,13 +91,33 @@ def event_notification():
 		return {"accepted": True}
 
 	import_queued = False
+	refresh_queued = None
 	if event_type == NOON_FBPI_ORDER_SYNC_EVENT_TYPE:
-		job = enqueue_order_import(account.name, trigger_source="Noon Webhook")
-		import_queued = job is not None
+		known_order = _imported_order(account, payload)
+		if known_order:
+			refresh_queued = enqueue_order_refresh(known_order) is not None
+		else:
+			job = enqueue_order_import(account.name, trigger_source="Noon Webhook")
+			import_queued = job is not None
 
-	_log_accepted_event(account, message_id, event_type, import_queued)
+	_log_accepted_event(account, message_id, event_type, import_queued, refresh_queued)
 
 	return {"accepted": True}
+
+
+def _imported_order(account, payload):
+	"""Name of the Marketplace Order already imported for ``payload.order_nr`` (#390), else ``None``.
+
+	``order_nr`` is used only as a lookup key: it must be a non-empty string and is never stored,
+	logged or trusted for anything else. A missing, non-string or unknown value means "no known
+	order", so the caller falls back to the account import."""
+	order_nr = payload.get("order_nr")
+	order_nr = order_nr.strip() if isinstance(order_nr, str) else ""
+	if not order_nr:
+		return None
+	return frappe.db.get_value(
+		"Marketplace Order", {"order_identity_key": compute_order_identity_key(account.name, order_nr)}, "name"
+	)
 
 
 def _handle_return_reference_update(account, message_id, payload):
@@ -195,7 +220,7 @@ def _resolve_account_and_connection(project_code):
 	return account, connection
 
 
-def _log_accepted_event(account, message_id, event_type, import_queued):
+def _log_accepted_event(account, message_id, event_type, import_queued, refresh_queued=None):
 	"""Write one committed ``Marketplace Sync Log`` row for an accepted event
 	(decision: relies on #145's existing per-account job_id dedup rather than
 	a new dedup doctype). Never raises outward - a logging failure must not
@@ -208,7 +233,10 @@ def _log_accepted_event(account, message_id, event_type, import_queued):
 	because an identical job_id was already queued/running). If
 	``enqueue_order_import()`` itself raises, this function is never reached
 	at all (see ``event_notification()``), so no row is ever committed that
-	misrepresents a raised enqueue failure as a Success."""
+	misrepresents a raised enqueue failure as a Success. ``refresh_queued`` is
+	``None`` unless the event named an already imported order (#390), in which
+	case the per-order refresh was queued instead of the import and the row says
+	whether that job was new (``False``: a deduplicated redelivery)."""
 	try:
 		now = frappe.utils.now_datetime()
 		frappe.get_doc(
@@ -225,6 +253,7 @@ def _log_accepted_event(account, message_id, event_type, import_queued):
 						"message_id": message_id,
 						"event_type": event_type,
 						"import_queued": import_queued,
+						**({} if refresh_queued is None else {"refresh_queued": refresh_queued}),
 					}
 				),
 			}

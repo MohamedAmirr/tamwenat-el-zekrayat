@@ -47,10 +47,14 @@ JSON envelope:
   `Noon Connection`, and that connection to exactly one enabled `Marketplace
   Account`; otherwise the request is rejected.
 - `payload` — the event-type-specific body, checked to be a JSON object. For
-  `FBPI::ORDER_SYNC` it is **not parsed**: the receiver only re-triggers the
-  existing FBPI order-import job, which re-fetches state from Noon's own
-  `ListFbpiOrders` endpoint rather than trusting anything in this payload (so
-  the payload's `order_nr` is not used). For `RETURNS::REFERENCE_UPDATE` the
+  `FBPI::ORDER_SYNC` only `order_nr` is read (#390), as a lookup key and never
+  stored or logged: a non-empty string that matches a Marketplace Order of the
+  resolved account (`external_order_id`) queues the deduplicated per-order
+  `GetFbpiOrder` refresh (`orders.enqueue_order_refresh`); a missing, non-string
+  or unknown value re-triggers the existing FBPI order-import job, which
+  re-fetches state from Noon's own `ListFbpiOrders` endpoint. Nothing else in the
+  payload is trusted. The sync log row gains `refresh_queued` (true for a new
+  job, false for a deduplicated redelivery) when the refresh path is taken. For `RETURNS::REFERENCE_UPDATE` the
   receiver reads `barcode` only (#263, see below).
 
 ## Authentication

@@ -7,12 +7,14 @@
  "field_order": [
   "integration_shipment_nr",
   "mp_item_nr",
-  "partner_sku"
+  "partner_sku",
+  "delivery_note"
  ],
  "fields": [
   {"fieldname": "integration_shipment_nr", "fieldtype": "Data", "ignore_xss_filter": 1, "in_list_view": 1, "label": "Integration Shipment Nr", "read_only": 1, "reqd": 1},
   {"description": "Noon's per-physical-unit mp_item_nr (only available in latest_payload.items[] per #145).", "fieldname": "mp_item_nr", "fieldtype": "Data", "ignore_xss_filter": 1, "in_list_view": 1, "label": "MP Item Nr", "read_only": 1, "reqd": 1},
-  {"fieldname": "partner_sku", "fieldtype": "Data", "ignore_xss_filter": 1, "in_list_view": 1, "label": "Partner SKU", "read_only": 1}
+  {"fieldname": "partner_sku", "fieldtype": "Data", "ignore_xss_filter": 1, "in_list_view": 1, "label": "Partner SKU", "read_only": 1},
+  {"description": "The Delivery Note this unit is on (#390): one note per shipment. The unit counts as covered while that note is a draft or submitted. Deleting the Delivery Note clears this field.", "fieldname": "delivery_note", "fieldtype": "Link", "label": "Delivery Note", "no_copy": 1, "options": "Delivery Note", "read_only": 1}
  ],
  "index_web_pages_for_search": 1,
  "istable": 1,

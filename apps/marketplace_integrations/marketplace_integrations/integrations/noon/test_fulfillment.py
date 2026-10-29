@@ -220,7 +220,7 @@ class IntegrationTestNoonAvailableActions(IntegrationTestNoonFulfillmentBase):
 		result = fulfillment.get_available_actions(order)
 		self.assertEqual(
 			result["actions"],
-			["cancel_shipment", "add_awb", "mark_handed_over", "upload_invoice", "upload_order_invoice"],
+			["cancel_shipment", "cancel_on_noon", "add_awb", "mark_handed_over", "upload_invoice", "upload_order_invoice"],
 		)
 		self.assertFalse(result["cancelled_on_noon"])
 
@@ -230,7 +230,7 @@ class IntegrationTestNoonAvailableActions(IntegrationTestNoonFulfillmentBase):
 		order.save()
 		self.assertEqual(
 			fulfillment.get_available_actions(order)["actions"],
-			["cancel_shipment", "add_awb", "mark_handed_over", "retry"],
+			["cancel_shipment", "cancel_on_noon", "add_awb", "mark_handed_over", "retry"],
 		)
 
 	def test_error_shipment_offers_retry_and_discard(self):
