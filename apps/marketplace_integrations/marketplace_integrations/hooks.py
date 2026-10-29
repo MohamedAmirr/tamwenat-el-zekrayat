@@ -352,6 +352,11 @@ fixtures = [
 					"Sales Order Item-price_list_rate-precision",
 					"Sales Order-contact_mobile-read_only",
 					"Sales Order-contact_mobile-allow_on_submit",
+					# AWB / Carrier on the Delivery Note: relabelled native lr_no / transporter, and
+					# moved (field_order) under the customer on the Details tab, not collapsed.
+					"Delivery Note-lr_no-label",
+					"Delivery Note-transporter-label",
+					"Delivery Note-main-field_order",
 				],
 			]
 		],
