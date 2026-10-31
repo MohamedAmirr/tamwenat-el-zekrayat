@@ -553,5 +553,20 @@
   "label": "Carrier Error",
   "name": "Delivery Note-custom_carrier_error",
   "depends_on": "eval:doc.custom_carrier_status==\"Error\""
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Delivery Note",
+  "collapsible": 1,
+  "hidden": 0,
+  "modified": "2026-10-31 00:00:00.000000",
+  "module": null,
+  "permlevel": 0,
+  "translatable": 0,
+  "fieldname": "custom_more_section",
+  "fieldtype": "Section Break",
+  "insert_after": "pricing_rules",
+  "label": "More",
+  "name": "Delivery Note-custom_more_section"
  }
 ]
