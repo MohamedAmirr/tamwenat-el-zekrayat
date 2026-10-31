@@ -354,9 +354,14 @@ fixtures = [
 					"Sales Order-contact_mobile-allow_on_submit",
 					# AWB / Carrier on the Delivery Note: relabelled native lr_no / transporter, and
 					# moved (field_order) under the customer on the Details tab, not collapsed.
+					# Form layout: field_order also moves six native sections into the collapsed
+					# "More" section (Custom Field below); per_installed / per_returned lose their
+					# "saved only" depends_on so a new note and a saved note show the same fields.
 					"Delivery Note-lr_no-label",
 					"Delivery Note-transporter-label",
 					"Delivery Note-main-field_order",
+					"Delivery Note-per_installed-depends_on",
+					"Delivery Note-per_returned-depends_on",
 				],
 			]
 		],
@@ -384,6 +389,7 @@ fixtures = [
 					"Payment Entry-custom_marketplace_transaction_id",
 					"Delivery Note-custom_carrier_status",
 					"Delivery Note-custom_carrier_error",
+					"Delivery Note-custom_more_section",
 				],
 			]
 		],
