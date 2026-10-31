@@ -49,6 +49,8 @@ NOON_EVENT_WEBHOOK_PATH = "/api/method/marketplace_integrations.api.noon_webhook
 # event_type is acknowledged (200) without enqueuing anything, so Noon
 # stops retrying a type we don't handle (#163 scope).
 NOON_FBPI_ORDER_SYNC_EVENT_TYPE = "FBPI::ORDER_SYNC"
+# #400: the only ``event_schema_version`` Noon documents for it (accepted as integer or string).
+NOON_ORDER_SYNC_SCHEMA_VERSION = 1
 
 # #263: the return-reference event. Its payload shape (barcode, barcode_type) comes
 # from an AI-written summary, not a Noon page, so it is unverified; the receiver

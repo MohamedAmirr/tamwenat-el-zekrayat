@@ -29,10 +29,11 @@ JSON envelope:
 ```
 
 - `event_schema_version` — a version marker for the envelope/payload shape.
-  Not read or validated by `api/noon_webhooks.py` (#163 only checks the
-  fields it actually needs).
+  For `FBPI::ORDER_SYNC` the receiver (#400) requires it to be `1`, as an
+  integer or the string `"1"`; any other or missing value is answered 200 and
+  logged (see "Delivery semantics"). Other event types are not checked.
 - `event_type` — identifies what happened (e.g. `FBPI::ORDER_SYNC`). This
-  receiver acts on `FBPI::ORDER_SYNC` (queues the order import) and
+  receiver acts on `FBPI::ORDER_SYNC` (refreshes the named order, else queues the order import) and
   `RETURNS::REFERENCE_UPDATE` (queues a return lookup, see below); every other
   value is acknowledged (200) without being processed, so Noon stops retrying it.
 - `metadata.message_id` — a per-delivery identifier. Recorded on the
@@ -47,10 +48,10 @@ JSON envelope:
   `Noon Connection`, and that connection to exactly one enabled `Marketplace
   Account`; otherwise the request is rejected.
 - `payload` — the event-type-specific body, checked to be a JSON object. For
-  `FBPI::ORDER_SYNC` it is **not parsed**: the receiver only re-triggers the
-  existing FBPI order-import job, which re-fetches state from Noon's own
-  `ListFbpiOrders` endpoint rather than trusting anything in this payload (so
-  the payload's `order_nr` is not used). For `RETURNS::REFERENCE_UPDATE` the
+  `FBPI::ORDER_SYNC` the receiver (#400) reads `order_nr` only, as a lookup key
+  (stripped string, never stored): state is still re-fetched from Noon
+  (`GetFbpiOrder` for a known order, `ListFbpiOrders` otherwise) rather than
+  trusting anything in the payload. For `RETURNS::REFERENCE_UPDATE` the
   receiver reads `barcode` only (#263, see below).
 
 ## Authentication
@@ -138,36 +139,51 @@ destinations are not supported.
 ## Delivery semantics
 
 Noon uses **at-least-once delivery**, with **up to 50 retries using
-exponential backoff** on a non-2xx (or otherwise failed) response. This
-receiver's authentication/envelope-shape checks finish synchronously so an
-invalid request fails fast (and predictably) across those retries; a valid,
-handled event enqueues the existing per-account deduplicated
-`run_order_import` job (same `job_id` scheme as #145's polling/manual
-paths), so redelivery of the same event (or a burst of several events for
-the same account) can never queue more than one import job per account at a
-time.
+exponential backoff** on a non-2xx (or otherwise failed) response.
 
-**Accepted gap, orders older than 7 days:** the order import only looks back
-`ORDER_IMPORT_LOOKBACK_DAYS` (7) days from its start, and the webhook payload's
-`order_nr` is not used to fetch a specific order. A webhook for an order created
-more than 7 days ago therefore changes nothing; only a manual **Refresh from
-Noon** on that Marketplace Order picks up the change.
+Status codes (#400):
 
-**Accepted dedup gap:** if a webhook event arrives while that account's
-import job is already queued/running, RQ's own `deduplicate=True` makes
-`frappe.enqueue(...)` return `None` for this delivery - no new job is
-queued. The receiver still authenticates and validates the envelope
-successfully, so it still returns 200 and logs `status="Success"` (with
-`import_queued: false` recorded in the log row's `request_data`) - Noon
-correctly stops retrying a delivery this app has in fact accepted. The
-order this event was about is not actually (re-)imported by this specific
-delivery, though: it is only picked up whenever the already-running/queued
-import job happens to run, or - if that job's own lookback window already
-passed before this event's change landed on Noon's side - by the next
-hourly poll cycle (#145), up to about an hour later. This is accepted
-behavior, not a bug: it follows directly from relying entirely on #145's
-existing per-account job_id dedup rather than introducing a new dedup
-doctype/mechanism for this receiver (see "Delivery semantics" above).
+- **403**: no `metadata` object, no `message_id`/`project_code`, an unresolvable
+  `project_code`, or a missing/wrong `X-Api-Key`. Nothing is stored, so
+  unauthenticated traffic never writes a row.
+- **200, logged `Invalid`**: authenticated, but the content is unusable (missing
+  or non-string `event_type`, non-object `payload`, for `FBPI::ORDER_SYNC` an
+  `event_schema_version` other than `1` or a missing/empty `payload.order_nr`).
+  200 stops Noon retrying something a retry cannot fix. The `Marketplace Sync Log`
+  row (`Order Import`, `Noon Webhook`, status `Invalid`) holds `message_id`,
+  `event_type`, `reason` and the raw `payload`, each capped at 4096 characters (a larger
+  payload is kept as `truncated_payload`, the #263 pattern; a longer `message_id` or
+  `event_type` is cut).
+- **200, accepted**: everything else. No Noon HTTP call happens in the request.
+
+Accepted `FBPI::ORDER_SYNC`:
+
+- `payload.order_nr` is looked up (stripped) as an existing Marketplace Order for
+  the resolved account. A **known order** queues one deduplicated
+  `run_order_refresh` job (`GetFbpiOrder` for just that order, so no 7-day limit,
+  trigger source "Noon Webhook"); an **unknown order** falls back to the existing
+  per-account deduplicated `run_order_import` (7-day `ListFbpiOrders`), which is
+  how a brand-new order arrives. `order_nr` is never stored or logged on an
+  accepted event.
+- The accepted row records `message_id`, `event_type`, `import_queued` and, for a
+  known order, `refresh_queued`.
+- **Redelivery / burst:** the job ids are per order
+  (`marketplace-noon-order-refresh-<order>`) and per account
+  (`marketplace-noon-order-import-<account>`), with RQ `deduplicate=True`. A
+  delivery that arrives while the same job is queued or running queues nothing,
+  still gets 200, and logs `refresh_queued: false` (or `import_queued: false`).
+  The job fetches the order when it runs, so a queued job already sees what the
+  redelivered event announced; if the fetch had already happened (job running), the
+  next webhook or the hourly poll (#145) picks the change up. There is no
+  `message_id` dedup doctype.
+- **404 from `GetFbpiOrder`**: the refresh only runs for an order we already
+  imported, so a 404 means Noon no longer returns it (or is transiently unavailable).
+  The refresh logs an `Error` row with trigger source "Noon Webhook" and falls back
+  once to the account import (the import never calls back into a refresh, so there is
+  no loop; bounded per delivery). That import re-lists only the last 7 days, so for an
+  older order only the `Error` row is written. The hourly poll remains the safety net. A Desk "Refresh from Noon" (source
+  "Manual") that gets a 404 still fails visibly. 401 re-authentication is not
+  handled here.
 
 ## RETURNS::REFERENCE_UPDATE (#263)
 
@@ -197,8 +213,9 @@ found nothing else, official or unofficial. The receiver therefore:
 - stores the raw `payload` on a `Marketplace Sync Log` row (`sync_type` Return
   Lookup, `request_data.payload`), capped at 4096 characters (larger payloads are
   kept as `truncated_payload`). Headers and the key are never stored. This is for
-  this event only: `FBPI::ORDER_SYNC` logging is unchanged because its payload can
-  hold customer data. Look at the first real payload before widening this.
+  this event only: an accepted `FBPI::ORDER_SYNC` still logs no payload because it
+  can hold customer data (only rejected envelopes keep the capped payload, see
+  "Delivery semantics"). Look at the first real payload before widening this.
 
 **To verify after the first real delivery:** open the newest `Return Lookup` /
 `Noon Webhook` row in Marketplace Sync Log, compare `request_data.payload` with

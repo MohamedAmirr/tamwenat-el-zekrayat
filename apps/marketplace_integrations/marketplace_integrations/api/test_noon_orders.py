@@ -216,6 +216,11 @@ class IntegrationTestRefreshOrderEndpoint(IntegrationTestCase):
 			with self.assertRaises(frappe.PermissionError):
 				refresh_order(self.order.name)
 
+	def test_refresh_order_rejects_guest(self):
+		with self.set_user("Guest"):
+			with self.assertRaises(frappe.PermissionError):
+				refresh_order(self.order.name)
+
 	@patch("marketplace_integrations.api.noon_orders.queue_order_refresh")
 	def test_refresh_order_queues_on_long_queue(self, mock_queue):
 		"""refresh_order() enqueues the refresh and returns immediately."""
