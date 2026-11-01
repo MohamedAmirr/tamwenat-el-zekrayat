@@ -24,7 +24,8 @@ An adapter is a module exposing (the contract; a contract test checks every adap
   and note checks only). For ``"create"`` it may return a dict instead of ``None``: the note needs the
   person's input first and nothing is sent (the dict is returned to the form).
 - ``find_remote(doc)``: the carrier's data when it has the shipment, ``None`` when it confirms none, raises
-  ``carrier_log.Unknown`` when the answer is not certain.
+  ``carrier_log.Unknown`` when the answer is not certain. The job calls it first on every attempt after the
+  first; an adapter that sets the optional ``LOOKUP_FIRST = True`` has it called on the first attempt too.
 - ``create_remote(doc)``: create and return the carrier's data; raises ``carrier_log.Failed`` (definitive
   refusal) or ``carrier_log.Unknown``.
 - ``created_values(doc, data)``: the Delivery Note fields to write once Created.
@@ -47,6 +48,7 @@ from frappe.utils import add_to_date, cstr, get_datetime, now_datetime
 from frappe.utils.background_jobs import is_job_enqueued
 
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as bosta_shipment
+from marketplace_integrations.integrations.noon import delivery_note_shipment as noon_shipment
 from marketplace_integrations.services.carrier_log import (
 	CANCELLATION_PENDING,
 	CANCELLATION_UNKNOWN,
@@ -67,7 +69,7 @@ from marketplace_integrations.services.carrier_log import (
 
 #: ``{carrier: adapter}``, a plain dict: no base class. To add a carrier: one adapter module with the
 #: contract above, one row here, a Supplier, and its carrier-specific fields, see the Provider contract in the integration READMEs.
-CARRIERS = {"Bosta": bosta_shipment}
+CARRIERS = {"Bosta": bosta_shipment, "Noon": noon_shipment}
 
 SKIP_FLAG = "skip_carrier_shipment"
 #: A Creating note with no queued job older than this counts as stuck (``check`` can resolve it).
@@ -243,7 +245,7 @@ def request_create(delivery_note, modified=None):
 		enqueue_after_commit=True,
 		delivery_note=delivery_note,
 		log=log,
-		lookup_first=bool(previous),
+		lookup_first=bool(previous) or bool(getattr(adapter, "LOOKUP_FIRST", False)),
 	)
 	frappe.db.commit()
 	return {"status": CREATING, "queued": True}

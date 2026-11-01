@@ -42,7 +42,12 @@ boot_session = "marketplace_integrations.services.carrier_shipments.boot_session
 # include js in doctype views
 doctype_js = {
 	"Sales Order": "public/js/sales_order.js",
-	"Delivery Note": ["public/js/delivery_note.js", "public/js/delivery_note_shipping.js", "public/js/delivery_note_bosta.js"],
+	"Delivery Note": [
+		"public/js/delivery_note.js",
+		"public/js/delivery_note_shipping.js",
+		"public/js/delivery_note_bosta.js",
+		"public/js/delivery_note_noon.js",
+	],
 }
 doctype_list_js = {"Sales Order": "public/js/sales_order_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
@@ -361,6 +366,8 @@ fixtures = [
 					"Delivery Note-main-field_order",
 					"Delivery Note-per_installed-depends_on",
 					"Delivery Note-per_returned-depends_on",
+					# A Noon note has no Shipping Rule (integrations/noon/delivery_note_shipment.py clears it).
+					"Delivery Note-shipping_rule-depends_on",
 				],
 			]
 		],
@@ -406,6 +413,8 @@ fixtures = [
 					"Delivery Note-custom_return_source",
 					"Delivery Note-custom_last_integration_error",
 					"Delivery Note-custom_carrier_request_snapshot",
+					"Delivery Note-custom_noon_generate_awb",
+					"Delivery Note Item-custom_noon_item_status",
 					"Integration Request-custom_operation_type",
 					"Integration Request-custom_result",
 					"Integration Request-custom_external_reference",

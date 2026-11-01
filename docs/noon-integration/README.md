@@ -24,3 +24,32 @@ For issue #143's authentication flow, also consult the official
 [Rate Limits & Usage](https://noon-docs.noonpartners.dev/docs/overview/rate-limiting),
 and [Static Sandbox](https://noon-docs.noonpartners.dev/docs/overview/sandbox)
 guides. These guides are online sources, not copied into this snapshot.
+
+## Noon shipment from the Delivery Note (#415)
+
+The Delivery Note of a Noon Sales Order is the shipment. The Noon adapter
+(`integrations/noon/delivery_note_shipment.py`) plugs into the neutral carrier contract
+(`services/carrier_shipments.py`); see `docs/marketplace-integrations/delivery-note-first.md`.
+
+- **Create on Submit.** The form waits for a background job ("Sending to Noon...") and submits only once
+  the Integration Status is Created. The job asks Noon first (`GetShipment`) on every attempt, the first
+  included; only a confirmed "No shipment found" allows `CreateShipment`. A timeout, 5xx, 408/429 or an
+  unrecognised answer is Creation Unknown (Check Noon, then Submit again); a definite 4xx is Creation Failed.
+  Nothing is retried automatically.
+- **Shipment number** = the Delivery Note name, stored in Carrier Reference at the first attempt. An amended
+  note has a new name, so a new number.
+- **AWB.** Type it (sent with courier `noon`), or tick Generate AWB through Noon under it: the job calls
+  `GetNoonLogisticsAWBs` once (qty 1), writes the AWB to the note and logs an Integration Request row
+  (operation AWB) before `CreateShipment`. A retry reuses the stored AWB. An AWB held by another Delivery Note
+  that is not cancelled is refused, ignoring case.
+- **Units** come from the order's latest payload, by SKU and quantity (Confirmed and Acknowledged only).
+  Units that another live Noon note started are read from that note's request snapshot.
+- **No COD, no address, no Shipping Rule.** The carrier is the locked Supplier Noon; the note clears its
+  Shipping Rule and the tax row that rule added.
+- **Cancel.** Noon is asked first (`GetFbpiOrder`): every unit of the shipment already cancelled is success
+  with no cancel call. Otherwise `CancelShipment`: 200 cancels, a definite 4xx leaves the note submitted with
+  Noon's reason, anything else is Cancellation Unknown (Retry asks Noon first again). The ERPNext cancel
+  follows only after Noon confirms. Changing the AWB or items of a created shipment is cancel and amend.
+- **Not built yet (phase 3 and later):** Shipping Status refresh, the item status column values, the
+  webhook refresh and the nightly Noon reconcile (placeholders do nothing), and the FBPI warehouse check
+  (hook `check_fbpi_warehouse`, sub-issue #416).

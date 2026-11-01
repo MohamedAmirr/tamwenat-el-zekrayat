@@ -1,0 +1,241 @@
+const assert = require("node:assert/strict");
+const test = require("node:test");
+
+global.__ = (message, args) => {
+	if (!args) return message;
+	return message.replace(/\{(\d+)\}/g, (_, index) => args[index]);
+};
+
+function load({ responses = {} } = {}) {
+	const registered = {};
+	const calls = [];
+	const dialogs = [];
+	const msgprints = [];
+	const alerts = [];
+	const confirms = [];
+	global.frappe = {
+		validated: true,
+		marketplace_integrations: { shipping: { register_carrier: (name, hooks) => (registered[name] = hooks) } },
+		ui: {
+			Dialog: class {
+				constructor(config) {
+					this.config = config;
+					this.fields_dict = { body: { $wrapper: { html: (html) => (this.html = html) } } };
+					dialogs.push(this);
+				}
+				show() {}
+				hide() {
+					this.hidden = true;
+					if (this.config.on_hide) this.config.on_hide();
+				}
+			},
+		},
+		utils: { escape_html: (text) => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") },
+		confirm: (message, yes) => {
+			confirms.push(message);
+			return yes();
+		},
+		msgprint: (opts) => msgprints.push(opts),
+		show_alert: (opts) => alerts.push(opts),
+		call: (opts) => {
+			calls.push(opts);
+			const key = Object.keys(responses).find((name) => opts.method.endsWith(name));
+			if (key) {
+				const answer = typeof responses[key] === "function" ? responses[key](opts) : responses[key];
+				return answer instanceof Error ? Promise.reject(answer) : Promise.resolve({ message: answer });
+			}
+			return Promise.resolve({ message: {} });
+		},
+	};
+	const path = require.resolve("./delivery_note_noon.js");
+	delete require.cache[path];
+	const mod = require(path);
+	return { mod, registered, calls, dialogs, msgprints, alerts, confirms };
+}
+
+function make_form(doc = {}) {
+	return {
+		doc: { name: "MAT-DN-1", docstatus: 0, transporter_name: "Noon", ...doc },
+		buttons: [],
+		props: {},
+		values: {},
+		reloads: 0,
+		add_custom_button(label, action) {
+			this.buttons.push({ label, action });
+		},
+		set_df_property(field, property, value) {
+			this.props[`${field}.${property}`] = value;
+		},
+		set_value(field, value) {
+			this.values[field] = value;
+			this.doc[field] = value;
+			return Promise.resolve();
+		},
+		reload_doc() {
+			this.reloads++;
+			return Promise.resolve();
+		},
+	};
+}
+
+test("Noon registers its hooks with the shared shipping shell", () => {
+	const { registered } = load();
+	assert.deepEqual(Object.keys(registered), ["Noon"]);
+	const mod = require("./delivery_note_noon.js");
+	assert.equal(registered.Noon.before_send, mod.before_send);
+	assert.equal(registered.Noon.refresh, mod.refresh);
+	assert.equal(registered.Noon.add_buttons, mod.add_buttons);
+	assert.equal(registered.Noon.pick_city, undefined);
+});
+
+test("the carrier is always locked; an editable note without an AWB choice has both fields open", () => {
+	const { mod } = load();
+	const frm = make_form({ custom_integration_status: "Not Created" });
+	mod.set_awb_state(frm);
+	assert.equal(frm.props["transporter.read_only"], 1);
+	assert.equal(frm.props["custom_noon_generate_awb.read_only"], 0);
+	assert.equal(frm.props["lr_no.read_only"], 0);
+});
+
+test("a ticked checkbox makes the AWB read-only", () => {
+	const { mod } = load();
+	const frm = make_form({ custom_integration_status: "", custom_noon_generate_awb: 1 });
+	mod.set_awb_state(frm);
+	assert.equal(frm.props["lr_no.read_only"], 1);
+	assert.equal(frm.props["custom_noon_generate_awb.read_only"], 0);
+});
+
+test("a generated AWB locks the checkbox and the AWB even on an editable note", () => {
+	const { mod } = load();
+	const frm = make_form({ custom_integration_status: "Creation Failed", custom_noon_generate_awb: 1, lr_no: "AWB1" });
+	assert.equal(mod.awb_generated(frm), true);
+	mod.set_awb_state(frm);
+	assert.equal(frm.props["lr_no.read_only"], 1);
+	assert.equal(frm.props["custom_noon_generate_awb.read_only"], 1);
+});
+
+test("once the shipment started both fields lock", () => {
+	const { mod } = load();
+	for (const status of ["Creating", "Creation Unknown", "Created", "Cancelled"]) {
+		const frm = make_form({ custom_integration_status: status, lr_no: "TYPED" });
+		mod.set_awb_state(frm);
+		assert.equal(frm.props["lr_no.read_only"], 1, status);
+		assert.equal(frm.props["custom_noon_generate_awb.read_only"], 1, status);
+	}
+	const submitted = make_form({ docstatus: 1, custom_integration_status: "Created" });
+	mod.set_awb_state(submitted);
+	assert.equal(submitted.props["lr_no.read_only"], 1);
+});
+
+test("ticking the checkbox clears a typed AWB; an untouched or generated note is left alone", () => {
+	const { mod } = load();
+	const typed = make_form({ custom_noon_generate_awb: 1, lr_no: "TYPED" });
+	mod.custom_noon_generate_awb(typed);
+	assert.equal(typed.values.lr_no, "");
+	assert.equal(typed.props["lr_no.read_only"], 1);
+
+	const generated = make_form({ custom_integration_status: "Creation Failed", custom_noon_generate_awb: 1, lr_no: "AWB1" });
+	mod.custom_noon_generate_awb(generated);
+	assert.equal(generated.values.lr_no, undefined);
+
+	const other = make_form({ transporter_name: "Bosta", custom_noon_generate_awb: 1, lr_no: "X" });
+	mod.custom_noon_generate_awb(other);
+	assert.deepEqual(other.values, {});
+});
+
+test("Submit needs a typed AWB or the checkbox", () => {
+	const { mod, msgprints } = load();
+	assert.equal(mod.before_send(make_form({})), false);
+	assert.equal(msgprints.length, 1);
+	assert.equal(mod.before_send(make_form({ lr_no: "TYPED" })), true);
+	assert.equal(mod.before_send(make_form({ custom_noon_generate_awb: 1 })), true);
+	assert.equal(msgprints.length, 1);
+});
+
+test("the cancel button shows on a draft note with a live shipment only", () => {
+	const { mod } = load();
+	for (const status of ["Created", "Cancellation Pending", "Cancellation Unknown"]) {
+		const frm = make_form({ custom_integration_status: status });
+		mod.add_buttons(frm);
+		assert.deepEqual(frm.buttons.map((b) => b.label), ["Cancel Noon Shipment"], status);
+	}
+	for (const status of ["", "Not Created", "Creating", "Creation Unknown", "Creation Failed", "Cancelled"]) {
+		const frm = make_form({ custom_integration_status: status });
+		mod.add_buttons(frm);
+		assert.deepEqual(frm.buttons, [], status);
+	}
+	const submitted = make_form({ docstatus: 1, custom_integration_status: "Created" });
+	mod.add_buttons(submitted);
+	assert.deepEqual(submitted.buttons, []);
+});
+
+test("before_cancel ignores a note that is not a created Noon shipment", async () => {
+	const { mod, calls } = load();
+	assert.equal(mod.before_cancel(make_form({ transporter_name: "Bosta", custom_integration_status: "Created" })), undefined);
+	assert.equal(mod.before_cancel(make_form({ custom_integration_status: "Cancelled", docstatus: 1 })), undefined);
+	assert.equal(mod.before_cancel(make_form({ custom_integration_status: "" })), undefined);
+	assert.deepEqual(calls, []);
+});
+
+test("before_cancel lets the native cancel go on once Noon cancelled, and reloads the form", async () => {
+	const { mod, calls } = load({ responses: { cancel_shipment: { status: "Cancelled", outcome: "cancelled", message: "" } } });
+	const frm = make_form({ docstatus: 1, custom_integration_status: "Created" });
+	await mod.before_cancel(frm);
+	assert.equal(frappe.validated, true);
+	assert.equal(frm.reloads, 1);
+	assert.equal(calls.length, 1);
+	assert.ok(calls[0].method.endsWith("carrier_shipments.cancel_shipment"));
+});
+
+test("a Noon refusal stops the cancel and shows Noon's text escaped", async () => {
+	const { mod, msgprints } = load({
+		responses: { cancel_shipment: { status: "Created", outcome: "refused", message: "Not <b>allowed</b>" } },
+	});
+	const frm = make_form({ docstatus: 1, custom_integration_status: "Created" });
+	await mod.before_cancel(frm);
+	assert.equal(frappe.validated, false);
+	assert.equal(frm.reloads, 0);
+	assert.match(msgprints[0].message, /Noon refused: Not &lt;b&gt;allowed&lt;\/b&gt;/);
+	assert.match(msgprints[0].message, /Nothing was cancelled in ERPNext/);
+});
+
+test("an unknown result keeps the note and offers Retry and Check with Noon", async () => {
+	const { mod, dialogs } = load({
+		responses: { cancel_shipment: { status: "Cancellation Unknown", outcome: "unknown", message: "timeout" } },
+	});
+	const frm = make_form({ docstatus: 1, custom_integration_status: "Created" });
+	const pending = mod.before_cancel(frm);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(dialogs.length, 1);
+	assert.equal(dialogs[0].config.primary_action_label, "Retry");
+	assert.equal(dialogs[0].config.secondary_action_label, "Check with Noon");
+	assert.match(dialogs[0].html, /timeout/);
+	// closing without choosing ends the attempt: the cancel does not go on
+	dialogs[0].hide();
+	await pending;
+	assert.equal(frappe.validated, false);
+});
+
+test("Retry asks the server again", async () => {
+	let answers = [
+		{ status: "Cancellation Unknown", outcome: "unknown", message: "timeout" },
+		{ status: "Cancelled", outcome: "cancelled", message: "" },
+	];
+	const { mod, dialogs, calls } = load({ responses: { cancel_shipment: () => answers.shift() } });
+	const frm = make_form({ docstatus: 1, custom_integration_status: "Created" });
+	const pending = mod.before_cancel(frm);
+	await new Promise((resolve) => setImmediate(resolve));
+	await dialogs[0].config.primary_action();
+	await pending;
+	assert.equal(calls.length, 2);
+	assert.equal(frappe.validated, true);
+});
+
+test("the draft Cancel Noon Shipment button confirms, cancels and reloads", async () => {
+	const { mod, confirms, alerts } = load({ responses: { cancel_shipment: { status: "Cancelled", outcome: "cancelled", message: "" } } });
+	const frm = make_form({ custom_integration_status: "Created" });
+	await mod.cancel_shipment(frm);
+	assert.equal(confirms.length, 1);
+	assert.equal(frm.reloads, 1);
+	assert.equal(alerts[0].indicator, "green");
+});

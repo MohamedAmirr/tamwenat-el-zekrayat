@@ -1,72 +1,99 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-"""Noon shipment created from a draft Delivery Note (#391, epic #392).
+"""Noon adapter of the neutral carrier contract (``services/carrier_shipments.py``; epic #413, #415).
 
-Delivery Note-first fulfillment (``docs/marketplace-integrations/delivery-note-first.md``): a
-person makes a draft Delivery Note from a submitted Noon Sales Order (Create > Delivery Note) and
-saves it. Saving queues ``run()`` (an ``after_insert`` ``doc_events`` handler that never raises
-and makes no HTTP call, see ``services/carrier_shipments.py``). The worker picks the units by SKU
-and quantity from the Delivery Note rows, writes the Pending shipment, reuses
-``fulfillment.run_create_shipment`` for the Noon calls and writes the result back to the Delivery
-Note. The app never submits the Delivery Note.
+Delivery Note-first (``docs/marketplace-integrations/delivery-note-first.md``): the Delivery Note of a
+Noon Sales Order is the shipment. Submit starts a background job (``carrier_shipments.request_create`` then
+``run_create``) and the note submits only once the shipment is Created (``require_shipment_created``). This
+module holds only the Noon parts: the contract methods and the Noon-only helpers (AWB step, unit picking).
 
-Native ERPNext fields are used instead of new ones: ``transporter`` (Supplier "Noon", created by
-a patch) and ``lr_no`` / ``lr_date`` (the AWB). Only the status and the error text are custom
-(``custom_carrier_status``, ``custom_carrier_error``). A typed ``lr_no`` is sent as the sticker AWB.
+Native fields used: ``transporter`` (Supplier "Noon", created by a patch), ``lr_no`` (the AWB) and
+``lr_date``. The shipment number sent to Noon is the Delivery Note name, stored in
+``custom_carrier_reference`` at the first attempt. ``custom_noon_generate_awb`` asks Noon for the AWB.
+``custom_carrier_request_snapshot`` holds ``{"mp_item_nrs": [...]}``, the units the shipment was created with.
 
 Rules enforced here:
 
-- ``guard_changes`` (Delivery Note ``validate``): once a shipment row exists for the note
-  (Pending, Created or Error), ``transporter`` and the item rows (item, quantity, add, remove)
-  cannot change, so the note always matches the units sent to Noon.
-- ``require_created`` (``before_submit``): a Noon Delivery Note cannot be submitted until its
-  shipment is Created.
-- The worker never holds the Marketplace Order row lock across a Noon call (it relies on
-  ``fulfillment.py``'s commit-before-lock pattern) and writes the Delivery Note with ``db_set``, so
-  no Delivery Note hook runs again. A refused or failed attempt keeps the draft, shows the error
-  on the note (``custom_carrier_error``) and in Needs Attention, and **Retry** re-queues it.
-- Retry and a duplicate job reuse the note's existing shipment row (same shipment number), so
-  nothing is created twice.
+- Noon has no idempotency key but ``integration_shipment_nr`` is unique, so **every attempt asks Noon first**
+  (GetShipment, ``find_remote``) and creates only when Noon confirms there is none
+  (``fulfillment._is_shipment_not_found``). No automatic retry of a create or a cancel. A timeout, a
+  connection error, a 5xx/408/429, a malformed 2xx or an unrecognised "absent" answer is Unknown, never a
+  failure. A definite 4xx, a configuration problem or a missing mapping is Failed.
+- A Noon-generated AWB is requested once (``GetNoonLogisticsAWBs`` qty 1), written to ``lr_no`` and
+  committed with an Integration Request row (operation "AWB") before CreateShipment. A retry reuses it. A
+  typed AWB is sent with the courier ``fulfillment.NOON_COURIER`` ("noon"), always.
+- An AWB held by another Delivery Note that is not cancelled is refused (case-insensitive).
+- Units: ``_pick_units`` takes ``mp_item_nr`` by SKU and quantity from the order's latest payload; units that
+  another live Noon note already started come from that note's snapshot, never from the old Marketplace Order
+  shipment tables.
+- No COD and no address: CreateShipment takes neither. A Noon note clears its Shipping Rule and the tax row
+  that rule added (ERPNext only adds them, it never removes them).
+- The worker writes with ``db_set`` (no validate, no hooks): a system write-back.
 
-Background work: retries and backoff are those of ``run_create_shipment`` (a failed Noon call
-ends in Error, the user retries); validation refusals (too few shippable units, missing mapping,
-an Item mapped to several Noon SKUs on the order, a typed AWB already in use) are terminal until
-the user fixes the note or the mapping. The job id is per Delivery Note, deduplicated.
+Placeholders: ``refresh`` and ``reconcile`` are implemented later (issue #415 phase 3); the FBPI warehouse
+check of ``validate_ready`` is ``check_fbpi_warehouse``, filled in by sub-issue #416.
 """
+
+import json
 
 import frappe
 from frappe import _
-from frappe.utils import add_to_date, cstr, escape_html, flt, get_datetime, getdate, now_datetime, strip_html
-from frappe.utils.background_jobs import is_job_enqueued
+from frappe.query_builder.functions import Lower
+from frappe.utils import cint, cstr, flt, getdate, now_datetime, strip_html
 
-from marketplace_integrations.integrations.noon import fulfillment, handover_state
+from marketplace_integrations.integrations.noon import fulfillment
+from marketplace_integrations.integrations.noon.client import SERVICE_NAME
+from marketplace_integrations.integrations.noon.constants import (
+	NOON_LOGISTICS_AWBS_GET_PATH,
+	SHIPMENT_CANCEL_PATH,
+	SHIPMENT_CREATE_PATH,
+	SHIPMENT_GET_PATH,
+)
+from marketplace_integrations.services import carrier_log
+from marketplace_integrations.services.carrier_log import (
+	CANCELLATION_PENDING,
+	CANCELLATION_UNKNOWN,
+	CREATED,
+	EDITABLE_STATUSES,
+	NOT_CREATED,
+	Failed,
+	Unknown,
+)
 from marketplace_integrations.services.mappings import resolve_item
 
-#: ``supplier_name`` of the native Supplier used as the Delivery Note ``transporter`` (created by a
-#: patch). The Supplier's document name depends on Buying Settings ``supp_master_name``, so it is
-#: looked up by this name (``transporter_name()``), never assumed to be the same string.
+#: ``supplier_name`` of the native Supplier used as the Delivery Note ``transporter`` (created by a patch).
+#: The Supplier's document name depends on Buying Settings, so it is looked up by this name, never assumed.
 SUPPLIER_NAME = "Noon"
-#: A Pending note older than this (since its last modification) counts as stuck and can be retried.
-#: Mirrored in ``public/js/delivery_note.js``; the server is the gate.
-STALE_PENDING_MINUTES = 15
+#: The carrier name the Delivery Note shows its Shipping section for (``carrier_shipments.boot_session``).
+SHIPPING_CARRIER = SUPPLIER_NAME
+#: The job asks Noon (GetShipment) before every create, the first attempt included
+#: (``carrier_shipments.request_create``).
+LOOKUP_FIRST = True
 
-PENDING = "Pending"
-CREATED = "Created"
-ERROR = "Error"
-#: The note's Noon shipment was cancelled or discarded; Retry Noon Shipment creates a new one.
-CANCELLED = "Cancelled"
+#: Shipping Status values (Noon's own words, derived from the item statuses; written by ``refresh``, phase 3).
+SHIPPING_ACKNOWLEDGED = "Acknowledged"
+SHIPPING_CANCELLED = "Cancelled"
 
-#: Shipment statuses that still hold units / exist on Noon (the same set as fulfillment's active one).
-_LIVE_STATUSES = tuple(sorted(fulfillment._ACTIVE_SHIPMENT_STATUSES))
-#: Shipment row statuses that tie the note to its shipment (transporter, lr_no, status and items are
-#: locked), Cancel Pending included: a cancel that Noon has not answered yet must not drift from the note.
-_LOCKING_STATUSES = _LIVE_STATUSES
-_JOB_PREFIX = "marketplace-noon-delivery-note-shipment"
+#: Written by the app only (workers and APIs); a person's save never changes them.
+SYSTEM_FIELDS = (
+	"custom_integration_status",
+	"custom_shipping_status",
+	"custom_carrier_delivery_id",
+	"custom_carrier_reference",
+	"custom_last_sync_at",
+	"custom_last_integration_error",
+	"custom_carrier_request_snapshot",
+)
+#: Fields a person edits that must stay put once the shipment is started (and the Generate AWB checkbox).
+LOCKED_FIELDS = ("transporter", "lr_no")
+#: Integration Statuses whose snapshot holds units that are still claimed (the shipment may exist at Noon).
+_CLAIMING_STATUSES = (CREATED, CANCELLATION_PENDING, CANCELLATION_UNKNOWN)
+_RETRYABLE_HTTP = {408, 429}
 
 
 class _Refused(Exception):
-	"""A readable reason the shipment cannot be created from this note (shown to the user)."""
+	"""A readable reason the shipment cannot be created from this note."""
 
 
 # ---------------------------------------------------------------------------
@@ -75,8 +102,8 @@ class _Refused(Exception):
 
 
 def noon_order_name(doc):
-	"""The Noon Marketplace Order of a draft/new Delivery Note whose rows all come from one
-	submitted, Noon-linked Sales Order, else ``None`` (returns and every other note are not ours)."""
+	"""The Noon Marketplace Order of a Delivery Note whose rows all come from one submitted, Noon-linked Sales
+	Order, else ``None`` (returns and every other note are not ours)."""
 	if doc.get("is_return"):
 		return None
 	sales_orders = {row.get("against_sales_order") for row in doc.get("items") or []}
@@ -92,49 +119,45 @@ def noon_order_name(doc):
 	return values.custom_marketplace_order
 
 
-def applies_to(doc):
-	return bool(noon_order_name(doc))
-
-
 def transporter_name():
 	"""The Supplier docname of "Noon" (looked up by ``supplier_name``), or ``None`` when missing."""
 	return frappe.db.get_value("Supplier", {"supplier_name": SUPPLIER_NAME}, "name")
 
 
-def _shipment_rows(order_name, delivery_note, statuses=None):
-	"""Shipment rows of the order that belong to ``delivery_note``: its first note (``delivery_note``)
-	or any note in the row's ``delivery_notes`` list (an old-flow shipment can hold several)."""
-	filters = {"parent": order_name, "parenttype": "Marketplace Order"}
-	if statuses:
-		filters["status"] = ["in", list(statuses)]
-	rows = frappe.get_all(
-		"Marketplace Order Shipment",
-		filters=filters,
-		or_filters=[
-			["delivery_note", "=", delivery_note],
-			["delivery_notes", "like", f'%"{delivery_note}"%'],
-		],
-		fields=[
-			"name",
-			"integration_shipment_nr",
-			"status",
-			"last_error",
-			"delivery_note",
-			"delivery_notes",
-			"handed_over_on",
-		],
-		parent_doctype="Marketplace Order",
-		order_by="idx desc",
+def applies_to(doc):
+	"""A note of a Noon Sales Order. A dict with only ``is_return`` and ``transporter`` (the Needs Attention
+	collector and the amend cleanup have no rows to read) is judged by the transporter."""
+	if doc.get("is_return"):
+		return False
+	if doc.get("items") is None:
+		transporter = doc.get("transporter")
+		return bool(transporter) and frappe.db.get_value("Supplier", transporter, "supplier_name") == SUPPLIER_NAME
+	return bool(noon_order_name(doc))
+
+
+def saved_state(doc):
+	"""The note as stored (ownership of an existing note is judged by it), else ``doc`` itself."""
+	return doc if doc.is_new() else (doc.get_doc_before_save() or doc)
+
+
+def _rows(doc):
+	return sorted((cstr(row.name), cstr(row.item_code), flt(row.qty, 6)) for row in doc.get("items") or [])
+
+
+def _reference(doc):
+	"""The shipment number sent to Noon: stored at the first attempt, else the note name."""
+	return cstr(doc.get("custom_carrier_reference")).strip() or doc.name
+
+
+def _order_values(doc):
+	"""``marketplace_account``, ``external_order_id``, ``latest_payload`` and ``noon_pending_oos_units`` of
+	the note's Noon Marketplace Order."""
+	return frappe.db.get_value(
+		"Marketplace Order",
+		noon_order_name(doc),
+		["marketplace_account", "external_order_id", "latest_payload", "noon_pending_oos_units"],
+		as_dict=True,
 	)
-	return [row for row in rows if delivery_note in handover_state.shipment_notes(row)]
-
-
-def _flow_rows(order_name, delivery_note, statuses=None):
-	"""The note's shipment rows that were created from the note (this flow). A row with
-	``handed_over_on`` belongs to the old Mark Handed Over flow and is left to its own rules. Everything
-	that guards or serves a Delivery Note decides from these rows, never from the editable
-	``custom_carrier_status``."""
-	return [row for row in _shipment_rows(order_name, delivery_note, statuses) if not row.handed_over_on]
 
 
 # ---------------------------------------------------------------------------
@@ -142,50 +165,114 @@ def _flow_rows(order_name, delivery_note, statuses=None):
 # ---------------------------------------------------------------------------
 
 
-def _rows(doc):
-	return sorted((cstr(row.name), cstr(row.item_code), flt(row.qty, 6)) for row in doc.get("items") or [])
+def _awb_in_use(doc):
+	"""Is the note's ``lr_no`` held by another Delivery Note that is not cancelled (any carrier, ignoring
+	letter case)? Read without per-user permissions: only a yes/no leaves."""
+	awb = cstr(doc.get("lr_no")).strip()
+	if not awb:
+		return False
+	note = frappe.qb.DocType("Delivery Note")
+	query = (
+		frappe.qb.from_(note)
+		.select(note.name)
+		.where(Lower(note.lr_no) == awb.lower())
+		.where(note.docstatus < 2)
+	)
+	if doc.get("name") and not doc.is_new():
+		query = query.where(note.name != doc.name)
+	return bool(query.limit(1).run())
 
 
-def saved_state(doc):
-	"""The note as stored (what decides ownership for an existing note: a row added in the form
-	without a Sales Order must not take the note out of the guard), else ``doc`` itself."""
-	return doc if doc.is_new() else (doc.get_doc_before_save() or doc)
+def _refuse_used_awb(doc):
+	frappe.throw(
+		_("AWB {0} is already on another Delivery Note.").format(frappe.bold(frappe.utils.escape_html(cstr(doc.lr_no)))),
+		title=_("Noon shipment"),
+	)
+
+
+def _clear_shipping_rule(doc):
+	"""A Noon note has no Shipping Rule: ERPNext adds the rule's tax row on every calculation and removes it
+	nowhere (``SellingController.remove_shipping_charge`` is never called), so the rule is cleared first
+	(or the recalculation would add the row again), then its row is removed and the totals recalculated."""
+	rule_name = doc.get("shipping_rule")
+	if not rule_name:
+		return
+	rule = frappe.db.get_value("Shipping Rule", rule_name, ["account", "cost_center"], as_dict=True)
+	doc.shipping_rule = None
+	for row in list(doc.get("taxes") or []):
+		if rule and row.charge_type == "Actual" and row.account_head == rule.account:
+			if not rule.cost_center or cstr(row.cost_center) == cstr(rule.cost_center):
+				doc.get("taxes").remove(row)
+	doc.calculate_taxes_and_totals()
+
+
+def _prepare(doc):
+	"""An editable Noon note: the carrier is always the Noon Supplier, and no Shipping Rule."""
+	supplier = transporter_name()
+	if not supplier:
+		frappe.throw(_("Supplier Noon (carrier) does not exist. Run bench migrate."), title=_("Noon shipment"))
+	doc.transporter = supplier
+	doc.transporter_name = SUPPLIER_NAME
+	_clear_shipping_rule(doc)
+
+
+def _clear_new(doc):
+	"""Clear what a new or amended note must not carry over (Amend copies even ``no_copy`` fields)."""
+	for fieldname in SYSTEM_FIELDS:
+		doc.set(fieldname, None)
+	for row in doc.get("items") or []:
+		row.custom_noon_item_status = None
+	doc.custom_integration_status = NOT_CREATED
+
+
+def clear_inherited(doc):
+	"""``validate`` of a new note amended from a Noon note that is no longer a Noon note (the carrier was
+	changed): the old shipment's number, AWB, checkbox and status would sit on a note that has no Noon
+	shipment."""
+	_clear_new(doc)
+	doc.custom_noon_generate_awb = 0
+	doc.lr_no = None
+	doc.lr_date = None
+
+
+def _awb_was_generated(before):
+	return bool(cint(before.get("custom_noon_generate_awb")) and cstr(before.get("lr_no")).strip())
 
 
 def guard_changes(doc):
-	"""``validate``: show Pending on a new note; refuse changes the shipment depends on."""
+	"""``validate``: set up a new note; keep app-written fields and a started shipment untouched."""
 	before = saved_state(doc)
-	order_name = noon_order_name(before)
-	if not order_name:
+	if not noon_order_name(before):
 		return
+	ours = bool(noon_order_name(doc))
 	if doc.is_new():
-		if not doc.get("custom_carrier_status"):
-			doc.custom_carrier_status = PENDING
-			doc.custom_carrier_error = None
-		if doc.get("amended_from") and doc.get("lr_no"):
-			# Amend copies the old note's AWB, which belongs to the shipment of that note and would
-			# be sent as a typed sticker AWB (and refused as used). A different AWB typed by the
-			# user is kept.
-			if doc.lr_no == frappe.db.get_value("Delivery Note", doc.amended_from, "lr_no"):
+		_clear_new(doc)
+		if doc.get("amended_from"):
+			# Amend copies the old note's AWB and checkbox, which belong to the shipment of that note. A
+			# different AWB the person typed is kept.
+			doc.custom_noon_generate_awb = 0
+			source_awb = frappe.db.get_value("Delivery Note", doc.amended_from, "lr_no")
+			if source_awb and cstr(doc.get("lr_no")) == cstr(source_awb):
 				doc.lr_no = None
 				doc.lr_date = None
+		if ours:
+			_prepare(doc)
+			_check_awb_choice(doc, before)
 		return
-	if not _flow_rows(order_name, doc.name, _LOCKING_STATUSES):
+	# The app writes these with db_set (no validate): put the stored values back instead of refusing, so a
+	# person's save never changes them and never loses the app's write.
+	for fieldname in SYSTEM_FIELDS:
+		doc.set(fieldname, before.get(fieldname))
+	if cstr(before.get("custom_integration_status")) in EDITABLE_STATUSES:
+		if ours:
+			_prepare(doc)
+			_check_awb_choice(doc, before)
 		return
-	if cstr(before.get("custom_carrier_status")) != cstr(doc.get("custom_carrier_status")):
-		# The worker writes the status with db_set (no validate); a person must not edit it away.
+	if any(cstr(before.get(f)) != cstr(doc.get(f)) for f in LOCKED_FIELDS) or cint(
+		before.get("custom_noon_generate_awb")
+	) != cint(doc.get("custom_noon_generate_awb")):
 		frappe.throw(
-			_("The carrier status cannot be changed by hand after the Noon shipment was started."),
-			title=_("Noon shipment"),
-		)
-	if cstr(before.get("transporter")) != cstr(doc.get("transporter")):
-		frappe.throw(
-			_("The carrier cannot be changed after the Noon shipment was started."),
-			title=_("Noon shipment"),
-		)
-	if cstr(before.get("lr_no")) != cstr(doc.get("lr_no")):
-		frappe.throw(
-			_("The AWB / Tracking No cannot be changed after the Noon shipment was started."),
+			_("The carrier, AWB and Generate AWB cannot be changed after the Noon shipment was started."),
 			title=_("Noon shipment"),
 		)
 	if _rows(before) != _rows(doc):
@@ -198,218 +285,137 @@ def guard_changes(doc):
 		)
 
 
-def require_created(doc):
-	"""``before_submit``: a Noon Delivery Note needs a Created shipment."""
-	order_name = noon_order_name(doc)
-	if not order_name:
-		return
-	if _shipment_rows(order_name, doc.name, [CREATED]):
-		return
-	if not doc.get("custom_carrier_status") and not _shipment_rows(order_name, doc.name):
-		return  # a Noon note from before this flow (no status, no shipment): submits as it always did
-	frappe.throw(
-		_("The Noon shipment of this Delivery Note is not Created yet, so it cannot be submitted."),
-		title=_("Noon shipment"),
-	)
-
-
-def queue(doc):
-	"""Queue the worker for ``doc`` after the current transaction commits (one job per note)."""
-	frappe.enqueue(
-		run,
-		queue="long",
-		timeout=900,
-		enqueue_after_commit=True,
-		job_id=f"{_JOB_PREFIX}-{doc.name}",
-		deduplicate=True,
-		delivery_note=doc.name,
-	)
-
-
-def _is_stale_pending(modified):
-	return get_datetime(modified) <= add_to_date(now_datetime(), minutes=-STALE_PENDING_MINUTES)
-
-
-def retry(delivery_note):
-	"""Re-queue a draft Delivery Note whose shipment failed (Error) or is stuck (Pending for longer
-	than ``STALE_PENDING_MINUTES``). The caller checked write access.
-
-	Safe against a job that is still running: the job id is per note and deduplicated (a queued or
-	running job is not queued twice), the worker locks the note, reuses the note's shipment row and
-	asks Noon (GetShipment) before creating, so a second run cannot create a second shipment."""
-	values = frappe.db.get_value(
-		"Delivery Note",
-		delivery_note,
-		["docstatus", "custom_carrier_status", "modified"],
-		as_dict=True,
-	)
-	if values and values.docstatus == 0 and values.custom_carrier_status == PENDING:
-		if not _is_stale_pending(values.modified):
+def _check_awb_choice(doc, before):
+	"""An editable note: a generated AWB cannot be changed or unticked (the AWB would be wasted and a new one
+	requested), a ticked box has no typed AWB, and a typed AWB is not on another live note."""
+	if not doc.is_new() and _awb_was_generated(before):
+		if cstr(doc.get("lr_no")) != cstr(before.get("lr_no")) or not cint(doc.get("custom_noon_generate_awb")):
 			frappe.throw(
-				_("The Noon shipment is still being created. You can retry if it is not finished after {0} minutes.").format(
-					STALE_PENDING_MINUTES
-				)
+				_("The AWB was generated by Noon and cannot be changed. Cancel the shipment and amend the Delivery Note."),
+				title=_("Noon shipment"),
 			)
-	elif not values or values.docstatus != 0 or values.custom_carrier_status not in (ERROR, CANCELLED):
-		frappe.throw(_("Only a draft Delivery Note with a failed, cancelled or stuck Noon shipment can be retried."))
-	return requeue(delivery_note)
-
-
-def requeue(delivery_note):
-	"""Show Pending on the draft note (restarts its stale clock) and queue the worker."""
-	_write_back(delivery_note, {"custom_carrier_status": PENDING, "custom_carrier_error": None})
-	queue(frappe._dict(name=delivery_note))
-	return {"queued": True}
-
-
-# ---------------------------------------------------------------------------
-# Worker
-# ---------------------------------------------------------------------------
-
-
-def run(delivery_note):
-	"""Create (or resume) the Noon shipment of one draft Delivery Note and write the result back."""
-	frappe.set_user("Administrator")
-	if frappe.db.get_value("Delivery Note", delivery_note, "docstatus") != 0:
-		frappe.db.commit()
-		return  # deleted, submitted or cancelled meanwhile
-	order_name = noon_order_name(frappe.get_doc("Delivery Note", delivery_note))
-	if not order_name:
-		frappe.db.commit()
 		return
-	try:
-		_run(delivery_note, order_name)
-	except _Refused as refusal:
-		frappe.db.rollback()
-		_fail_safely(delivery_note, order_name, cstr(refusal))
-	except Exception:
-		frappe.db.rollback()
-		frappe.log_error(title="Noon shipment from Delivery Note failed", message=frappe.get_traceback())
-		_fail_safely(
-			delivery_note, order_name, _("Unexpected error while creating the Noon shipment; see the Error Log.")
+	if cint(doc.get("custom_noon_generate_awb")) and cstr(doc.get("lr_no")).strip():
+		frappe.throw(
+			_("Untick Generate AWB through Noon, or clear the AWB: Noon cannot generate an AWB when one is typed."),
+			title=_("Noon shipment"),
 		)
+	if _awb_in_use(doc):
+		_refuse_used_awb(doc)
 
 
-def _fail_safely(delivery_note, order_name, message):
-	"""``_fail`` can itself raise (connection disabled, a locked row); never leave the note Pending
-	because of it: fall back to writing the error on the note alone, and log if even that fails."""
-	try:
-		_fail(delivery_note, order_name, message)
-	except Exception:
-		frappe.db.rollback()
-		frappe.log_error(title="Noon shipment from Delivery Note: could not record the error", message=frappe.get_traceback())
-		try:
-			_write_back(delivery_note, {"custom_carrier_status": ERROR, "custom_carrier_error": escape_html(message)})
-		except Exception:
-			frappe.db.rollback()
-			frappe.log_error(title="Noon shipment from Delivery Note: note left Pending", message=frappe.get_traceback())
-
-
-def _run(delivery_note, order_name):
-	transporter = transporter_name()
-	if not transporter:
-		raise _Refused(_("Supplier Noon (carrier) does not exist. Run bench migrate."))
-	# Lock order is always Delivery Note first, then Marketplace Order (handover_state's on_trash
-	# handler does the same). Nothing but locking reads sits between the two locks, and a person's
-	# save of the note either finished before this lock or waits and then sees the shipment row.
-	frappe.db.commit()
-	frappe.db.get_value("Delivery Note", delivery_note, "name", for_update=True)
-	order = fulfillment._lock_and_load_order(order_name, commit_first=False)
-	doc = frappe.get_doc("Delivery Note", delivery_note)
-	if doc.docstatus != 0 or noon_order_name(doc) != order_name:
-		frappe.db.commit()
+def refuse_sales_order_cancel(order):
+	"""Sales Order ``before_cancel``: refuse while a draft Noon Delivery Note has a live shipment."""
+	supplier = transporter_name()
+	if not supplier:
 		return
-	existing = _shipment_rows(order_name, doc.name, _LOCKING_STATUSES)
-	if existing:
-		if existing[0].status == "Cancel Pending":
-			raise _Refused(_("The Noon shipment of this Delivery Note is being cancelled."))
-		shipment_nr = existing[0].integration_shipment_nr
-		resume = existing[0].status != CREATED
-	else:
-		_refuse_unless_previous_shipment_cancelled(order_name, doc)
-		account, _client = _account_or_refuse(order)
-		units = _pick_units(order, doc)
-		try:
-			shipment_nr = fulfillment.add_pending_shipment(
-				order, account, units, doc.get("lr_no"), delivery_note=doc.name
-			)
-		except frappe.ValidationError as error:
-			frappe.clear_messages()
-			raise _Refused(strip_html(cstr(error))) from error
-		order.save()
-		resume = True
-	frappe.db.commit()  # release both locks before any Noon call
-
-	if resume:
-		fulfillment.run_create_shipment(order_name, shipment_nr)
-
-	order = fulfillment._lock_and_load_order(order_name)
-	shipment = fulfillment._find_shipment_row(order, shipment_nr)
-	status = shipment.status if shipment else None
-	message = cstr(shipment.last_error) if shipment else ""
-	awb_nr = next(
-		(row.awb_nr for row in order.noon_shipment_awbs or [] if row.integration_shipment_nr == shipment_nr),
-		"",
+	notes = frappe.get_all(
+		"Delivery Note Item",
+		filters={"against_sales_order": order.name, "docstatus": 0, "parenttype": "Delivery Note"},
+		pluck="parent",
+		distinct=True,
+		parent_doctype="Delivery Note",
 	)
-	frappe.db.commit()
-	if status == CREATED and awb_nr:
-		_write_back(
-			doc.name,
-			{
-				"transporter": transporter,
-				"lr_no": awb_nr,
-				"lr_date": getdate(),
-				"custom_carrier_status": CREATED,
-				"custom_carrier_error": None,
-			},
-		)
+	if not notes:
 		return
-	# run_create_shipment already logged the failure on the order (Needs Attention); only the note is left.
-	_write_back(
-		doc.name,
-		{
-			"custom_carrier_status": ERROR,
-			"custom_carrier_error": escape_html(
-				message
-				or _("The Noon shipment is {0}; check the order's Noon Fulfillment.").format(
-					_(status) if status else _("not found")
-				)
-			),
+	live = frappe.get_all(
+		"Delivery Note",
+		filters={
+			"name": ["in", notes],
+			"transporter": supplier,
+			"custom_integration_status": ["in", list(carrier_log.LIVE_STATUSES)],
 		},
+		pluck="name",
 	)
+	if live:
+		frappe.throw(
+			_("Sales Order {0} has a draft Delivery Note with a live Noon shipment: {1}.").format(
+				order.name, ", ".join(live)
+			),
+			title=_("Noon shipment"),
+		)
 
 
-def _account_or_refuse(order):
+# ---------------------------------------------------------------------------
+# Validation before Noon is contacted
+# ---------------------------------------------------------------------------
+
+
+def check_fbpi_warehouse(doc, account):
+	"""Hook point (sub-issue #416): the FBPI warehouse check, that the stored warehouse code equals the
+	account's FBPI code and the warehouse is active. Its Marketplace Account fields come with #416, so
+	nothing is checked yet."""
+
+
+def _started_units(doc):
+	"""``mp_item_nr`` of the units other live Noon notes of the same Sales Order already started, read from
+	their snapshot (a Cancelled note releases its units)."""
+	orders = {row.get("against_sales_order") for row in doc.get("items") or [] if row.get("against_sales_order")}
+	parents = frappe.get_all(
+		"Delivery Note Item",
+		filters={"against_sales_order": ["in", list(orders)], "docstatus": ["<", 2], "parenttype": "Delivery Note"},
+		pluck="parent",
+		distinct=True,
+		parent_doctype="Delivery Note",
+	)
+	notes = frappe.get_all(
+		"Delivery Note",
+		filters={
+			"name": ["in", parents],
+			"docstatus": ["<", 2],
+			"custom_integration_status": ["in", list(_CLAIMING_STATUSES)],
+		},
+		fields=["name", "custom_carrier_request_snapshot"],
+	)
+	started = set()
+	for note in notes:
+		if doc.get("name") and note.name == doc.name:
+			continue
+		started.update(_snapshot_units(note.custom_carrier_request_snapshot))
+	return started
+
+
+def _snapshot_units(snapshot):
+	"""The ``mp_item_nr`` list of a ``custom_carrier_request_snapshot`` (empty when unreadable)."""
 	try:
-		return fulfillment._account_and_client(order)
-	except frappe.ValidationError as error:
-		frappe.clear_messages()
-		raise _Refused(strip_html(cstr(error))) from error
+		data = frappe.parse_json(snapshot) if snapshot else {}
+	except Exception:
+		return []
+	units = data.get("mp_item_nrs") if isinstance(data, dict) else None
+	return [cstr(unit).strip() for unit in units or [] if cstr(unit).strip()]
 
 
-def _pick_units(order, doc):
-	"""``[{"mp_item_nr", "partner_sku"}]`` for the note's rows: per Item, the row quantity (sales UOM)
-	is the number of units, taken from the currently shippable units of the Item's Noon SKU."""
+def _pick_units(doc):
+	"""``[{"mp_item_nr", "partner_sku"}]`` for the note's rows: per Item, the row quantity (sales UOM) is the
+	number of units, taken from the units of the Item's Noon SKU that are Confirmed and Acknowledged and not
+	already started by another live note or reserved as Out of Stock. Raises ``_Refused``."""
 	wanted = {}
 	for row in doc.get("items") or []:
 		wanted[row.item_code] = wanted.get(row.item_code, 0) + flt(row.qty)
-
-	order_skus = sorted(
-		{
-			cstr(item.get("partner_sku")).strip()
-			for item in fulfillment._latest_payload_items(order)
-			if isinstance(item, dict) and cstr(item.get("partner_sku")).strip()
-		}
-	)
+	order = _order_values(doc)
+	payload_items = [
+		item for item in fulfillment._latest_payload_items(order) if isinstance(item, dict)
+	]
 	skus_by_item = {}
-	for sku in order_skus:
+	for sku in sorted({cstr(item.get("partner_sku")).strip() for item in payload_items} - {""}):
 		item = resolve_item(order.marketplace_account, sku)
 		if item:
 			skus_by_item.setdefault(item, []).append(sku)
 
+	claimed = _started_units(doc) | fulfillment._pending_oos_units(order)
 	shippable_by_sku = {}
-	for unit in fulfillment.get_shippable_units(order):
-		shippable_by_sku.setdefault(unit["partner_sku"], []).append(unit)
+	seen = set()
+	for item in payload_items:
+		mp_item_nr = cstr(item.get("mp_item_nr")).strip()
+		if not mp_item_nr or mp_item_nr in seen or mp_item_nr in claimed:
+			continue
+		if (
+			item.get("mp_status") != fulfillment.MP_STATUS_CONFIRMED
+			or item.get("integration_status") != fulfillment.INTEGRATION_STATUS_ACKNOWLEDGED
+		):
+			continue
+		seen.add(mp_item_nr)
+		shippable_by_sku.setdefault(cstr(item.get("partner_sku")).strip(), []).append(mp_item_nr)
 
 	picked = []
 	for item, qty in wanted.items():
@@ -418,9 +424,7 @@ def _pick_units(order, doc):
 			raise _Refused(_("Item {0} has no enabled Noon product mapping for a SKU on this order.").format(item))
 		if len(skus) > 1:
 			raise _Refused(
-				_("Item {0} is mapped to more than one Noon SKU on this order ({1}).").format(
-					item, ", ".join(skus)
-				)
+				_("Item {0} is mapped to more than one Noon SKU on this order ({1}).").format(item, ", ".join(skus))
 			)
 		if qty <= 0 or qty != int(qty):
 			raise _Refused(_("The quantity of Item {0} must be a whole number of units.").format(item))
@@ -431,336 +435,277 @@ def _pick_units(order, doc):
 					item, int(qty), skus[0], len(available)
 				)
 			)
-		picked += [
-			{"mp_item_nr": unit["mp_item_nr"], "partner_sku": unit["partner_sku"]}
-			for unit in available[: int(qty)]
-		]
+		picked += [{"mp_item_nr": nr, "partner_sku": skus[0]} for nr in available[: int(qty)]]
 	return picked
 
 
-def _fail(delivery_note, order_name, message):
-	"""Refusal before any shipment row exists: show it on the note and in Needs Attention."""
-	order = fulfillment._lock_and_load_order(order_name)
-	fulfillment._log_fulfillment(
-		order, "CreateShipment", "Error", {"delivery_note": delivery_note}, response_data=message
-	)
-	_write_back(delivery_note, {"custom_carrier_status": ERROR, "custom_carrier_error": escape_html(message)})
+def _account_and_client(doc):
+	"""``(account, client)`` of the note's Noon Marketplace Account; a configuration problem raises
+	``frappe.ValidationError`` with a readable message."""
+	account, client = fulfillment._account_and_client(_order_values(doc))
+	if not cstr(account.noon_warehouse_code).strip():
+		frappe.throw(_("Marketplace Account {0} requires a Noon Warehouse Code.").format(account.name))
+	return account, client
 
 
-def _write_back(delivery_note, values):
-	"""Write the result on the draft Delivery Note without running its hooks, bumping ``modified``
-	so a stale open form cannot save over it, and tell open forms to refresh."""
-	if not frappe.db.exists("Delivery Note", delivery_note):
-		frappe.db.commit()
-		return
-	doc = frappe.get_doc("Delivery Note", delivery_note)
-	doc.db_set(values, update_modified=True, notify=True, commit=True)
-
-
-# ---------------------------------------------------------------------------
-# Cancel / delete of the note, Sales Order cancel (#393)
-# ---------------------------------------------------------------------------
-
-
-def _refuse_unless_previous_shipment_cancelled(order_name, doc):
-	"""An amended note (``amended_from``) gets a new shipment only when the shipment of the note it
-	amends is Cancelled (or Discarded): otherwise two shipments would claim the same goods."""
-	previous = doc.get("amended_from")
-	for _hop in range(5):
-		if not previous:
-			return
-		live = _shipment_rows(order_name, previous, _LIVE_STATUSES)
-		if live:
-			raise _Refused(
-				_("The Noon shipment of {0}, which this Delivery Note amends, is not Cancelled yet.").format(previous)
-			)
-		previous = frappe.db.get_value("Delivery Note", previous, "amended_from")
-
-
-def _awb_rows_exist(order_name, shipment_nr):
-	return bool(
-		frappe.db.exists(
-			"Marketplace Order Shipment AWB",
-			{"parent": order_name, "parenttype": "Marketplace Order", "integration_shipment_nr": shipment_nr},
-		)
-	)
-
-
-def _never_reached_noon(order_name, row):
-	"""A Pending/Error shipment with no AWB row never got as far as CreateShipment (the AWB row is
-	written before it), so nothing exists on Noon and it can be dropped locally."""
-	return row.status in ("Pending", "Error") and not _awb_rows_exist(order_name, row.integration_shipment_nr)
-
-
-def _lock_note_then_order(delivery_note, order_name):
-	# Lock order: Delivery Note, then Marketplace Order (see _run).
-	frappe.db.get_value("Delivery Note", delivery_note, "name", for_update=True)
-	frappe.db.get_value("Marketplace Order", order_name, "name", for_update=True)
-
-
-def _discard_locally(order_name, row):
-	"""Mark a shipment that never reached Noon (or a failed one the user discards) Discarded, with no
-	Noon call, and log DiscardShipment Success like ``fulfillment.discard_shipment`` so the earlier
-	CreateShipment/GetShipment error stops showing in Needs Attention. Written in the caller's
-	transaction like ``handover_state.clear_deleted_delivery_note`` (the parent's ``modified`` is
-	bumped so a stale copy cannot save over it); it rolls back with that transaction."""
-	frappe.db.set_value(
-		"Marketplace Order Shipment", row.name, {"status": "Discarded", "last_error": None}, update_modified=False
-	)
-	frappe.db.set_value("Marketplace Order", order_name, "modified", now_datetime(), update_modified=False)
-	order = frappe.get_doc("Marketplace Order", order_name)
-	fulfillment._log_fulfillment(
-		order, "DiscardShipment", "Success", {"integration_shipment_nr": row.integration_shipment_nr}, commit=False
-	)
-
-
-def _refusal_for(row):
-	if row.status in ("Created", "Cancel Pending"):
-		return _(
-			"The Noon shipment of this Delivery Note must be cancelled first. On the Delivery Note form use "
-			"Cancel (a dialog cancels the Noon shipment first), or on a draft the Cancel Noon Shipment "
-			"button, then cancel or delete the note."
-		)
-	return _(
-		"The Noon shipment of this Delivery Note may already exist on Noon. Use Retry Noon Shipment first "
-		"(once it is Created it can be cancelled), or, if Noon keeps rejecting it, the Discard Noon "
-		"Shipment button on the Delivery Note form."
-	)
-
-
-def guard_cancel_or_delete(doc, method=None):
-	"""``before_cancel`` and ``on_trash``: refuse while a live Noon shipment created from this Delivery
-	Note exists, however the cancel or delete was triggered (form, API, list bulk delete). A shipment
-	that never reached Noon is discarded locally and the note proceeds. Decided from the shipment rows
-	(not the editable carrier status); old-flow notes (Mark Handed Over) are not touched."""
-	order_name = noon_order_name(doc)
-	if not order_name or not _flow_rows(order_name, doc.name, _LIVE_STATUSES):
-		return
-	_lock_note_then_order(doc.name, order_name)
-	for row in _flow_rows(order_name, doc.name, _LIVE_STATUSES):  # again, now under the locks
-		if _never_reached_noon(order_name, row):
-			_discard_locally(order_name, row)
-		else:
-			frappe.throw(_refusal_for(row), title=_("Noon shipment"))
-
-
-def _is_pending_create(doc):
-	"""The create job may still be about to make the shipment: a fresh Pending note with no shipment row."""
-	return doc.get("custom_carrier_status") == PENDING and not _is_stale_pending(doc.modified)
-
-
-def cancel_for_note(delivery_note):
-	"""Start cancelling the live Noon shipment of a Delivery Note (queued, polled by the form dialog).
-
-	Returns the same shape as ``cancel_state``. The caller (api) checked document-level permission."""
-	frappe.db.commit()  # first statement before the locks (see fulfillment._lock_and_load_order)
-	doc = frappe.get_doc("Delivery Note", delivery_note)
-	order_name = noon_order_name(doc)
-	if not order_name or doc.docstatus == 2:
-		return {"state": "done"}
-	if not _flow_rows(order_name, delivery_note, _LIVE_STATUSES):
-		if _is_pending_create(doc):
-			# Reporting "done" now could let the queued create job make a shipment right after.
-			frappe.throw(
-				_("The Noon shipment is still being created. Try again in a moment."), title=_("Noon shipment")
-			)
-		return {"state": "done"}
-	frappe.db.commit()
-	_lock_note_then_order(delivery_note, order_name)
-	rows = _flow_rows(order_name, delivery_note, _LIVE_STATUSES)
-	for row in rows:
-		if _never_reached_noon(order_name, row):
-			_discard_locally(order_name, row)
-		elif row.status not in ("Created", "Cancel Pending"):
-			frappe.throw(_refusal_for(row), title=_("Noon shipment"))
-	frappe.db.commit()
-	for row in rows:
-		if row.status in ("Created", "Cancel Pending"):
-			fulfillment.cancel_shipment(
-				order_name, row.integration_shipment_nr, delivery_note=delivery_note, as_system=True
-			)
-	return cancel_state(delivery_note)
-
-
-def resend_cancel(delivery_note, order_name, integration_shipment_nr):
-	"""Sales Order Retry of a note's Cancel Pending shipment: through the note's own cancel job."""
-	return fulfillment.cancel_shipment(
-		order_name, integration_shipment_nr, delivery_note=delivery_note, as_system=True
-	)
-
-
-def _retry_in_flight(doc):
-	if doc.get("custom_carrier_status") == PENDING:
-		return True
+def _client_for(doc, error):
+	"""Like ``_account_and_client`` but a configuration problem raises ``error`` (``Failed`` for a create,
+	``Unknown`` for a lookup)."""
 	try:
-		return bool(is_job_enqueued(f"{_JOB_PREFIX}-{doc.name}"))
-	except Exception:
-		return False
+		return _account_and_client(doc)
+	except frappe.ValidationError as exc:
+		frappe.clear_messages()
+		raise error(strip_html(cstr(exc))) from exc
 
 
-def discard_for_note(delivery_note):
-	"""Discard the draft note's failed (Error) Noon shipment locally, with no Noon call.
-
-	For a shipment stuck in Error (even one with an AWB row) that Noon keeps rejecting. It becomes
-	Discarded, its units are released and the note goes to the state after a cancel (``lr_no`` and
-	``lr_date`` cleared, Retry Noon Shipment can create a new shipment, or the note can be deleted).
-	A Created shipment cannot be discarded this way: it is cancelled on Noon. Refused while a Retry is
-	in flight (the note is Pending or its job is queued/running). It makes no Noon GetShipment check:
-	the form's confirmation warns that a shipment Noon did create keeps existing there. The caller
-	(api) checked document-level permission."""
-	frappe.db.commit()  # first statement before the locks (see fulfillment._lock_and_load_order)
-	doc = frappe.get_doc("Delivery Note", delivery_note)
-	order_name = noon_order_name(doc)
-	if not order_name or doc.docstatus != 0:
-		frappe.throw(_("Only a draft Delivery Note with a failed Noon shipment can be discarded."))
-	if _retry_in_flight(doc):
-		frappe.throw(
-			_("A Noon shipment retry is in progress for this Delivery Note. Wait for it to finish, then try again."),
-			title=_("Noon shipment"),
-		)
-	frappe.db.commit()
-	_lock_note_then_order(delivery_note, order_name)
-	rows = _flow_rows(order_name, delivery_note, _LIVE_STATUSES)
-	if not rows or any(row.status != ERROR for row in rows):
-		frappe.throw(
-			_(
-				"Only a shipment in Error can be discarded. A Created shipment must be cancelled on Noon "
-				"(Cancel Noon Shipment)."
-			)
-		)
-	for row in rows:
-		_discard_locally(order_name, row)
-	frappe.db.commit()
-	_write_back(delivery_note, _values_after_shipment_ended())
-	return {"discarded": True}
-
-
-def _values_after_shipment_ended():
-	"""Note fields after its shipment was cancelled or discarded (``run_cancel``, ``discard_for_note``)."""
-	# the old shipment's AWB must not be sent again as a typed sticker AWB
-	return {"lr_no": None, "lr_date": None, "custom_carrier_status": CANCELLED, "custom_carrier_error": None}
-
-
-def run_cancel(marketplace_order_name, integration_shipment_nr, delivery_note):
-	"""Job: the existing Noon cancel worker, then, for a draft note whose shipment ended Cancelled,
-	show that on the note so Retry Noon Shipment can create a new one."""
-	fulfillment.run_cancel_shipment(marketplace_order_name, integration_shipment_nr)
-	if frappe.db.get_value("Delivery Note", delivery_note, "docstatus") != 0:
-		return
-	order = frappe.get_doc("Marketplace Order", marketplace_order_name)
-	shipment = fulfillment._find_shipment_row(order, integration_shipment_nr)
-	if shipment and shipment.status == "Cancelled":
-		_write_back(delivery_note, _values_after_shipment_ended())
-
-
-def cancel_state(delivery_note):
-	"""``{"state": "none"|"cancelling"|"error"|"live"|"done", "message"}`` for the cancel dialog.
-
-	``done``: no live shipment is left, the note's own cancel/delete can go on. ``cancelling``: a
-	cancel job is pending. ``error``: Noon refused or could not be reached (``message``). ``live``:
-	a live shipment exists and no cancel was started."""
-	doc = frappe.get_doc("Delivery Note", delivery_note)
-	order_name = noon_order_name(doc)
-	if not order_name:
-		return {"state": "done"}
-	rows = _flow_rows(order_name, delivery_note, _LIVE_STATUSES)
-	if not rows:
-		return {"state": "done"}
-	for row in rows:
-		# A definite Noon refusal puts the shipment back to Created with the error; an unanswered
-		# attempt stays Cancel Pending (with the error when the call failed).
-		if row.status in ("Cancel Pending", "Created"):
-			if row.last_error:
-				message = cstr(row.last_error)
-				if "Traceback" in message:
-					message = _("Noon could not be reached. Try again.")
-				return {"state": "error", "message": message}
-			if row.status == "Cancel Pending":
-				return {"state": "cancelling"}
-	return {"state": "live"}
-
-
-def refuse_sales_order_cancel(doc, method=None):
-	"""Sales Order ``before_cancel``: ERPNext only blocks on submitted links, so refuse while a draft
-	Delivery Note of this order has a live Noon shipment."""
-	marketplace_order = doc.get("custom_marketplace_order")
-	if not marketplace_order or frappe.db.get_value("Marketplace Order", marketplace_order, "platform") != "Noon":
-		return
-	rows = frappe.get_all(
-		"Marketplace Order Shipment",
-		filters={"parent": marketplace_order, "parenttype": "Marketplace Order", "status": ["in", list(_LIVE_STATUSES)]},
-		fields=["delivery_note", "delivery_notes"],
-		parent_doctype="Marketplace Order",
-	)
-	drafts = sorted(
-		{
-			note
-			for row in rows
-			for note in handover_state.shipment_notes(row)
-			if frappe.db.get_value("Delivery Note", note, "docstatus") == 0
-		}
-	)
-	if drafts:
-		frappe.throw(
-			_(
-				"Draft Delivery Note(s) {0} have a live Noon shipment. Cancel the Noon shipment and delete or "
-				"cancel the Delivery Note first."
-			).format(", ".join(drafts)),
-			title=_("Noon shipment"),
-		)
-
-
-# ---------------------------------------------------------------------------
-# Add AWB, shipment invoice, Retry from the note (#393)
-# ---------------------------------------------------------------------------
-
-
-def _created_shipment(delivery_note):
-	doc = frappe.get_doc("Delivery Note", delivery_note)
-	order_name = noon_order_name(doc)
-	rows = _flow_rows(order_name, delivery_note, [CREATED]) if order_name else []
-	if not rows:
-		frappe.throw(_("This Delivery Note has no Created Noon shipment."))
-	return order_name, rows[0].integration_shipment_nr
-
-
-def add_awb_for_note(delivery_note, awb_nr):
-	"""Add a replacement AWB to the note's Created shipment (the existing AddShipmentCourierAwbs flow).
-	``lr_no`` is not touched: it keeps the AWB the shipment was created with."""
-	order_name, shipment_nr = _created_shipment(delivery_note)
-	return fulfillment.add_awb(order_name, shipment_nr, fulfillment.NOON_COURIER, awb_nr, as_system=True)
-
-
-def upload_invoice_for_note(delivery_note, file_url, invoice_nr, issued_at):
-	order_name, shipment_nr = _created_shipment(delivery_note)
-	return fulfillment.upload_invoice(order_name, shipment_nr, file_url, invoice_nr, issued_at, as_system=True)
-
-
-def retry_awb_or_invoice_for_note(delivery_note):
-	"""Re-queue the note's Created shipment's pending AWB or Pending/Error invoice."""
-	order_name, shipment_nr = _created_shipment(delivery_note)
-	return fulfillment.retry(order_name, shipment_nr, as_system=True)
-
-
-def shipment_summary(delivery_note):
-	"""What the form needs to show buttons: the Created shipment's AWBs and invoice state, or ``None``."""
-	doc = frappe.get_doc("Delivery Note", delivery_note)
-	order_name = noon_order_name(doc)
-	rows = _flow_rows(order_name, delivery_note, _LIVE_STATUSES) if order_name else []
-	if not rows:
+def validate_ready(doc, action="create"):
+	"""Everything that can be refused before Noon is contacted (the contract's ``validate_ready``). A
+	configuration problem is thrown here, so a note is never left Creating for it. ``action`` ``"lookup"`` and
+	``"cancel"`` only check the configuration (and, for a cancel, the shipment number)."""
+	if not applies_to(doc):
+		frappe.throw(_("This Delivery Note is not a Noon shipment."))
+	account, _client = _account_and_client(doc)
+	if action != "create":
+		if action == "cancel" and not cstr(doc.get("custom_carrier_reference")).strip():
+			frappe.throw(_("This Delivery Note has no Noon shipment number."))
 		return None
-	row = rows[0]
-	order = frappe.get_doc("Marketplace Order", order_name)
-	shipment = fulfillment._find_shipment_row(order, row.integration_shipment_nr)
-	awbs = [
-		{"awb_nr": awb.awb_nr, "status": awb.status}
-		for awb in order.noon_shipment_awbs or []
-		if awb.integration_shipment_nr == row.integration_shipment_nr
-	]
-	return {
-		"integration_shipment_nr": row.integration_shipment_nr,
-		"status": row.status,
-		"awbs": awbs,
-		"invoice_status": shipment.invoice_status if shipment else None,
-		"invoice_nr": shipment.invoice_nr if shipment else None,
+	if doc.docstatus != 0:
+		frappe.throw(_("Only a draft Delivery Note can be sent to Noon."))
+	if not transporter_name() or cstr(doc.get("transporter")) != cstr(transporter_name()):
+		frappe.throw(_("The carrier of this Delivery Note must be Noon."))
+	if not doc.get("items"):
+		frappe.throw(_("The Delivery Note has no items."))
+	if not cstr(doc.get("lr_no")).strip() and not cint(doc.get("custom_noon_generate_awb")):
+		frappe.throw(_("Type the AWB, or tick Generate AWB through Noon, before sending the shipment."))
+	if _awb_in_use(doc):
+		_refuse_used_awb(doc)
+	check_fbpi_warehouse(doc, account)
+	try:
+		_pick_units(doc)
+	except _Refused as refusal:
+		frappe.throw(cstr(refusal))
+	return None
+
+
+# ---------------------------------------------------------------------------
+# Worker
+# ---------------------------------------------------------------------------
+
+
+def _json(response):
+	try:
+		return response.json()
+	except (ValueError, AttributeError):
+		return None
+
+
+def _unreached(exc, what):
+	return Unknown(_("The Noon {0} request failed ({1}). It may or may not have reached Noon.").format(what, cstr(exc)[:200]))
+
+
+def _fail_or_unknown(client, response):
+	"""A non-200 answer: Failed for a definite refusal (a 4xx other than 408/429), else Unknown."""
+	message = client.error_message(response)
+	if fulfillment._is_definite_refusal(response.status_code):
+		return Failed(message)
+	return Unknown(message, response.status_code)
+
+
+def find_remote(doc):
+	"""The contract's ``find_remote``: Noon's shipment (``{"awbs", "items"}``) when GetShipment has it,
+	``None`` only when Noon says "No shipment found", else ``Unknown``."""
+	account, client = _client_for(doc, Unknown)
+	try:
+		response = client.request(
+			"POST",
+			SHIPMENT_GET_PATH,
+			json={"warehouse_code": account.noon_warehouse_code, "integration_shipment_nr": _reference(doc)},
+		)
+	except Exception as exc:
+		raise _unreached(exc, "lookup") from exc
+	if response.status_code == 200:
+		body = _json(response)
+		if not isinstance(body, dict) or not isinstance(body.get("items"), list) or not isinstance(body.get("awbs"), list):
+			raise Unknown(_("Noon returned a shipment in an unrecognised format. Check the shipment in Noon."), 200)
+		return {
+			"awbs": [awb for awb in body["awbs"] if isinstance(awb, dict)],
+			"items": [item for item in body["items"] if isinstance(item, dict)],
+		}
+	if fulfillment._is_shipment_not_found(response):
+		return None
+	raise Unknown(client.error_message(response), response.status_code)
+
+
+def _ensure_awb(doc, account, client):
+	"""The AWB of the shipment: the stored ``lr_no`` (typed, or generated by an earlier attempt: never request
+	another), else one Noon generates, written to the note and committed before CreateShipment."""
+	awb = cstr(doc.get("lr_no")).strip()
+	if awb:
+		return awb
+	if not cint(doc.get("custom_noon_generate_awb")):
+		raise Failed(_("The Delivery Note has no AWB. Type the AWB or tick Generate AWB through Noon."))
+	log = carrier_log.open_log(SERVICE_NAME, doc.name, "AWB", reference=_reference(doc))
+	frappe.db.commit()
+	try:
+		response = client.request(
+			"POST", NOON_LOGISTICS_AWBS_GET_PATH, json={"country_code": account.noon_country_code, "qty": 1}
+		)
+	except Exception as exc:
+		error = _unreached(exc, "AWB")
+		carrier_log.close_log(log, "Unknown", error=cstr(error))
+		frappe.db.commit()
+		raise error from exc
+	if response.status_code != 200:
+		error = _fail_or_unknown(client, response)
+		carrier_log.close_log(
+			log, "Failed" if isinstance(error, Failed) else "Unknown", error=cstr(error), http_status=response.status_code
+		)
+		frappe.db.commit()
+		raise error
+	body = _json(response)
+	awbs = body.get("awb_nrs") if isinstance(body, dict) else None
+	awb = cstr(awbs[0]).strip() if isinstance(awbs, list) and awbs else ""
+	if not awb:
+		error = Unknown(_("Noon returned no AWB number."), 200)
+		carrier_log.close_log(log, "Unknown", error=cstr(error), http_status=200)
+		frappe.db.commit()
+		raise error
+	# Stored at once: the form shows it, and a retry (even after CreateShipment failed) reuses it.
+	doc.db_set({"lr_no": awb}, update_modified=False, notify=True, commit=True)
+	carrier_log.close_log(log, "Success", output=awb, http_status=200)
+	frappe.db.commit()
+	return awb
+
+
+def create_remote(doc):
+	"""The contract's ``create_remote``: the AWB step, then CreateShipment. Returns ``{"awbs", "items"}`` as
+	sent; raises ``Failed`` (a definite refusal, a configuration problem, a missing mapping) or ``Unknown``."""
+	account, client = _client_for(doc, Failed)
+	try:
+		units = _pick_units(doc)
+	except _Refused as refusal:
+		raise Failed(cstr(refusal)) from refusal
+	awb = _ensure_awb(doc, account, client)
+	body = {
+		"warehouse_code": account.noon_warehouse_code,
+		"integration_shipment_nr": _reference(doc),
+		"fbpi_order_nr": _order_values(doc).external_order_id,
+		"awbs": [{"courier": fulfillment.NOON_COURIER, "awb_nr": awb}],
+		"items": [{"mp_item_nr": unit["mp_item_nr"]} for unit in units],
 	}
+	frappe.db.commit()  # no transaction open across the call
+	try:
+		response = client.request("POST", SHIPMENT_CREATE_PATH, json=body)
+	except Exception as exc:
+		raise _unreached(exc, "create") from exc
+	if response.status_code != 200:
+		raise _fail_or_unknown(client, response)
+	return {"awbs": body["awbs"], "items": body["items"]}
+
+
+def created_values(doc, data):
+	"""The Delivery Note fields written once Created (also by ``carrier_shipments.check``). The snapshot is
+	the units Noon holds for the shipment; the Shipping Status starts as Acknowledged (the units were
+	acknowledged when picked) until a refresh derives it."""
+	units = sorted(
+		{cstr(item.get("mp_item_nr")).strip() for item in data.get("items") or [] if cstr(item.get("mp_item_nr")).strip()}
+	)
+	awb = cstr(doc.get("lr_no")).strip() or next(
+		(cstr(awb.get("awb_nr")).strip() for awb in data.get("awbs") or [] if cstr(awb.get("awb_nr")).strip()), ""
+	)
+	return {
+		"lr_no": awb,
+		"lr_date": getdate(),
+		"custom_shipping_status": SHIPPING_ACKNOWLEDGED,
+		"custom_last_integration_error": None,
+		"custom_last_sync_at": now_datetime(),
+		"custom_carrier_request_snapshot": json.dumps({"mp_item_nrs": units}),
+	}
+
+
+def log_data(values):
+	"""The create data for the Integration Log: the units only (no personal data)."""
+	return values.get("custom_carrier_request_snapshot")
+
+
+def after_created(delivery_note, data):
+	"""Noon has nothing to do after the Created write (no label, no summary)."""
+
+
+# ---------------------------------------------------------------------------
+# Cancel (spec section 8)
+# ---------------------------------------------------------------------------
+
+
+def _all_units_cancelled(raw_order, units):
+	"""Does GetFbpiOrder show every unit of the shipment as cancelled by Noon (``mp_status``)?"""
+	items = raw_order.get("items") if isinstance(raw_order, dict) else None
+	if not units or not isinstance(items, list):
+		return False
+	status = {
+		cstr(item.get("mp_item_nr")).strip(): item.get("mp_status") for item in items if isinstance(item, dict)
+	}
+	return all(status.get(unit) == "MP_ITEM_STATUS_CANCELLED" for unit in units)
+
+
+def cancel_remote(doc):
+	"""The contract's ``cancel_remote`` (the neutral ``carrier_shipments.cancel`` holds the state machine, the
+	lock and the log). Noon is asked first: GetFbpiOrder showing every unit of the shipment cancelled is
+	success with no cancel call (``custom_shipping_status`` Cancelled). Otherwise CancelShipment: 200 is
+	Cancelled, a definite 4xx is ``refused`` (Noon's text), anything else raises ``Unknown``. A failed
+	GetFbpiOrder is Unknown too: a cancel is never sent blind, and Retry asks first again."""
+	account, client = _client_for(doc, Unknown)
+	values = {"custom_shipping_status": SHIPPING_CANCELLED}
+	try:
+		raw_order = fulfillment.get_fbpi_order(account, _order_values(doc).external_order_id)
+	except Exception as exc:
+		frappe.clear_messages()
+		raise Unknown(_("Noon did not answer the order lookup before the cancel ({0}).").format(cstr(exc)[:200])) from exc
+	if _all_units_cancelled(raw_order, _snapshot_units(doc.get("custom_carrier_request_snapshot"))):
+		return frappe._dict(outcome="cancelled", message="", values=values, http_status=None)
+	frappe.db.commit()  # no transaction open across the call
+	try:
+		response = client.request(
+			"POST",
+			SHIPMENT_CANCEL_PATH,
+			json={"warehouse_code": account.noon_warehouse_code, "integration_shipment_nr": _reference(doc)},
+		)
+	except Exception as exc:
+		raise _unreached(exc, "cancel") from exc
+	if response.status_code == 200:
+		return frappe._dict(outcome="cancelled", message="", values=values, http_status=200)
+	message = client.error_message(response)
+	if fulfillment._is_definite_refusal(response.status_code):
+		return frappe._dict(outcome="refused", message=message, values={}, http_status=response.status_code)
+	raise Unknown(message, response.status_code)
+
+
+def after_cancelled(delivery_note):
+	"""Noon has nothing to do after the Cancelled write."""
+
+
+# ---------------------------------------------------------------------------
+# Status, nightly, Needs Attention
+# ---------------------------------------------------------------------------
+
+
+def refresh(delivery_note):
+	"""The contract's ``refresh``. Placeholder, implemented in issue #415 phase 3 (GetShipment and
+	GetFbpiOrder, derived Shipping Status): it reads nothing from Noon and returns the stored status."""
+	return frappe.db.get_value("Delivery Note", delivery_note, "custom_shipping_status")
+
+
+def reconcile():
+	"""The contract's ``reconcile``. Placeholder, implemented in issue #415 phase 3 (the nightly Noon check):
+	it does nothing."""
+
+
+def problem_states():
+	"""The contract's ``problem_states``: Noon has no exception or return status (its problems come from the
+	Integration Status and, in phase 3, from differing units)."""
+	return {}
+
+
+def terminal_states():
+	"""The contract's ``terminal_states``: Cancelled never changes again."""
+	return [SHIPPING_CANCELLED]
