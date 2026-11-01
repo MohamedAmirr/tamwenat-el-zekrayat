@@ -404,6 +404,7 @@ fixtures = [
 					"Delivery Note-custom_actual_shipping_cost",
 					"Delivery Note-custom_actual_cost_received_on",
 					"Delivery Note-custom_return_source",
+					"Delivery Note-custom_returned_cod",
 					"Delivery Note-custom_last_integration_error",
 					"Delivery Note-custom_carrier_request_snapshot",
 					"Delivery Note-custom_noon_generate_awb",

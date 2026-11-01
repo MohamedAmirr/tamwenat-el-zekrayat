@@ -23,6 +23,7 @@
 	const FAILED = "Creation Failed";
 	const CANCEL_STATUSES = ["Cancellation Pending", "Cancellation Unknown", "Cancelled"];
 	const EDITABLE = ["", NOT_CREATED, FAILED];
+	const RETURN_PICKUP = "Customer Return Pickup";
 
 	const API = "marketplace_integrations.api.carrier_shipments.";
 	const carriers = {};
@@ -36,7 +37,9 @@
 		carriers[name] = carrier;
 	}
 
+	// A return is a carrier note only when the staff chose the carrier to collect it.
 	function carrier_name(frm) {
+		if (frm.doc && frm.doc.is_return && frm.doc.custom_return_source !== RETURN_PICKUP) return null;
 		const name = frm.doc && frm.doc.transporter_name;
 		const enabled = (frappe.boot && frappe.boot.marketplace_shipping_carriers) || [];
 		return name && enabled.includes(name) && carriers[name] ? name : null;
@@ -151,9 +154,22 @@
 
 	// ---- Submit: wait for the carrier shipment, then let the native submit continue -------------
 
-	function failure_html(carrier_name_, status, error) {
+	// `submitting` is false for a button request (the return pickup): nothing was being submitted then.
+	function failure_html(carrier_name_, status, error, submitting = true) {
 		const escape = frappe.utils.escape_html;
 		const carrier = escape(carrier_name_);
+		if (!submitting) {
+			if (status === UNKNOWN) {
+				return (
+					`<p>${__("It is not known whether {0} created the request.", [carrier])}</p>` +
+					`<p class="text-muted">${__("Use Check with {0} on the Delivery Note before trying again.", [carrier])}</p>`
+				);
+			}
+			if (status === FAILED) {
+				return `<p>${__("{0} did not create the request: {1}", [carrier, escape(error || "")])}</p>`;
+			}
+			return `<p>${__("{0} is taking longer than expected.", [carrier])}</p><p class="text-muted">${__("Open the Delivery Note later and check its Integration Status.")}</p>`;
+		}
 		if (status === UNKNOWN) {
 			return (
 				`<p>${__("It is not known whether {0} created the shipment. The Delivery Note was not submitted.", [carrier])}</p>` +
@@ -171,7 +187,8 @@
 	// frappe.validated = false and shows why.
 	function before_submit(frm) {
 		const carrier = carrier_name(frm);
-		if (!carrier) return;
+		// A return is submitted without waiting: submitting it is the receipt; its pickup is its own button.
+		if (!carrier || frm.doc.is_return) return;
 		if (status_of(frm) === CREATED) return;
 		const hooks = carriers[carrier];
 		if (frm.is_dirty()) {
@@ -183,6 +200,14 @@
 			frappe.validated = false;
 			return;
 		}
+		return send_and_wait(frm, carrier, true);
+	}
+
+	// Starts the carrier request (the create of a delivery, or the pickup of a return) and waits for it in a
+	// dialog. Resolves once the note is Created (form reloaded); otherwise sets frappe.validated = false and
+	// shows why. `submitting` is true when it is the native Submit that waits.
+	function send_and_wait(frm, carrier, submitting) {
+		const hooks = carriers[carrier];
 		return new Promise((resolve) => {
 			let dialog = null;
 			let timer = null;
@@ -202,13 +227,15 @@
 				if (keep_sending) {
 					frappe.show_alert({
 						message: frappe.utils.escape_html(
-							__("Still sending to {0}. Open the Delivery Note later: if the shipment is Created, submit it again.", [carrier])
+							submitting
+									? __("Still sending to {0}. Open the Delivery Note later: if the shipment is Created, submit it again.", [carrier])
+									: __("Still sending to {0}. Open the Delivery Note later and check its Integration Status.", [carrier])
 						),
 						indicator: "blue",
 					});
 				} else {
 					frappe.msgprint({
-						message: failure_html(carrier, status, error),
+						message: failure_html(carrier, status, error, submitting),
 						indicator: "red",
 						title: __("{0} shipment", [carrier]),
 						primary_action:
@@ -239,7 +266,11 @@
 			});
 			dialog.show();
 			dialog.fields_dict.body.$wrapper.html(
-				`<p>${frappe.utils.escape_html(__("Please wait. The Delivery Note is submitted once {0} has created the shipment.", [carrier]))}</p>`
+				`<p>${frappe.utils.escape_html(
+						submitting
+							? __("Please wait. The Delivery Note is submitted once {0} has created the shipment.", [carrier])
+							: __("Please wait. Sending the return pickup request to {0}.", [carrier])
+					)}</p>`
 			);
 			const started = Date.now();
 			const poll = () =>
@@ -273,7 +304,12 @@
 							settled = true;
 							if (dialog) dialog.hide();
 							frappe.validated = false;
-							frappe.show_alert({ message: __("Choose the {0} city, then submit again.", [carrier]), indicator: "orange" });
+							frappe.show_alert({
+								message: submitting
+									? __("Choose the {0} city, then submit again.", [carrier])
+									: __("Choose the {0} city, save, then request the pickup again.", [carrier]),
+								indicator: "orange",
+							});
 							hooks.pick_city(frm);
 							resolve();
 							return;
@@ -312,6 +348,7 @@
 		max_wait_ms: MAX_WAIT_MS,
 		carrier_name,
 		failure_html,
+		send_and_wait,
 		server_message,
 		is_editable,
 	};

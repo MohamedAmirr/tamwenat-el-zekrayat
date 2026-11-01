@@ -254,7 +254,9 @@ Noon is the second adapter (#415): the old `custom_carrier_status` / `custom_car
   follows once Cancelled. `integrations/bosta/editing.py` (APIs `get_edit_values`, `edit_shipment`) sends
   changed receiver phone / drop-off address with `PUT` and records them on the note and the snapshot.
   `integrations/bosta/returns.py` makes one draft Sales Return (`custom_return_source`) when a returned
-  state (`statuses.RETURNED_STATE_CODES`) arrives. New Delivery Note fields `custom_return_source` and
+  state (`statuses.RETURNED_STATE_CODES`) arrives. A return marked "Customer Return Pickup" is a Bosta
+  note (`applies_to`) and runs the neutral create machine as operation "Return Pickup" (type 25, cod =
+  `-custom_returned_cod`, #411). New Delivery Note fields `custom_return_source`, `custom_returned_cod` and
   `custom_actual_cost_received_on`. Open decisions: `docs/bosta-integration/README.md`.
 - **Needs Attention** (`services/marketplace_attention.py::_collect_carrier_items`, #415) reads the Delivery
   Notes of every carrier in `CARRIERS` (platform = the carrier name, message names the carrier through the

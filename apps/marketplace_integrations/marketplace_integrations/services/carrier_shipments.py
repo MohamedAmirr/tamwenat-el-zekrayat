@@ -128,7 +128,7 @@ def validate_delivery_note(doc, method=None):
 		adapter.guard_changes(doc)
 	if doc.is_new() and doc.get("amended_from") and not adapter_for(doc):
 		# Amend copies even no_copy fields: the carrier was changed, so clear what the source note's carrier left.
-		source = frappe.db.get_value("Delivery Note", doc.amended_from, ["is_return", "transporter"], as_dict=True)
+		source = frappe.db.get_value("Delivery Note", doc.amended_from, ["is_return", "transporter", "custom_return_source"], as_dict=True)
 		if source:
 			for adapter in CARRIERS.values():
 				if adapter.applies_to(source):
@@ -139,7 +139,11 @@ def require_shipment_created(doc, method=None):
 	"""``before_submit``: no submit unless the shipment is Created (judged by the stored status, not by the
 	copy a client sent)."""
 	adapter = adapter_for(doc)
-	if adapter and status_of(doc) != CREATED:
+	# A return pickup is optional (a return the carrier owns may be submitted without one): submitting the
+	# return is the receipt. Only a pickup still being requested blocks it, so it cannot be left orphaned.
+	status = status_of(doc)
+	blocked = status in (CREATING, UNKNOWN) if doc.get("is_return") else status != CREATED
+	if adapter and blocked:
 		frappe.throw(
 			_("The {0} shipment of this Delivery Note is not Created yet, so it cannot be submitted.").format(
 				adapter.SERVICE_NAME
@@ -229,11 +233,13 @@ def request_create(delivery_note, modified=None):
 			"custom_last_integration_error": None,
 		},
 	)
+	# A return note the carrier owns is a pickup request: same machine, its own operation name.
+	operation = "Return Pickup" if doc.get("is_return") else "Create"
 	log = open_log(
 		adapter.SERVICE_NAME,
 		delivery_note,
-		"Create",
-		attempt=attempt_number(adapter.SERVICE_NAME, delivery_note),
+		operation,
+		attempt=attempt_number(adapter.SERVICE_NAME, delivery_note, operation),
 		reference=reference,
 	)
 	frappe.enqueue(

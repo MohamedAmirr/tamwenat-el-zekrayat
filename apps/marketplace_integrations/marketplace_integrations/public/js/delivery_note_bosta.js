@@ -16,6 +16,7 @@
 	const EDITABLE = ["", "Not Created", "Creation Failed"];
 	// Integration Statuses with a Bosta shipment that must be cancelled at Bosta before ERPNext cancels.
 	const CANCELLABLE = ["Created", "Cancellation Pending", "Cancellation Unknown"];
+	const RETURN_PICKUP = "Customer Return Pickup";
 	const ADDRESS_LINE_MIN = 6;
 	const ADDRESS_LINE_MAX = 240;
 
@@ -356,15 +357,42 @@
 		});
 	}
 
+	// ---- Customer Return Pickup (type 25) ---------------------------------------------------------
+
+	// The button shows on a draft return the staff marked "Customer Return Pickup", until a pickup is started.
+	function can_request_pickup(frm) {
+		return Boolean(
+			frm.doc &&
+				frm.doc.is_return &&
+				frm.doc.custom_return_source === RETURN_PICKUP &&
+				frm.doc.docstatus === 0 &&
+				EDITABLE.includes(frm.doc.custom_integration_status || "")
+		);
+	}
+
+	// Same wait dialog, Unknown / Check / Retry pattern as the outbound create (the neutral shell owns it).
+	function request_pickup(frm) {
+		if (frm.is_dirty()) {
+			frappe.msgprint({ message: __("Save the Delivery Note first, then request the pickup."), indicator: "orange" });
+			return Promise.resolve();
+		}
+		const shipping = frappe.marketplace_integrations.shipping;
+		return shipping.send_and_wait(frm, "Bosta", false);
+	}
+
 	function add_buttons(frm) {
 		const status = frm.doc.custom_integration_status || "";
+		const is_return = Boolean(frm.doc.is_return);
 		if (frm.doc.docstatus === 0 && EDITABLE.includes(status)) {
 			frm.add_custom_button(__("Pick Bosta City"), () => pick_city(frm));
 		}
-		if (status === "Created" && !frm.doc.custom_shipping_label) {
+		if (can_request_pickup(frm)) {
+			frm.add_custom_button(__("Request Bosta Return Pickup"), () => request_pickup(frm));
+		}
+		if (status === "Created" && !frm.doc.custom_shipping_label && !is_return) {
 			frm.add_custom_button(__("Fetch Bosta Label"), () => fetch_label(frm));
 		}
-		if (status === "Created") {
+		if (status === "Created" && !is_return) {
 			frm.add_custom_button(__("Edit Bosta Shipment"), () => edit_shipment(frm));
 		}
 		if (frm.doc.docstatus === 0 && CANCELLABLE.includes(status)) {
@@ -395,6 +423,8 @@
 			pick_city,
 			fetch_label,
 			add_buttons,
+			can_request_pickup,
+			request_pickup,
 			city_label,
 			before_cancel,
 			custom_cod_amount,

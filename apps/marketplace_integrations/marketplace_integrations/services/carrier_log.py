@@ -42,7 +42,7 @@ class RateLimited(Exception):
 	"""The carrier asked to slow down (HTTP 429); a reconciliation run stops early."""
 
 
-def attempt_number(service, delivery_note):
+def attempt_number(service, delivery_note, operation="Create"):
 	"""The next attempt number shown on the log (display only: Log Settings deletes old logs, so no
 	decision may depend on it)."""
 	return (
@@ -52,7 +52,7 @@ def attempt_number(service, delivery_note):
 				"integration_request_service": service,
 				"reference_doctype": "Delivery Note",
 				"reference_docname": delivery_note,
-				"custom_operation_type": "Create",
+				"custom_operation_type": operation,
 			},
 		)
 		+ 1

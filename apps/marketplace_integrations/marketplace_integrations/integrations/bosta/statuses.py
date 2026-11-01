@@ -466,6 +466,7 @@ def update_sales_order_summary(sales_order):
 			filters={
 				"name": ["in", parents],
 				"docstatus": ["<", 2],
+				"is_return": 0,
 				"transporter": supplier,
 				"custom_carrier_delivery_id": ["!=", ""],
 			},

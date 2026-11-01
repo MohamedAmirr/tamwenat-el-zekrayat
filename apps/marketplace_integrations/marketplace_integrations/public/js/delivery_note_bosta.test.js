@@ -419,3 +419,69 @@ test("no COD note when the amount matches, the form is unsaved or dirty, or the 
 	}
 	assert.equal(calls.length, 1);
 });
+
+// ---- Customer Return Pickup -----------------------------------------------------------------
+
+function return_form(doc = {}, { dirty = false } = {}) {
+	const frm = make_form({
+		is_return: 1,
+		custom_return_source: "Customer Return Pickup",
+		custom_integration_status: "Not Created",
+		...doc,
+	});
+	frm.is_dirty = () => dirty;
+	return frm;
+}
+
+test("Request Bosta Return Pickup shows on a draft pickup return that is Not Created or Creation Failed", () => {
+	const { mod } = load();
+	for (const status of ["", "Not Created", "Creation Failed"]) {
+		const frm = return_form({ custom_integration_status: status });
+		mod.add_buttons(frm);
+		assert.ok(frm.buttons.some((b) => b.label === "Request Bosta Return Pickup"), status);
+	}
+});
+
+test("Request Bosta Return Pickup is hidden for other returns, started pickups and submitted returns", () => {
+	const { mod } = load();
+	for (const doc of [
+		{ custom_return_source: "" },
+		{ custom_return_source: "Returned by Bosta" },
+		{ is_return: 0 },
+		{ custom_integration_status: "Creating" },
+		{ custom_integration_status: "Created" },
+		{ custom_integration_status: "Creation Unknown" },
+		{ docstatus: 1 },
+	]) {
+		const frm = return_form(doc);
+		mod.add_buttons(frm);
+		assert.ok(!frm.buttons.some((b) => b.label === "Request Bosta Return Pickup"), JSON.stringify(doc));
+	}
+});
+
+test("a Created pickup return offers neither the label nor Edit Bosta Shipment", () => {
+	const { mod } = load();
+	const frm = return_form({ custom_integration_status: "Created" });
+	mod.add_buttons(frm);
+	assert.deepEqual(frm.buttons.map((b) => b.label), ["Cancel Bosta Shipment"]);
+});
+
+test("the button runs the shared wait dialog without submitting", async () => {
+	const { mod } = load();
+	const sent = [];
+	global.frappe.marketplace_integrations.shipping.send_and_wait = (frm, carrier, submitting) => {
+		sent.push({ carrier, submitting });
+		return Promise.resolve();
+	};
+	await mod.request_pickup(return_form());
+	assert.deepEqual(sent, [{ carrier: "Bosta", submitting: false }]);
+});
+
+test("an unsaved return asks to save first and sends nothing", async () => {
+	const { mod, msgprints } = load();
+	const sent = [];
+	global.frappe.marketplace_integrations.shipping.send_and_wait = () => sent.push(1);
+	await mod.request_pickup(return_form({}, { dirty: true }));
+	assert.deepEqual(sent, []);
+	assert.equal(msgprints[0].message, "Save the Delivery Note first, then request the pickup.");
+});

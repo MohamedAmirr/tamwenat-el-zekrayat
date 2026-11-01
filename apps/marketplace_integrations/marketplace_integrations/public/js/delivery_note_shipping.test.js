@@ -226,6 +226,38 @@ test("submit of a note no carrier owns is left alone", () => {
 	assert.equal(calls.length, 0);
 });
 
+test("a return is a carrier note only when marked Customer Return Pickup, and its submit never waits", () => {
+	const { shipping, handlers, calls, dialogs } = load();
+	const plain = make_form({ is_return: 1, custom_integration_status: "Not Created" });
+	assert.equal(shipping.carrier_name(plain), null);
+	assert.equal(shipping.carrier_name(make_form({ is_return: 1, custom_return_source: "Returned by Bosta" })), null);
+	const pickup = make_form({ is_return: 1, custom_return_source: "Customer Return Pickup", custom_integration_status: "Not Created" });
+	assert.equal(shipping.carrier_name(pickup), "Bosta");
+	assert.equal(handlers.before_submit(pickup), undefined);
+	assert.equal(calls.length, 0);
+	assert.equal(dialogs.length, 0);
+	assert.equal(global.frappe.validated, true);
+});
+
+test("a pickup request through the button waits for Created and does not talk about submitting", async () => {
+	const { shipping, calls, dialogs } = load({
+		statuses: [{ custom_integration_status: "Creating" }, { custom_integration_status: "Created" }],
+	});
+	const frm = make_form({ custom_integration_status: "Not Created" });
+	await shipping.send_and_wait(frm, "Bosta", false);
+	assert.equal(calls[0].method, "marketplace_integrations.api.carrier_shipments.request_shipment");
+	assert.match(dialogs[0].html, /Sending the return pickup request to Bosta/);
+	assert.doesNotMatch(dialogs[0].html, /submitted/);
+	assert.equal(frm.reloads, 1);
+});
+
+test("a failed pickup request does not say the Delivery Note was not submitted", () => {
+	const { shipping } = load();
+	for (const status of ["Creation Unknown", "Creation Failed", "Creating"]) {
+		assert.doesNotMatch(shipping.failure_html("Bosta", status, "x", false), /not submitted/, status);
+	}
+});
+
 test("submit of an unsaved form asks to save first and does not call the carrier", () => {
 	const { handlers, calls, msgprints } = load();
 	const frm = make_form({ custom_integration_status: "Not Created" }, { dirty: true });

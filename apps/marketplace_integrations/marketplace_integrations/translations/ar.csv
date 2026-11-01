@@ -1856,3 +1856,17 @@ Invalid upload key.,مفتاح الرفع غير صالح.
 Invalid document type.,نوع المستند غير صالح.
 The Delivery Note no longer has a Created Noon shipment.,لم يعد لمذكرة التسليم شحنة Noon بحالة Created.
 The items changed after the invoice was uploaded. The invoice may need re-upload.,تغيّرت الأصناف بعد رفع الفاتورة. قد تحتاج الفاتورة إلى إعادة رفع.
+Returned COD,مبلغ الدفع عند الاستلام المرتجع
+Returned COD cannot be negative.,لا يمكن أن يكون مبلغ الدفع عند الاستلام المرتجع سالبًا.
+The returned COD and return source cannot be changed after the Bosta return pickup was started.,لا يمكن تغيير مبلغ الدفع عند الاستلام المرتجع ومصدر المرتجع بعد بدء طلب استلام المرتجع لدى Bosta.
+Choose Customer Return Pickup to ask Bosta to collect the goods from the customer.,اختر استلام مرتجع العميل لطلب من Bosta استلام البضاعة من العميل.
+The amount Bosta hands to the customer at pickup (zero or more). Sent to Bosta as a negative COD.,المبلغ الذي تسلّمه Bosta للعميل عند الاستلام (صفر أو أكثر). يُرسل إلى Bosta كمبلغ دفع عند الاستلام سالب.
+Request Bosta Return Pickup,طلب استلام المرتجع من Bosta
+Save the Delivery Note first, then request the pickup.,احفظ مذكرة التسليم أولًا ثم اطلب الاستلام.
+Please wait. Sending the return pickup request to {0}.,يرجى الانتظار. يجري إرسال طلب استلام المرتجع إلى {0}.
+Still sending to {0}. Open the Delivery Note later and check its Integration Status.,ما زال الإرسال إلى {0} جاريًا. افتح مذكرة التسليم لاحقًا وتحقق من حالة التكامل.
+"Choose the {0} city, save, then request the pickup again.","اختر مدينة {0} ثم احفظ ثم اطلب الاستلام مرة أخرى."
+It is not known whether {0} created the request.,من غير المعروف ما إذا كانت {0} قد أنشأت الطلب.
+{0} did not create the request: {1},لم تنشئ {0} الطلب: {1}
+{0} is taking longer than expected.,{0} تستغرق وقتًا أطول من المتوقع.
+Open the Delivery Note later and check its Integration Status.,افتح مذكرة التسليم لاحقًا وتحقق من حالة التكامل.

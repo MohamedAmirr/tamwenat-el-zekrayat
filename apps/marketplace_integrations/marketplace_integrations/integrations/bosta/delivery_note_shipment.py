@@ -72,6 +72,10 @@ SUPPLIER_NAME = "Bosta"
 SHIPPING_CARRIER = SUPPLIER_NAME
 
 BOSTA_DELIVERY_TYPE = 10
+#: Customer Return Pickup: a type 25 delivery whose COD is negative (the refund the courier hands over).
+BOSTA_RETURN_PICKUP_TYPE = 25
+#: ``custom_return_source`` of a return the staff want Bosta to collect from the customer.
+RETURN_PICKUP = "Customer Return Pickup"
 BOSTA_COD_LIMIT = 30000
 # The Integration Status values, LIVE_STATUSES and EDITABLE_STATUSES come from ``services/carrier_log.py``
 # (shared with the neutral service).
@@ -119,8 +123,11 @@ def bosta_supplier():
 
 
 def applies_to(doc):
-	"""A non-return note whose transporter is the Bosta Supplier."""
-	if doc.get("is_return") or not doc.get("transporter"):
+	"""A note whose transporter is the Bosta Supplier: a normal note, or a return the staff marked
+	"Customer Return Pickup" (a plain return or one returned by Bosta is not a Bosta shipment)."""
+	if not doc.get("transporter"):
+		return False
+	if doc.get("is_return") and doc.get("custom_return_source") != RETURN_PICKUP:
 		return False
 	return frappe.db.get_value("Supplier", doc.transporter, "supplier_name") == SUPPLIER_NAME
 
@@ -205,6 +212,13 @@ def _check_cod(cod):
 		)
 
 
+def _check_returned_cod(value):
+	"""The Returned COD is entered as zero or more; the request sends it negative. No other ceiling is
+	defined (the spec's business-policy limit is open), so none is checked."""
+	if flt(value) < 0:
+		frappe.throw(_("Returned COD cannot be negative."), title=_("Bosta shipment"))
+
+
 def _apply_cod_rule(doc, before):
 	"""Editable Bosta note: until the person confirms the COD (ticks ``custom_cod_confirmed`` or changes the
 	amount) the default is recomputed on every save, so a carrier chosen after the first save or removed
@@ -251,7 +265,9 @@ def guard_changes(doc):
 			# Amend copies the old note's tracking number, which belongs to that note's shipment.
 			doc.lr_no = None
 			doc.lr_date = None
-		if ours:
+		if ours and doc.get("is_return"):
+			_check_returned_cod(doc.get("custom_returned_cod"))
+		elif ours:
 			_apply_cod_rule(doc, doc)
 			_check_cod(doc.custom_cod_amount)
 		return
@@ -262,10 +278,20 @@ def guard_changes(doc):
 	for fieldname in SYSTEM_FIELDS:
 		doc.set(fieldname, before.get(fieldname))
 	if cstr(before.get("custom_integration_status")) in EDITABLE_STATUSES:
-		if ours:
+		if ours and doc.get("is_return"):
+			_check_returned_cod(doc.get("custom_returned_cod"))
+		elif ours:
 			_apply_cod_rule(doc, before)
 			_check_cod(doc.get("custom_cod_amount"))
 		return
+	if doc.get("is_return") and (
+		flt(before.get("custom_returned_cod"), 2) != flt(doc.get("custom_returned_cod"), 2)
+		or cstr(before.get("custom_return_source")) != cstr(doc.get("custom_return_source"))
+	):
+		frappe.throw(
+			_("The returned COD and return source cannot be changed after the Bosta return pickup was started."),
+			title=_("Bosta shipment"),
+		)
 	if (
 		any(cstr(before.get(f)) != cstr(doc.get(f)) for f in LOCKED_FIELDS)
 		or flt(before.get("custom_cod_amount"), 2) != flt(doc.get("custom_cod_amount"), 2)
@@ -470,11 +496,14 @@ def validate_ready(doc, action="create"):
 		frappe.throw(_("The Delivery Note has no items."))
 	if not cstr(doc.get("custom_bosta_city")).strip():
 		frappe.throw(_("Choose the Bosta city before sending the shipment."))
-	_check_cod(doc.get("custom_cod_amount"))
-	if not cint(doc.get("custom_cod_confirmed")):
-		frappe.throw(
-			_("Confirm the COD amount before sending the shipment: tick COD confirmed, or change the COD. 0 is allowed.")
-		)
+	if doc.get("is_return"):
+		_check_returned_cod(doc.get("custom_returned_cod"))
+	else:
+		_check_cod(doc.get("custom_cod_amount"))
+		if not cint(doc.get("custom_cod_confirmed")):
+			frappe.throw(
+				_("Confirm the COD amount before sending the shipment: tick COD confirmed, or change the COD. 0 is allowed.")
+			)
 	if not cstr(doc.get("customer_name")).strip():
 		frappe.throw(_("The receiver name is missing."))
 	if not _receiver_phone(doc, order):
@@ -502,9 +531,14 @@ def build_payload(doc):
 	order = sales_order_of(doc)
 	settings = BostaClient().get_settings()
 	reference = cstr(doc.custom_carrier_reference) or doc.name
+	# A Customer Return Pickup (type 25) sends the customer's address as dropOffAddress (same builder as a
+	# delivery) and a negative COD: the entered Returned COD, which is never negative. Bosta returns the
+	# goods to ``businessLocationId`` (the pickup location of the settings, also used by a delivery).
+	is_pickup = bool(doc.get("is_return"))
+	returned_cod = flt(doc.get("custom_returned_cod"), 2)
 	return {
-		"type": BOSTA_DELIVERY_TYPE,
-		"cod": flt(doc.custom_cod_amount, 2),
+		"type": BOSTA_RETURN_PICKUP_TYPE if is_pickup else BOSTA_DELIVERY_TYPE,
+		"cod": (-returned_cod if returned_cod else 0) if is_pickup else flt(doc.custom_cod_amount, 2),
 		"receiver": {"firstName": cstr(doc.customer_name).strip(), "phone": _receiver_phone(doc, order)},
 		"dropOffAddress": {"city": cstr(doc.custom_bosta_city).strip(), "firstLine": _address_for(doc, order)["first_line"]},
 		"businessLocationId": settings.business_location_id,
@@ -630,6 +664,9 @@ def after_created(delivery_note, data):
 	before the note could take them."""
 	from marketplace_integrations.integrations.bosta import statuses
 
+	if frappe.db.get_value("Delivery Note", delivery_note, "is_return"):
+		# A return pickup: not part of the Sales Order's shipping summary, and no label job.
+		return
 	delivery_id = _delivery_id(data)
 	_update_summary(delivery_note)
 	frappe.enqueue(
