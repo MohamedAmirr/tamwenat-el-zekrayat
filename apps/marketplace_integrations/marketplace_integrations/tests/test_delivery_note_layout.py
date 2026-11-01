@@ -21,8 +21,6 @@ EXPECTED = [
 	"custom_carrier_delivery_id",
 	"custom_carrier_reference",
 	"custom_shipping_status_column",
-	"custom_carrier_status",
-	"custom_carrier_error",
 	"custom_integration_status",
 	"custom_shipping_status",
 	"custom_shipping_column",
@@ -56,7 +54,7 @@ class TestDeliveryNoteLayout(IntegrationTestCase):
 	def test_native_fields_left_the_header_and_keep_their_meaning(self):
 		meta = frappe.get_meta("Delivery Note")
 		header = self.order[: self.order.index("column_break1")]
-		for fieldname in ("transporter", "lr_no", "lr_date", "custom_carrier_status", "custom_carrier_error"):
+		for fieldname in ("transporter", "lr_no", "lr_date"):
 			self.assertNotIn(fieldname, header)
 		self.assertEqual(meta.get_field("transporter").fieldtype, "Link")
 		self.assertEqual(meta.get_field("lr_no").fieldtype, "Data")

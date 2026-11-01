@@ -4,7 +4,7 @@
 """Noon reconciliation evidence for a Marketplace Order (#178 part 3).
 
 ``build_evidence()`` reads the Marketplace Order document (plus one Noon Return
-existence check), its ``noon_shipments``/``noon_shipment_units`` child tables and
+existence check), the units of its Noon Delivery Notes (``started_units_of_order``) and
 the per-unit ``latest_payload.items[]`` (the only place Noon's per-physical-unit
 ``mp_status`` / ``integration_status`` / ``mp_item_nr`` live, #145).  No Noon
 call, no write.
@@ -18,11 +18,10 @@ status-grouped Marketplace Order Item id):
 - a line has started fulfillment when ANY of its units is ``SHIPPED`` OR sits in a
   shipment whose status is in ``_STARTED_SHIPMENT_STATUSES``; either source is
   enough (conservative: it blocks a change rather than letting one through).  Only a
-  ``Created`` shipment exists at Noon; ``Pending`` (CreateShipment not yet sent) and
-  ``Error`` (never created) shipments never left, so they do not count.  OPEN QUESTION:
-  Noon documents no outcome for ``Cancel Pending`` (a CancelShipment call is in
-  flight for a shipment that was ``Created``); it is counted as started until the
-  cancellation is confirmed;
+  ``Created`` note exists at Noon; Creating, Creation Failed and Creation Unknown notes
+  never counted as left, so they do not count.  OPEN QUESTION: Noon documents no
+  outcome for a cancellation in flight (Cancellation Pending or Unknown on a note that
+  was ``Created``); it is counted as started until the cancellation is confirmed;
 - full cancellation = no eligible unit remains;
 - an unrecognized status (``UNSPECIFIED`` or a future value; Noon documents no
   meaning for it) makes the stage unknown instead of being guessed.
@@ -49,22 +48,13 @@ from marketplace_integrations.services.sales_order_sync import (
 _KNOWN_MP_STATUSES = set(MP_STATUS_MAP.values())
 _KNOWN_INTEGRATION_STATUSES = set(INTEGRATION_STATUS_MAP.values())
 _SHIPPED = INTEGRATION_STATUS_MAP["INTEGRATION_ITEM_STATUS_SHIPPED"]
-# Deliberately separate from ``fulfillment._ACTIVE_SHIPMENT_STATUSES`` (which decides
-# which units are still claimed by a shipment): only these shipments may have left.
-_STARTED_SHIPMENT_STATUSES = {"Created", "Cancel Pending"}
 
 
 def _started_shipment_mp_item_nrs(order):
-	started_shipment_nrs = {
-		row.integration_shipment_nr
-		for row in order.noon_shipments or []
-		if row.status in _STARTED_SHIPMENT_STATUSES
-	}
-	return {
-		cstr(row.mp_item_nr).strip()
-		for row in order.noon_shipment_units or []
-		if row.integration_shipment_nr in started_shipment_nrs
-	}
+	"""Units of the live Noon Delivery Notes of the order (read from their request snapshot)."""
+	from marketplace_integrations.integrations.noon.delivery_note_shipment import started_units_of_order
+
+	return started_units_of_order(order.name) if getattr(order, "name", None) else set()
 
 
 def _has_noon_return(order):

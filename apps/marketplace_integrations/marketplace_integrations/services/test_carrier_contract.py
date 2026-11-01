@@ -45,7 +45,7 @@ NEUTRAL_FILES = (
 REGISTRY_LINES = re.compile(r"^(from marketplace_integrations\.integrations\.\w+ import .*|CARRIERS = .*)$")
 CARRIER_NAMES = re.compile(r"Bosta|Noon", re.IGNORECASE)
 #: Fields that only one carrier uses.
-CARRIER_FIELDS = re.compile(r"custom_bosta_|custom_noon_|custom_cod_|custom_carrier_status|custom_carrier_error")
+CARRIER_FIELDS = re.compile(r"custom_bosta_|custom_noon_|custom_cod_")
 
 
 class IntegrationTestCarrierContract(IntegrationTestCase):

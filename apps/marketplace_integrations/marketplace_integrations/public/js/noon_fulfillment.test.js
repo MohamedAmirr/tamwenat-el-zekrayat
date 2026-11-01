@@ -6,14 +6,15 @@ global.__ = (message, args) => {
 	return message.replace(/\{(\d+)\}/g, (_, index) => args[index]);
 };
 
-// Loads noon_fulfillment.js fresh against a mock frappe. Only the Create Noon Shipment dialog
-// is exercised here (#385): its AWB field and the create_shipment arguments it sends.
+// Loads noon_fulfillment.js fresh against a mock frappe. After #415 the Sales Order keeps only Mark Out of
+// Stock, the order invoice and the stuck-reservation recovery; the shipment dialogs are gone.
 function load() {
 	const calls = [];
 	const dialogs = [];
 	const alerts = [];
 	global.frappe = {
 		utils: { escape_html: (value) => String(value) },
+		model: { can_write: () => true },
 		ui: {
 			Dialog: class {
 				constructor(config) {
@@ -29,9 +30,10 @@ function load() {
 			if (opts.method.endsWith("get_shippable_units")) {
 				return Promise.resolve({ message: [{ mp_item_nr: "1", partner_sku: "SKU-1" }] });
 			}
-			return Promise.resolve({ message: { queued: true } });
+			return Promise.resolve({ message: { queued: false } });
 		},
 		msgprint() {},
+		confirm: (_message, proceed) => proceed(),
 		show_alert: (alert) => alerts.push(alert),
 	};
 	const path = require.resolve("./noon_fulfillment.js");
@@ -46,57 +48,54 @@ async function settle() {
 	}
 }
 
-async function open_create_dialog() {
-	const state = load();
-	state.module_exports.show_noon_create_shipment_dialog({
-		marketplace_order: "MO-NOON",
-		sales_order: "SO-1",
-		shipments: [],
-		reload() {},
-	});
-	await settle();
-	const dialog = state.dialogs[state.dialogs.length - 1];
-	return { ...state, dialog };
-}
+const ctx = () => ({ marketplace_order: "MO-NOON", sales_order: "SO-1", reload() {} });
 
-async function submit(dialog, values) {
-	dialog.config.primary_action(values);
-	await settle();
-}
+test("only the order-level buttons exist", () => {
+	const { module_exports } = load();
+	assert.deepEqual(
+		module_exports.noon_fulfillment_buttons(ctx()).map((button) => button.action),
+		["mark_out_of_stock", "upload_order_invoice", "retry_order_invoice", "release_stuck_oos_reservation"]
+	);
+});
 
-test("the Create Noon Shipment dialog has an optional AWB Nr Data field after the units", async () => {
-	const { dialog } = await open_create_dialog();
-	assert.equal(dialog.config.title, "Create Noon Shipment");
+test("the Mark Out of Stock dialog lists the shippable units and sends the chosen mp_item_nrs", async () => {
+	const { module_exports, dialogs, calls } = load();
+	module_exports.show_noon_mark_out_of_stock_dialog(ctx());
+	await settle();
+	const dialog = dialogs[dialogs.length - 1];
+	assert.equal(dialog.config.title, "Mark Units Out of Stock");
 	assert.deepEqual(
 		dialog.config.fields.map((field) => field.fieldname),
-		["units", "awb_nr"]
+		["units"]
 	);
-	const awb = dialog.config.fields.find((field) => field.fieldname === "awb_nr");
-	assert.equal(awb.fieldtype, "Data");
-	assert.equal(awb.label, "AWB Nr");
-	assert.ok(!awb.reqd, "the AWB field is optional");
-	assert.match(awb.description, /Leave empty to use a Noon AWB/);
-});
-
-test("a filled AWB is trimmed and sent with create_shipment", async () => {
-	const { dialog, calls } = await open_create_dialog();
-	await submit(dialog, { units: ["0"], awb_nr: "  NOON-STK-1  " });
+	dialog.config.primary_action({ units: ["0"] });
+	await settle();
 	const call = calls[calls.length - 1];
-	assert.equal(call.method, "marketplace_integrations.api.noon_fulfillment.create_shipment");
-	assert.deepEqual(call.args, {
-		marketplace_order: "MO-NOON",
-		mp_item_nrs: ["1"],
-		awb_nr: "NOON-STK-1",
-	});
+	assert.equal(call.method, "marketplace_integrations.api.noon_fulfillment.mark_out_of_stock");
+	assert.deepEqual(call.args, { marketplace_order: "MO-NOON", mp_item_nrs: ["1"] });
 });
 
-test("an empty or spaces-only AWB is not sent, so the worker uses a Noon AWB as before", async () => {
-	for (const awb_nr of [undefined, "", "   "]) {
-		const { dialog, calls } = await open_create_dialog();
-		await submit(dialog, { units: ["0"], awb_nr });
-		const call = calls[calls.length - 1];
-		assert.equal(call.method, "marketplace_integrations.api.noon_fulfillment.create_shipment");
-		assert.deepEqual(call.args, { marketplace_order: "MO-NOON", mp_item_nrs: ["1"] });
-		assert.equal(Object.prototype.hasOwnProperty.call(call.args, "awb_nr"), false, `awb_nr=${JSON.stringify(awb_nr)}`);
+test("a queued answer that was deduplicated says the action is already queued for the order", async () => {
+	const { module_exports, dialogs, alerts } = load();
+	module_exports.show_noon_upload_order_invoice_dialog(ctx());
+	dialogs[dialogs.length - 1].config.primary_action({
+		invoice_file: "/private/files/i.pdf",
+		invoice_nr: "INV-1",
+		issued_at: "2026-11-01",
+	});
+	await settle();
+	assert.equal(alerts[0].message, "A Noon fulfillment action for this order is already queued or running.");
+});
+
+test("the retired shipment helpers are not exported", () => {
+	const { module_exports } = load();
+	for (const name of [
+		"noon_shipments_html",
+		"noon_handover_alert",
+		"show_noon_create_shipment_dialog",
+		"show_noon_cancel_shipment_dialog",
+		"show_noon_mark_handed_over_dialog",
+	]) {
+		assert.equal(module_exports[name], undefined, name);
 	}
 });

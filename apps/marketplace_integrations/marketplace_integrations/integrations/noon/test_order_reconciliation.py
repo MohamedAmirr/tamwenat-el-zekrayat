@@ -37,9 +37,16 @@ UNSPECIFIED = "INTEGRATION_ITEM_STATUS_UNSPECIFIED"
 HAS_RETURN = "marketplace_integrations.integrations.noon.order_reconciliation._has_noon_return"
 
 
+STARTED_UNITS = "marketplace_integrations.integrations.noon.order_reconciliation._started_shipment_mp_item_nrs"
+
+
 def build_evidence(order, has_return=False):
-	"""Pure-logic tests never touch the DB: the one Noon Return lookup is stubbed."""
-	with patch(HAS_RETURN, return_value=has_return):
+	"""Pure-logic tests never touch the DB: the one Noon Return lookup and the units the order's Noon
+	Delivery Notes started (``order.started``) are stubbed."""
+	with (
+		patch(HAS_RETURN, return_value=has_return),
+		patch(STARTED_UNITS, return_value=set(getattr(order, "started", ()))),
+	):
 		return _build_evidence(order)
 
 
@@ -52,19 +59,13 @@ def _unit(mp_item_nr, sku="SKU-A", mp_status=CONFIRMED, integration_status=ACKNO
 	}
 
 
-def _order(units, shipments=(), shipment_units=()):
-	"""``shipments``: ``[(integration_shipment_nr, status)]``; ``shipment_units``: ``[(shipment_nr, mp_item_nr)]``."""
+def _order(units, started=()):
+	"""``started``: the ``mp_item_nr`` of the units a live Noon Delivery Note of the order started."""
 	return SimpleNamespace(
 		name="MO-164",
 		platform="Noon",
 		latest_payload={"items": units},
-		noon_shipments=[
-			SimpleNamespace(integration_shipment_nr=nr, status=status) for nr, status in shipments
-		],
-		noon_shipment_units=[
-			SimpleNamespace(integration_shipment_nr=nr, mp_item_nr=mp_item_nr)
-			for nr, mp_item_nr in shipment_units
-		],
+		started=list(started),
 	)
 
 
@@ -77,38 +78,33 @@ class UnitTestNoonOrderReconciliation(UnitTestCase):
 		self.assertNotIn("cancellation", evidence)
 		self.assertEqual(evidence["source"], "marketplace")
 
-	def test_unit_in_a_created_shipment_has_started_fulfillment(self):
-		# Cancel Pending is undocumented at Noon: counted as started (open question).
-		for status in ("Created", "Cancel Pending"):
-			with self.subTest(status=status):
-				evidence = build_evidence(
-					_order([_unit("1"), _unit("2", sku="SKU-B")], [("S-1", status)], [("S-1", "1")])
-				)
+	def test_unit_of_a_live_noon_delivery_note_has_started_fulfillment(self):
+		evidence = build_evidence(_order([_unit("1"), _unit("2", sku="SKU-B")], started=["1"]))
 
-				self.assertEqual(evidence["fulfillment_started"], {"sku:SKU-A": True, "sku:SKU-B": False})
-				self.assertIs(evidence["lifecycle_permits_change"], True)
+		self.assertEqual(evidence["fulfillment_started"], {"sku:SKU-A": True, "sku:SKU-B": False})
+		self.assertIs(evidence["lifecycle_permits_change"], True)
 
-	def test_unit_in_a_shipment_that_never_left_has_not_started(self):
-		for status in ("Pending", "Error", "Cancelled", "Discarded"):
-			with self.subTest(status=status):
-				evidence = build_evidence(_order([_unit("1")], [("S-1", status)], [("S-1", "1")]))
+	def test_the_started_units_are_those_of_the_live_noon_notes_of_the_order(self):
+		from marketplace_integrations.integrations.noon import order_reconciliation
 
-				self.assertEqual(evidence["fulfillment_started"], {"sku:SKU-A": False})
+		adapter = "marketplace_integrations.integrations.noon.delivery_note_shipment.started_units_of_order"
+		with patch(adapter, return_value={"1"}) as started:
+			self.assertEqual(order_reconciliation._started_shipment_mp_item_nrs(_order([])), {"1"})
+		started.assert_called_once_with("MO-164")
 
-	def test_shipped_unit_has_started_even_without_a_shipment_row(self):
+	def test_shipped_unit_has_started_even_without_a_delivery_note(self):
 		evidence = build_evidence(_order([_unit("1", integration_status=SHIPPED)]))
 
 		self.assertEqual(evidence["fulfillment_started"], {"sku:SKU-A": True})
 		self.assertIs(evidence["lifecycle_permits_change"], False)
 		self.assertTrue(evidence["lifecycle_reason"])
 
-	def test_either_source_means_started_when_shipped_and_shipment_tables_disagree(self):
-		# Unit 1 SHIPPED but only in a Cancelled shipment; unit 2 ACKNOWLEDGED but in a Created shipment.
+	def test_either_source_means_started_when_shipped_and_the_delivery_notes_disagree(self):
+		# Unit 1 SHIPPED at Noon but on no live note; unit 2 ACKNOWLEDGED but on a live note.
 		evidence = build_evidence(
 			_order(
 				[_unit("1", sku="SKU-A", integration_status=SHIPPED), _unit("2", sku="SKU-B")],
-				[("S-1", "Cancelled"), ("S-2", "Created")],
-				[("S-1", "1"), ("S-2", "2")],
+				started=["2"],
 			)
 		)
 
@@ -143,14 +139,12 @@ class UnitTestNoonOrderReconciliation(UnitTestCase):
 		self.assertNotIn("cancellation", evidence)
 
 	def test_cancellation_after_a_unit_started_is_cancelled_after_fulfillment(self):
-		for kwargs, shipments, shipment_units in (
-			({"integration_status": SHIPPED}, (), ()),
-			({}, [("S-1", "Created")], [("S-1", "1")]),
+		for kwargs, started in (
+			({"integration_status": SHIPPED}, ()),
+			({}, ["1"]),
 		):
-			with self.subTest(shipments=bool(shipments)):
-				evidence = build_evidence(
-					_order([_unit("1", mp_status=CANCELLED, **kwargs)], shipments, shipment_units)
-				)
+			with self.subTest(started=bool(started)):
+				evidence = build_evidence(_order([_unit("1", mp_status=CANCELLED, **kwargs)], started))
 
 				self.assertEqual(evidence["cancellation"], "full")
 				self.assertIs(evidence["cancelled_after_fulfillment"], True)
@@ -209,7 +203,7 @@ class UnitTestNoonOrderReconciliation(UnitTestCase):
 				self.assertIs(build_evidence(_order(units), has_return=True)["return"], True)
 
 	def test_adapter_does_not_mutate_the_order(self):
-		order = _order([_unit("1")], [("S-1", "Created")], [("S-1", "1")])
+		order = _order([_unit("1")], started=["1"])
 		before = repr(vars(order))
 
 		build_evidence(order)
@@ -261,7 +255,7 @@ class UnitTestNoonEvidenceThroughThePlanner(UnitTestCase):
 		}
 
 	def test_changed_line_that_started_fulfillment_needs_attention(self):
-		evidence = build_evidence(_order([_unit("1"), _unit("2")], [("S-1", "Created")], [("S-1", "1")]))
+		evidence = build_evidence(_order([_unit("1"), _unit("2")], started=["1"]))
 
 		result = plan(self._snapshot(2), self._snapshot(1), evidence, self._erp_state())
 

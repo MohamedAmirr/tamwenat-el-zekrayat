@@ -43,7 +43,6 @@ boot_session = "marketplace_integrations.services.carrier_shipments.boot_session
 doctype_js = {
 	"Sales Order": "public/js/sales_order.js",
 	"Delivery Note": [
-		"public/js/delivery_note.js",
 		"public/js/delivery_note_shipping.js",
 		"public/js/delivery_note_bosta.js",
 		"public/js/delivery_note_noon.js",
@@ -167,10 +166,6 @@ _RECHECK_EVENTS = {
 	"on_cancel": _RECHECK_HANDLER,
 	"on_trash": _RECHECK_HANDLER,
 }
-# #368: a Delivery Note that a Noon shipment row links to must stay deletable, so its on_trash
-# also runs the handler that clears that link (it never raises). on_cancel keeps the link on
-# purpose: the amend flow re-links through amended_from (integrations/noon/handover_state.py).
-_HANDOVER_CLEAR_HANDLER = "marketplace_integrations.integrations.noon.handover_state.clear_deleted_delivery_note"
 # #391/#415: Delivery Note-first carrier shipments (the neutral contract in services/carrier_shipments.py,
 # one adapter per carrier). Nothing is queued on insert: Submit starts the shipment (api/carrier_shipments.py).
 # validate, before_submit, before_cancel and on_trash (#393) are deliberate refusals, so they do raise:
@@ -181,9 +176,8 @@ _CARRIER_GUARD = "marketplace_integrations.services.carrier_shipments.guard_canc
 doc_events = {
 	"Delivery Note": {
 		**_RECHECK_EVENTS,
-		# The guard comes first: it refuses (or discards a shipment that never reached Noon) before
-		# the handover handler resets the shipment's note link.
-		"on_trash": [_CARRIER_GUARD, _RECHECK_HANDLER, _HANDOVER_CLEAR_HANDLER],
+		# The guard comes first: it refuses a delete while the shipment is live.
+		"on_trash": [_CARRIER_GUARD, _RECHECK_HANDLER],
 		"before_cancel": _CARRIER_GUARD,
 		"validate": "marketplace_integrations.services.carrier_shipments.validate_delivery_note",
 		"before_submit": "marketplace_integrations.services.carrier_shipments.require_shipment_created",
@@ -391,8 +385,6 @@ fixtures = [
 					"Sales Order-custom_shipping_status_summary",
 					"Payment Entry-custom_marketplace_order",
 					"Payment Entry-custom_marketplace_transaction_id",
-					"Delivery Note-custom_carrier_status",
-					"Delivery Note-custom_carrier_error",
 					"Delivery Note-custom_more_section",
 					"Delivery Note-custom_shipping_section",
 					"Delivery Note-custom_integration_status",

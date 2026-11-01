@@ -1,6 +1,6 @@
 # Delivery Note-first fulfillment (decided 2026-10-29)
 
-Status: decided. Epic #392; sub-issue 1 (#391, Noon create from a draft Delivery Note) and #393 (the note carries cancel, delete, Add AWB, shipment invoice and Retry) are built; #394 (remove the superseded handover flow) is later, see `docs/noon-integration/fulfillment-release.md` (Delivery Note-first shipment). This document records the agreed direction so the plan, the issues and the code follow it.
+Status: decided. Epic #392 is superseded by epic #413 / #415: the Noon adapter behind the neutral carrier contract creates the shipment on Submit (Bosta shape), and the old flow (create, cancel, handover, discard, retry paths, `handover_state.py`, `delivery_note_drafts.py`, `delivery_note.js`, the AWB pool, the shipment child tables) is removed (#415, phase 4). Read `docs/noon-integration/README.md` and `business-spec.md`; the text below is the original direction. See also `docs/noon-integration/fulfillment-release.md`. This document records the agreed direction so the plan, the issues and the code follow it.
 
 ## Decision
 
@@ -35,4 +35,4 @@ Branch `feat/noon-shipped-batch` (#390, #377, #378, #376, unreviewed wip) is par
 
 ## Existing Noon code this replaces
 
-`integrations/noon/fulfillment.py` (create, cancel, handover, discard, retry paths), `integrations/noon/handover_state.py`, `services/delivery_note_drafts.py`, `public/js/noon_fulfillment.js`, `api/noon_fulfillment.py`. Kept as needed: the AWB pool, Add AWB, invoice upload, the webhook refresh. The Epic must list exactly what is kept, rewritten and deleted, plus the migration for shipments created under the old flow.
+`integrations/noon/fulfillment.py` (create, cancel, handover, discard, retry paths), `integrations/noon/handover_state.py`, `services/delivery_note_drafts.py`, `public/js/noon_fulfillment.js`, `api/noon_fulfillment.py`. Decided later in #415: nothing of the AWB pool or Add AWB is kept (no pool AWBs to migrate); order invoice upload and the webhook refresh stay. The Epic must list exactly what is kept, rewritten and deleted, plus the migration for shipments created under the old flow.

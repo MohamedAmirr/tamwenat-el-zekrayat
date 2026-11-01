@@ -369,13 +369,23 @@ def _started_units(doc):
 	"""``mp_item_nr`` of the units other live Noon notes of the same Sales Order already started, read from
 	their snapshot (a Cancelled note releases its units)."""
 	orders = {row.get("against_sales_order") for row in doc.get("items") or [] if row.get("against_sales_order")}
+	return _started_units_of_sales_orders(orders, exclude_note=doc.get("name"))
+
+
+def _started_units_of_sales_orders(sales_orders, exclude_note=None):
+	"""``mp_item_nr`` of the units the live Noon notes (Created, Cancellation Pending or Unknown) of these
+	Sales Orders hold in their snapshot."""
+	if not sales_orders:
+		return set()
 	parents = frappe.get_all(
 		"Delivery Note Item",
-		filters={"against_sales_order": ["in", list(orders)], "docstatus": ["<", 2], "parenttype": "Delivery Note"},
+		filters={"against_sales_order": ["in", list(sales_orders)], "docstatus": ["<", 2], "parenttype": "Delivery Note"},
 		pluck="parent",
 		distinct=True,
 		parent_doctype="Delivery Note",
 	)
+	if not parents:
+		return set()
 	notes = frappe.get_all(
 		"Delivery Note",
 		filters={
@@ -387,10 +397,74 @@ def _started_units(doc):
 	)
 	started = set()
 	for note in notes:
-		if doc.get("name") and note.name == doc.name:
+		if exclude_note and note.name == exclude_note:
 			continue
 		started.update(_snapshot_units(note.custom_carrier_request_snapshot))
 	return started
+
+
+def started_units_of_order(marketplace_order_name):
+	"""``mp_item_nr`` of the units a live Noon Delivery Note of this Marketplace Order started (the readers
+	of order reconciliation, the Mark Out of Stock rule and the sync debounce use it)."""
+	sales_orders = frappe.get_all(
+		"Sales Order", filters={"custom_marketplace_order": marketplace_order_name}, pluck="name"
+	)
+	return _started_units_of_sales_orders(sales_orders)
+
+
+def has_created_note(marketplace_order_name):
+	"""Does a Delivery Note of this Marketplace Order (not cancelled) hold a Created Noon shipment? The order
+	invoice upload needs one."""
+	sales_orders = frappe.get_all(
+		"Sales Order", filters={"custom_marketplace_order": marketplace_order_name}, pluck="name"
+	)
+	if not sales_orders:
+		return False
+	parents = frappe.get_all(
+		"Delivery Note Item",
+		filters={"against_sales_order": ["in", sales_orders], "docstatus": ["<", 2], "parenttype": "Delivery Note"},
+		pluck="parent",
+		distinct=True,
+		parent_doctype="Delivery Note",
+	)
+	return bool(parents) and bool(
+		frappe.get_all(
+			"Delivery Note",
+			filters={"name": ["in", parents], "docstatus": ["<", 2], "custom_integration_status": CREATED},
+			limit=1,
+			pluck="name",
+		)
+	)
+
+
+def recent_awbs_of_orders(marketplace_order_names, modified_since):
+	"""Distinct ``lr_no`` of the live Noon notes (Created, Cancellation Pending or Unknown) of these Marketplace
+	Orders modified since ``modified_since`` (the daily return scan of ``returns.py``)."""
+	sales_orders = frappe.get_all(
+		"Sales Order", filters={"custom_marketplace_order": ["in", list(marketplace_order_names)]}, pluck="name"
+	)
+	if not sales_orders:
+		return []
+	parents = frappe.get_all(
+		"Delivery Note Item",
+		filters={"against_sales_order": ["in", sales_orders], "docstatus": ["<", 2], "parenttype": "Delivery Note"},
+		pluck="parent",
+		distinct=True,
+		parent_doctype="Delivery Note",
+	)
+	if not parents:
+		return []
+	awbs = frappe.get_all(
+		"Delivery Note",
+		filters={
+			"name": ["in", parents],
+			"docstatus": ["<", 2],
+			"custom_integration_status": ["in", list(_CLAIMING_STATUSES)],
+			"modified": [">=", modified_since],
+		},
+		pluck="lr_no",
+	)
+	return sorted({cstr(awb).strip() for awb in awbs if cstr(awb).strip()})
 
 
 def _snapshot_units(snapshot):

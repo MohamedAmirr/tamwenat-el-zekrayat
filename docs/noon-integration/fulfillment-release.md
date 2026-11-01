@@ -1,5 +1,7 @@
 # Noon FBPI fulfillment release notes (#146)
 
+> **Superseded in part by #415 (phase 4).** The Marketplace Order shipment flow described below (Create / Cancel / Add AWB / Discard / Retry, the AWB pool, Mark Handed Over, the `Marketplace Order Shipment`, `...Unit` and `...AWB` tables, `custom_carrier_status` / `custom_carrier_error`) was removed; the Delivery Note is the shipment (`docs/noon-integration/README.md`, `business-spec.md`). Still current: Sales Order eligibility and sync, Mark Out of Stock, the order-level invoice (it now needs a Delivery Note with a Created Noon shipment), the returns lookup, and the real-world verification lists, which now live in the #415 issue ("Verify on the first real shipment"). Read the rest as history.
+
 Covers the Noon Sales Order eligibility/sync policy and FBPI shipment
 fulfillment (create/cancel/add-AWB/mark-out-of-stock/shipment invoice) built
 in #146, plus the FBPI return reference lookup/evidence capture built in

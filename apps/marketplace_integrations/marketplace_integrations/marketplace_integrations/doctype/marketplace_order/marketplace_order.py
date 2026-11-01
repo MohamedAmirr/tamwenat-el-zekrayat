@@ -75,8 +75,3 @@ class MarketplaceOrder(Document):
 			)
 
 			set_sync_status_from_current_snapshot(self)
-		# #368: runs on every save, also when the re-plan above is skipped, so no save, sync or
-		# re-check can clear the unresolved handover units' Needs Action before they are fixed.
-		from marketplace_integrations.integrations.noon.handover_state import reassert
-
-		reassert(self)

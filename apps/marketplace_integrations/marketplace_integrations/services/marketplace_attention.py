@@ -33,21 +33,15 @@ Problem sources (``problem_type``):
   AND was last updated (last_platform_update_on, else modified) after the
   failed attempt - a failed update of an already-imported order stays visible.
 - Fulfillment Error: Marketplace Sync Log (Fulfillment, Error), keyed by
-  (order, action, integration_shipment_nr); hidden once a later Success row
-  exists for the same key, a later DiscardShipment Success for that shipment,
-  or (GetShipment errors) a later CreateShipment Success recovered via
-  GetShipment for that shipment.
+  (order, action); hidden once a later Success row exists for the same key.
+  Rows of the retired shipment actions (RETIRED_FULFILLMENT_ACTIONS) are never listed.
 - Webhook Retries Exhausted: Shopify Webhook Delivery, same condition as
   shopify_reconciliation.get_webhook_delivery_exhausted_retry_count(). Listed
   in the report only: an exhausted delivery can never clear (the retry cap
   blocks any further attempt), so it is NOT counted by get_attention_counts()
   and never drives the account level.
-- Noon Fulfillment: ONE rollup row per Noon order (shipment Error / Cancel
-  Pending / invoice upload Error, or units pending Out of Stock), plus (#164)
-  shipments stuck in Pending longer than NOON_PENDING_SHIPMENT_STUCK_HOURS, Created shipments
-  nobody marked handed over for NOON_HANDOVER_REMINDER_HOURS (#368),
-  measured from the shipment row's creation. The Error / Cancel Pending /
-  invoice error / Out of Stock parts have no age threshold.
+- Noon Fulfillment: ONE row per Noon order with units pending Out of Stock (no age threshold).
+  Shipment problems are Delivery Note rows (the carrier items below).
 - Noon Return Unlinked (#164): one row per Noon Return with no Marketplace
   Order (no exact order_nr match, see integrations/noon/returns.py).
 - Carrier Return Review (#411, #415): one row per draft Sales Return a returned carrier shipment created,
@@ -73,11 +67,6 @@ import frappe
 from frappe import _
 from frappe.utils import add_to_date, cstr, flt, get_datetime, now_datetime
 
-from marketplace_integrations.integrations.noon import handover_state
-from marketplace_integrations.integrations.noon.constants import (
-	NOON_HANDOVER_REMINDER_HOURS,
-	NOON_PENDING_SHIPMENT_STUCK_HOURS,
-)
 from marketplace_integrations.integrations.shopify.webhooks import MAX_WEBHOOK_DELIVERY_ATTEMPTS
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_product_mapping.marketplace_product_mapping import (
 	compute_mapping_identity_key,
@@ -152,8 +141,6 @@ EXPLANATION_MAX_LENGTH = 200
 SYNC_MESSAGE_MAX_LENGTH = 500
 CHUNK_SIZE = 500
 MAX_LISTED_SKUS = 5
-
-NOON_SHIPMENT_ATTENTION_STATUSES = ["Error", "Cancel Pending"]
 
 
 def get_attention_items(filters=None):
@@ -309,20 +296,6 @@ def _get_orders(accounts, filters, fields, or_filters=None):
 		fields=fields,
 		limit_page_length=0,
 	)
-
-
-def _get_orders_by_name(names, fields):
-	rows = []
-	for chunk in _chunks(names):
-		rows.extend(
-			frappe.get_list(
-				"Marketplace Order",
-				filters={"name": ["in", chunk]},
-				fields=fields,
-				limit_page_length=0,
-			)
-		)
-	return rows
 
 
 def _collect_order_status_items(accounts):
@@ -1025,7 +998,16 @@ def _collect_cancelled_payment_entries(accounts, order_accounts):
 	]
 
 
-RECOVERED_VIA_GET_SHIPMENT_NOTE = "found via GetShipment retry"
+#: Sync Log actions of the old Marketplace Order shipment flow (removed in #415): old Error rows of these are
+#: stale, there is nothing left to retry or discard, so they are never listed.
+RETIRED_FULFILLMENT_ACTIONS = (
+	"CreateShipment",
+	"GetShipment",
+	"CancelShipment",
+	"DiscardShipment",
+	"AddShipmentCourierAwbs",
+	"UploadShipmentInvoice",
+)
 
 
 def _fulfillment_message(log):
@@ -1044,13 +1026,7 @@ def _fulfillment_message(log):
 def _fulfillment_action_label(action):
 	"""Plain verb for a Noon fulfillment action code; an unknown code is shown as stored."""
 	labels = {
-		"CreateShipment": _("Create shipment"),
-		"GetShipment": _("Check shipment on Noon"),
-		"CancelShipment": _("Cancel shipment"),
-		"DiscardShipment": _("Discard shipment"),
-		"AddShipmentCourierAwbs": _("Add AWB"),
 		"UpdateOrder": _("Mark units Out of Stock"),
-		"UploadShipmentInvoice": _("Upload shipment invoice"),
 		"UploadOrderInvoice": _("Upload order invoice"),
 		"ReleaseStuckOosReservation": _("Release Out of Stock reservation"),
 	}
@@ -1078,24 +1054,18 @@ def _collect_fulfillment_errors(accounts):
 	if not errors:
 		return []
 
-	def parts_of(log):
-		data = _parse_request_data(log.request_data)
-		return cstr(data.get("action")), cstr(data.get("integration_shipment_nr")).strip(), data
+	def action_of(log):
+		return cstr(_parse_request_data(log.request_data).get("action"))
 
 	def stamp_of(log):
 		return get_datetime(log.attempted_at or log.creation)
 
+	errors = [log for log in errors if action_of(log) not in RETIRED_FULFILLMENT_ACTIONS]
+	if not errors:
+		return []
 	order_names = {log.marketplace_order for log in errors if log.marketplace_order}
-	# Latest resolving stamp per (order, action, shipment); discards and
-	# GetShipment recoveries are keyed per (order, shipment).
+	# Latest resolving stamp per (order, action).
 	last_success = {}
-	last_discard = {}
-	last_recovery = {}
-
-	def remember(store, key, stamp):
-		if key not in store or stamp > store[key]:
-			store[key] = stamp
-
 	for chunk in _chunks(order_names):
 		for log in frappe.get_list(
 			"Marketplace Sync Log",
@@ -1103,17 +1073,10 @@ def _collect_fulfillment_errors(accounts):
 			fields=fields,
 			limit_page_length=0,
 		):
-			action, shipment, data = parts_of(log)
+			key = (log.marketplace_order, action_of(log))
 			stamp = stamp_of(log)
-			remember(last_success, (log.marketplace_order, action, shipment), stamp)
-			if shipment and action == "DiscardShipment":
-				remember(last_discard, (log.marketplace_order, shipment), stamp)
-			if (
-				shipment
-				and action == "CreateShipment"
-				and data.get("note") == RECOVERED_VIA_GET_SHIPMENT_NOTE
-			):
-				remember(last_recovery, (log.marketplace_order, shipment), stamp)
+			if key not in last_success or stamp > last_success[key]:
+				last_success[key] = stamp
 
 	# One lookup for the customer-facing order numbers shown instead of the MKTORD names.
 	references = {}
@@ -1126,49 +1089,21 @@ def _collect_fulfillment_errors(accounts):
 		):
 			references[order.name] = order.platform_order_reference
 
-	# #391: Delivery Notes named by refusals logged before any shipment existed; one lookup for all.
-	logged_notes = {
-		cstr(parts_of(log)[2].get("delivery_note")).strip() for log in errors
-	} - {""}
-	open_notes = set()
-	for chunk in _chunks(logged_notes):
-		open_notes.update(
-			frappe.get_all(
-				"Delivery Note",
-				filters={"name": ["in", chunk], "docstatus": 0, "custom_carrier_status": "Error"},
-				pluck="name",
-			)
-		)
-
 	items = []
 	seen = set()
 	for log in errors:
-		action, shipment, data = parts_of(log)
-		key = (log.marketplace_order, action, shipment)
-		# #391: a refusal before any shipment exists is logged against the Delivery Note
-		# it came from; it is open only while that draft note still shows the error.
-		note = cstr(data.get("delivery_note")).strip()
-		if note and note not in open_notes:
+		action = action_of(log)
+		key = (log.marketplace_order, action)
+		if key in seen:
 			continue
-		if (key, note) in seen:
-			continue
-		seen.add((key, note))
-		stamp = stamp_of(log)
-		resolved_by = [last_success.get(key)]
-		if shipment:
-			resolved_by.append(last_discard.get((log.marketplace_order, shipment)))
-			if action == "GetShipment":
-				resolved_by.append(last_recovery.get((log.marketplace_order, shipment)))
-		if any(later and later > stamp for later in resolved_by):
+		seen.add(key)
+		later = last_success.get(key)
+		if later and later > stamp_of(log):
 			continue
 		label = _fulfillment_action_label(action)
 		message = _fulfillment_message(log) or _("{0} failed - open the order.").format(label)
 		order_reference = references.get(log.marketplace_order) or log.marketplace_order or ""
-		explanation = (
-			_("{0} failed on order {1} (Delivery Note {2}): {3}").format(label, order_reference, note, message)
-			if note
-			else _("{0} failed on order {1}: {2}").format(label, order_reference, message)
-		)
+		explanation = _("{0} failed on order {1}: {2}").format(label, order_reference, message)
 		items.append(
 			_item(
 				FULFILLMENT_ERROR,
@@ -1242,128 +1177,25 @@ def _collect_noon_rollups(accounts):
 	if not noon_accounts:
 		return []
 
-	rollups = {}
-
-	def rollup(order):
-		return rollups.setdefault(
-			order,
-			{
-				"shipments": 0,
-				"worst": None,
-				"invoice_errors": 0,
-				"pending_oos": 0,
-				"stuck_pending": 0,
-				"not_handed_over": 0,
-				"notes": [],
-			},
-		)
-
+	# Shipment problems are Delivery Note rows now (the carrier collector); one rollup row per order
+	# remains for units reserved for a queued Out of Stock call.
 	pending = _get_orders(
 		noon_accounts,
 		{"platform": "Noon", "noon_pending_oos_units": ["not in", ["", "[]"]]},
-		["name", "noon_pending_oos_units"],
+		["name", "marketplace_account", "platform", "modified", "noon_pending_oos_units"],
 	)
+	items = []
 	for order in pending:
 		count = _pending_oos_count(order.noon_pending_oos_units)
-		if count:
-			rollup(order.name)["pending_oos"] = count
-
-	# Child rows can't be filtered by the parent's account/platform in one
-	# query, so fetch the problem shipments and resolve their parents in bulk.
-	shipments = frappe.get_list(
-		"Marketplace Order Shipment",
-		parent_doctype="Marketplace Order",
-		# Cancelled / Discarded shipments are closed: an old invoice error on one
-		# must not keep the order flagged.
-		filters={"status": ["not in", ["Cancelled", "Discarded"]]},
-		or_filters={"status": ["in", NOON_SHIPMENT_ATTENTION_STATUSES], "invoice_status": "Error"},
-		fields=["parent", "status", "invoice_status", "delivery_note"],
-		limit_page_length=0,
-	)
-	for shipment in shipments:
-		entry = rollup(shipment.parent)
-		entry["shipments"] += 1
-		# #391: name the Delivery Note a problem shipment was created from.
-		if shipment.delivery_note and shipment.delivery_note not in entry["notes"]:
-			entry["notes"].append(shipment.delivery_note)
-		if shipment.status in NOON_SHIPMENT_ATTENTION_STATUSES:
-			if entry["worst"] != "Error":
-				entry["worst"] = shipment.status
-		if shipment.invoice_status == "Error":
-			entry["invoice_errors"] += 1
-
-	# #164: Pending shipments older than the threshold (Created / Cancelled /
-	# Discarded / Error / Cancel Pending are not Pending, so they never match).
-	stuck = frappe.get_list(
-		"Marketplace Order Shipment",
-		parent_doctype="Marketplace Order",
-		filters={
-			"status": "Pending",
-			"creation": ["<=", add_to_date(now_datetime(), hours=-NOON_PENDING_SHIPMENT_STUCK_HOURS)],
-		},
-		fields=["parent"],
-		limit_page_length=0,
-	)
-	for shipment in stuck:
-		rollup(shipment.parent)["stuck_pending"] += 1
-
-	# #368: Created shipments nobody marked handed over (no handed_over_on) for longer than the
-	# reminder threshold and with no live Delivery Note. Cancelled / Discarded are not Created, and
-	# setting handed_over_on (Mark Handed Over) or cancelling/discarding the shipment clears it.
-	unhanded = frappe.get_list(
-		"Marketplace Order Shipment",
-		parent_doctype="Marketplace Order",
-		filters={
-			"status": "Created",
-			"handed_over_on": ["is", "not set"],
-			"creation": ["<=", add_to_date(now_datetime(), hours=-NOON_HANDOVER_REMINDER_HOURS)],
-		},
-		fields=["parent", "delivery_note", "delivery_notes"],
-		limit_page_length=0,
-	)
-	for shipment in unhanded:
-		if not handover_state.live_notes(shipment):
-			rollup(shipment.parent)["not_handed_over"] += 1
-
-	if not rollups:
-		return []
-	orders = _get_orders_by_name(list(rollups), ["name", "marketplace_account", "platform", "modified"])
-	items = []
-	for order in orders:
-		if order.platform != "Noon" or order.marketplace_account not in noon_accounts:
+		if not count:
 			continue
-		entry = rollups[order.name]
-		parts = []
-		if entry["shipments"]:
-			text = _("{0} shipment(s) need attention").format(entry["shipments"])
-			if entry["worst"]:
-				text += _(" (worst: {0})").format(_(entry["worst"]))
-			if entry["notes"]:
-				text += _(" (Delivery Note: {0})").format(", ".join(entry["notes"]))
-			parts.append(text)
-		if entry["invoice_errors"]:
-			parts.append(_("{0} invoice upload(s) failed").format(entry["invoice_errors"]))
-		if entry["stuck_pending"]:
-			parts.append(
-				_("{0} shipment(s) stuck in Pending for over {1} hour(s)").format(
-					entry["stuck_pending"], NOON_PENDING_SHIPMENT_STUCK_HOURS
-				)
-			)
-		if entry["not_handed_over"]:
-			parts.append(
-				_("{0} shipment(s) created but not marked handed over for over {1} hour(s)").format(
-					entry["not_handed_over"], NOON_HANDOVER_REMINDER_HOURS
-				)
-			)
-		if entry["pending_oos"]:
-			parts.append(_("{0} unit(s) pending Out of Stock").format(entry["pending_oos"]))
 		items.append(
 			_item(
 				NOON_FULFILLMENT,
 				noon_accounts[order.marketplace_account],
 				"Marketplace Order",
 				order.name,
-				"; ".join(parts),
+				_("{0} unit(s) pending Out of Stock").format(count),
 				order.modified,
 				NEXT_OPEN_ORDER,
 			)

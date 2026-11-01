@@ -61,7 +61,19 @@ Deleted: the `Bosta Shipment` and `Bosta Shipment Item` doctypes, `bulk.py`, `de
 3. A Supplier named like the carrier and its carrier-specific Custom Fields (with their own `depends_on`).
 4. A small JS file calling `frappe.marketplace_integrations.shipping.register_carrier(name, {before_send(frm) -> bool, refresh(frm), add_buttons(frm), pick_city(frm), locked_fields})` (the shell calls the neutral `api.carrier_shipments` methods; carrier-only rules such as the Bosta COD gate live in the carrier's file), listed after `delivery_note_shipping.js` in `hooks.py` `doctype_js`.
 
-## Intended extension points for Noon (documented only, not built)
+## Provider contract (standing convention for every future carrier)
+
+A carrier is an adapter module `integrations/<carrier>/delivery_note_shipment.py` registered in `services/carrier_shipments.CARRIERS`. Neutral code (`services/carrier_shipments.py`, `services/carrier_log.py`, `api/carrier_shipments.py`, `public/js/delivery_note_shipping.js`, the Needs Attention carrier collector) never names a carrier and holds no carrier logic or carrier field; a grep test (`services/test_carrier_contract.py`) enforces it. The adapter exposes exactly these members:
+
+- `SHIPPING_CARRIER`, `SERVICE_NAME`: the Supplier name the Shipping section shows for, and the service name of the log rows.
+- `applies_to(doc)`: does this note belong to the carrier. `guard_changes(doc)`: `validate` rules (locked fields, items once started). `clear_inherited(doc)`: what an amended note must not inherit. `validate_ready(doc)`: everything refusable before the carrier is contacted.
+- `find_remote(doc)`: the shipment data, `None` when the carrier confirms there is none, or raises `Unknown`. `create_remote(doc)`: the data, or raises `Failed` (definite refusal) or `Unknown`. `created_values(doc, data)`: the fields to write once created. `after_created(note, data)`: follow-up work (Bosta label job).
+- `cancel_remote(doc)`: Cancelled, `Refused(reason)` or raises `Unknown`. `refresh(note)`: read the carrier and write the status. `reconcile()`: the nightly check. `refuse_sales_order_cancel(order)`. `problem_states()`: `{problem_type: [shipping statuses]}` for Needs Attention.
+- Carrier-only rules (address source, COD) stay inside `validate_ready` / `create_remote` / `guard_changes`, never as contract methods. Client side: `register_carrier(name, {before_send(frm) -> bool, refresh(frm), add_buttons(frm)})`.
+
+Rules every adapter keeps: ask the carrier first before any create or cancel; no automatic retry without an idempotency key; timeout, connection error, 5xx/408/429 or a malformed answer is Unknown, never Failed; a definite 4xx is Failed or Refused; nothing is held open across HTTP; the carrier's status is its own words. Do not add a contract method before a real second carrier needs it.
+
+## Intended extension points for Noon (historical: Noon was built in #415, see `docs/noon-integration/README.md`)
 
 Noon joins the same Shipping section in a separate epic. These are the carrier differences that must stay behind the adapter, so Noon needs no renames or shell rewrite. No hook exists for them yet; add each one when Noon needs it.
 
@@ -69,7 +81,7 @@ Noon joins the same Shipping section in a separate epic. These are the carrier d
 - Tracking number: Bosta is API-assigned; Noon takes a manual AWB from a pool before the first save.
 - Submit wait: Bosta's Submit waits on a queued job (`request_method`); Noon creates the shipment on save and Submit would not wait.
 - Fields editable before creation: Bosta locks carrier, tracking number, COD, city and items once started; Noon locks items and quantities only.
-- Status fields: Noon still uses `custom_carrier_status` / `custom_carrier_error`; moving it to `custom_integration_status` / `custom_last_integration_error` is part of the Noon epic.
+- Status fields: done in #415, Noon uses `custom_integration_status` / `custom_last_integration_error`; `custom_carrier_status` / `custom_carrier_error` were removed.
 
 ## Unverified Bosta facts (open questions, safest behavior built)
 

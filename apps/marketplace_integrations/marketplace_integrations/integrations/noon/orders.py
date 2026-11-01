@@ -167,7 +167,7 @@ def import_order(account, raw_order, bump_trigger_source="Noon Order Import", ec
 
 	``bump_trigger_source`` is the sync-debounce trigger source recorded if this import
 	bumps (#178): the poller keeps "Noon Order Import"; a self-initiated re-import (our
-	own create-shipment / mark-out-of-stock actions, ``refresh_order()``) passes "Manual"
+	own mark-out-of-stock action, ``refresh_order()``) passes "Manual"
 	so its Sales Order sync is not mislabelled as a poll. Still bumps either way - the
 	planner must see the change those actions made.
 
@@ -190,20 +190,21 @@ def import_order(account, raw_order, bump_trigger_source="Noon Order Import", ec
 	whose ``name`` is not in the parent's current in-memory list for that
 	exact ``parentfield``). A poll run that loaded this order's row under
 	ordinary REPEATABLE READ semantics could therefore silently delete a
-	``Marketplace Order Shipment``/``...Unit``/``...AWB`` row committed by a
-	concurrent fulfillment action (``integrations/noon/fulfillment.py``)
-	between this poll's own read and its own save - that concurrent write is
-	invisible to a plain snapshot read, but ``update_children()`` does not
-	know or care that it only ever touches ``items`` here; it iterates every
-	Table field on the doctype.
+	child row committed by a concurrent fulfillment action
+	(``integrations/noon/fulfillment.py``; the shipment child tables that
+	motivated this are gone since #415, the lock stays for every other write to
+	the order row) between this poll's own read and its own save - that
+	concurrent write is invisible to a plain snapshot read, but
+	``update_children()`` does not know or care that it only ever touches
+	``items`` here; it iterates every Table field on the doctype.
 
 	The fix is a **locking** read, not a plain one: ``frappe.db.sql(...,
 	FOR UPDATE)`` is an InnoDB locking read, which (unlike an ordinary
 	consistent/snapshot read under REPEATABLE READ) always reads the latest
 	COMMITTED row version and takes an exclusive row lock, blocking until any
 	other transaction holding that same lock (e.g. a concurrent fulfillment
-	write, which acquires the identical lock before it modifies a shipment
-	table - see ``integrations/noon/fulfillment.py``) releases it.
+	write, which acquires the identical lock before it modifies the order -
+	see ``integrations/noon/fulfillment.py``) releases it.
 
 	Round-3 review (#146 review finding #1) found the ordering half of this
 	fix was still wrong: this function used to call ``normalize_order()``
@@ -319,8 +320,8 @@ def import_order(account, raw_order, bump_trigger_source="Noon Order Import", ec
 
 	# #146 decision 7 bumped ONLY on the first transition into eligibility and never
 	# once a Sales Order was linked.  #178 part 3 reverses the linked half: a poll
-	# that changes a LINKED order (units cancelled/out of stock/shipped, shipment
-	# membership, ...) now bumps too, so the reconciliation planner sees it
+	# that changes a LINKED order (units cancelled/out of stock/shipped, units its
+	# Delivery Notes started, ...) now bumps too, so the reconciliation planner sees it
 	# (``bump_if_linked_order_changed()``: only when the evidence fingerprint
 	# changed, so a poll that merely re-confirms an order never re-bumps).  The
 	# first-eligibility bump for a not-yet-linked order is unchanged.

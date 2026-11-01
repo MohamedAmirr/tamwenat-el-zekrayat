@@ -1,26 +1,25 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-"""Noon FBPI shipment fulfillment tests (#146 section C) - shippable-unit
-computation, shipment allocation/numbering, Create/Cancel/AddAWB/UpdateOrder/
-invoice workers, idempotent retry, and Sync Log evidence. Mocks NoonClient
-and never makes real HTTP calls, same convention as integrations/noon/
-test_orders.py. Fixtures use only the documented Noon API shapes from the
-locked plan's facts table (``docs/noon-integration/noon_api_full.md``).
+"""Noon FBPI order-level fulfillment tests (#146 section C, trimmed by #415) - shippable-unit
+computation, the available actions, Mark Out of Stock, the order invoice and Sync Log evidence.
+Shipment create, cancel and refresh are tested in test_delivery_note_shipment.py. Mocks NoonClient
+and never makes real HTTP calls, same convention as integrations/noon/test_orders.py. Fixtures use
+only the documented Noon API shapes (``docs/noon-integration/noon_api_full.md``).
 """
 
 from unittest.mock import MagicMock, patch
 
 import frappe
-from frappe.model.document import Document
 from frappe.tests import IntegrationTestCase
-from frappe.utils import add_to_date, cstr, now_datetime, nowdate
+from frappe.utils import nowdate
 
-from marketplace_integrations.integrations.noon import awb_pool, expected_change, fulfillment
-from marketplace_integrations.marketplace_integrations.doctype.noon_awb.noon_awb import (
-	compute_awb_identity_key,
-)
+from marketplace_integrations.integrations.noon import expected_change, fulfillment
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
+
+_ADAPTER = "marketplace_integrations.integrations.noon.delivery_note_shipment"
+_STARTED = f"{_ADAPTER}.started_units_of_order"
+_HAS_CREATED_NOTE = f"{_ADAPTER}.has_created_note"
 
 # A minimal but structurally valid single-page PDF (proper xref table/startxref
 # offset) - unlike the ad-hoc "%PDF-1.4\n...\n%%EOF" fixtures used elsewhere in
@@ -98,6 +97,16 @@ def _make_fulfillment_order(account, fbpi_order_nr, payload_items):
 	)
 
 
+def _delete_noon_account_fixtures(account):
+	# delete_doc (not db.delete) so the child rows of Marketplace Order go too
+	for order_name in frappe.get_all("Marketplace Order", filters={"marketplace_account": account.name}, pluck="name"):
+		frappe.delete_doc("Marketplace Order", order_name, ignore_permissions=True, force=True)
+	frappe.db.delete("Marketplace Sync Log", filters={"marketplace_account": account.name})
+	frappe.delete_doc("Marketplace Account", account.name, ignore_permissions=True, force=True)
+	frappe.delete_doc("Noon Connection", account.connection, ignore_permissions=True, force=True)
+	frappe.db.commit()
+
+
 class IntegrationTestNoonFulfillmentBase(IntegrationTestCase):
 	def setUp(self):
 		suffix = frappe.generate_hash(length=8)
@@ -105,7 +114,6 @@ class IntegrationTestNoonFulfillmentBase(IntegrationTestCase):
 		self.fbpi_order_nr = f"ORD-FUL-{suffix}"
 
 	def tearDown(self):
-		frappe.db.delete("Noon AWB", {"marketplace_account": self.account.name})
 		frappe.db.delete("Marketplace Order", filters={"marketplace_account": self.account.name})
 		frappe.db.delete("Marketplace Sync Log", filters={"marketplace_account": self.account.name})
 		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
@@ -137,67 +145,34 @@ class IntegrationTestNoonShippableUnits(IntegrationTestNoonFulfillmentBase):
 		shippable = fulfillment.get_shippable_units(order)
 		self.assertEqual([row["mp_item_nr"] for row in shippable], ["1"])
 
-	def test_units_already_claimed_by_an_active_shipment_are_excluded(self):
+	def test_units_started_by_a_live_noon_delivery_note_are_excluded(self):
 		order = _make_fulfillment_order(
 			self.account,
 			self.fbpi_order_nr,
 			[_confirmed_acknowledged(1), _confirmed_acknowledged(2, "SKU-002")],
 		)
-		order.append(
-			"noon_shipments",
-			{"integration_shipment_nr": f"{self.fbpi_order_nr}-1", "status": "Created", "awb_source": "Noon"},
-		)
-		order.append(
-			"noon_shipment_units",
-			{
-				"integration_shipment_nr": f"{self.fbpi_order_nr}-1",
-				"mp_item_nr": "1",
-				"partner_sku": "SKU-001",
-			},
-		)
-		order.save()
+		with patch(_STARTED, return_value={"1"}) as started:
+			shippable = fulfillment.get_shippable_units(order)
 
-		shippable = fulfillment.get_shippable_units(order)
 		self.assertEqual([row["mp_item_nr"] for row in shippable], ["2"])
+		started.assert_called_once_with(order.name)
 
-	def test_units_claimed_only_by_a_cancelled_shipment_remain_shippable(self):
+	def test_units_of_no_live_note_remain_shippable(self):
 		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-		order.append(
-			"noon_shipments",
-			{
-				"integration_shipment_nr": f"{self.fbpi_order_nr}-1",
-				"status": "Cancelled",
-				"awb_source": "Noon",
-			},
-		)
-		order.append(
-			"noon_shipment_units",
-			{
-				"integration_shipment_nr": f"{self.fbpi_order_nr}-1",
-				"mp_item_nr": "1",
-				"partner_sku": "SKU-001",
-			},
-		)
-		order.save()
+		with patch(_STARTED, return_value=set()):
+			shippable = fulfillment.get_shippable_units(order)
 
-		shippable = fulfillment.get_shippable_units(order)
 		self.assertEqual([row["mp_item_nr"] for row in shippable], ["1"])
 
 
 class IntegrationTestNoonAvailableActions(IntegrationTestNoonFulfillmentBase):
-	def _add_shipment(self, order, status, **extra):
-		order.append(
-			"noon_shipments",
-			{"integration_shipment_nr": f"{self.fbpi_order_nr}-1", "status": status, "awb_source": "Noon", **extra},
-		)
-		order.save()
-
-	def test_acknowledged_order_offers_only_unit_actions(self):
+	def test_acknowledged_order_offers_only_mark_out_of_stock(self):
 		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-		self.assertEqual(
-			fulfillment.get_available_actions(order),
-			{"actions": ["create_shipment", "mark_out_of_stock"], "cancelled_on_noon": False},
-		)
+		with patch(_HAS_CREATED_NOTE, return_value=False):
+			self.assertEqual(
+				fulfillment.get_available_actions(order),
+				{"actions": ["mark_out_of_stock"], "cancelled_on_noon": False},
+			)
 
 	def test_cancelled_units_offer_nothing_and_flag_cancelled_on_noon(self):
 		order = _make_fulfillment_order(
@@ -205,676 +180,43 @@ class IntegrationTestNoonAvailableActions(IntegrationTestNoonFulfillmentBase):
 			self.fbpi_order_nr,
 			[{**_confirmed_acknowledged(1), "mp_status": "MP_ITEM_STATUS_CANCELLED"}],
 		)
-		self.assertEqual(
-			fulfillment.get_available_actions(order), {"actions": [], "cancelled_on_noon": True}
-		)
+		with patch(_HAS_CREATED_NOTE, return_value=False):
+			self.assertEqual(
+				fulfillment.get_available_actions(order), {"actions": [], "cancelled_on_noon": True}
+			)
 
-	def test_created_shipment_offers_shipment_actions_and_no_unit_actions(self):
+	def test_a_created_note_offers_the_order_invoice_and_its_retry_follows_the_status(self):
 		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-		self._add_shipment(order, "Created")
-		order.append(
-			"noon_shipment_units",
-			{"integration_shipment_nr": f"{self.fbpi_order_nr}-1", "mp_item_nr": "1", "partner_sku": "SKU-001"},
-		)
-		order.save()
-		result = fulfillment.get_available_actions(order)
-		self.assertEqual(
-			result["actions"],
-			["cancel_shipment", "add_awb", "mark_handed_over", "upload_invoice", "upload_order_invoice"],
-		)
-		self.assertFalse(result["cancelled_on_noon"])
+		with patch(_HAS_CREATED_NOTE, return_value=True), patch(_STARTED, return_value={"1"}):
+			result = fulfillment.get_available_actions(order)
+			self.assertEqual(result["actions"], ["upload_order_invoice"])
+			self.assertFalse(result["cancelled_on_noon"])
 
-		# Retry appears once the Created shipment has a Pending invoice upload,
-		# and upload_invoice() itself refuses while one is already pending.
-		order.noon_shipments[0].invoice_status = "Pending"
-		order.save()
-		self.assertEqual(
-			fulfillment.get_available_actions(order)["actions"],
-			["cancel_shipment", "add_awb", "mark_handed_over", "retry"],
-		)
-
-	def test_error_shipment_offers_retry_and_discard(self):
-		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-		self._add_shipment(order, "Error", last_error="boom")
-		order.append(
-			"noon_shipment_units",
-			{"integration_shipment_nr": f"{self.fbpi_order_nr}-1", "mp_item_nr": "1", "partner_sku": "SKU-001"},
-		)
-		order.save()
-		self.assertEqual(fulfillment.get_available_actions(order)["actions"], ["retry", "discard_shipment"])
+			order.noon_order_invoice_status = "Pending"
+			self.assertEqual(fulfillment.get_available_actions(order)["actions"], ["retry_order_invoice"])
+			order.noon_order_invoice_status = "Error"
+			self.assertEqual(
+				fulfillment.get_available_actions(order)["actions"],
+				["upload_order_invoice", "retry_order_invoice"],
+			)
 
 	def test_pending_oos_reservation_offers_release(self):
 		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
 		order.noon_pending_oos_units = frappe.as_json(["1"])
 		order.save()
-		self.assertEqual(
-			fulfillment.get_available_actions(order)["actions"], ["release_stuck_oos_reservation"]
-		)
+		with patch(_HAS_CREATED_NOTE, return_value=False):
+			self.assertEqual(
+				fulfillment.get_available_actions(order)["actions"], ["release_stuck_oos_reservation"]
+			)
 
 	def test_endpoint_returns_actions_for_a_noon_order(self):
 		from marketplace_integrations.api import noon_fulfillment
 
 		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-		self.assertEqual(
-			noon_fulfillment.get_available_actions(order.name)["actions"],
-			["create_shipment", "mark_out_of_stock"],
-		)
-
-
-class IntegrationTestNoonCreateShipmentRequestPath(IntegrationTestNoonFulfillmentBase):
-	def setUp(self):
-		super().setUp()
-		self.order = _make_fulfillment_order(
-			self.account,
-			self.fbpi_order_nr,
-			[_confirmed_acknowledged(1), _confirmed_acknowledged(2, "SKU-002")],
-		)
-
-	def test_rejects_units_that_are_not_shippable(self):
-		with self.assertRaises(frappe.ValidationError):
-			fulfillment.create_shipment(self.order.name, ["999"], "Noon")
-
-	def test_refuses_an_own_courier_request(self):
-		with self.assertRaises(frappe.ValidationError):
-			fulfillment.create_shipment(self.order.name, ["1"], "Own Courier")
-		self.order.reload()
-		self.assertEqual(len(self.order.noon_shipments), 0)
-		self.assertEqual(len(self.order.noon_shipment_awbs), 0)
-
-	def test_awb_source_defaults_to_noon_and_writes_no_awb_row_before_the_worker(self):
-		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
-			enqueue.return_value = MagicMock()
-			fulfillment.create_shipment(self.order.name, ["1"])
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].awb_source, "Noon")
-		# The Noon AWB (pool, else one GetNoonLogisticsAWBs call) is attached by the worker.
-		self.assertEqual(len(self.order.noon_shipment_awbs), 0)
-
-	def test_writes_pending_rows_and_enqueues_without_any_noon_http_call(self):
-		with (
-			patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue,
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-		):
-			enqueue.return_value = MagicMock()
-			result = fulfillment.create_shipment(self.order.name, ["1"], "Noon")
-			self.assertNotIn("enqueue_after_commit", enqueue.call_args.kwargs)
-
-			client_class.return_value.request.assert_not_called()
-		self.assertEqual(result["integration_shipment_nr"], f"{self.fbpi_order_nr}-1")
-		self.assertTrue(result["queued"])
-
-		self.order.reload()
-		self.assertEqual(len(self.order.noon_shipments), 1)
-		self.assertEqual(self.order.noon_shipments[0].status, "Pending")
-		self.assertEqual(self.order.noon_shipments[0].awb_source, "Noon")
-		self.assertEqual([row.mp_item_nr for row in self.order.noon_shipment_units], ["1"])
-
-	def test_new_shipment_row_creation_is_its_own_not_the_orders_import_time(self):
-		frappe.db.set_value("Marketplace Order", self.order.name, "creation", add_to_date(None, hours=-5))
-		self.addCleanup(
-			frappe.delete_doc, "Marketplace Order", self.order.name, force=True, ignore_permissions=True
-		)
-		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
-			enqueue.return_value = MagicMock()
-			fulfillment.create_shipment(self.order.name, ["1"], "Noon")
-
-		shipment_creation = frappe.db.get_value(
-			"Marketplace Order Shipment", {"parent": self.order.name}, "creation"
-		)
-		self.assertGreater(shipment_creation, add_to_date(None, hours=-1))
-
-	def test_rejects_a_unit_already_claimed_by_an_active_shipment(self):
-		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
-			enqueue.return_value = MagicMock()
-			fulfillment.create_shipment(self.order.name, ["1"], "Noon")
-			with self.assertRaises(frappe.ValidationError):
-				fulfillment.create_shipment(self.order.name, ["1"], "Noon")
-
-	def test_shipment_numbers_are_never_reused_after_cancellation(self):
-		"""Decision 13: n = 1 + every shipment ever created on this order,
-		including cancelled ones."""
-		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
-			enqueue.return_value = MagicMock()
-			first = fulfillment.create_shipment(self.order.name, ["1"], "Noon")
-		self.assertEqual(first["integration_shipment_nr"], f"{self.fbpi_order_nr}-1")
-
-		self.order.reload()
-		self.order.noon_shipments[0].status = "Cancelled"
-		self.order.save()
-
-		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
-			enqueue.return_value = MagicMock()
-			second = fulfillment.create_shipment(self.order.name, ["2"], "Noon")
-		self.assertEqual(second["integration_shipment_nr"], f"{self.fbpi_order_nr}-2")
-
-
-class IntegrationTestNoonCreateShipmentWorker(IntegrationTestNoonFulfillmentBase):
-	def setUp(self):
-		super().setUp()
-		self.order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
-			enqueue.return_value = MagicMock()
-			fulfillment.create_shipment(self.order.name, ["1"], "Noon")
-		self.shipment_nr = f"{self.fbpi_order_nr}-1"
-
-	def _patch_refresh(self):
-		"""run_create_shipment() always re-fetches+re-imports the order
-		first (decision 12) - patched to a no-op returning the same raw
-		payload, since re-verifying the re-import path itself is
-		integrations/noon/test_orders.py's job, not this module's."""
-		return patch(
-			"marketplace_integrations.integrations.noon.fulfillment.import_order",
-			return_value=(self.order, []),
-		), patch(
-			"marketplace_integrations.integrations.noon.fulfillment.get_fbpi_order",
-			return_value={"fbpi_order_nr": self.fbpi_order_nr, "items": [_confirmed_acknowledged(1)]},
-		)
-
-	def test_happy_path_creates_shipment_and_logs_success(self):
-		import_patch, get_patch = self._patch_refresh()
-		get_response = MagicMock(status_code=404)
-		awb_response = MagicMock(status_code=200)
-		awb_response.json.return_value = {"awb_nrs": ["NOON-AWB-1"]}
-		create_response = MagicMock(status_code=200)
-		with (
-			import_patch,
-			get_patch,
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-		):
-			client = client_class.return_value
-			client.request.side_effect = [get_response, awb_response, create_response]
-			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
-
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].status, "Created")
-		logs = frappe.get_all(
-			"Marketplace Sync Log",
-			filters={"marketplace_order": self.order.name, "sync_type": "Fulfillment"},
-			fields=["status"],
-		)
-		self.assertEqual([log.status for log in logs], ["Success"])
-
-	def test_noon_400_no_shipment_found_is_treated_as_not_found(self):
-		"""Production Noon answers GetShipment for an unknown shipment with HTTP 400
-		INVALID_ARGUMENT "No shipment found ..." (not 404); creation must proceed."""
-		import_patch, get_patch = self._patch_refresh()
-		get_response = MagicMock(status_code=400)
-		get_response.json.return_value = {
-			"error": {
-				"code": "INVALID_ARGUMENT",
-				"message": "AssertionError(\"No shipment found with integration_shipment_nr 'X'.\")",
-			}
-		}
-		awb_response = MagicMock(status_code=200)
-		awb_response.json.return_value = {"awb_nrs": ["NOON-AWB-1"]}
-		create_response = MagicMock(status_code=200)
-		with (
-			import_patch,
-			get_patch,
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-		):
-			client = client_class.return_value
-			client.request.side_effect = [get_response, awb_response, create_response]
-			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
-
-		self.assertEqual(client.request.call_args.args[1], fulfillment.SHIPMENT_CREATE_PATH)
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].status, "Created")
-
-	def test_other_get_shipment_400_never_resends_create(self):
-		import_patch, get_patch = self._patch_refresh()
-		get_response = MagicMock(status_code=400)
-		get_response.json.return_value = {"error": {"code": "INVALID_ARGUMENT", "message": "bad warehouse"}}
-		with (
-			import_patch,
-			get_patch,
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-		):
-			client = client_class.return_value
-			client.request.return_value = get_response
-			client.error_message.return_value = "bad warehouse"
-			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
-
-		self.assertEqual(client.request.call_count, 1)
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].status, "Error")
-
-	def test_retry_finds_shipment_via_get_shipment_and_never_resends_create(self):
-		"""Decision 15: CreateShipment documents no idempotency key -
-		retrying a Pending/Error shipment calls GetShipment first, and a 200
-		there means the shipment already exists - no CreateShipment call."""
-		import_patch, get_patch = self._patch_refresh()
-		get_response = MagicMock(status_code=200)
-		get_response.json.return_value = {"awbs": [], "items": [{"mp_item_nr": 1}]}
-		with (
-			import_patch,
-			get_patch,
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-		):
-			client = client_class.return_value
-			client.request.return_value = get_response
-			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
-
-		self.assertEqual(client.request.call_count, 1)
-		self.assertEqual(client.request.call_args.args[1], fulfillment.SHIPMENT_GET_PATH)
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].status, "Created")
-
-	def test_get_shipment_server_error_never_resends_create(self):
-		import_patch, get_patch = self._patch_refresh()
-		with (
-			import_patch,
-			get_patch,
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-		):
-			client = client_class.return_value
-			client.request.return_value = MagicMock(status_code=500)
-			client.error_message.return_value = "GetShipment unavailable"
-			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
-		self.assertEqual(client.request.call_count, 1)
-		self.assertEqual(client.request.call_args.args[1], fulfillment.SHIPMENT_GET_PATH)
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].status, "Error")
-
-	def test_noon_awb_is_generated_once_and_reused_on_retry(self):
-		"""Decision 14: a Noon-generated AWB is fetched/saved/committed
-		exactly once, before CreateShipment, and reused on every retry."""
-		import_patch, get_patch = self._patch_refresh()
-		not_found = MagicMock(status_code=404)
-		awb_response = MagicMock(status_code=200)
-		awb_response.json.return_value = {"awb_nrs": ["NOON-AWB-1"]}
-		create_response = MagicMock(status_code=200)
-		with (
-			import_patch,
-			get_patch,
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-		):
-			client = client_class.return_value
-			client.request.side_effect = [not_found, awb_response, create_response]
-			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
-
-		self.order.reload()
-		self.assertEqual(len(self.order.noon_shipment_awbs), 1)
-		self.assertEqual(self.order.noon_shipment_awbs[0].awb_nr, "NOON-AWB-1")
-		self.assertEqual(self.order.noon_shipment_awbs[0].status, "Added")
-
-		# Error-and-retry: AWB row already exists, so NOON_LOGISTICS_AWBS_GET_PATH
-		# must not be called a second time.
-		self.order.noon_shipments[0].status = "Error"
-		self.order.save()
-		import_patch2, get_patch2 = self._patch_refresh()
-		not_found2 = MagicMock(status_code=404)
-		create_response2 = MagicMock(status_code=200)
-		with (
-			import_patch2,
-			get_patch2,
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class2,
-		):
-			client2 = client_class2.return_value
-			client2.request.side_effect = [not_found2, create_response2]
-			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
-
-		paths_called = [call.args[1] for call in client2.request.call_args_list]
-		self.assertNotIn(fulfillment.NOON_LOGISTICS_AWBS_GET_PATH, paths_called)
-		self.order.reload()
-		self.assertEqual(len(self.order.noon_shipment_awbs), 1)
-		self.assertEqual(self.order.noon_shipment_awbs[0].awb_nr, "NOON-AWB-1")
-
-	def _add_pool_awb(self, awb_nr):
-		return frappe.get_doc(
-			{
-				"doctype": "Noon AWB",
-				"marketplace_account": self.account.name,
-				"awb_nr": awb_nr,
-				"country_code": self.account.noon_country_code,
-				"status": "Available",
-			}
-		).insert(ignore_permissions=True)
-
-	def test_pool_awb_is_used_and_marked_used_without_a_noon_awb_call(self):
-		self._add_pool_awb("POOL-AWB-1")
-		import_patch, get_patch = self._patch_refresh()
-		with (
-			import_patch,
-			get_patch,
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-		):
-			client = client_class.return_value
-			client.request.side_effect = [MagicMock(status_code=404), MagicMock(status_code=200)]
-			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
-
-		paths_called = [call.args[1] for call in client.request.call_args_list]
-		self.assertNotIn(fulfillment.NOON_LOGISTICS_AWBS_GET_PATH, paths_called)
-		create_body = client.request.call_args_list[-1].kwargs["json"]
-		self.assertEqual(create_body["awbs"][0]["awb_nr"], "POOL-AWB-1")
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipment_awbs[0].awb_nr, "POOL-AWB-1")
-		self.assertEqual(self.order.noon_shipments[0].status, "Created")
-		pool_row = frappe.get_doc("Noon AWB", {"marketplace_account": self.account.name})
-		self.assertEqual(pool_row.status, "Used")
-		self.assertEqual(pool_row.marketplace_order, self.order.name)
-		self.assertEqual(pool_row.integration_shipment_nr, self.shipment_nr)
-		self.assertIsNotNone(pool_row.used_on)
-
-	def test_empty_pool_falls_back_to_single_awb_call(self):
-		import_patch, get_patch = self._patch_refresh()
-		awb_response = MagicMock(status_code=200)
-		awb_response.json.return_value = {"awb_nrs": ["NOON-AWB-1"]}
-		with (
-			import_patch,
-			get_patch,
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-		):
-			client = client_class.return_value
-			client.request.side_effect = [MagicMock(status_code=404), awb_response, MagicMock(status_code=200)]
-			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
-
-		awb_call = client.request.call_args_list[1]
-		self.assertEqual(awb_call.args[1], fulfillment.NOON_LOGISTICS_AWBS_GET_PATH)
-		self.assertEqual(awb_call.kwargs["json"], {"country_code": "ae", "qty": 1})
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipment_awbs[0].awb_nr, "NOON-AWB-1")
-
-	def test_pool_awb_is_reused_on_retry_not_another_claimed(self):
-		self._add_pool_awb("POOL-AWB-1")
-		self._add_pool_awb("POOL-AWB-2")
-		import_patch, get_patch = self._patch_refresh()
-		with (
-			import_patch,
-			get_patch,
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-		):
-			client = client_class.return_value
-			client.request.side_effect = [MagicMock(status_code=404), MagicMock(status_code=200)]
-			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
-
-		self.order.reload()
-		first_awb = self.order.noon_shipment_awbs[0].awb_nr
-		self.order.noon_shipments[0].status = "Error"
-		self.order.save()
-		import_patch2, get_patch2 = self._patch_refresh()
-		with (
-			import_patch2,
-			get_patch2,
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class2,
-		):
-			client2 = client_class2.return_value
-			client2.request.side_effect = [MagicMock(status_code=404), MagicMock(status_code=200)]
-			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
-
-		self.order.reload()
-		self.assertEqual(len(self.order.noon_shipment_awbs), 1)
-		self.assertEqual(self.order.noon_shipment_awbs[0].awb_nr, first_awb)
-		statuses = frappe.get_all(
-			"Noon AWB", filters={"marketplace_account": self.account.name}, pluck="status"
-		)
-		self.assertCountEqual(statuses, ["Used", "Available"])
-
-	def test_failed_shipment_keeps_its_claimed_awb_used(self):
-		self._add_pool_awb("POOL-AWB-1")
-		import_patch, get_patch = self._patch_refresh()
-		with (
-			import_patch,
-			get_patch,
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-		):
-			client = client_class.return_value
-			client.error_message.return_value = "bad"
-			client.request.side_effect = [MagicMock(status_code=404), MagicMock(status_code=400)]
-			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
-
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].status, "Error")
-		self.assertEqual(frappe.db.get_value("Noon AWB", {"awb_nr": "POOL-AWB-1"}, "status"), "Used")
-
-
-class IntegrationTestNoonCancelShipment(IntegrationTestNoonFulfillmentBase):
-	def setUp(self):
-		super().setUp()
-		self.order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-
-	def test_cancel_only_allowed_for_created_shipments(self):
-		self.order.append(
-			"noon_shipments",
-			{"integration_shipment_nr": f"{self.fbpi_order_nr}-1", "status": "Pending", "awb_source": "Noon"},
-		)
-		self.order.save()
-		with self.assertRaises(frappe.ValidationError):
-			fulfillment.cancel_shipment(self.order.name, f"{self.fbpi_order_nr}-1")
-
-	def test_cancel_sets_cancel_pending_then_worker_marks_cancelled(self):
-		self.order.append(
-			"noon_shipments",
-			{"integration_shipment_nr": f"{self.fbpi_order_nr}-1", "status": "Created", "awb_source": "Noon"},
-		)
-		self.order.save()
-
-		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
-			enqueue.return_value = MagicMock()
-			fulfillment.cancel_shipment(self.order.name, f"{self.fbpi_order_nr}-1")
-			self.assertNotIn("enqueue_after_commit", enqueue.call_args.kwargs)
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].status, "Cancel Pending")
-
-		with patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class:
-			client_class.return_value.request.return_value = MagicMock(status_code=200)
-			fulfillment.run_cancel_shipment(self.order.name, f"{self.fbpi_order_nr}-1")
-
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].status, "Cancelled")
-		logs = frappe.get_all(
-			"Marketplace Sync Log",
-			filters={"marketplace_order": self.order.name, "sync_type": "Fulfillment"},
-			fields=["status"],
-		)
-		self.assertEqual([log.status for log in logs], ["Success"])
-
-
-class IntegrationTestNoonDiscardShipment(IntegrationTestNoonFulfillmentBase):
-	"""#146 round-3 review finding #2: discard_shipment()/
-	release_stuck_oos_reservation() recovery actions."""
-
-	def setUp(self):
-		super().setUp()
-		self.order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-
-	def test_discard_only_allowed_from_error_or_cancel_pending(self):
-		self.order.append(
-			"noon_shipments",
-			{"integration_shipment_nr": f"{self.fbpi_order_nr}-1", "status": "Created", "awb_source": "Noon"},
-		)
-		self.order.save()
-		with self.assertRaises(frappe.ValidationError):
-			fulfillment.discard_shipment(self.order.name, f"{self.fbpi_order_nr}-1")
-
-	def test_discard_from_error_releases_claimed_unit(self):
-		self.order.append(
-			"noon_shipments",
-			{
-				"integration_shipment_nr": f"{self.fbpi_order_nr}-1",
-				"status": "Error",
-				"awb_source": "Noon",
-				"last_error": "Something went wrong",
-			},
-		)
-		self.order.append(
-			"noon_shipment_units",
-			{
-				"integration_shipment_nr": f"{self.fbpi_order_nr}-1",
-				"mp_item_nr": "1",
-				"partner_sku": "SKU-001",
-			},
-		)
-		self.order.save()
-
-		result = fulfillment.discard_shipment(self.order.name, f"{self.fbpi_order_nr}-1")
-		self.assertTrue(result["discarded"])
-
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].status, "Discarded")
-		self.assertIsNone(self.order.noon_shipments[0].last_error)
-		# The unit discarding this shipment held is shippable again.
-		shippable = {row["mp_item_nr"] for row in fulfillment.get_shippable_units(self.order)}
-		self.assertIn("1", shippable)
-
-		logs = frappe.get_all(
-			"Marketplace Sync Log",
-			filters={"marketplace_order": self.order.name, "sync_type": "Fulfillment"},
-			fields=["status"],
-		)
-		self.assertEqual([log.status for log in logs], ["Success"])
-
-	def test_discard_from_cancel_pending(self):
-		self.order.append(
-			"noon_shipments",
-			{
-				"integration_shipment_nr": f"{self.fbpi_order_nr}-1",
-				"status": "Cancel Pending",
-				"awb_source": "Noon",
-			},
-		)
-		self.order.save()
-		fulfillment.discard_shipment(self.order.name, f"{self.fbpi_order_nr}-1")
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].status, "Discarded")
-
-	def test_release_stuck_oos_reservation_clears_pending_units(self):
-		self.order.noon_pending_oos_units = frappe.as_json(["1"])
-		self.order.save()
-
-		result = fulfillment.release_stuck_oos_reservation(self.order.name)
-		self.assertEqual(result["released"], ["1"])
-
-		self.order.reload()
-		self.assertEqual(frappe.parse_json(self.order.noon_pending_oos_units), [])
-
-	def test_release_stuck_oos_reservation_requires_a_reservation(self):
-		with self.assertRaises(frappe.ValidationError):
-			fulfillment.release_stuck_oos_reservation(self.order.name)
-
-
-class IntegrationTestNoonAddAwb(IntegrationTestNoonFulfillmentBase):
-	def setUp(self):
-		super().setUp()
-		self.order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-		self.shipment_nr = f"{self.fbpi_order_nr}-1"
-		self.order.append(
-			"noon_shipments",
-			{"integration_shipment_nr": self.shipment_nr, "status": "Created", "awb_source": "Own Courier"},
-		)
-		self.order.save()
-
-	def _queue_awb(self, courier="noon"):
-		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
-			enqueue.return_value = MagicMock()
-			fulfillment.add_awb(self.order.name, self.shipment_nr, courier, "AWB-1")
-			self.assertNotIn("enqueue_after_commit", enqueue.call_args.kwargs)
-
-	def test_add_awb_accepts_noon_case_insensitively_and_stores_lowercase_noon(self):
-		self._queue_awb("Noon")
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipment_awbs[0].courier, "noon")
-		self.assertEqual(self.order.noon_shipment_awbs[0].source, "Noon")
-		self.assertEqual(self.order.noon_shipment_awbs[0].status, "Pending")
-
-	def test_add_awb_refuses_any_other_courier(self):
-		for courier in ("Aramex", "", "noon2"):
-			with self.assertRaises(frappe.ValidationError):
-				self._queue_awb(courier)
-		self.order.reload()
-		self.assertEqual(len(self.order.noon_shipment_awbs), 0)
-
-	def test_add_awb_payload_sent_to_noon_has_courier_noon(self):
-		self._queue_awb("Noon")
-		with patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class:
-			client = client_class.return_value
-			get_response = MagicMock(status_code=200)
-			get_response.json.return_value = {"awbs": []}
-			client.request.side_effect = [get_response, MagicMock(status_code=200)]
-			fulfillment.run_add_awb(self.order.name, self.shipment_nr, "AWB-1")
-		add_call = client.request.call_args_list[1]
-		self.assertEqual(add_call.args[1], fulfillment.SHIPMENT_COURIER_AWBS_ADD_PATH)
-		self.assertEqual(add_call.kwargs["json"]["awbs"], [{"courier": "noon", "awb_nr": "AWB-1"}])
-
-	def test_legacy_own_courier_shipment_and_awb_rows_still_retry_cancel_and_report_actions(self):
-		self.order.append(
-			"noon_shipment_awbs",
-			{
-				"integration_shipment_nr": self.shipment_nr,
-				"courier": "Aramex",
-				"awb_nr": "AWB-1",
-				"source": "Own Courier",
-				"status": "Pending",
-			},
-		)
-		self.order.save()
-		self.assertIn("retry", fulfillment.get_available_actions(frappe.get_doc("Marketplace Order", self.order.name))["actions"])
-		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
-			enqueue.return_value = MagicMock()
-			self.assertEqual(fulfillment.retry(self.order.name, self.shipment_nr), {"queued": True})
-			self.assertEqual(enqueue.call_args.args[0], fulfillment.run_add_awb)
-			self.assertEqual(enqueue.call_args.kwargs["awb_nr"], "AWB-1")
-			self.assertEqual(fulfillment.cancel_shipment(self.order.name, self.shipment_nr), {"queued": True})
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].status, "Cancel Pending")
-		self.assertEqual(self.order.noon_shipments[0].awb_source, "Own Courier")
-		self.assertEqual(self.order.noon_shipment_awbs[0].courier, "Aramex")
-
-	def test_legacy_own_courier_shipment_in_error_can_be_discarded(self):
-		self.order.noon_shipments[0].status = "Error"
-		self.order.save()
-		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue"):
-			fulfillment.discard_shipment(self.order.name, self.shipment_nr)
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].status, "Discarded")
-
-	def test_duplicate_awb_is_rejected_without_another_row(self):
-		self._queue_awb()
-		with self.assertRaises(frappe.ValidationError):
-			self._queue_awb()
-		self.order.reload()
-		self.assertEqual(len(self.order.noon_shipment_awbs), 1)
-
-	def test_get_shipment_server_error_never_adds_awb(self):
-		self._queue_awb()
-		with patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class:
-			client = client_class.return_value
-			client.request.return_value = MagicMock(status_code=500)
-			client.error_message.return_value = "GetShipment unavailable"
-			fulfillment.run_add_awb(self.order.name, self.shipment_nr, "AWB-1")
-		self.assertEqual(client.request.call_count, 1)
-		self.assertEqual(client.request.call_args.args[1], fulfillment.SHIPMENT_GET_PATH)
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipment_awbs[0].status, "Pending")
-
-	def test_malformed_get_shipment_body_never_adds_awb(self):
-		self._queue_awb()
-		with patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class:
-			client = client_class.return_value
-			client.request.return_value = MagicMock(status_code=200)
-			client.request.return_value.json.return_value = {}
-			fulfillment.run_add_awb(self.order.name, self.shipment_nr, "AWB-1")
-		self.assertEqual(client.request.call_count, 1)
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipment_awbs[0].status, "Pending")
-
-	def test_cancelled_shipment_does_not_add_queued_awb(self):
-		self._queue_awb()
-		self.order.reload()
-		self.order.noon_shipments[0].status = "Cancelled"
-		self.order.save()
-		with patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class:
-			fulfillment.run_add_awb(self.order.name, self.shipment_nr, "AWB-1")
-			client_class.return_value.request.assert_not_called()
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipment_awbs[0].status, "Skipped")
-
-	def test_awb_retry_reports_an_already_queued_job(self):
-		self._queue_awb()
-		with patch(
-			"marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue", return_value=None
-		):
-			self.assertEqual(fulfillment.retry(self.order.name, self.shipment_nr), {"queued": False})
+		with patch(_HAS_CREATED_NOTE, return_value=False):
+			self.assertEqual(
+				noon_fulfillment.get_available_actions(order.name)["actions"], ["mark_out_of_stock"]
+			)
 
 
 class IntegrationTestNoonMarkOutOfStock(IntegrationTestNoonFulfillmentBase):
@@ -908,9 +250,8 @@ class IntegrationTestNoonMarkOutOfStock(IntegrationTestNoonFulfillmentBase):
 			fulfillment.mark_out_of_stock(order.name, ["1"])
 		order.reload()
 		self.assertEqual(fulfillment._pending_oos_units(order), {"1"})
+		# The reserved unit is no longer shippable (a Delivery Note cannot take it either).
 		self.assertEqual(fulfillment.get_shippable_units(order), [])
-		with self.assertRaises(frappe.ValidationError):
-			fulfillment.create_shipment(order.name, ["1"], "Noon")
 		with (
 			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
 			patch(
@@ -1010,43 +351,37 @@ class IntegrationTestNoonMarkOutOfStock(IntegrationTestNoonFulfillmentBase):
 		order.reload()
 		self.assertEqual(fulfillment._pending_oos_units(order), {"2"})
 
-	def test_worker_skips_unit_claimed_after_reservation(self):
+	def test_worker_skips_unit_a_noon_delivery_note_started_after_the_reservation(self):
 		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
 		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
 			enqueue.return_value = MagicMock()
 			fulfillment.mark_out_of_stock(order.name, ["1"])
 		order.reload()
-		order.append(
-			"noon_shipments",
-			{"integration_shipment_nr": f"{self.fbpi_order_nr}-1", "status": "Created", "awb_source": "Noon"},
-		)
-		order.append(
-			"noon_shipment_units",
-			{
-				"integration_shipment_nr": f"{self.fbpi_order_nr}-1",
-				"mp_item_nr": "1",
-				"partner_sku": "SKU-001",
-			},
-		)
-		order.save()
-		with patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class:
+		with (
+			patch(_STARTED, return_value={"1"}),
+			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
+		):
 			fulfillment.run_mark_out_of_stock(order.name, ["1"])
 			client_class.return_value.request.assert_not_called()
 		order.reload()
 		self.assertEqual(fulfillment._pending_oos_units(order), set())
 
 
-class IntegrationTestNoonShipmentInvoice(IntegrationTestNoonFulfillmentBase):
+class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):
+	"""UploadFbpiOrderInvoice: the Created-shipment precondition (a Noon Delivery Note), the idempotency
+	key, the file rules and the error paths."""
+
 	def setUp(self):
 		super().setUp()
 		self.order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-		self.order.append(
-			"noon_shipments",
-			{"integration_shipment_nr": f"{self.fbpi_order_nr}-1", "status": "Created", "awb_source": "Noon"},
-		)
-		self.order.save()
-		self.shipment_nr = f"{self.fbpi_order_nr}-1"
 		self._file_content_map = {}
+		patcher = patch(_HAS_CREATED_NOTE, return_value=True)
+		self.has_created_note = patcher.start()
+		self.addCleanup(patcher.stop)
+
+	def tearDown(self):
+		frappe.db.delete("File", filters={"attached_to_name": self.order.name})
+		super().tearDown()
 
 	def _make_file(self, content):
 		file_doc = frappe.get_doc(
@@ -1059,7 +394,6 @@ class IntegrationTestNoonShipmentInvoice(IntegrationTestNoonFulfillmentBase):
 				"attached_to_name": self.order.name,
 			}
 		).insert()
-		# Store content mapping by file_url for mocking
 		self._file_content_map[file_doc.file_url] = content
 		return file_doc
 
@@ -1077,230 +411,6 @@ class IntegrationTestNoonShipmentInvoice(IntegrationTestNoonFulfillmentBase):
 			return original_get_content(file_doc, *args, **kwargs)
 
 		return patch.object(File, "get_content", autospec=True, side_effect=get_content)
-
-	def tearDown(self):
-		frappe.db.delete("File", filters={"attached_to_name": self.order.name})
-		super().tearDown()
-
-	def test_rejects_non_pdf_content(self):
-		file_doc = self._make_file(b"not a pdf")
-		with self._patch_get_content():
-			with self.assertRaises(frappe.ValidationError):
-				fulfillment.upload_invoice(
-					self.order.name, self.shipment_nr, file_doc.file_url, "INV-1", nowdate()
-				)
-
-	def test_rejects_public_file(self):
-		"""#146 round-3 review finding #9: a public File must be rejected -
-		the field's own description says "Private PDF attachment", but
-		nothing enforced it before this fix."""
-		file_doc = frappe.get_doc(
-			{
-				"doctype": "File",
-				"file_name": "public-invoice-fixture.pdf",
-				"content": _MINIMAL_VALID_PDF,
-				"is_private": 0,
-				"attached_to_doctype": "Marketplace Order",
-				"attached_to_name": self.order.name,
-			}
-		).insert()
-		with self.assertRaises(frappe.ValidationError):
-			fulfillment.upload_invoice(self.order.name, self.shipment_nr, file_doc.file_url, "INV-1", nowdate())
-
-	def test_rejects_oversized_file(self):
-		file_doc = self._make_file(b"%PDF-1.4\nmock invoice content exceeding the patched limit\n%%EOF")
-		with (
-			self._patch_get_content(),
-			patch("marketplace_integrations.integrations.noon.fulfillment.SHIPMENT_INVOICE_MAX_BYTES", 10),
-		):
-			with self.assertRaises(frappe.ValidationError):
-				fulfillment.upload_invoice(
-					self.order.name, self.shipment_nr, file_doc.file_url, "INV-1", nowdate()
-				)
-
-	def test_idempotency_key_generated_once_and_reused_on_retry(self):
-		file_doc = self._make_file(b"%PDF-1.4\nmock invoice content\n%%EOF")
-		with (
-			self._patch_get_content(),
-			patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue,
-		):
-			enqueue.return_value = MagicMock()
-			fulfillment.upload_invoice(
-				self.order.name, self.shipment_nr, file_doc.file_url, "INV-1", nowdate()
-			)
-		self.order.reload()
-		first_key = self.order.noon_shipments[0].invoice_idempotency_key
-		self.assertTrue(first_key)
-
-		with (
-			self._patch_get_content(),
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-		):
-			response = MagicMock(status_code=500)
-			client_class.return_value.request.return_value = response
-			fulfillment.run_upload_invoice(self.order.name, self.shipment_nr, first_key)
-
-		# Retry (run_upload_invoice again) must send the SAME key, never a new one.
-		with (
-			self._patch_get_content(),
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-		):
-			response = MagicMock(status_code=200)
-			client_class.return_value.request.return_value = response
-			fulfillment.run_upload_invoice(self.order.name, self.shipment_nr, first_key)
-			payload = client_class.return_value.request.call_args.kwargs["json"]
-		self.assertEqual(payload["idempotency_key"], first_key)
-		# The base64 invoice payload must never reach the Sync Log.
-		logs = frappe.get_all(
-			"Marketplace Sync Log",
-			filters={"marketplace_order": self.order.name, "sync_type": "Fulfillment"},
-			fields=["request_data", "response_data"],
-		)
-		for log in logs:
-			self.assertNotIn(payload["invoice"], (log.request_data or "") + (log.response_data or ""))
-
-	def test_second_upload_is_rejected_while_first_is_pending(self):
-		first_file = self._make_file(b"%PDF-1.4\nfirst invoice\n%%EOF")
-		second_file = self._make_file(b"%PDF-1.4\nsecond invoice\n%%EOF")
-		with (
-			self._patch_get_content(),
-			patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue,
-		):
-			enqueue.return_value = MagicMock()
-			fulfillment.upload_invoice(
-				self.order.name, self.shipment_nr, first_file.file_url, "INV-1", nowdate()
-			)
-			self.assertNotIn("enqueue_after_commit", enqueue.call_args.kwargs)
-			with self.assertRaises(frappe.ValidationError):
-				fulfillment.upload_invoice(
-					self.order.name, self.shipment_nr, second_file.file_url, "INV-2", nowdate()
-				)
-			self.assertEqual(enqueue.call_count, 1)
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].invoice_file, first_file.file_url)
-		self.assertEqual(self.order.noon_shipments[0].invoice_nr, "INV-1")
-		self.assertEqual(self.order.noon_shipments[0].invoice_status, "Pending")
-
-	def test_stale_invoice_job_cannot_send_a_new_upload(self):
-		file_doc = self._make_file(b"%PDF-1.4\nmock invoice content\n%%EOF")
-		with (
-			self._patch_get_content(),
-			patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue,
-		):
-			enqueue.return_value = MagicMock()
-			fulfillment.upload_invoice(
-				self.order.name, self.shipment_nr, file_doc.file_url, "INV-1", nowdate()
-			)
-		self.order.reload()
-		first_key = self.order.noon_shipments[0].invoice_idempotency_key
-		self.order.noon_shipments[0].invoice_status = "Uploaded"
-		self.order.save()
-		with (
-			self._patch_get_content(),
-			patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue,
-		):
-			enqueue.return_value = MagicMock()
-			fulfillment.upload_invoice(
-				self.order.name, self.shipment_nr, file_doc.file_url, "INV-2", nowdate()
-			)
-		self.order.reload()
-		second_key = self.order.noon_shipments[0].invoice_idempotency_key
-		self.assertNotEqual(first_key, second_key)
-		with (
-			self._patch_get_content(),
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-		):
-			fulfillment.run_upload_invoice(self.order.name, self.shipment_nr, first_key)
-			client_class.return_value.request.assert_not_called()
-
-	def test_cancelled_shipment_does_not_upload_queued_invoice(self):
-		file_doc = self._make_file(b"%PDF-1.4\nmock invoice content\n%%EOF")
-		with (
-			self._patch_get_content(),
-			patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue,
-		):
-			enqueue.return_value = MagicMock()
-			fulfillment.upload_invoice(
-				self.order.name, self.shipment_nr, file_doc.file_url, "INV-1", nowdate()
-			)
-		self.order.reload()
-		key = self.order.noon_shipments[0].invoice_idempotency_key
-		self.order.noon_shipments[0].status = "Cancelled"
-		self.order.save()
-		with (
-			self._patch_get_content(),
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-		):
-			fulfillment.run_upload_invoice(self.order.name, self.shipment_nr, key)
-			client_class.return_value.request.assert_not_called()
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].invoice_status, "Error")
-		with self.assertRaises(frappe.ValidationError):
-			fulfillment.retry(self.order.name, self.shipment_nr)
-
-	def test_invoice_retry_reports_an_already_queued_job(self):
-		file_doc = self._make_file(b"%PDF-1.4\nmock invoice content\n%%EOF")
-		with (
-			self._patch_get_content(),
-			patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue,
-		):
-			enqueue.return_value = MagicMock()
-			fulfillment.upload_invoice(
-				self.order.name, self.shipment_nr, file_doc.file_url, "INV-1", nowdate()
-			)
-		with patch(
-			"marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue", return_value=None
-		):
-			self.assertEqual(fulfillment.retry(self.order.name, self.shipment_nr), {"queued": False})
-
-	def test_no_accounting_or_stock_documents_are_ever_created(self):
-		"""Decision 23: shipments are Noon-side evidence only."""
-		doctypes = ("Sales Invoice", "Payment Entry", "GL Entry", "Delivery Note", "Stock Entry")
-		before = {doctype: frappe.db.count(doctype) for doctype in doctypes}
-		file_doc = self._make_file(b"%PDF-1.4\nmock invoice content\n%%EOF")
-		with (
-			self._patch_get_content(),
-			patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue,
-		):
-			enqueue.return_value = MagicMock()
-			fulfillment.upload_invoice(
-				self.order.name, self.shipment_nr, file_doc.file_url, "INV-1", nowdate()
-			)
-		with (
-			self._patch_get_content(),
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-		):
-			client_class.return_value.request.return_value = MagicMock(status_code=200)
-			self.order.reload()
-			fulfillment.run_upload_invoice(
-				self.order.name, self.shipment_nr, self.order.noon_shipments[0].invoice_idempotency_key
-			)
-		self.assertEqual({doctype: frappe.db.count(doctype) for doctype in doctypes}, before)
-
-
-class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):
-	"""UploadFbpiOrderInvoice: mirrors the shipment-invoice tests, plus the
-	no-mixing rule and the Created-shipment precondition."""
-
-	_make_file = IntegrationTestNoonShipmentInvoice._make_file
-	_patch_get_content = IntegrationTestNoonShipmentInvoice._patch_get_content
-
-	def setUp(self):
-		super().setUp()
-		self.order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-		self.shipment_nr = f"{self.fbpi_order_nr}-1"
-		self._file_content_map = {}
-
-	def tearDown(self):
-		frappe.db.delete("File", filters={"attached_to_name": self.order.name})
-		super().tearDown()
-
-	def _add_created_shipment(self):
-		self.order.append(
-			"noon_shipments",
-			{"integration_shipment_nr": self.shipment_nr, "status": "Created", "awb_source": "Noon"},
-		)
-		self.order.save()
 
 	def _upload(self, file_doc, invoice_nr="INV-1"):
 		with (
@@ -1324,13 +434,13 @@ class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):
 			return client_class.return_value.request
 
 	def test_requires_a_created_shipment(self):
+		self.has_created_note.return_value = False
 		file_doc = self._make_file(b"%PDF-1.4\nmock invoice content\n%%EOF")
 		with self._patch_get_content(), self.assertRaises(frappe.ValidationError):
 			fulfillment.upload_order_invoice(self.order.name, file_doc.file_url, "INV-1", nowdate())
 		self.assertNotIn("upload_order_invoice", fulfillment.get_available_actions(self.order)["actions"])
 
 	def test_success_sends_order_level_payload_and_marks_uploaded(self):
-		self._add_created_shipment()
 		file_doc = self._make_file(b"%PDF-1.4\nmock invoice content\n%%EOF")
 		self.assertEqual(self._upload(file_doc), {"queued": True})
 		key = self.order.noon_order_invoice_idempotency_key
@@ -1353,7 +463,6 @@ class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):
 		self.assertNotIn(kwargs["json"]["invoice"], (logs[0].request_data or "") + (logs[0].response_data or ""))
 
 	def test_idempotent_retry_reuses_the_same_key(self):
-		self._add_created_shipment()
 		self._upload(self._make_file(b"%PDF-1.4\nmock invoice content\n%%EOF"))
 		key = self.order.noon_order_invoice_idempotency_key
 		self._run_worker(key, status_code=500)
@@ -1370,7 +479,6 @@ class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):
 		self.assertFalse(self.order.noon_order_invoice_last_error)
 
 	def test_stale_job_cannot_send_after_a_reupload(self):
-		self._add_created_shipment()
 		self._upload(self._make_file(b"%PDF-1.4\nfirst\n%%EOF"))
 		first_key = self.order.noon_order_invoice_idempotency_key
 		self._run_worker(first_key)
@@ -1380,7 +488,6 @@ class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):
 		self.assertFalse(self._run_worker(first_key).called)
 
 	def test_second_upload_is_rejected_while_pending(self):
-		self._add_created_shipment()
 		self._upload(self._make_file(b"%PDF-1.4\nfirst\n%%EOF"))
 		second = self._make_file(b"%PDF-1.4\nsecond\n%%EOF")
 		with self._patch_get_content(), self.assertRaises(frappe.ValidationError):
@@ -1388,34 +495,7 @@ class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):
 		self.order.reload()
 		self.assertEqual(self.order.noon_order_invoice_nr, "INV-1")
 
-	def test_shipment_invoice_pending_or_uploaded_blocks_order_invoice(self):
-		self._add_created_shipment()
-		file_doc = self._make_file(b"%PDF-1.4\nmock invoice content\n%%EOF")
-		for status in ("Pending", "Uploaded"):
-			self.order.noon_shipments[0].invoice_status = status
-			self.order.save()
-			with self._patch_get_content(), self.assertRaises(frappe.ValidationError):
-				fulfillment.upload_order_invoice(self.order.name, file_doc.file_url, "INV-1", nowdate())
-			self.assertNotIn("upload_order_invoice", fulfillment.get_available_actions(self.order)["actions"])
-		# An Error shipment invoice does not block.
-		self.order.noon_shipments[0].invoice_status = "Error"
-		self.order.save()
-		self.assertEqual(self._upload(file_doc), {"queued": True})
-
-	def test_order_invoice_pending_or_uploaded_blocks_shipment_invoice(self):
-		self._add_created_shipment()
-		file_doc = self._make_file(b"%PDF-1.4\nmock invoice content\n%%EOF")
-		for status in ("Pending", "Uploaded"):
-			self.order.noon_order_invoice_status = status
-			self.order.save()
-			with self._patch_get_content(), self.assertRaises(frappe.ValidationError):
-				fulfillment.upload_invoice(self.order.name, self.shipment_nr, file_doc.file_url, "INV-1", nowdate())
-			self.assertNotIn("upload_invoice", fulfillment.get_available_actions(self.order)["actions"])
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].invoice_status, "Not Uploaded")
-
 	def test_reupload_over_an_uploaded_order_invoice_is_allowed(self):
-		self._add_created_shipment()
 		self._upload(self._make_file(b"%PDF-1.4\nfirst\n%%EOF"))
 		first_key = self.order.noon_order_invoice_idempotency_key
 		self._run_worker(first_key)
@@ -1423,13 +503,11 @@ class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):
 		self.assertNotEqual(self.order.noon_order_invoice_idempotency_key, first_key)
 
 	def test_rejects_non_pdf_content(self):
-		self._add_created_shipment()
 		file_doc = self._make_file(b"not a pdf")
 		with self._patch_get_content(), self.assertRaises(frappe.ValidationError):
 			fulfillment.upload_order_invoice(self.order.name, file_doc.file_url, "INV-1", nowdate())
 
 	def test_rejects_public_file(self):
-		self._add_created_shipment()
 		file_doc = frappe.get_doc(
 			{
 				"doctype": "File",
@@ -1444,7 +522,6 @@ class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):
 			fulfillment.upload_order_invoice(self.order.name, file_doc.file_url, "INV-1", nowdate())
 
 	def test_rejects_oversized_file(self):
-		self._add_created_shipment()
 		file_doc = self._make_file(b"%PDF-1.4\nmock invoice content exceeding the patched limit\n%%EOF")
 		with (
 			self._patch_get_content(),
@@ -1454,11 +531,9 @@ class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):
 			fulfillment.upload_order_invoice(self.order.name, file_doc.file_url, "INV-1", nowdate())
 
 	def test_worker_errors_when_the_created_shipment_is_gone(self):
-		self._add_created_shipment()
 		self._upload(self._make_file(b"%PDF-1.4\nmock invoice content\n%%EOF"))
 		key = self.order.noon_order_invoice_idempotency_key
-		self.order.noon_shipments[0].status = "Cancelled"
-		self.order.save()
+		self.has_created_note.return_value = False
 		self.assertFalse(self._run_worker(key).called)
 		self.assertEqual(self.order.noon_order_invoice_status, "Error")
 
@@ -1474,7 +549,6 @@ class IntegrationTestNoonReadableNames(IntegrationTestNoonFulfillmentBase):
 			self.fbpi_order_nr,
 			[_confirmed_acknowledged(1), _confirmed_acknowledged(2, "SKU-002"), _confirmed_acknowledged(3)],
 		)
-		self.shipment_nr = f"{self.fbpi_order_nr}-4"
 
 	def _mapped(self, mapped_skus):
 		"""Patch the mapping lookup: only ``mapped_skus`` (sku -> item_name) resolve."""
@@ -1507,391 +581,10 @@ class IntegrationTestNoonReadableNames(IntegrationTestNoonFulfillmentBase):
 		# SKU-001 is on two units but resolved once.
 		self.assertEqual(sorted(call.args[1] for call in resolve.call_args_list), ["SKU-001", "SKU-002"])
 
-	def test_unit_label_falls_back_to_the_sku(self):
-		self.assertEqual(fulfillment.unit_label("SKU-001", {"SKU-001": "Hand Soap 500ml"}), "Hand Soap 500ml (SKU-001)")
-		self.assertEqual(fulfillment.unit_label("SKU-009", {}), "SKU-009")
-
-	def test_not_shippable_error_names_the_unit_by_item_and_sku(self):
-		resolve_patch, value_patch, _resolve = self._mapped({"SKU-001": "Hand Soap 500ml"})
-		with resolve_patch, value_patch, patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue"):
-			fulfillment.create_shipment(self.order.name, ["1"], "Noon")
-			with self.assertRaises(frappe.ValidationError) as raised:
-				fulfillment.create_shipment(self.order.name, ["1", "2"], "Noon")
-		message = str(raised.exception)
-		self.assertIn("Hand Soap 500ml (SKU-001)", message)
-		self.assertNotIn("Units 1", message)
-
-	def test_shipment_items_group_by_sku_with_quantity(self):
-		self.order.append("noon_shipments", {"integration_shipment_nr": self.shipment_nr, "status": "Created", "awb_source": "Noon"})
-		for nr, sku in (("1", "SKU-001"), ("2", "SKU-002"), ("3", "SKU-001")):
-			self.order.append(
-				"noon_shipment_units",
-				{"integration_shipment_nr": self.shipment_nr, "mp_item_nr": nr, "partner_sku": sku},
-			)
-		self.order.save()
-		resolve_patch, value_patch, resolve = self._mapped({"SKU-001": "Hand Soap 500ml"})
-		with resolve_patch, value_patch:
-			items = fulfillment.shipment_items(self.order)
-		self.assertEqual(
-			items[self.shipment_nr],
-			[{"label": "Hand Soap 500ml (SKU-001)", "qty": 2}, {"label": "SKU-002", "qty": 1}],
-		)
-		self.assertEqual(resolve.call_count, 2)
-
-	def test_sync_log_adds_readable_keys_and_keeps_existing_ones(self):
-		self.order.append("noon_shipments", {"integration_shipment_nr": self.shipment_nr, "status": "Created", "awb_source": "Noon"})
-		self.order.append(
-			"noon_shipment_units",
-			{"integration_shipment_nr": self.shipment_nr, "mp_item_nr": "1", "partner_sku": "SKU-001"},
-		)
-		self.order.save()
-		resolve_patch, value_patch, _resolve = self._mapped({"SKU-001": "Hand Soap 500ml"})
-		with resolve_patch, value_patch:
-			fulfillment._log_fulfillment(
-				self.order, "CreateShipment", "Success", {"integration_shipment_nr": self.shipment_nr}
-			)
+	def test_sync_log_adds_the_order_reference_and_keeps_existing_keys(self):
+		fulfillment._log_fulfillment(self.order, "UpdateOrder", "Success", {"mp_item_nrs": ["1"]})
 		log = frappe.get_last_doc("Marketplace Sync Log", filters={"marketplace_order": self.order.name})
 		data = frappe.parse_json(log.request_data)
-		self.assertEqual(data["action"], "CreateShipment")
-		self.assertEqual(data["integration_shipment_nr"], self.shipment_nr)
-		self.assertEqual(data["shipment_label"], "Shipment 4")
-		self.assertEqual(data["items"], ["Hand Soap 500ml (SKU-001)"])
+		self.assertEqual(data["action"], "UpdateOrder")
+		self.assertEqual(data["mp_item_nrs"], ["1"])
 		self.assertEqual(data["order_reference"], self.order.platform_order_reference or "")
-
-
-# ---------------------------------------------------------------------------
-# #385: AWB typed or scanned from a Noon sticker on the request path.
-# ---------------------------------------------------------------------------
-
-_ENQUEUE = "marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue"
-_CLAIM = "marketplace_integrations.integrations.noon.fulfillment.claim_pool_awb"
-_CLIENT = "marketplace_integrations.integrations.noon.fulfillment.NoonClient"
-
-
-def _delete_noon_account_fixtures(account):
-	frappe.db.delete("Noon AWB", {"marketplace_account": account.name})
-	# delete_doc (not db.delete) so the child rows of Marketplace Order go too
-	for order_name in frappe.get_all("Marketplace Order", filters={"marketplace_account": account.name}, pluck="name"):
-		frappe.delete_doc("Marketplace Order", order_name, ignore_permissions=True, force=True)
-	frappe.db.delete("Marketplace Sync Log", filters={"marketplace_account": account.name})
-	frappe.delete_doc("Marketplace Account", account.name, ignore_permissions=True, force=True)
-	frappe.delete_doc("Noon Connection", account.connection, ignore_permissions=True, force=True)
-	frappe.db.commit()
-
-
-def _add_noon_awb(account, awb_nr, status, marketplace_order=None):
-	return frappe.get_doc(
-		{
-			"doctype": "Noon AWB",
-			"marketplace_account": account.name,
-			"awb_nr": awb_nr,
-			"country_code": account.noon_country_code,
-			"status": status,
-			"marketplace_order": marketplace_order,
-			"generated_on": now_datetime(),
-		}
-	).insert(ignore_permissions=True)
-
-
-class IntegrationTestNoonTypedAwbRequestPath(IntegrationTestNoonFulfillmentBase):
-	"""#385: create_shipment(..., awb_nr) records a typed AWB instead of claiming one."""
-
-	def setUp(self):
-		super().setUp()
-		self.order = _make_fulfillment_order(
-			self.account,
-			self.fbpi_order_nr,
-			[_confirmed_acknowledged(1), _confirmed_acknowledged(2, "SKU-002")],
-		)
-		self.shipment_nr = f"{self.fbpi_order_nr}-1"
-
-	def _create(self, order, awb_nr, mp_item_nrs=("1",)):
-		with patch(_ENQUEUE) as enqueue:
-			enqueue.return_value = MagicMock()
-			result = fulfillment.create_shipment(order.name, list(mp_item_nrs), "Noon", awb_nr)
-		return result, enqueue
-
-	def _noon_awb_count(self):
-		return frappe.db.count("Noon AWB", {"marketplace_account": self.account.name})
-
-	def _assert_order_untouched(self):
-		self.order.reload()
-		self.assertEqual(len(self.order.noon_shipments), 0)
-		self.assertEqual(len(self.order.noon_shipment_units), 0)
-		self.assertEqual(len(self.order.noon_shipment_awbs), 0)
-
-	def test_empty_and_spaces_only_awb_keep_todays_behavior(self):
-		for awb_nr, unit in (("", "1"), ("   ", "2")):
-			with self.subTest(awb_nr=awb_nr):
-				_result, enqueue = self._create(self.order, awb_nr, [unit])
-				enqueue.assert_called_once()
-
-		self.order.reload()
-		self.assertEqual([row.status for row in self.order.noon_shipments], ["Pending", "Pending"])
-		self.assertEqual({row.awb_source for row in self.order.noon_shipments}, {"Noon"})
-		self.assertEqual(len(self.order.noon_shipment_awbs), 0)
-		self.assertEqual(self._noon_awb_count(), 0)
-
-	def test_filled_awb_writes_shipment_units_pending_awb_and_a_used_noon_awb_row(self):
-		result, enqueue = self._create(self.order, "NOON-STK-1001")
-		enqueue.assert_called_once()
-		self.assertEqual(result["integration_shipment_nr"], self.shipment_nr)
-		self.assertTrue(result["queued"])
-
-		self.order.reload()
-		self.assertEqual(len(self.order.noon_shipments), 1)
-		shipment = self.order.noon_shipments[0]
-		self.assertEqual((shipment.status, shipment.awb_source), ("Pending", "Noon"))
-		self.assertEqual([row.mp_item_nr for row in self.order.noon_shipment_units], ["1"])
-
-		self.assertEqual(len(self.order.noon_shipment_awbs), 1)
-		awb = self.order.noon_shipment_awbs[0]
-		self.assertEqual(
-			(awb.integration_shipment_nr, awb.courier, awb.awb_nr, awb.source, awb.status),
-			(self.shipment_nr, "noon", "NOON-STK-1001", "Noon", "Pending"),
-		)
-
-		pool_rows = frappe.get_all(
-			"Noon AWB",
-			filters={"marketplace_account": self.account.name},
-			fields=["awb_nr", "status", "marketplace_order", "integration_shipment_nr", "used_on", "country_code"],
-		)
-		self.assertEqual(len(pool_rows), 1)
-		row = pool_rows[0]
-		self.assertEqual(row.awb_nr, "NOON-STK-1001")
-		self.assertEqual(row.status, "Used")
-		self.assertEqual(row.marketplace_order, self.order.name)
-		self.assertEqual(row.integration_shipment_nr, self.shipment_nr)
-		self.assertIsNotNone(row.used_on)
-		self.assertEqual(row.country_code, "ae")
-
-	def test_awb_is_trimmed_before_it_is_stored(self):
-		self._create(self.order, "  NOON-TRIM-1 \t")
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipment_awbs[0].awb_nr, "NOON-TRIM-1")
-		self.assertEqual(
-			frappe.db.get_value("Noon AWB", {"marketplace_account": self.account.name}, "awb_nr"),
-			"NOON-TRIM-1",
-		)
-		self.assertEqual(
-			frappe.db.get_value("Noon AWB", {"marketplace_account": self.account.name}, "awb_identity_key"),
-			compute_awb_identity_key(self.account.name, "NOON-TRIM-1"),
-		)
-
-	def test_awb_longer_than_140_characters_is_rejected_and_writes_nothing(self):
-		with patch(_ENQUEUE) as enqueue, self.assertRaises(frappe.ValidationError) as raised:
-			fulfillment.create_shipment(self.order.name, ["1"], "Noon", "A" * 141)
-		self.assertIn("140", str(raised.exception))
-		enqueue.assert_not_called()
-		self._assert_order_untouched()
-		self.assertEqual(self._noon_awb_count(), 0)
-
-	def test_awb_of_exactly_140_characters_is_accepted(self):
-		awb_nr = "B" * 140
-		result, _enqueue = self._create(self.order, f"  {awb_nr}  ")
-		self.assertTrue(result["queued"])
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipment_awbs[0].awb_nr, awb_nr)
-
-	def test_awb_already_on_another_order_of_the_same_account_is_rejected_whatever_its_status(self):
-		other = _make_fulfillment_order(
-			self.account,
-			f"{self.fbpi_order_nr}-B",
-			[_confirmed_acknowledged(n, f"SKU-{n:03d}") for n in range(1, 5)],
-		)
-		for unit, status in zip(["1", "2", "3", "4"], ["Pending", "Created", "Error", "Cancelled"], strict=True):
-			with self.subTest(status=status):
-				_create_result, _enqueue = self._create(other, f"DUP-{status}", [unit])
-				other.reload()
-				frappe.db.set_value("Marketplace Order Shipment", other.noon_shipments[-1].name, "status", status)
-				with patch(_ENQUEUE) as enqueue, self.assertRaises(frappe.ValidationError) as raised:
-					fulfillment.create_shipment(self.order.name, ["1"], "Noon", f"DUP-{status}")
-				self.assertEqual(str(raised.exception), fulfillment._awb_already_used_message(f"DUP-{status}"))
-				enqueue.assert_not_called()
-
-		self._assert_order_untouched()
-		self.assertEqual(self._noon_awb_count(), 4)
-
-	def test_awb_on_an_order_row_alone_is_still_rejected(self):
-		"""The duplicate check also reads Marketplace Order shipment AWB rows, not only the pool."""
-		other = _make_fulfillment_order(self.account, f"{self.fbpi_order_nr}-B", [_confirmed_acknowledged(1)])
-		self._create(other, "ROW-ONLY-1")
-		frappe.db.delete("Noon AWB", {"marketplace_account": self.account.name, "awb_nr": "ROW-ONLY-1"})
-
-		with patch(_ENQUEUE) as enqueue, self.assertRaises(frappe.ValidationError):
-			fulfillment.create_shipment(self.order.name, ["1"], "Noon", "ROW-ONLY-1")
-		enqueue.assert_not_called()
-		self._assert_order_untouched()
-
-	def test_same_awb_on_another_account_is_accepted(self):
-		other_account = _make_noon_account(f"Typed AWB Other {frappe.generate_hash(length=8)}")
-		self.addCleanup(_delete_noon_account_fixtures, other_account)
-		self._create(self.order, "SHARED-1")
-
-		other_order = _make_fulfillment_order(other_account, f"{self.fbpi_order_nr}-C", [_confirmed_acknowledged(1)])
-		result, _enqueue = self._create(other_order, "SHARED-1")
-		self.assertTrue(result["queued"])
-		self.assertEqual(frappe.db.count("Noon AWB", {"marketplace_account": other_account.name}), 1)
-		self.assertEqual(self._noon_awb_count(), 1)
-
-	def test_awb_on_an_available_pool_row_is_rejected_and_the_row_stays_available(self):
-		_add_noon_awb(self.account, "POOL-DUP-1", "Available")
-		with patch(_ENQUEUE) as enqueue, self.assertRaises(frappe.ValidationError):
-			fulfillment.create_shipment(self.order.name, ["1"], "Noon", "POOL-DUP-1")
-		enqueue.assert_not_called()
-		self._assert_order_untouched()
-		self.assertEqual(
-			frappe.db.get_value("Noon AWB", {"awb_nr": "POOL-DUP-1", "marketplace_account": self.account.name}, "status"),
-			"Available",
-		)
-		self.assertEqual(awb_pool.count_available(self.account.name), 1)
-
-	def test_awb_on_a_used_pool_row_is_rejected(self):
-		_add_noon_awb(self.account, "POOL-USED-1", "Used")
-		with patch(_ENQUEUE) as enqueue, self.assertRaises(frappe.ValidationError):
-			fulfillment.create_shipment(self.order.name, ["1"], "Noon", "POOL-USED-1")
-		enqueue.assert_not_called()
-		self._assert_order_untouched()
-		self.assertEqual(self._noon_awb_count(), 1)
-
-	def test_unique_index_collision_during_insert_gives_the_same_rejection_and_writes_nothing(self):
-		"""Another request inserts the same AWB between the pre-checks and this insert;
-		the real insert hits the unique awb_identity_key index."""
-		_add_noon_awb(self.account, "RACE-1", "Used")
-		real_exists = frappe.db.exists
-
-		def exists_without_noon_awb(doctype, *args, **kwargs):
-			if doctype == "Noon AWB":
-				return False
-			return real_exists(doctype, *args, **kwargs)
-
-		with (
-			patch.object(frappe.db, "exists", exists_without_noon_awb),
-			patch.object(fulfillment, "_pool_awb_exists_ignoring_case", return_value=False),
-			patch(_ENQUEUE) as enqueue,
-			self.assertRaises(frappe.ValidationError) as raised,
-		):
-			fulfillment.create_shipment(self.order.name, ["1"], "Noon", "RACE-1")
-		self.assertEqual(str(raised.exception), fulfillment._awb_already_used_message("RACE-1"))
-		self.assertFalse(
-			[m for m in frappe.get_message_log() if "must be unique" in cstr(m)],
-			"the framework's 'must be unique' message must not leak",
-		)
-		enqueue.assert_not_called()
-		self._assert_order_untouched()
-		self.assertEqual(self._noon_awb_count(), 1)
-
-	def test_awb_comparison_ignores_letter_case_against_pool_rows_and_other_orders(self):
-		other_account = _make_noon_account(f"Typed AWB Case Other {frappe.generate_hash(length=8)}")
-		self.addCleanup(_delete_noon_account_fixtures, other_account)
-		_add_noon_awb(self.account, "case-avail-1", "Available")
-		_add_noon_awb(self.account, "CASE-USED-1", "Used")
-		other = _make_fulfillment_order(self.account, f"{self.fbpi_order_nr}-B", [_confirmed_acknowledged(1)])
-		self._create(other, "Case-Row-1")
-		frappe.db.delete("Noon AWB", {"marketplace_account": self.account.name, "awb_nr": "Case-Row-1"})
-		for typed in ("CASE-AVAIL-1", "case-used-1", "CASE-ROW-1", "case-row-1"):
-			with self.subTest(typed=typed):
-				with patch(_ENQUEUE) as enqueue, self.assertRaises(frappe.ValidationError):
-					fulfillment.create_shipment(self.order.name, ["1"], "Noon", typed)
-				enqueue.assert_not_called()
-		self._assert_order_untouched()
-
-		# same account only: another account may use the same AWB in any case
-		other_order = _make_fulfillment_order(other_account, f"{self.fbpi_order_nr}-C", [_confirmed_acknowledged(1)])
-		result, _enqueue = self._create(other_order, "CASE-ROW-1")
-		self.assertTrue(result["queued"])
-
-
-class IntegrationTestNoonTypedAwbWorker(IntegrationTestNoonFulfillmentBase):
-	"""#385: the worker sends a typed AWB as-is and never claims or fetches one."""
-
-	def setUp(self):
-		super().setUp()
-		self.order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-		with patch(_ENQUEUE) as enqueue:
-			enqueue.return_value = MagicMock()
-			fulfillment.create_shipment(self.order.name, ["1"], "Noon", "NOON-STK-7")
-		self.shipment_nr = f"{self.fbpi_order_nr}-1"
-
-	def _patch_refresh(self):
-		return (
-			patch(
-				"marketplace_integrations.integrations.noon.fulfillment.import_order",
-				return_value=(self.order, []),
-			),
-			patch(
-				"marketplace_integrations.integrations.noon.fulfillment.get_fbpi_order",
-				return_value={"fbpi_order_nr": self.fbpi_order_nr, "items": [_confirmed_acknowledged(1)]},
-			),
-		)
-
-	def test_worker_claims_no_pool_row_and_fetches_no_noon_awb(self):
-		_add_noon_awb(self.account, "POOL-UNTOUCHED-1", "Available")
-		import_patch, get_patch = self._patch_refresh()
-		with (
-			import_patch,
-			get_patch,
-			patch(_CLAIM) as claim,
-			patch(_CLIENT) as client_class,
-		):
-			client = client_class.return_value
-			client.request.side_effect = [MagicMock(status_code=404), MagicMock(status_code=200)]
-			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
-
-		claim.assert_not_called()
-		paths = [call.args[1] for call in client.request.call_args_list]
-		self.assertNotIn(fulfillment.NOON_LOGISTICS_AWBS_GET_PATH, paths)
-		create_body = client.request.call_args_list[-1].kwargs["json"]
-		self.assertEqual(create_body["awbs"], [{"courier": "noon", "awb_nr": "NOON-STK-7"}])
-
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].status, "Created")
-		self.assertEqual([row.awb_nr for row in self.order.noon_shipment_awbs], ["NOON-STK-7"])
-		self.assertEqual(
-			frappe.db.get_value("Noon AWB", {"awb_nr": "POOL-UNTOUCHED-1", "marketplace_account": self.account.name}, "status"),
-			"Available",
-		)
-		self.assertEqual(awb_pool.count_available(self.account.name), 1)
-
-	def test_retry_of_an_error_shipment_resends_the_same_awb(self):
-		import_patch, get_patch = self._patch_refresh()
-		with (
-			import_patch,
-			get_patch,
-			patch(_CLIENT) as client_class,
-		):
-			client = client_class.return_value
-			client.error_message.return_value = "bad"
-			client.request.side_effect = [MagicMock(status_code=404), MagicMock(status_code=400)]
-			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].status, "Error")
-		first_create_body = client.request.call_args_list[-1].kwargs["json"]
-
-		import_patch2, get_patch2 = self._patch_refresh()
-		with (
-			import_patch2,
-			get_patch2,
-			patch(_CLAIM) as claim,
-			patch(_CLIENT) as client_class2,
-		):
-			client2 = client_class2.return_value
-			client2.request.side_effect = [MagicMock(status_code=404), MagicMock(status_code=200)]
-			fulfillment.run_create_shipment(self.order.name, self.shipment_nr)
-
-		claim.assert_not_called()
-		paths = [call.args[1] for call in client2.request.call_args_list]
-		self.assertNotIn(fulfillment.NOON_LOGISTICS_AWBS_GET_PATH, paths)
-		retry_create_body = client2.request.call_args_list[-1].kwargs["json"]
-		self.assertEqual(retry_create_body["awbs"], first_create_body["awbs"])
-		self.assertEqual(retry_create_body["awbs"], [{"courier": "noon", "awb_nr": "NOON-STK-7"}])
-
-		self.order.reload()
-		self.assertEqual(self.order.noon_shipments[0].status, "Created")
-		self.assertEqual(len(self.order.noon_shipment_awbs), 1)
-		self.assertEqual(self.order.noon_shipment_awbs[0].awb_nr, "NOON-STK-7")
-		self.assertEqual(
-			frappe.db.count("Noon AWB", {"marketplace_account": self.account.name, "awb_nr": "NOON-STK-7"}),
-			1,
-		)
-
