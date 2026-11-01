@@ -407,6 +407,8 @@ fixtures = [
 					"Delivery Note-custom_carrier_request_snapshot",
 					"Delivery Note-custom_noon_generate_awb",
 					"Delivery Note Item-custom_noon_item_status",
+					# #416: the row-form button of Mark as Out of Stock (hidden until sales_order.js shows it)
+					"Sales Order Item-custom_noon_mark_out_of_stock",
 					"Integration Request-custom_operation_type",
 					"Integration Request-custom_result",
 					"Integration Request-custom_external_reference",

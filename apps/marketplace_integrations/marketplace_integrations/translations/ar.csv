@@ -791,8 +791,7 @@ Mapping is disabled.,الربط معطّل.
 Mapping no longer exists or was moved to another account.,الربط لم يعد موجودًا أو نُقل إلى حساب آخر.
 Mapping {0} does not belong to Marketplace Account {1}.,الربط {0} لا ينتمي إلى حساب السوق {1}.
 Maps each Shopify payment gateway (exact name) to the Mode of Payment and Clearing Account used for its mirrored Payment Entries.,يربط كل بوابة دفع في Shopify (بالاسم الدقيق) بطريقة الدفع وحساب التسوية المستخدمين في قيود الدفع المنسوخة لها.
-Mark Out of Stock,تعليم كنفد من المخزون
-Mark Units Out of Stock,تعليم الوحدات كنفدت من المخزون
+Mark as Out of Stock,تعليم كنفد من المخزون
 "Marketplace Account Warehouse must be a leaf Warehouse, not a group Warehouse.",يجب أن يكون مستودع حساب السوق مستودعًا فرعيًا، لا مستودع مجموعة.
 Marketplace Account and External Order ID are required to compute the order identity key.,حساب السوق ومعرّف الطلب الخارجي مطلوبان لحساب مفتاح هوية الطلب.
 Marketplace Account and External Reference are required to compute the mapping identity key.,حساب السوق والمرجع الخارجي مطلوبان لحساب مفتاح هوية الربط.
@@ -1582,9 +1581,9 @@ Product Bundle {0}: component Item {1} needs a positive quantity.,حزمة ال�
 Marketplace Order {0} has no Sales Order yet.,طلب السوق {0} ليس له أمر بيع بعد.
 Sales Order {0} is not submitted.,أمر البيع {0} غير معتمد.
 Some handed-over units could not be added to the draft Delivery Note. Fix the product mapping or add them to a Delivery Note by hand.,تعذّرت إضافة بعض الوحدات المسلّمة إلى مسودة مذكرة التسليم. أصلح ربط المنتج أو أضفها إلى مذكرة تسليم يدويًا.
-"Items, quantities and rates of a Noon order cannot be changed in ERPNext because Noon has no order update. Use Mark Out of Stock on the Sales Order, or cancel and amend the Delivery Note.",لا يمكن تغيير أصناف وكميات وأسعار طلب Noon في ERPNext لأن Noon لا تدعم تحديث الطلب. استخدم وضع علامة نفاد المخزون في أمر البيع، أو ألغِ مذكرة التسليم وعدّلها.
+"Items, quantities and rates of a Noon order cannot be changed in ERPNext because Noon has no order update. Use Mark as Out of Stock on an item row of the Sales Order, or cancel and amend the Delivery Note.",لا يمكن تغيير أصناف وكميات وأسعار طلب Noon في ERPNext لأن Noon لا تدعم تحديث الطلب. استخدم تعليم كنفد من المخزون على صف صنف في أمر البيع، أو ألغِ مذكرة التسليم وعدّلها.
 Noon order items are locked,أصناف طلب Noon مقفلة
-"Items and quantities of a Noon order cannot be changed here. Use Mark Out of Stock on this Sales Order, or cancel and amend the Delivery Note.",لا يمكن تغيير أصناف وكميات طلب Noon هنا. استخدم وضع علامة نفاد المخزون في أمر البيع هذا، أو ألغِ مذكرة التسليم وعدّلها.
+"Items and quantities of a Noon order cannot be changed here. Use Mark as Out of Stock on an item row of this Sales Order, or cancel and amend the Delivery Note.",لا يمكن تغيير أصناف وكميات طلب Noon هنا. استخدم تعليم كنفد من المخزون على صف صنف في أمر البيع هذا، أو ألغِ مذكرة التسليم وعدّلها.
 Delivery Note,مذكرة التسليم
 AWB,بوليصة الشحن
 Bosta shipments cannot be created for {0} orders: {0} fulfils its own orders.,لا يمكن إنشاء شحنات Bosta لطلبات {0}: {0} تتولى تنفيذ طلباتها بنفسها.
@@ -1817,3 +1816,26 @@ Noon did not answer the warehouse request. Try again.,لم ترد Noon على ط
 The Noon warehouse of Marketplace Account {0} was never checked. Press Check Noon Warehouse.,لم يُفحص مستودع Noon لحساب السوق {0} قط. اضغط فحص مستودع Noon.
 "The Noon fulfillment system code of Marketplace Account {0} ({1}) is not its FBPI Code ({2}). Press Check Noon Warehouse again, or correct the FBPI Code.",رمز نظام التنفيذ في Noon لحساب السوق {0} ({1}) ليس رمز FBPI الخاص به ({2}). اضغط فحص مستودع Noon مرة أخرى أو صحّح رمز FBPI.
 The Noon warehouse of Marketplace Account {0} is not active at Noon.,مستودع Noon لحساب السوق {0} غير نشط لدى Noon.
+Sales Order {0} is not a submitted Noon order.,أمر البيع {0} ليس طلب Noon معتمدًا.
+Row {0} is not an item of Sales Order {1}.,الصف {0} ليس صنفًا في أمر البيع {1}.
+"Item {0} is in Delivery Note {1}. Noon accepts Out of Stock only before a shipment exists: remove the item from a draft note, or cancel the note, first.",الصنف {0} موجود في مذكرة التسليم {1}. تقبل Noon تعليم نفاد المخزون قبل وجود الشحنة فقط: أزل الصنف من المسودة أو ألغِ المذكرة أولًا.
+No unit of item {0} can be marked Out of Stock.,لا يمكن تعليم أي وحدة من الصنف {0} كنفدت من المخزون.
+The Noon request failed ({0}). It may or may not have reached Noon.,فشل طلب Noon ({0}). قد يكون وصل إلى Noon وقد لا يكون.
+Noon does not show the units as Out of Stock yet. Retry in a moment.,لا تعرض Noon الوحدات كنافدة من المخزون بعد. أعد المحاولة بعد قليل.
+"Noon confirmed, but the Sales Order could not be updated. See the Error Log.",أكدت Noon ذلك، لكن تعذّر تحديث أمر البيع. راجع سجل الأخطاء.
+"Noon confirmed, but the Sales Order was not updated.",أكدت Noon ذلك، لكن لم يتم تحديث أمر البيع.
+The Out of Stock reservation was released.,تم تحرير حجز نفاد المخزون.
+Marking Out of Stock failed unexpectedly. See the Error Log.,فشل تعليم نفاد المخزون بشكل غير متوقع. راجع سجل الأخطاء.
+"Marking this item Out of Stock is final at Noon: it cannot be fulfilled later even if it is restocked, and Noon may charge cancellation fees. Continue?",تعليم هذا الصنف كنفد من المخزون نهائي لدى Noon: لا يمكن تنفيذه لاحقًا حتى لو أُعيد توفيره، وقد تفرض Noon رسوم إلغاء. هل تريد المتابعة؟
+Check Noon,فحص Noon
+"Still sending to Noon. Open the Sales Order later to see the result.",ما زال الإرسال إلى Noon جاريًا. افتح أمر البيع لاحقًا لرؤية النتيجة.
+The item was marked Out of Stock at Noon and removed from the order.,تم تعليم الصنف كنفد من المخزون لدى Noon وإزالته من الطلب.
+It is not known whether Noon marked the item Out of Stock.,من غير المعروف ما إذا كانت Noon قد علّمت الصنف كنفد من المخزون.
+Check Noon asks Noon first and never sends the request twice.,فحص Noon يسأل Noon أولًا ولا يرسل الطلب مرتين أبدًا.
+"Noon marked the item Out of Stock, but the Sales Order was not updated.",علّمت Noon الصنف كنفد من المخزون، لكن لم يتم تحديث أمر البيع.
+Retry only repeats the update here; Noon is not asked to do it again.,تعيد إعادة المحاولة التحديث هنا فقط؛ ولا يُطلب من Noon تنفيذه مرة أخرى.
+The request could not be completed.,تعذّر إكمال الطلب.
+The item stays in the order.,يبقى الصنف في الطلب.
+Sending to Noon...,جارٍ الإرسال إلى Noon...
+Please wait. The item is removed from the order once Noon confirms.,يرجى الانتظار. تتم إزالة الصنف من الطلب بعد تأكيد Noon.
+The request could not be sent.,تعذّر إرسال الطلب.

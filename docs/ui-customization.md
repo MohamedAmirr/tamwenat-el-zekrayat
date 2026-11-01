@@ -8,7 +8,7 @@ All paths are under `apps/marketplace_integrations/marketplace_integrations/` un
 
 | Surface | Where | Notes |
 | --- | --- | --- |
-| Noon fulfillment on the Sales Order | `public/js/noon_fulfillment.js`, loaded by `sales_order.js` with `frappe.require` | Button group for a submitted Noon-linked Sales Order: Mark Out of Stock, Upload / Retry Order Invoice, Release Stuck Out of Stock Reservation (shipments, AWBs and cancel are on the Delivery Note, #415); calls `api/noon_fulfillment.py` with the linked Marketplace Order. Not in `doctype_js`, so it loads only when needed. |
+| Noon fulfillment on the Sales Order | `public/js/noon_fulfillment.js`, loaded by `sales_order.js` with `frappe.require` | Button group for a submitted Noon-linked Sales Order: Upload / Retry Order Invoice, Release Stuck Out of Stock Reservation (shipments, AWBs and cancel are on the Delivery Note, #415); calls `api/noon_fulfillment.py` with the linked Marketplace Order. Mark as Out of Stock (#416) is a Button field in the Sales Order Item row form (Custom Field, hidden until the script shows it for rows the server offers; needs write on the Sales Order only): confirm, "Sending to Noon..." wait dialog with polling, error/unknown dialogs with Retry / Check Noon. Not in `doctype_js`, so it loads only when needed. |
 | Own doctype form | `marketplace_integrations/doctype/<name>/<name>.js` | Ships with the doctype. |
 | Core doctype form (Sales Order) | `public/js/sales_order.js`, registered in `hooks.py` `doctype_js` | Wrap in an IIFE; shares scope with core script. |
 | Core doctype list | `public/js/sales_order_list.js`, `doctype_list_js` | Extend `frappe.listview_settings`, never replace it. |

@@ -361,7 +361,7 @@
   "translatable": 0,
   "read_only": 1,
   "no_copy": 1,
-  "options": "\nCreate\nCancel\nEdit\nRefresh\nReturn Pickup\nLabel Fetch\nWebhook\nAWB\nWarehouse"
+  "options": "\nCreate\nCancel\nEdit\nRefresh\nReturn Pickup\nLabel Fetch\nWebhook\nAWB\nWarehouse\nOut of Stock"
  },
  {
   "doctype": "Custom Field",
@@ -892,5 +892,22 @@
   "read_only": 1,
   "allow_on_submit": 1,
   "in_list_view": 1
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Sales Order Item",
+  "fieldname": "custom_noon_mark_out_of_stock",
+  "fieldtype": "Button",
+  "label": "Mark as Out of Stock",
+  "insert_after": "item_name",
+  "name": "Sales Order Item-custom_noon_mark_out_of_stock",
+  "hidden": 1,
+  "modified": "2026-11-01 20:00:00.000000",
+  "module": null,
+  "permlevel": 0,
+  "translatable": 0,
+  "no_copy": 1,
+  "print_hide": 1,
+  "report_hide": 1
  }
 ]

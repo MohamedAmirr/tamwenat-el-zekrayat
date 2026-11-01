@@ -32,14 +32,19 @@ happened between that commit and the lock (a pagination/auth read inside the HTT
 """
 
 import base64
+import hashlib
 import json
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, get_datetime, now_datetime
+from frappe.utils import cstr, escape_html, get_datetime, now_datetime, strip_html
 
-from marketplace_integrations.integrations.noon.catalog import get_account, validate_connection_enabled
-from marketplace_integrations.integrations.noon.client import NoonClient
+from marketplace_integrations.integrations.noon.catalog import (
+	fbpi_ready,
+	get_account,
+	validate_connection_enabled,
+)
+from marketplace_integrations.integrations.noon.client import SERVICE_NAME, NoonClient
 from marketplace_integrations.integrations.noon.constants import (
 	FBPI_ORDER_INVOICE_UPLOAD_PATH,
 	FBPI_ORDER_UPDATE_PATH,
@@ -48,7 +53,8 @@ from marketplace_integrations.integrations.noon.constants import (
 from marketplace_integrations.integrations.noon.expected_change import record_out_of_stock
 from marketplace_integrations.integrations.noon.orders import get_order as get_fbpi_order
 from marketplace_integrations.integrations.noon.orders import import_order
-from marketplace_integrations.services.mappings import resolve_mapping_and_item
+from marketplace_integrations.services import carrier_log
+from marketplace_integrations.services.mappings import resolve_item, resolve_mapping_and_item
 
 RQ_JOB_PREFIX = "marketplace-noon-fulfillment"
 # The only courier: the value Noon documents for AWBs it generated.
@@ -56,7 +62,12 @@ NOON_COURIER = "noon"
 
 MP_STATUS_CONFIRMED = "MP_ITEM_STATUS_CONFIRMED"
 INTEGRATION_STATUS_ACKNOWLEDGED = "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED"
+INTEGRATION_STATUS_OUT_OF_STOCK = "INTEGRATION_ITEM_STATUS_OUT_OF_STOCK"
 UPDATE_ORDER_ITEM_STATUS_OUT_OF_STOCK = "UPDATE_ORDER_REQUEST_ITEM_STATUS_OUT_OF_STOCK"
+#: ``Integration Request.custom_operation_type`` of every Noon call of Mark as Out of Stock.
+OUT_OF_STOCK_OPERATION = "Out of Stock"
+#: How long the dialog can read the outcome of one Mark as Out of Stock press (seconds).
+_OOS_RESULT_TTL = 3600
 
 
 def _order_invoice_job_id(order_name, idempotency_key):
@@ -206,8 +217,6 @@ def get_available_actions(order):
 	from marketplace_integrations.integrations.noon.delivery_note_shipment import has_created_note
 
 	actions = []
-	if get_shippable_units(order):
-		actions.append("mark_out_of_stock")
 	created = has_created_note(order.name)
 	if created and order.noon_order_invoice_status != "Pending":
 		actions.append("upload_order_invoice")
@@ -304,162 +313,347 @@ def release_stuck_oos_reservation(marketplace_order_name):
 # ---------------------------------------------------------------------------
 
 
-def mark_out_of_stock(marketplace_order_name, mp_item_nrs):
-	"""Request path (#146 decision 18): only units that are still shippable (not started by a Noon
-	Delivery Note). The submitted-Sales-Order warning is client-side only (decision 8) - this
-	function does not block on it."""
-	order = _lock_and_load_order(marketplace_order_name)
-	_account_and_client(order)
-	mp_item_nrs = list(dict.fromkeys(cstr(nr).strip() for nr in (mp_item_nrs or []) if cstr(nr).strip()))
-	if not mp_item_nrs:
-		frappe.throw(_("At least one unit must be selected."))
-	shippable = {row["mp_item_nr"] for row in get_shippable_units(order)}
-	not_shippable = [nr for nr in mp_item_nrs if nr not in shippable]
-	if not_shippable:
-		frappe.throw(_("Units {0} cannot be marked Out of Stock.").format(", ".join(not_shippable)))
-	order.noon_pending_oos_units = frappe.as_json(sorted(_pending_oos_units(order) | set(mp_item_nrs)))
+class _OutOfStockFailed(Exception):
+	"""Noon definitely refused the UpdateOrder request (the message is Noon's text)."""
+
+
+class _OutOfStockUnknown(Exception):
+	"""A Noon call has no conclusive answer: Noon may or may not have acted."""
+
+
+def _result_key(sales_order, request_id):
+	return f"noon-oos-result|{sales_order}|{request_id}"
+
+
+def _set_result(sales_order, request_id, state, message=""):
+	"""What the wait dialog reads (``out_of_stock_result``): ``done``, ``failed``, ``unknown`` or
+	``local_failed``. Display only: the marker ``noon_pending_oos_units`` and the Integration Request rows
+	are the record."""
+	frappe.cache().set_value(
+		_result_key(sales_order, request_id),
+		{"state": state, "message": cstr(message)[:500]},
+		expires_in_sec=_OOS_RESULT_TTL,
+	)
+
+
+def out_of_stock_result(sales_order, request_id):
+	"""The outcome of one press for the wait dialog: ``{"state", "message"}``, ``pending`` until the job
+	has written one."""
+	return frappe.cache().get_value(_result_key(sales_order, request_id)) or {"state": "pending", "message": ""}
+
+
+def _is_out_of_stock(raw_order, mp_item_nr):
+	"""Does GetFbpiOrder show this unit as ``INTEGRATION_ITEM_STATUS_OUT_OF_STOCK``?"""
+	for item in (raw_order or {}).get("items") or []:
+		if isinstance(item, dict) and cstr(item.get("mp_item_nr")).strip() == mp_item_nr:
+			return item.get("integration_status") == INTEGRATION_STATUS_OUT_OF_STOCK
+	return False
+
+
+def _live_notes_by_item(sales_order):
+	"""``{item_code: [Delivery Note names]}`` of the Draft or submitted Delivery Notes holding the Sales
+	Order's items (Noon accepts Out of Stock only before a shipment exists)."""
+	rows = frappe.get_all(
+		"Delivery Note Item",
+		filters={"against_sales_order": sales_order, "docstatus": ["<", 2], "parenttype": "Delivery Note"},
+		fields=["item_code", "parent"],
+		parent_doctype="Delivery Note",
+		order_by="parent",
+	)
+	notes = {}
+	for row in rows:
+		names = notes.setdefault(row.item_code, [])
+		if row.parent not in names:
+			names.append(row.parent)
+	return notes
+
+
+def _units_by_item(order):
+	"""``{item_code: {"units": [mp_item_nr], "skus": {partner_sku}}}``: the units Mark as Out of Stock can
+	act on. Shippable units (``get_shippable_units``, which reads the Delivery Notes) plus the units this
+	app already reserved for an earlier press (Noon may have confirmed them, so only the local step is
+	left), each placed on its Item through the SKU mapping."""
+	from marketplace_integrations.integrations.noon.delivery_note_shipment import started_units_of_order
+
+	sku_by_unit = {row["mp_item_nr"]: row["partner_sku"] for row in get_shippable_units(order, include_pending_oos=True)}
+	held = _pending_oos_units(order)
+	if held:
+		started = started_units_of_order(order.name)
+		for item in _latest_payload_items(order):
+			nr = cstr(item.get("mp_item_nr")).strip() if isinstance(item, dict) else ""
+			if nr in held and nr not in started and nr not in sku_by_unit:
+				sku_by_unit[nr] = cstr(item.get("partner_sku")).strip()
+	item_by_sku = {}
+	result = {}
+	for nr, sku in sku_by_unit.items():
+		if sku not in item_by_sku:
+			item_by_sku[sku] = resolve_item(order.marketplace_account, sku) if sku else None
+		item_code = item_by_sku[sku]
+		if item_code:
+			entry = result.setdefault(item_code, {"units": [], "skus": set()})
+			entry["units"].append(nr)
+			entry["skus"].add(sku)
+	return result
+
+
+def out_of_stock_rows(sales_order):
+	"""Names of the Sales Order Item rows the Mark as Out of Stock action is offered for: the row's Item is
+	in no live Delivery Note, has units Noon can still mark and is mapped to exactly one SKU. The server
+	re-checks everything when the action is used."""
+	values = frappe.db.get_value("Sales Order", sales_order, ["docstatus", "custom_marketplace_order"], as_dict=True)
+	if not values or values.docstatus != 1 or not values.custom_marketplace_order:
+		return []
+	if frappe.db.get_value("Marketplace Order", values.custom_marketplace_order, "platform") != "Noon":
+		return []
+	order = frappe.get_doc("Marketplace Order", values.custom_marketplace_order)
+	blocked = _live_notes_by_item(sales_order)
+	units = _units_by_item(order)
+	rows = frappe.get_all(
+		"Sales Order Item",
+		filters={"parent": sales_order, "parenttype": "Sales Order"},
+		fields=["name", "item_code"],
+		parent_doctype="Sales Order",
+		order_by="idx",
+	)
+	return [
+		row.name
+		for row in rows
+		if row.item_code not in blocked and units.get(row.item_code) and len(units[row.item_code]["skus"]) == 1
+	]
+
+
+def mark_row_out_of_stock(sales_order_name, row_name):
+	"""Request path of Mark as Out of Stock for one Sales Order Item row (the API checked write permission
+	on the Sales Order). Refuses unless the account's warehouse is FBPI, refuses while the row's Item is in
+	a Draft or submitted Delivery Note (naming it), reserves the Item's units in ``noon_pending_oos_units``
+	and queues the job. Pressing again while the reservation of the same units exists is the Retry: the job
+	then asks Noon first. Returns ``{"queued", "request_id"}``."""
+	values = frappe.db.get_value("Sales Order", sales_order_name, ["docstatus", "custom_marketplace_order"], as_dict=True)
+	if not values or values.docstatus != 1 or not values.custom_marketplace_order:
+		frappe.throw(_("Sales Order {0} is not a submitted Noon order.").format(sales_order_name))
+	# The Delivery Note entry points do the same: the user's right is the Sales Order's, the order row is
+	# written as the system (a Sales Order writer needs no Marketplace Order rights).
+	order = _lock_and_load_order(values.custom_marketplace_order, as_system=True)
+	account, _client = _account_and_client(order)
+	ready, reason = fbpi_ready(account)
+	if not ready:
+		frappe.throw(reason)
+	item_code = frappe.db.get_value(
+		"Sales Order Item", {"name": row_name, "parent": sales_order_name, "parenttype": "Sales Order"}, "item_code"
+	)
+	if not item_code:
+		frappe.throw(_("Row {0} is not an item of Sales Order {1}.").format(cstr(row_name), sales_order_name))
+	notes = _live_notes_by_item(sales_order_name).get(item_code)
+	if notes:
+		frappe.throw(
+			_(
+				"Item {0} is in Delivery Note {1}. Noon accepts Out of Stock only before a shipment exists: remove the item from a draft note, or cancel the note, first."
+			).format(
+				frappe.bold(escape_html(item_code)), ", ".join(frappe.bold(escape_html(note)) for note in notes)
+			)
+		)
+	entry = _units_by_item(order).get(item_code)
+	if not entry or not entry["units"]:
+		frappe.throw(_("No unit of item {0} can be marked Out of Stock.").format(frappe.bold(escape_html(item_code))))
+	if len(entry["skus"]) > 1:
+		frappe.throw(
+			_("Item {0} is mapped to more than one Noon SKU on this order ({1}).").format(
+				frappe.bold(escape_html(item_code)), escape_html(", ".join(sorted(entry["skus"])))
+			)
+		)
+	units = sorted(entry["units"])
+	held = _pending_oos_units(order)
+	is_retry = bool(held & set(units))
+	order.noon_pending_oos_units = frappe.as_json(sorted(held | set(units)))
 	order.save()
 	frappe.db.commit()
 
+	request_id = frappe.generate_hash(length=16)
+	newly_reserved = set(units) - held
 	try:
 		job = frappe.enqueue(
 			run_mark_out_of_stock,
 			queue="long",
 			timeout=300,
-			job_id=f"{RQ_JOB_PREFIX}-{order.name}-oos-{frappe.generate_hash(length=16)}",
+			job_id=f"{RQ_JOB_PREFIX}-{order.name}-oos-{hashlib.sha1(','.join(units).encode()).hexdigest()[:16]}",
 			deduplicate=True,
 			marketplace_order_name=order.name,
-			mp_item_nrs=mp_item_nrs,
+			mp_item_nrs=units,
+			sales_order=sales_order_name,
+			request_id=request_id,
+			check_first=is_retry,
 		)
 	except Exception:
-		_release_pending_oos_units(order.name, mp_item_nrs)
+		_release_pending_oos_units(order.name, newly_reserved)
 		raise
 	if job is None:
-		_release_pending_oos_units(order.name, mp_item_nrs)
-	return {"queued": job is not None}
+		_release_pending_oos_units(order.name, newly_reserved)
+	return {"queued": job is not None, "request_id": request_id}
 
 
-def run_mark_out_of_stock(marketplace_order_name, mp_item_nrs):
-	"""The order lock is released before the UpdateOrder HTTP call and before
-	the post-success GetFbpiOrder refresh, and re-acquired immediately after
-	each (#146 review finding #3; round-5 fix, review finding #5 - the
-	GetFbpiOrder refresh used to still hold the lock acquired for the
-	UpdateOrder result check, contrary to what this docstring already
-	claimed). The outer ``except`` is new per #146 review finding #4: a
-	transport-level exception from ``_account_and_client()`` or
-	``client.request()`` used to propagate out of this worker with no
-	committed ``Marketplace Sync Log`` row at all - the ``finally`` below
-	already released the OOS reservation in that case (so units never stayed
-	stuck), but the failure itself was invisible beyond a bare RQ job-failure
-	log entry. A concurrent ``release_stuck_oos_reservation()`` clearing the
-	local reservation mid-call no longer causes this worker to drop evidence
-	of the actual Noon outcome silently - it still writes a Sync Log row for
-	whatever UpdateOrder actually returned (round-5 fix, review finding #3)."""
-	frappe.set_user("Administrator")
-	order = _lock_and_load_order(marketplace_order_name)
-	if not set(mp_item_nrs) <= _pending_oos_units(order):
-		frappe.db.commit()
-		return
+def _open_log(sales_order, request_id, external_order_id):
+	log = carrier_log.open_log(
+		SERVICE_NAME,
+		sales_order,
+		OUT_OF_STOCK_OPERATION,
+		correlation_id=request_id,
+		reference=external_order_id,
+		reference_doctype="Sales Order",
+	)
+	frappe.db.commit()  # logged before the call: a worker that dies mid-call leaves the row
+	return log
+
+
+def _read_noon_order(account, external_order_id, sales_order, request_id):
+	"""GetFbpiOrder, logged. Nothing of the answer is stored in the log (it holds customer data). Raises
+	``_OutOfStockUnknown`` when Noon gives no usable answer."""
+	log = _open_log(sales_order, request_id, external_order_id)
 	try:
-		still_shippable = {row["mp_item_nr"] for row in get_shippable_units(order, include_pending_oos=True)}
-		if not set(mp_item_nrs) <= still_shippable:
-			frappe.db.commit()
-			_log_fulfillment(
-				order,
-				"UpdateOrder",
-				"Error",
-				{"mp_item_nrs": mp_item_nrs},
-				_("Units are no longer eligible to mark Out of Stock."),
-			)
-			return
-		account, client = _account_and_client(order)
-		external_order_id = order.external_order_id
-		frappe.db.commit()  # release the order lock before the Noon HTTP call below
+		raw_order = get_fbpi_order(account, external_order_id)
+	except Exception as exc:
+		frappe.clear_messages()
+		message = _("Noon did not answer the order lookup ({0}).").format(strip_html(cstr(exc))[:200])
+		carrier_log.close_log(log, "Unknown", error=message)
+		frappe.db.commit()
+		raise _OutOfStockUnknown(message) from exc
+	carrier_log.close_log(log, "Success", http_status=200)
+	frappe.db.commit()
+	return raw_order
 
+
+def _send_out_of_stock(client, external_order_id, units, sales_order, request_id):
+	"""UpdateOrder, logged. Returns on 200; raises ``_OutOfStockFailed`` for a definite refusal (a 4xx other
+	than 408/429) and ``_OutOfStockUnknown`` for anything else. Never sent twice automatically."""
+	log = _open_log(sales_order, request_id, external_order_id)
+	try:
 		response = client.request(
 			"POST",
 			FBPI_ORDER_UPDATE_PATH,
 			json={
 				"fbpi_order_nr": external_order_id,
-				"items": [
-					{"mp_item_nr": nr, "status": UPDATE_ORDER_ITEM_STATUS_OUT_OF_STOCK} for nr in mp_item_nrs
-				],
+				"items": [{"mp_item_nr": nr, "status": UPDATE_ORDER_ITEM_STATUS_OUT_OF_STOCK} for nr in units],
 			},
 		)
-
-		order = _lock_and_load_order(marketplace_order_name)
-		reservation_released_concurrently = not set(mp_item_nrs) <= _pending_oos_units(order)
-		if reservation_released_concurrently:
-			# #146 round-5 fix (review finding #3): the local reservation is
-			# gone (e.g. release_stuck_oos_reservation() ran while the Noon
-			# call above was in flight), but UpdateOrder may have already
-			# succeeded on Noon's side - still write a Sync Log row recording
-			# the actual Noon outcome rather than silently dropping the only
-			# evidence of it. Returning here (not falling through to the
-			# refresh below) is still correct: with no local reservation left
-			# to reconcile, there is nothing for the refresh to protect.
-			frappe.db.commit()
-			note = "Local Out of Stock reservation was released concurrently while this call was in flight."
-			if response.status_code != 200:
-				_log_fulfillment(
-					order,
-					"UpdateOrder",
-					"Error",
-					{"mp_item_nrs": mp_item_nrs, "note": note},
-					client.error_message(response),
-				)
-			else:
-				_log_fulfillment(order, "UpdateOrder", "Success", {"mp_item_nrs": mp_item_nrs, "note": note})
-			return
-		if response.status_code != 200:
-			frappe.db.commit()
-			_log_fulfillment(
-				order, "UpdateOrder", "Error", {"mp_item_nrs": mp_item_nrs}, client.error_message(response)
-			)
-			return
-
-		# #364 expected-change marker: UpdateOrder succeeded, so record what we sent. The own
-		# refresh below passes echo_guard=False so it leaves the marker for a later poll.
-		record_out_of_stock(order.name, mp_item_nrs)
-		# #146 round-5 fix (review finding #5): this worker used to hold the
-		# order lock (re-acquired just above) across the GetFbpiOrder HTTP
-		# call below - the module/function docstrings already claimed it was
-		# released here, but nothing actually committed before the call.
-		# Release it now, same as every other HTTP call in this module.
+	except Exception as exc:
+		message = _("The Noon request failed ({0}). It may or may not have reached Noon.").format(cstr(exc)[:200])
+		carrier_log.close_log(log, "Unknown", error=message)
 		frappe.db.commit()
-		try:
-			raw_order = get_fbpi_order(account, external_order_id)
-			# #146 round-5 fix (review finding #1): commit again, immediately
-			# before import_order()'s own raw-SQL lock - the HTTP call above
-			# made its own plain consistent read in the transaction the
-			# commit just above opened; without this second commit that lock
-			# would not be first-in-transaction. See
-			# docs/frappe-conventions.md and import_order()'s docstring.
-			frappe.db.commit()
-			savepoint = "noon_oos_refresh_" + frappe.generate_hash(length=10)
-			frappe.db.savepoint(savepoint)
-			try:
-				# Our own refresh: echo_guard=False leaves the expected-change marker for a later poll.
-				import_order(account, raw_order, bump_trigger_source="Manual", echo_guard=False)
-			except Exception:
-				frappe.db.rollback(save_point=savepoint)
-				raise
-			else:
-				frappe.db.release_savepoint(savepoint)
-				frappe.db.commit()  # import_order() itself never commits - this worker does
-		except Exception:
-			frappe.log_error(title="Noon fulfillment: OOS refresh failed", message=frappe.get_traceback())
-		order = _lock_and_load_order(marketplace_order_name)
+		raise _OutOfStockUnknown(message) from exc
+	if response.status_code == 200:
+		carrier_log.close_log(log, "Success", http_status=200, data=frappe.as_json({"mp_item_nrs": units}))
 		frappe.db.commit()
-		_log_fulfillment(order, "UpdateOrder", "Success", {"mp_item_nrs": mp_item_nrs})
+		return
+	message = client.error_message(response)
+	definite = _is_definite_refusal(response.status_code)
+	carrier_log.close_log(
+		log, "Failed" if definite else "Unknown", error=message, http_status=response.status_code
+	)
+	frappe.db.commit()
+	raise (_OutOfStockFailed if definite else _OutOfStockUnknown)(message)
+
+
+def _apply_out_of_stock_locally(
+	account, marketplace_order_name, external_order_id, mp_item_nrs, sales_order, request_id, raw_order=None
+):
+	"""The local half: refresh the Marketplace Order from Noon, then run the Sales Order sync, whose planner
+	removes the row through the native Update Items (``flags.marketplace_syncing_orders`` lets
+	``noon_item_edit_guard`` pass it). Returns ``""`` when done, else a readable reason: the reservation then
+	stays and Retry repeats only this step."""
+	from marketplace_integrations.services.sales_order_sync import sync_sales_order
+
+	try:
+		if raw_order is None:
+			raw_order = _read_noon_order(account, external_order_id, sales_order, request_id)
+	except _OutOfStockUnknown as exc:
+		return cstr(exc)
+	if not all(_is_out_of_stock(raw_order, nr) for nr in mp_item_nrs):
+		return _("Noon does not show the units as Out of Stock yet. Retry in a moment.")
+	try:
+		# commit right before each lock below: import_order() and the sync lock the order row first
+		frappe.db.commit()
+		import_order(account, raw_order, bump_trigger_source="Manual", echo_guard=False)
+		frappe.db.commit()
+		result = sync_sales_order(marketplace_order_name, trigger_source="Manual")
+		frappe.db.commit()
 	except Exception:
-		order = _lock_and_load_order(marketplace_order_name)
+		frappe.db.rollback()
+		frappe.log_error(title="Noon fulfillment: Out of Stock local step failed", message=frappe.get_traceback())
+		return _("Noon confirmed, but the Sales Order could not be updated. See the Error Log.")
+	if not result.get("ok"):
+		return strip_html(cstr(result.get("error"))) or _("Noon confirmed, but the Sales Order was not updated.")
+	return ""
+
+
+def run_mark_out_of_stock(marketplace_order_name, mp_item_nrs, sales_order, request_id, check_first=False):
+	"""Worker of Mark as Out of Stock. Nothing is held across a Noon call (commit before each call, lock
+	after, ``_lock_and_load_order``).
+
+	``check_first`` (a Retry: the units were reserved by an earlier press) asks Noon first (GetFbpiOrder); the
+	units Noon already shows Out of Stock are not sent again, so UpdateOrder is never repeated. UpdateOrder
+	itself is sent at most once per press and never resent automatically. The reservation
+	(``noon_pending_oos_units``) is released on a definite refusal and when the local step is done; it stays
+	after an Unknown answer and after a failed local step (Needs Attention lists it)."""
+	frappe.set_user("Administrator")
+	order = _lock_and_load_order(marketplace_order_name)
+	if not set(mp_item_nrs) <= _pending_oos_units(order):
 		frappe.db.commit()
-		_log_fulfillment(
-			order, "UpdateOrder", "Error", {"mp_item_nrs": mp_item_nrs}, traceback_text=frappe.get_traceback()
+		_set_result(sales_order, request_id, "failed", _("The Out of Stock reservation was released."))
+		return
+	# a Retry's reservation outlives an Unknown answer of this run too (nothing is sent blind)
+	keep_reservation = bool(check_first)
+	try:
+		account, client = _account_and_client(order)
+		external_order_id = order.external_order_id
+		frappe.db.commit()  # release the order lock before the Noon calls below
+
+		raw_order = None
+		to_send = list(mp_item_nrs)
+		if check_first:
+			raw_order = _read_noon_order(account, external_order_id, sales_order, request_id)
+			to_send = [nr for nr in mp_item_nrs if not _is_out_of_stock(raw_order, nr)]
+		if to_send:
+			order = _lock_and_load_order(marketplace_order_name)
+			eligible = {row["mp_item_nr"] for row in get_shippable_units(order, include_pending_oos=True)}
+			if not set(mp_item_nrs) <= _pending_oos_units(order) or not set(to_send) <= eligible:
+				frappe.db.commit()
+				keep_reservation = False
+				_set_result(sales_order, request_id, "failed", _("Units are no longer eligible to mark Out of Stock."))
+				return
+			frappe.db.commit()
+			keep_reservation = True  # from the send on, Noon may have acted
+			_send_out_of_stock(client, external_order_id, to_send, sales_order, request_id)
+			order = _lock_and_load_order(marketplace_order_name)
+			if set(mp_item_nrs) <= _pending_oos_units(order):
+				# #364 expected-change marker; the own refresh passes echo_guard=False so it stays for a later poll
+				record_out_of_stock(order.name, to_send)
+			frappe.db.commit()
+			raw_order = None  # the answer must be read after the send
+		reason = _apply_out_of_stock_locally(
+			account, marketplace_order_name, external_order_id, mp_item_nrs, sales_order, request_id, raw_order
+		)
+		if reason:
+			keep_reservation = True
+			_set_result(sales_order, request_id, "local_failed", reason)
+		else:
+			keep_reservation = False
+			_set_result(sales_order, request_id, "done")
+	except _OutOfStockFailed as exc:
+		keep_reservation = False
+		_set_result(sales_order, request_id, "failed", cstr(exc))
+	except _OutOfStockUnknown as exc:
+		_set_result(sales_order, request_id, "unknown", cstr(exc))
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(title="Noon fulfillment: Out of Stock failed", message=frappe.get_traceback())
+		_set_result(
+			sales_order,
+			request_id,
+			"unknown" if keep_reservation else "failed",
+			_("Marking Out of Stock failed unexpectedly. See the Error Log."),
 		)
 	finally:
-		_release_pending_oos_units(marketplace_order_name, mp_item_nrs)
+		if not keep_reservation:
+			_release_pending_oos_units(marketplace_order_name, mp_item_nrs)
 
 
 # ---------------------------------------------------------------------------

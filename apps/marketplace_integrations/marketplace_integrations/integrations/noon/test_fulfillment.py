@@ -166,12 +166,13 @@ class IntegrationTestNoonShippableUnits(IntegrationTestNoonFulfillmentBase):
 
 
 class IntegrationTestNoonAvailableActions(IntegrationTestNoonFulfillmentBase):
-	def test_acknowledged_order_offers_only_mark_out_of_stock(self):
+	def test_acknowledged_order_offers_no_button_action(self):
+		# Mark as Out of Stock is an item row button now (#416), not an action of this list
 		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
 		with patch(_HAS_CREATED_NOTE, return_value=False):
 			self.assertEqual(
 				fulfillment.get_available_actions(order),
-				{"actions": ["mark_out_of_stock"], "cancelled_on_noon": False},
+				{"actions": [], "cancelled_on_noon": False},
 			)
 
 	def test_cancelled_units_offer_nothing_and_flag_cancelled_on_noon(self):
@@ -214,157 +215,7 @@ class IntegrationTestNoonAvailableActions(IntegrationTestNoonFulfillmentBase):
 
 		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
 		with patch(_HAS_CREATED_NOTE, return_value=False):
-			self.assertEqual(
-				noon_fulfillment.get_available_actions(order.name)["actions"], ["mark_out_of_stock"]
-			)
-
-
-class IntegrationTestNoonMarkOutOfStock(IntegrationTestNoonFulfillmentBase):
-	def test_rejects_units_that_are_not_shippable(self):
-		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-		with self.assertRaises(frappe.ValidationError):
-			fulfillment.mark_out_of_stock(order.name, ["999"])
-
-	def test_enqueue_failure_releases_the_persisted_reservation(self):
-		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-		with patch(
-			"marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue",
-			side_effect=RuntimeError("queue unavailable"),
-		):
-			with self.assertRaisesRegex(RuntimeError, "queue unavailable"):
-				fulfillment.mark_out_of_stock(order.name, ["1"])
-		order.reload()
-		self.assertEqual(fulfillment._pending_oos_units(order), set())
-		self.assertEqual([row["mp_item_nr"] for row in fulfillment.get_shippable_units(order)], ["1"])
-		with patch(
-			"marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue", return_value=None
-		):
-			self.assertEqual(fulfillment.mark_out_of_stock(order.name, ["1"]), {"queued": False})
-		order.reload()
-		self.assertEqual(fulfillment._pending_oos_units(order), set())
-
-	def test_worker_sends_update_order_and_refreshes(self):
-		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
-			enqueue.return_value = MagicMock()
-			fulfillment.mark_out_of_stock(order.name, ["1"])
-		order.reload()
-		self.assertEqual(fulfillment._pending_oos_units(order), {"1"})
-		# The reserved unit is no longer shippable (a Delivery Note cannot take it either).
-		self.assertEqual(fulfillment.get_shippable_units(order), [])
-		with (
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-			patch(
-				"marketplace_integrations.integrations.noon.fulfillment.get_fbpi_order",
-				return_value={"fbpi_order_nr": self.fbpi_order_nr, "items": [_confirmed_acknowledged(1)]},
-			),
-			patch(
-				"marketplace_integrations.integrations.noon.fulfillment.import_order",
-				return_value=(order, []),
-			),
-		):
-			client_class.return_value.request.return_value = MagicMock(status_code=200)
-			fulfillment.run_mark_out_of_stock(order.name, ["1"])
-			payload = client_class.return_value.request.call_args.kwargs["json"]
-		self.assertEqual(
-			payload["items"],
-			[{"mp_item_nr": "1", "status": fulfillment.UPDATE_ORDER_ITEM_STATUS_OUT_OF_STOCK}],
-		)
-		order.reload()
-		self.assertEqual(fulfillment._pending_oos_units(order), set())
-		logs = frappe.get_all(
-			"Marketplace Sync Log",
-			filters={"marketplace_order": order.name, "sync_type": "Fulfillment"},
-			fields=["status"],
-		)
-		self.assertEqual([log.status for log in logs], ["Success"])
-
-	def test_worker_records_the_expected_change_marker_and_its_own_refresh_leaves_it(self):
-		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
-			enqueue.return_value = MagicMock()
-			fulfillment.mark_out_of_stock(order.name, ["1"])
-		with (
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-			patch(
-				"marketplace_integrations.integrations.noon.fulfillment.get_fbpi_order",
-				return_value={"fbpi_order_nr": self.fbpi_order_nr, "items": [_confirmed_acknowledged(1)]},
-			),
-			patch(
-				"marketplace_integrations.integrations.noon.fulfillment.import_order",
-				return_value=(order, []),
-			) as import_order,
-		):
-			client_class.return_value.request.return_value = MagicMock(status_code=200)
-			fulfillment.run_mark_out_of_stock(order.name, ["1"])
-
-		self.assertIs(import_order.call_args.kwargs["echo_guard"], False)
-		marker = frappe.db.get_value(
-			"Marketplace Order", order.name, ["expected_change_hash", "expected_change_scope"], as_dict=True
-		)
-		self.assertEqual(marker.expected_change_hash, expected_change.sent_hash(["1"]))
-		self.assertEqual(frappe.parse_json(marker.expected_change_scope), ["1"])
-
-	def test_worker_sets_no_marker_when_noon_rejects_the_call(self):
-		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
-			enqueue.return_value = MagicMock()
-			fulfillment.mark_out_of_stock(order.name, ["1"])
-		with patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class:
-			client_class.return_value.request.return_value = MagicMock(status_code=500)
-			client_class.return_value.error_message.return_value = "Noon unavailable"
-			fulfillment.run_mark_out_of_stock(order.name, ["1"])
-
-		self.assertFalse(frappe.db.get_value("Marketplace Order", order.name, "expected_change_hash"))
-
-	def test_worker_releases_reservation_after_noon_error(self):
-		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
-			enqueue.return_value = MagicMock()
-			fulfillment.mark_out_of_stock(order.name, ["1"])
-			first_job_id = enqueue.call_args.kwargs["job_id"]
-		with patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class:
-			client_class.return_value.request.return_value = MagicMock(status_code=500)
-			client_class.return_value.error_message.return_value = "Noon unavailable"
-			fulfillment.run_mark_out_of_stock(order.name, ["1"])
-		order.reload()
-		self.assertEqual(fulfillment._pending_oos_units(order), set())
-		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
-			enqueue.return_value = MagicMock()
-			fulfillment.mark_out_of_stock(order.name, ["1"])
-			self.assertNotEqual(enqueue.call_args.kwargs["job_id"], first_job_id)
-
-	def test_worker_releases_only_its_own_reserved_units(self):
-		order = _make_fulfillment_order(
-			self.account,
-			self.fbpi_order_nr,
-			[_confirmed_acknowledged(1), _confirmed_acknowledged(2, "SKU-002")],
-		)
-		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
-			enqueue.return_value = MagicMock()
-			fulfillment.mark_out_of_stock(order.name, ["1"])
-			fulfillment.mark_out_of_stock(order.name, ["2"])
-		with patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class:
-			client_class.return_value.request.return_value = MagicMock(status_code=500)
-			client_class.return_value.error_message.return_value = "Noon unavailable"
-			fulfillment.run_mark_out_of_stock(order.name, ["1"])
-		order.reload()
-		self.assertEqual(fulfillment._pending_oos_units(order), {"2"})
-
-	def test_worker_skips_unit_a_noon_delivery_note_started_after_the_reservation(self):
-		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
-		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
-			enqueue.return_value = MagicMock()
-			fulfillment.mark_out_of_stock(order.name, ["1"])
-		order.reload()
-		with (
-			patch(_STARTED, return_value={"1"}),
-			patch("marketplace_integrations.integrations.noon.fulfillment.NoonClient") as client_class,
-		):
-			fulfillment.run_mark_out_of_stock(order.name, ["1"])
-			client_class.return_value.request.assert_not_called()
-		order.reload()
-		self.assertEqual(fulfillment._pending_oos_units(order), set())
+			self.assertEqual(noon_fulfillment.get_available_actions(order.name)["actions"], [])
 
 
 class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):

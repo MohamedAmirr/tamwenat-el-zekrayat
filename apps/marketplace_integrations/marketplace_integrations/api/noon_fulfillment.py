@@ -2,7 +2,8 @@
 # For license information, please see license.txt
 
 """Permission-checked Desk boundary for the Noon FBPI order-level actions (#146, decision 20):
-Mark Out of Stock, the order invoice and the stuck-reservation recovery.
+Mark as Out of Stock (a Sales Order item row, #416: right is write on the Sales Order), the order invoice and
+the stuck-reservation recovery.
 
 Shipments are created, cancelled and refreshed from the Delivery Note
 (``api/carrier_shipments.py``, #415), so no shipment endpoint lives here.
@@ -41,12 +42,6 @@ def _get_noon_order(marketplace_order):
 
 
 @frappe.whitelist(methods=["POST"])
-def get_shippable_units(marketplace_order: str):
-	order = _get_noon_order(marketplace_order)
-	return fulfillment.get_shippable_units(order)
-
-
-@frappe.whitelist(methods=["POST"])
 def get_available_actions(marketplace_order: str):
 	"""Read-only convenience for the Sales Order form: which Noon Fulfillment buttons to show. No
 	lock needed (nothing is written), so this loads directly and only needs read permission; every
@@ -65,11 +60,26 @@ def release_stuck_oos_reservation(marketplace_order: str):
 
 
 @frappe.whitelist(methods=["POST"])
-def mark_out_of_stock(marketplace_order: str, mp_item_nrs):
-	_get_noon_order(marketplace_order)
-	if isinstance(mp_item_nrs, str):
-		mp_item_nrs = frappe.parse_json(mp_item_nrs)
-	return fulfillment.mark_out_of_stock(marketplace_order, mp_item_nrs)
+def get_out_of_stock_rows(sales_order: str):
+	"""Names of the Sales Order Item rows that offer Mark as Out of Stock. Right: write on the Sales Order
+	(the order row is read as the system: the user needs no Marketplace Order permission)."""
+	frappe.has_permission("Sales Order", "write", doc=sales_order, throw=True)
+	return fulfillment.out_of_stock_rows(sales_order)
+
+
+@frappe.whitelist(methods=["POST"])
+def mark_item_out_of_stock(sales_order: str, sales_order_item: str):
+	"""Mark as Out of Stock for one Sales Order Item row: authorizes, then delegates (the service refuses a
+	row in a Delivery Note, a non-FBPI warehouse and anything not eligible). Queues the Noon call."""
+	frappe.has_permission("Sales Order", "write", doc=sales_order, throw=True)
+	return fulfillment.mark_row_out_of_stock(sales_order, sales_order_item)
+
+
+@frappe.whitelist(methods=["POST"])
+def check_mark_out_of_stock(sales_order: str, request_id: str):
+	"""Poll of the wait dialog: ``{"state": pending|done|failed|unknown|local_failed, "message"}``."""
+	frappe.has_permission("Sales Order", "write", doc=sales_order, throw=True)
+	return fulfillment.out_of_stock_result(sales_order, request_id)
 
 
 @frappe.whitelist(methods=["POST"])

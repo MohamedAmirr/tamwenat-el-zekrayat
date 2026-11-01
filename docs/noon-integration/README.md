@@ -76,7 +76,23 @@ The Delivery Note of a Noon Sales Order is the shipment. The Noon adapter
   Noon. `check_fbpi_warehouse` (in `validate_ready`) refuses Create/Submit with its reason. Changing the
   account's warehouse code or connection clears the stored answer (check again). Mark Out of Stock and the
   invoice actions reuse `fbpi_ready` in the next sub-issue #416 runs.
-- **Not built yet:** Mark Out of Stock on a Sales Order row and the invoice uploads (rest of sub-issue #416).
+- **Mark as Out of Stock (#416).** A "Mark as Out of Stock" Button (Custom Field `custom_noon_mark_out_of_stock`) in the
+  row form of a submitted Noon Sales Order item; `noon_fulfillment.js` shows it only for rows
+  `api.noon_fulfillment.get_out_of_stock_rows` returns (needs write on the Sales Order only). The old unit
+  checklist dialog and its endpoints are gone. `mark_item_out_of_stock(sales_order, sales_order_item)` refuses a
+  non-FBPI warehouse (`fbpi_ready`), refuses (naming the note) a row whose Item is in a Draft or submitted
+  Delivery Note, and reserves the Item's units in `noon_pending_oos_units` before queueing one job per order and
+  unit set. After a confirm ("final at Noon, may cost cancellation fees") the form shows "Sending to Noon..." and
+  polls `check_mark_out_of_stock` (outcome kept in the cache for an hour; the reservation and the log are the
+  record). The job sends UpdateOrder once, then GetFbpiOrder, `import_order` and `sync_sales_order`, whose planner
+  removes the row through native Update Items (the edit guard passes it inside `marketplace_syncing_orders`).
+  Definite 4xx: error dialog with Retry, reservation released. Unknown (timeout, 5xx, 408/429): the reservation
+  stays; Retry (a press while the reservation exists) runs GetFbpiOrder first and sends UpdateOrder only for units
+  Noon does not already show `INTEGRATION_ITEM_STATUS_OUT_OF_STOCK`. Noon confirmed but the local step failed:
+  the reservation stays (Needs Attention "units pending Out of Stock"), Retry repeats only the local step. Every
+  Noon call is an Integration Request (operation Out of Stock, reference the Sales Order, no customer data).
+  Release Stuck Out of Stock Reservation stays for a dead worker.
+- **Not built yet:** the invoice uploads (rest of sub-issue #416).
 
 ## Provider contract
 

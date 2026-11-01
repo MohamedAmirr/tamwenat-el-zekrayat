@@ -501,10 +501,11 @@
 			!doc ||
 			doc.docstatus !== 1 ||
 			!doc.custom_marketplace_order ||
-			doc.custom_marketplace_platform !== "Noon" ||
-			!frappe.model.can_read("Marketplace Order")
+			doc.custom_marketplace_platform !== "Noon"
 		)
 			return Promise.resolve(null);
+		// Marketplace Order read is checked inside add_noon_fulfillment_actions: the item-row Mark as
+		// Out of Stock needs only write on the Sales Order.
 		const load = frappe.require ? frappe.require(NOON_FULFILLMENT_ASSET).catch(() => {}) : Promise.resolve();
 		return load.then(() => {
 			const noon = noon_fulfillment_module();
@@ -521,7 +522,7 @@
 		if (typeof frm.set_intro !== "function") return;
 		frm.set_intro(
 			__(
-				"Items and quantities of a Noon order cannot be changed here. Use Mark Out of Stock on this Sales Order, or cancel and amend the Delivery Note."
+				"Items and quantities of a Noon order cannot be changed here. Use Mark as Out of Stock on an item row of this Sales Order, or cancel and amend the Delivery Note."
 			),
 			"orange"
 		);

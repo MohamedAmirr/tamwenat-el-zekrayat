@@ -23,6 +23,7 @@ function load({
 	defaults_fails = false,
 	noon_state = { actions: [], cancelled_on_noon: false, shipments: [] },
 	noon_fails = false,
+		oos_rows = [],
 	can_create_delivery_note = true,
 	marketplace_summary = { name: "MO-1", platform: "Shopify", reference: "#SHOP-1", erpnext_sync_status: "Syncing", erpnext_sales_order: "" },
 } = {}) {
@@ -30,6 +31,7 @@ function load({
 	const edit_calls = [];
 	const marketplace_calls = [];
 	const noon_calls = [];
+	const oos_calls = [];
 	const confirms = [];
 	const required = [];
 	const alerts = [];
@@ -87,13 +89,14 @@ function load({
 				marketplace_calls.push(opts);
 				return Promise.resolve({ message: marketplace_summary });
 			}
+			if (opts.method.endsWith("noon_fulfillment.get_out_of_stock_rows")) {
+				oos_calls.push(opts);
+				return Promise.resolve({ message: oos_rows });
+			}
 			if (opts.method.includes("api.noon_fulfillment.")) {
 				noon_calls.push(opts);
 				if (opts.method.endsWith("get_available_actions")) {
 					return noon_fails ? Promise.reject(new Error("boom")) : Promise.resolve({ message: noon_state });
-				}
-				if (opts.method.endsWith("get_shippable_units")) {
-					return Promise.resolve({ message: [{ mp_item_nr: "<b>1</b>", partner_sku: "SKU-1" }, { mp_item_nr: "2", partner_sku: "" }] });
 				}
 				return Promise.resolve({ message: { queued: true } });
 			}
@@ -126,7 +129,7 @@ function load({
 	const path = require.resolve("./sales_order.js");
 	delete require.cache[path];
 	const module_exports = require(path);
-	return { calls, edit_calls, marketplace_calls, noon_calls, confirms, required, alerts, msgprints, dialogs, handlers, module_exports };
+	return { calls, edit_calls, marketplace_calls, noon_calls, oos_calls, confirms, required, alerts, msgprints, dialogs, handlers, module_exports };
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
@@ -589,7 +592,7 @@ test("a submitted Noon Sales Order shows the item-edit hint; other platforms and
 		await settle();
 		assert.equal(shown.length, intros, name);
 		if (intros) {
-			assert.match(shown[0].message, /Mark Out of Stock on this Sales Order, or cancel and amend the Delivery Note/);
+			assert.match(shown[0].message, /Mark as Out of Stock on an item row of this Sales Order, or cancel and amend the Delivery Note/);
 			assert.equal(shown[0].color, "orange");
 		}
 	}
@@ -759,13 +762,13 @@ test("the tab shows cancellation, received, last update and last sync values", (
 
 // ---- Noon fulfillment on the Sales Order form (moved from the Marketplace Order form) ----
 
-// #415: shipments, AWBs and handover live on the Delivery Note; the Sales Order keeps Mark Out of Stock,
-// the order invoice and the stuck-reservation recovery.
+// #415: shipments, AWBs and handover live on the Delivery Note; the Sales Order keeps the order invoice and
+// the stuck-reservation recovery as buttons. Mark as Out of Stock is a button of the item row form (#416).
 const NOON_ALL_ACTIONS = [
-	"mark_out_of_stock", "upload_order_invoice", "retry_order_invoice", "release_stuck_oos_reservation",
+	"upload_order_invoice", "retry_order_invoice", "release_stuck_oos_reservation",
 ];
 const NOON_LABELS = {
-	mark_out_of_stock: "Mark Out of Stock", upload_order_invoice: "Upload Order Invoice",
+	upload_order_invoice: "Upload Order Invoice",
 	retry_order_invoice: "Retry Order Invoice", release_stuck_oos_reservation: "Release Stuck Out of Stock Reservation",
 };
 const noon_so = (extra = {}) => ({ custom_marketplace_platform: "Noon", custom_marketplace_order: "MO-NOON", ...extra });
@@ -792,7 +795,7 @@ test("a submitted Noon Sales Order gets the Noon Fulfillment group with one butt
 
 test("only the actions the server reports are shown, and none when the list is empty", async () => {
 	const some = await refresh_noon({ noon_state: { actions: ["retry_order_invoice", "mark_out_of_stock", "unknown"] } });
-	assert.deepEqual(some.frm.buttons.map((b) => b.label), ["Mark Out of Stock", "Retry Order Invoice"]);
+	assert.deepEqual(some.frm.buttons.map((b) => b.label), ["Retry Order Invoice"]);
 	const none = await refresh_noon({ noon_state: { actions: [] } });
 	assert.deepEqual(none.frm.buttons, []);
 });
@@ -866,68 +869,40 @@ test("the retired shipment helpers are gone from the Noon asset", () => {
 	}
 });
 
-test("unit checklist uses indices as values, escapes labels and maps back to the real units", () => {
+test("the retired unit checklist helpers and dialog are gone from the Noon asset", () => {
 	load();
 	const noon = require("./noon_fulfillment.js");
-	global.frappe.utils.escape_html = escape_html;
-	const units = [{ mp_item_nr: "<b>1</b>", partner_sku: "S\"1" }, { mp_item_nr: "2", partner_sku: undefined }];
-	const options = noon.noon_unit_checklist_options(units);
-	assert.deepEqual(options.map((o) => o.value), ["0", "1"]);
-	assert.match(options[0].label, /&lt;b&gt;1&lt;\/b&gt;/); // raw mp_item_nr only in the tooltip
-	assert.match(options[0].label, />S&quot;1</);
-	assert.equal(options[1].label, '<span title="2"></span>');
-	assert.deepEqual(noon.mp_item_nrs_from_unit_indices(units, ["1", "0", "7"]), ["2", "<b>1</b>"]);
-	assert.deepEqual(noon.mp_item_nrs_from_unit_indices(units, undefined), []);
+	for (const name of ["noon_unit_checklist_options", "mp_item_nrs_from_unit_indices", "show_noon_mark_out_of_stock_dialog"]) {
+		assert.equal(noon[name], undefined, name);
+	}
 });
 
-test("unit checklist labels: mapped name, unmapped SKU fallback, repeated SKU counter, tooltip and escaping", () => {
-	load();
-	const noon = require("./noon_fulfillment.js");
-	global.frappe.utils.escape_html = escape_html;
-	const options = noon.noon_unit_checklist_options([
-		{ mp_item_nr: "N1", partner_sku: "SKU-001", item_name: "Hand Soap 500ml" },
-		{ mp_item_nr: "N2", partner_sku: "SKU-009" },
-		{ mp_item_nr: "N3", partner_sku: "SKU-002", item_name: "Rice <1kg>" },
-		{ mp_item_nr: "N4", partner_sku: "SKU-002", item_name: "Rice <1kg>" },
-		{ mp_item_nr: "N5", partner_sku: "SKU-002", item_name: "Rice <1kg>" },
-	]);
-	assert.equal(options[0].label, '<span title="N1">Hand Soap 500ml (SKU-001)</span>');
-	assert.equal(options[1].label, '<span title="N2">SKU-009</span>');
-	assert.equal(options[2].label, '<span title="N3">Rice &lt;1kg&gt; (SKU-002) (1 of 3)</span>');
-	assert.match(options[4].label, /\(SKU-002\) \(3 of 3\)/);
-	// the visible text never carries the raw mp_item_nr
-	assert.doesNotMatch(options[0].label.replace(/title="[^"]*"/, ""), /N1/);
+test("the Sales Order asks the server which item rows offer Mark as Out of Stock (write on the Sales Order is enough)", async () => {
+	const { frm, oos_calls } = await refresh_noon({ oos_rows: ["row-1"], can_read: false });
+	assert.equal(oos_calls.length, 1);
+	assert.deepEqual(oos_calls[0].args, { sales_order: "SAL-ORD-1" });
+	assert.deepEqual(frm.__mi_noon_oos_rows, ["row-1"]);
+	const none = await refresh_noon({ can_write: false });
+	assert.equal(none.oos_calls.length, 0);
 });
 
 test("a Closed submitted Noon Sales Order keeps the Noon Fulfillment buttons (the server decides)", async () => {
 	const { frm } = await refresh_noon(
-		{ noon_state: { actions: ["mark_out_of_stock", "retry_order_invoice"] } },
+		{ noon_state: { actions: ["retry_order_invoice"] } },
 		noon_so({ status: "Closed" })
 	);
-	assert.deepEqual(frm.buttons.map((b) => b.label), ["Mark Out of Stock", "Retry Order Invoice"]);
+	assert.deepEqual(frm.buttons.map((b) => b.label), ["Retry Order Invoice"]);
 });
 
-test("the Mark Out of Stock and recovery buttons call the endpoints with the linked Marketplace Order", async () => {
-	const { frm, dialogs, noon_calls, confirms } = await refresh_noon({
-		noon_state: { actions: ["mark_out_of_stock", "release_stuck_oos_reservation"] },
+test("the recovery button calls the endpoint with the linked Marketplace Order", async () => {
+	const { frm, noon_calls, confirms } = await refresh_noon({
+		noon_state: { actions: ["release_stuck_oos_reservation"] },
 	});
 	const by_label = Object.fromEntries(frm.buttons.map((b) => [b.label, b.action]));
 
-	by_label["Mark Out of Stock"]();
-	await settle();
-	const dialog = dialogs[dialogs.length - 1];
-	dialog.config.primary_action({ units: ["1"] });
-	assert.equal(confirms.length, 1);
-	assert.match(confirms[0].message, /SAL-ORD-1/);
-	confirms[0].proceed();
-	await settle();
-	const call = noon_calls[noon_calls.length - 1];
-	assert.equal(call.method, "marketplace_integrations.api.noon_fulfillment.mark_out_of_stock");
-	assert.deepEqual(call.args, { marketplace_order: "MO-NOON", mp_item_nrs: ["2"] });
-
 	by_label["Release Stuck Out of Stock Reservation"]();
-	assert.equal(confirms.length, 2);
-	confirms[1].proceed();
+	assert.equal(confirms.length, 1);
+	confirms[0].proceed();
 	await settle();
 	assert.deepEqual(noon_calls[noon_calls.length - 1].args, { marketplace_order: "MO-NOON" });
 });
