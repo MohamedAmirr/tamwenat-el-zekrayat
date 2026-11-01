@@ -81,6 +81,18 @@ Framework-internals dependencies on record:
 - Verified: Frappe 16.52.0 / ERPNext 16.51.1 (prod commits 4515014 / 5af6561; prod has no saved Dock layers, checked 2026-10-22), on `test.localhost`.
 - Evidence: the always-on test `marketplace_integrations/tests/test_navigation.py` (`UnitTestDockFrameworkWiring`, plus per-role resolution through `resolve_sidebar`).
 - Recheck: on any Frappe/ERPNext upgrade, and when prod gains a saved erpnext Dock layer.
+- Epic #413 (a) Delivery Note Submit wait (`public/js/delivery_note_shipping.js`, `before_submit`) relies on the form's `before_submit` promise flow and `frappe.validated` (`frappe/public/js/frappe/form/form.js`: `frappe.validated = true; me.script_manager.trigger("before_submit").then(function () { if (!frappe.validated) { return me.handle_save_fail ...`), on `frm.reload_doc()` refreshing the open document after the worker bumped `modified`, and on `frappe.db.get_value` polling.
+- Verified: Frappe 16.52.0 / ERPNext 16.51.1 on `test.localhost` (server side); the browser flow (reload before the native submit saves) is NOT yet verified and needs a browser pass.
+- Evidence: `test_the_form_still_waits_for_a_before_submit_promise` in `integrations/bosta/test_delivery_note_shipment.py` matches that exact pattern in the installed `form.js` (not only the words), plus `delivery_note_shipping.test.js`.
+- Recheck: on any Frappe/ERPNext upgrade, and after the first browser pass.
+- Epic #413 (b) Integration Request schema: the Bosta log is the native Integration Request with Custom Fields (`custom_dedupe_key` unique, `custom_operation_type`, `custom_result`, ...). It relies on the unique index raising `UniqueValidationError` / `DuplicateEntryError` on a duplicate insert (the webhook catches it as a replay), on Integration Request granting only System Manager (rows are inserted with `ignore_permissions` after the caller's own check), and on Log Settings deleting old Integration Request rows (90 days), so no rule may depend on counting them.
+- Verified: Frappe 16.52.0 on `test.localhost`.
+- Evidence: `integrations/bosta/test_statuses.py` (dedupe), `integrations/bosta/test_delivery_note_shipment.py::test_the_lookup_first_rule_survives_the_deletion_of_the_log_rows`.
+- Recheck: on any Frappe upgrade (schema of Integration Request, Log Settings defaults).
+- Epic #413 (c) Orphan DocType removal order: in `frappe/migrate.py` (16.52.0) `run_schema_updates` runs pre_model_sync patches, `sync_all`, then post_model_sync patches; `post_schema_updates` then runs sync_jobs, sync_fixtures, dashboards, customizations, languages, flushes deferred inserts and only then calls `remove_orphan_doctypes()` (`frappe/model/sync.py`, docstring "Deleting the entry doesn't delete any data"). So a `post_model_sync` patch still sees the old DocType row of a removed doctype, fixtures are not yet synced while it runs (a patch that writes a new Custom Field must create it itself), and the table of a removed doctype is never dropped by migrate (`test.localhost` still has `tabBosta Shipment Item` with no DocType row). `migrate_bosta_shipments_to_delivery_notes` fails loudly when the DocType row exists but its table does not.
+- Verified: Frappe 16.52.0 source read in the dev bench container, and the table check on `test.localhost`.
+- Evidence: `patches/v0_0/test_migrate_bosta_shipments_to_delivery_notes.py::test_the_patch_fails_loudly_when_the_doctype_row_exists_but_the_table_does_not`.
+- Recheck: on any Frappe upgrade.
 
 ## Skills (optional help)
 
