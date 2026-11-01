@@ -465,13 +465,215 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Cancelled", update_modified=False)
 		noon.refuse_sales_order_cancel(order)
 
-	# ---- placeholders --------------------------------------------------------------------------------
+	def test_a_draft_note_of_another_carrier_is_not_a_live_noon_shipment_to_bosta(self):
+		from marketplace_integrations.integrations.bosta import delivery_note_shipment as bosta
 
-	def test_refresh_and_reconcile_are_phase_3_placeholders_that_call_nothing(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		self._created_note(fx)
+		bosta.refuse_sales_order_cancel(frappe.get_doc("Sales Order", fx.name))
+
+	# ---- status: derivation, refresh, webhook, nightly -------------------------------------------------
+
+	@staticmethod
+	def _unit(nr, integration="SHIPPED", mp="MP_ITEM_STATUS_CONFIRMED", sku="SKU-A"):
+		return {
+			"mp_item_nr": nr,
+			"partner_sku": sku,
+			"mp_status": mp,
+			"integration_status": f"INTEGRATION_ITEM_STATUS_{integration}",
+		}
+
+	def _derive(self, units, order_items, shipment_nrs=None):
+		doc = frappe._dict(
+			custom_carrier_request_snapshot=json.dumps({"mp_item_nrs": units}),
+			items=[frappe._dict(name="row-1", item_code="ITEM-A")],
+		)
+		shipment = {"items": [{"mp_item_nr": nr} for nr in (shipment_nrs if shipment_nrs is not None else units)]}
+		with patch.object(noon, "resolve_item", return_value="ITEM-A"):
+			return noon.derive_status(doc, shipment, {"items": order_items}, "ACC")
+
+	def test_the_derivation_table(self):
+		unit = self._unit
+		cancelled = {"integration": "ACKNOWLEDGED", "mp": "MP_ITEM_STATUS_CANCELLED"}
+		cases = [
+			([unit("1", "ACKNOWLEDGED")], "Acknowledged", None),
+			([unit("1"), unit("2")], "Shipped", None),
+			([unit("1", "OUT_OF_STOCK")], "Out of Stock", None),
+			([unit("1", **cancelled), unit("2", **cancelled)], "Cancelled", "cancelled"),
+			([unit("1"), unit("2", "ACKNOWLEDGED")], "Mixed", "different statuses"),
+			([unit("1"), unit("2", **cancelled)], "Mixed", "cancelled 1 of 2"),
+		]
+		for order_items, expected, error_text in cases:
+			derived = self._derive([i["mp_item_nr"] for i in order_items], order_items)
+			self.assertEqual(derived.shipping_status, expected)
+			# the one row of the Item shows the same word (all units belong to it)
+			self.assertEqual(derived.rows, {"row-1": expected})
+			if error_text:
+				self.assertIn(error_text.lower(), (derived.error or "").lower())
+			else:
+				self.assertIsNone(derived.error)
+
+	def test_an_unknown_unit_status_changes_nothing_and_items_that_differ_set_an_error(self):
+		odd = self._derive(["1"], [{"mp_item_nr": "1", "partner_sku": "SKU-A", "integration_status": "INTEGRATION_ITEM_STATUS_UNSPECIFIED"}])
+		self.assertIsNone(odd.shipping_status)
+		self.assertEqual(odd.rows, {})
+		self.assertTrue(odd.error)
+		differ = self._derive(["1"], [self._unit("1")], shipment_nrs=["1", "9"])
+		self.assertEqual(differ.shipping_status, "Shipped")
+		self.assertIn("differ", differ.error)
+
+	def _refresh(self, note, shipment, order_items):
+		with patch(_CLIENT) as client_class, patch(_GET_ORDER, return_value={"items": order_items}) as get_order:
+			client = client_class.return_value
+			client.request.side_effect = [shipment]
+			client.error_message.side_effect = lambda response: response.message
+			result = noon.refresh(note.name)
+		return result, client, get_order
+
+	def test_refresh_writes_status_row_status_and_sync_time_and_never_edits_items(self):
 		fx = self._order([("SKU-A", 1)], ["SKU-A"])
 		note = self._created_note(fx)
+		rows_before = [(r.item_code, r.qty) for r in self._note(note.name).items]
+		shipment = _response(200, {"awbs": [], "items": [{"mp_item_nr": "1"}]})
+		result, client, get_order = self._refresh(note, shipment, [self._unit("1")])
+		self.assertEqual(result, "Shipped")
+		self.assertEqual(_paths(client), ["get"])  # GetShipment, then the order (mocked) once
+		get_order.assert_called_once()
+		stored = self._note(note.name)
+		self.assertEqual(stored.custom_shipping_status, "Shipped")
+		self.assertEqual(stored.items[0].custom_noon_item_status, "Shipped")
+		self.assertTrue(stored.custom_last_sync_at)
+		self.assertFalse(stored.custom_last_integration_error)
+		self.assertEqual([(r.item_code, r.qty) for r in stored.items], rows_before)
+
+	def test_refresh_shows_mixed_and_an_item_difference_sets_the_error(self):
+		fx = self._order([("SKU-A", 2)], ["SKU-A", "SKU-A"])
+		note = self._created_note(fx, units=("1", "2"))
+		shipment = _response(200, {"awbs": [], "items": [{"mp_item_nr": "1"}]})
+		self._refresh(note, shipment, [self._unit("1"), self._unit("2", "ACKNOWLEDGED")])
+		stored = self._note(note.name)
+		self.assertEqual(stored.custom_shipping_status, "Mixed")
+		self.assertEqual(stored.items[0].custom_noon_item_status, "Mixed")
+		self.assertIn("differ", stored.custom_last_integration_error)
+
+	def test_a_shipment_missing_at_noon_sets_the_error_and_keeps_the_status(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		self._refresh(note, _not_found(), [self._unit("1")])
+		stored = self._note(note.name)
+		self.assertTrue(stored.custom_last_integration_error)
+		self.assertNotEqual(stored.custom_shipping_status, "Shipped")
+
+	def test_refresh_resolves_a_cancellation_unknown_when_noon_shows_every_unit_cancelled(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Cancellation Unknown", update_modified=False)
+		result, client, _get = self._refresh(
+			note, None, [self._unit("1", "ACKNOWLEDGED", mp=_CANCELLED)]
+		)
+		self.assertEqual(result, "Cancelled")
+		self.assertEqual(self._note(note.name).custom_integration_status, "Cancelled")
+		client.request.assert_not_called()  # no GetShipment, never a cancel call
+
+	def _submit_flags(self, note):
+		frappe.db.set_value("Delivery Note", note.name, "docstatus", 1, update_modified=False)
+		frappe.db.set_value("Delivery Note Item", {"parent": note.name}, "docstatus", 1, update_modified=False)
+		frappe.db.commit()
+
+	def test_the_webhook_queues_one_deduplicated_refresh_per_submitted_note_and_ignores_drafts(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		draft = self._created_note(fx)
+		with patch("frappe.enqueue") as enqueue:
+			self.assertEqual(noon.enqueue_note_refreshes(fx.marketplace_order.name), [])
+		enqueue.assert_not_called()
+		self._submit_flags(draft)
+		with patch("frappe.enqueue") as enqueue:
+			self.assertEqual(noon.enqueue_note_refreshes(fx.marketplace_order.name), [draft.name])
+		kwargs = enqueue.call_args.kwargs
+		self.assertEqual(kwargs["job_id"], f"noon-refresh|{draft.name}")
+		self.assertTrue(kwargs["deduplicate"])
+		self.assertTrue(kwargs["enqueue_after_commit"])
+
+	def test_the_nightly_reconcile_is_one_deduplicated_long_job(self):
+		with patch("frappe.enqueue") as enqueue:
+			noon.reconcile()
+		kwargs = enqueue.call_args.kwargs
+		self.assertEqual((kwargs["job_id"], kwargs["queue"], kwargs["deduplicate"]), ("noon-reconcile", "long", True))
+
+	def test_the_nightly_reconcile_survives_one_notes_failure(self):
+		fx_one = self._order([("SKU-A", 1)], ["SKU-A"])
+		fx_two = self._order([("SKU-A", 1)], ["SKU-A"])
+		one, two = self._created_note(fx_one), self._created_note(fx_two)
+		seen = []
+
+		def reconcile_note(note, _service):
+			seen.append(note.name)
+			if note.name == one.name:
+				raise RuntimeError("boom")
+
+		with patch.object(noon, "_reconcile_note", side_effect=reconcile_note):
+			noon.run_reconcile()
+		self.assertIn(one.name, seen)
+		self.assertIn(two.name, seen)
+
+	def test_the_nightly_reconcile_resolves_an_unknown_create_by_lookup_only(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._draft_note(fx, lr_no="AWB-N1")
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{"custom_integration_status": "Creation Unknown", "custom_carrier_reference": note.name},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		shipment = _response(200, {"awbs": [{"awb_nr": "AWB-N1"}], "items": [{"mp_item_nr": "1"}]})
 		with patch(_CLIENT) as client_class:
-			self.assertIsNone(noon.refresh(note.name))
-			self.assertIsNone(noon.reconcile())
-		client_class.return_value.request.assert_not_called()
-		self.assertEqual(carrier_log.CREATED, "Created")
+			client = client_class.return_value
+			client.request.side_effect = [shipment]
+			client.error_message.side_effect = lambda response: response.message
+			noon.run_reconcile()
+		self.assertEqual(_paths(client), ["get"])  # GetShipment only, never CreateShipment
+		self.assertEqual(self._note(note.name).custom_integration_status, "Created")
+
+	def test_a_draft_that_holds_a_noon_shipment_gets_the_error_for_needs_attention(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._draft_note(fx, lr_no="AWB-N2")
+		frappe.db.set_value("Delivery Note", note.name, "custom_carrier_reference", note.name, update_modified=False)
+		frappe.db.commit()
+		shipment = _response(200, {"awbs": [], "items": [{"mp_item_nr": "1"}]})
+		with patch(_CLIENT) as client_class:
+			client = client_class.return_value
+			client.request.side_effect = [shipment]
+			noon.run_reconcile()
+		self.assertIn("holds a Noon shipment", self._note(note.name).custom_last_integration_error)
+		self.assertEqual(self._note(note.name).custom_integration_status, "Not Created")
+
+	def test_needs_attention_lists_mixed_cancelled_and_draft_holds_rows_for_noon(self):
+		from marketplace_integrations.services import marketplace_attention as attention
+
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{"custom_shipping_status": "Mixed", "custom_last_integration_error": "units differ"},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		found = [i for i in attention._collect_carrier_items(attention.CARRIER_EXCEPTION) if i["reference_name"] == note.name]
+		self.assertEqual(len(found), 1)
+		# Noon never has a carrier delivery id: a cancelled note still appears
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Cancelled", update_modified=False)
+		frappe.db.commit()
+		found = [i for i in attention._collect_carrier_items(attention.CARRIER_CANCELLED) if i["reference_name"] == note.name]
+		self.assertEqual(len(found), 1)
+		# a draft that holds a Noon shipment (Not Created with the error) is a creation problem
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{"custom_integration_status": "Not Created", "custom_last_integration_error": "This draft holds a Noon shipment"},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		found = [i for i in attention._collect_carrier_items(attention.CARRIER_CREATION_PROBLEM) if i["reference_name"] == note.name]
+		self.assertEqual(len(found), 1)

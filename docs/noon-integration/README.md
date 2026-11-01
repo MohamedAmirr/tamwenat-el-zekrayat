@@ -50,6 +50,18 @@ The Delivery Note of a Noon Sales Order is the shipment. The Noon adapter
   with no cancel call. Otherwise `CancelShipment`: 200 cancels, a definite 4xx leaves the note submitted with
   Noon's reason, anything else is Cancellation Unknown (Retry asks Noon first again). The ERPNext cancel
   follows only after Noon confirms. Changing the AWB or items of a created shipment is cancel and amend.
-- **Not built yet (phase 3 and later):** Shipping Status refresh, the item status column values, the
-  webhook refresh and the nightly Noon reconcile (placeholders do nothing), and the FBPI warehouse check
-  (hook `check_fbpi_warehouse`, sub-issue #416).
+- **Status and refresh.** `refresh` (Refresh from Noon button, synchronous: HTTP first, then lock and write)
+  calls `GetShipment` and `GetFbpiOrder` and derives Shipping Status from the units in the request snapshot:
+  all units agree = Acknowledged / Shipped / Out of Stock, all cancelled = Cancelled (terminal), units differ
+  or some cancelled = Mixed. The snapshot holds only `mp_item_nr`, so a unit is placed on a row through its
+  `partner_sku` and the product mapping (units of an Item are pooled over its rows); that row status is
+  `custom_noon_item_status`. Refresh never edits items. Cancelled units, Mixed or items that differ from the
+  snapshot set Last Integration Error and show in Needs Attention (Carrier Exception). A Cancellation Unknown
+  note resolves to Cancelled when every unit shows cancelled (no cancel call).
+- **Triggers.** The `FBPI::ORDER_SYNC` webhook path (`orders.refresh_order`) queues one deduplicated
+  `noon-refresh|<note>` job per submitted Noon note (drafts ignored). The nightly `noon-reconcile` long job
+  (23:59, from `carrier_shipments.reconcile_open_notes`) commits per note and survives one note's failure:
+  Creating (stale) / Creation Unknown = lookup only (`check`, never creates); Cancellation Unknown and Created
+  = refresh; a draft with a shipment number whose shipment Noon has = the error "draft holds a Noon
+  shipment" (Needs Attention, Carrier Creation Problem).
+- **Not built yet:** the FBPI warehouse check (hook `check_fbpi_warehouse`, sub-issue #416).

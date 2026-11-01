@@ -536,9 +536,21 @@ def _collect_carrier_items(problem_type=None):
 	def statuses_of(kind):
 		return sorted({status for found in states.values() for status in found.get(kind, [])})
 
-	shipped = {"custom_carrier_delivery_id": ["is", "set"]}
+	# A started shipment, whatever the carrier calls its id (Noon has none): judged by the Integration Status.
+	shipped = {
+		"custom_integration_status": ["in", ["Created", "Cancellation Pending", "Cancellation Unknown", "Cancelled"]]
+	}
 	if problem_type in (None, CARRIER_CREATION_PROBLEM):
 		collect({"custom_integration_status": ["in", ["Creation Failed", "Creation Unknown"]], "docstatus": 0})
+		# A draft that was never started but carries an error: the carrier's nightly check found a shipment
+		# the draft does not know about (the adapter wrote the error).
+		collect(
+			{
+				"custom_integration_status": ["in", ["", "Not Created"]],
+				"custom_last_integration_error": ["is", "set"],
+				"docstatus": 0,
+			}
+		)
 	if problem_type in (None, CARRIER_CANCELLED):
 		collect({**shipped, "custom_integration_status": "Cancelled"})
 	for kind in (CARRIER_EXCEPTION, CARRIER_RETURN):
@@ -621,13 +633,24 @@ def _collect_carrier_items(problem_type=None):
 		status = row.custom_integration_status
 		shipping_status = row.custom_shipping_status
 		seen = row.custom_last_sync_at or row.modified
-		if status in ("Creation Failed", "Creation Unknown") and row.docstatus == 0 and problem_type in (
-			None,
-			CARRIER_CREATION_PROBLEM,
-		):
-			error = row.custom_last_integration_error
-			add(CARRIER_CREATION_PROBLEM, carrier, row, f"{name}: {error}" if error else _(status), row.modified)
+		error = row.custom_last_integration_error
 		if (
+			(status in ("Creation Failed", "Creation Unknown") or (status in ("", "Not Created", None) and error))
+			and row.docstatus == 0
+			and problem_type in (None, CARRIER_CREATION_PROBLEM)
+		):
+			add(CARRIER_CREATION_PROBLEM, carrier, row, f"{name}: {error}" if error else _(status), row.modified)
+		if status == "Cancelled" and row.docstatus == 1 and problem_type in (None, CARRIER_CANCELLED):
+			# Cancelled at the carrier but still submitted here (the local cancel failed): stays until it is
+			# cancelled in ERPNext, however the carrier was told.
+			add(
+				CARRIER_CANCELLED,
+				carrier,
+				row,
+				_("{0} shipment is cancelled but this Delivery Note is still submitted. Press Cancel.").format(name),
+				seen,
+			)
+		elif (
 			status == "Cancelled"
 			and row.name not in cancelled_here
 			and seen >= cancelled_cutoff

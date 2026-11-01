@@ -862,6 +862,11 @@ def refresh_order(marketplace_order_name, trigger_source="Manual"):
 		frappe.db.commit()  # #146 decision 10: same per-order commit as above
 		if unmapped_skus:
 			_log_unmapped_skus(account, order, unmapped_skus, trigger_source)
+		# The order's submitted Noon Delivery Notes re-read their shipment (deduplicated, queued after the
+		# commit above; draft notes are ignored). Imported here: the adapter imports this module.
+		from marketplace_integrations.integrations.noon.delivery_note_shipment import enqueue_note_refreshes
+
+		enqueue_note_refreshes(order.name)
 		return {"name": order.name}
 
 

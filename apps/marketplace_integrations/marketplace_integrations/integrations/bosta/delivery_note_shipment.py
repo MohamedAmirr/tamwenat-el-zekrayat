@@ -296,6 +296,9 @@ def guard_changes(doc):
 
 def refuse_sales_order_cancel(order):
 	"""Sales Order ``before_cancel``: refuse while a draft Delivery Note has a live Bosta shipment."""
+	supplier = bosta_supplier()
+	if not supplier:
+		return
 	notes = frappe.get_all(
 		"Delivery Note Item",
 		filters={"against_sales_order": order.name, "docstatus": 0, "parenttype": "Delivery Note"},
@@ -307,7 +310,11 @@ def refuse_sales_order_cancel(order):
 		return
 	live = frappe.get_all(
 		"Delivery Note",
-		filters={"name": ["in", notes], "custom_integration_status": ["in", list(LIVE_STATUSES)]},
+		filters={
+			"name": ["in", notes],
+			"transporter": supplier,
+			"custom_integration_status": ["in", list(LIVE_STATUSES)],
+		},
 		pluck="name",
 	)
 	if live:

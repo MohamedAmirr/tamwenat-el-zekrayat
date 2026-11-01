@@ -31,8 +31,10 @@ Rules enforced here:
   that rule added (ERPNext only adds them, it never removes them).
 - The worker writes with ``db_set`` (no validate, no hooks): a system write-back.
 
-Placeholders: ``refresh`` and ``reconcile`` are implemented later (issue #415 phase 3); the FBPI warehouse
-check of ``validate_ready`` is ``check_fbpi_warehouse``, filled in by sub-issue #416.
+Status: ``refresh`` (GetShipment + GetFbpiOrder) derives the Shipping Status and the per-row Noon status from
+the units' item statuses and never edits items; ``enqueue_note_refreshes`` (webhook) and ``run_reconcile``
+(nightly) call it. The FBPI warehouse check of ``validate_ready`` is ``check_fbpi_warehouse``, filled in by
+sub-issue #416.
 """
 
 import json
@@ -54,9 +56,13 @@ from marketplace_integrations.services import carrier_log
 from marketplace_integrations.services.carrier_log import (
 	CANCELLATION_PENDING,
 	CANCELLATION_UNKNOWN,
+	CANCELLED,
 	CREATED,
+	CREATING,
 	EDITABLE_STATUSES,
+	FAILED,
 	NOT_CREATED,
+	UNKNOWN,
 	Failed,
 	Unknown,
 )
@@ -71,9 +77,21 @@ SHIPPING_CARRIER = SUPPLIER_NAME
 #: (``carrier_shipments.request_create``).
 LOOKUP_FIRST = True
 
-#: Shipping Status values (Noon's own words, derived from the item statuses; written by ``refresh``, phase 3).
+#: Shipping Status values (Noon's own words, derived from the item statuses; written by ``refresh``).
 SHIPPING_ACKNOWLEDGED = "Acknowledged"
+SHIPPING_SHIPPED = "Shipped"
+SHIPPING_OUT_OF_STOCK = "Out of Stock"
 SHIPPING_CANCELLED = "Cancelled"
+SHIPPING_MIXED = "Mixed"
+MP_STATUS_CANCELLED = "MP_ITEM_STATUS_CANCELLED"
+#: GetFbpiOrder ``integration_status`` -> Shipping Status word.
+_INTEGRATION_STATUS_NAMES = {
+	"INTEGRATION_ITEM_STATUS_ACKNOWLEDGED": SHIPPING_ACKNOWLEDGED,
+	"INTEGRATION_ITEM_STATUS_SHIPPED": SHIPPING_SHIPPED,
+	"INTEGRATION_ITEM_STATUS_OUT_OF_STOCK": SHIPPING_OUT_OF_STOCK,
+}
+_REFRESH_JOB = "noon-refresh|{}"
+RECONCILE_JOB = "noon-reconcile"
 
 #: Written by the app only (workers and APIs); a person's save never changes them.
 SYSTEM_FIELDS = (
@@ -689,21 +707,267 @@ def after_cancelled(delivery_note):
 # ---------------------------------------------------------------------------
 
 
+def _unit_status(item):
+	"""Noon's word for one unit: Cancelled (``mp_status``) wins, else the ``integration_status``; ``None``
+	when Noon sent a status this app does not know."""
+	if item.get("mp_status") == MP_STATUS_CANCELLED:
+		return SHIPPING_CANCELLED
+	return _INTEGRATION_STATUS_NAMES.get(item.get("integration_status"))
+
+
+def _combine(statuses):
+	"""All agree = that status, they differ = Mixed, any unknown (or none at all) = ``None``."""
+	statuses = list(statuses)
+	if not statuses or None in statuses:
+		return None
+	return statuses[0] if len(set(statuses)) == 1 else SHIPPING_MIXED
+
+
+def _unit_details(raw_order, units):
+	"""``{mp_item_nr: (status, partner_sku)}`` of the shipment's units from GetFbpiOrder (a unit the order no
+	longer lists has status ``None``)."""
+	items = raw_order.get("items") if isinstance(raw_order, dict) else None
+	by_nr = {cstr(item.get("mp_item_nr")).strip(): item for item in items or [] if isinstance(item, dict)}
+	return {
+		unit: (_unit_status(by_nr[unit]), cstr(by_nr[unit].get("partner_sku")).strip()) if unit in by_nr else (None, "")
+		for unit in units
+	}
+
+
+def derive_status(doc, shipment, raw_order, marketplace_account):
+	"""What a refresh writes (no writes here): ``_dict(shipping_status, rows, error)``.
+
+	``shipping_status`` is derived from the units in the snapshot (all agree = that status, all cancelled =
+	Cancelled, differ = Mixed), ``None`` when a unit is unknown or the snapshot is unreadable (nothing is
+	changed then). ``rows`` is ``{Delivery Note Item name: status}``: the snapshot holds only ``mp_item_nr``,
+	so a unit is placed on a row through its ``partner_sku`` (GetFbpiOrder) -> Item (the mapping): the units of
+	an Item are pooled over every row of that Item. ``error`` is the readable problem (``None`` when the
+	shipment is as sent): cancelled or differing units, or items that differ from the snapshot. Items are
+	never edited."""
+	units = _snapshot_units(doc.get("custom_carrier_request_snapshot"))
+	result = frappe._dict(shipping_status=None, rows={}, error=None)
+	if not units:
+		return result
+	details = _unit_details(raw_order, units)
+	result.shipping_status = _combine(status for status, _sku in details.values())
+	problems = []
+	cancelled = [unit for unit, (status, _sku) in details.items() if status == SHIPPING_CANCELLED]
+	if result.shipping_status is None:
+		problems.append(_("Noon returned a unit status this app does not know or no longer lists a unit."))
+	elif result.shipping_status == SHIPPING_CANCELLED:
+		problems.append(_("Noon shows this shipment as cancelled. Cancel the Delivery Note here."))
+	elif cancelled:
+		problems.append(_("Noon cancelled {0} of {1} units of this shipment.").format(len(cancelled), len(units)))
+	elif result.shipping_status == SHIPPING_MIXED:
+		problems.append(_("The units of this shipment have different statuses at Noon."))
+	if shipment is not None:
+		shipped = {cstr(item.get("mp_item_nr")).strip() for item in shipment.get("items") or []}
+		if shipped != set(units):
+			problems.append(
+				_("The items of the Noon shipment differ from the units sent. Items are never changed here: cancel the shipment and amend the Delivery Note.")
+			)
+	result.error = " ".join(problems) or None
+	if result.shipping_status is not None:
+		by_item = {}
+		for status, sku in details.values():
+			item = resolve_item(marketplace_account, sku) if sku else None
+			by_item.setdefault(item, []).append(status)
+		for row in doc.get("items") or []:
+			status = _combine(by_item.get(row.item_code, []))
+			if status:
+				result.rows[row.name] = status
+	return result
+
+
+def _read_noon(doc, lookup_shipment=True):
+	"""The HTTP part of a refresh (nothing locked, nothing written): ``(shipment, raw_order, account,
+	marketplace_account)``. ``shipment`` is ``None`` when Noon confirms none. Raises ``Unknown``."""
+	account, _client = _client_for(doc, Unknown)
+	order = _order_values(doc)
+	shipment = find_remote(doc) if lookup_shipment else None
+	try:
+		raw_order = fulfillment.get_fbpi_order(account, order.external_order_id)
+	except Exception as exc:
+		frappe.clear_messages()
+		raise Unknown(_("Noon did not answer the order lookup ({0}).").format(cstr(exc)[:200])) from exc
+	return shipment, raw_order, account, order.marketplace_account
+
+
 def refresh(delivery_note):
-	"""The contract's ``refresh``. Placeholder, implemented in issue #415 phase 3 (GetShipment and
-	GetFbpiOrder, derived Shipping Status): it reads nothing from Noon and returns the stored status."""
-	return frappe.db.get_value("Delivery Note", delivery_note, "custom_shipping_status")
+	"""The contract's ``refresh``: GetShipment + GetFbpiOrder, then the derived Shipping Status, the item
+	row statuses and Last Sync At are written (``derive_status``); returns the stored Shipping Status.
+
+	HTTP first, then lock and write (nothing is held across the calls). Created: derive and write. Cancellation
+	Unknown: only GetFbpiOrder, every unit cancelled resolves it to Cancelled (Noon asked first, never a
+	cancel call). Other statuses, and a Cancelled note (terminal), only return the stored status. A Noon
+	error is a readable ``frappe.ValidationError`` (the Refresh button shows it; jobs log it)."""
+	doc = frappe.get_doc("Delivery Note", delivery_note)
+	status = cstr(doc.get("custom_integration_status"))
+	if status not in (CREATED, CANCELLATION_UNKNOWN) or not noon_order_name(doc):
+		return doc.get("custom_shipping_status")
+	try:
+		shipment, raw_order, _account, marketplace_account = _read_noon(doc, lookup_shipment=status == CREATED)
+	except Unknown as unknown:
+		frappe.throw(cstr(unknown), title=_("Noon shipment"))
+	frappe.db.commit()  # lock as the next statement (MariaDB snapshot isolation)
+	locked = frappe.db.get_value("Delivery Note", delivery_note, "custom_integration_status", for_update=True)
+	if cstr(locked) != status:
+		frappe.db.commit()
+		return frappe.db.get_value("Delivery Note", delivery_note, "custom_shipping_status")
+	note = frappe.get_doc("Delivery Note", delivery_note)
+	values = {"custom_last_sync_at": now_datetime()}
+	if status == CANCELLATION_UNKNOWN:
+		if _all_units_cancelled(raw_order, _snapshot_units(note.get("custom_carrier_request_snapshot"))):
+			values.update(
+				custom_integration_status=CANCELLED, custom_shipping_status=SHIPPING_CANCELLED, custom_last_integration_error=None
+			)
+		note.db_set(values, update_modified=False, notify=True, commit=True)
+		return note.get("custom_shipping_status")
+	if shipment is None:
+		values["custom_last_integration_error"] = _("Noon has no shipment with number {0}.").format(_reference(note))
+	else:
+		derived = derive_status(note, shipment, raw_order, marketplace_account)
+		values["custom_last_integration_error"] = derived.error
+		if derived.shipping_status:
+			values["custom_shipping_status"] = derived.shipping_status
+		for row in note.get("items") or []:
+			if derived.rows.get(row.name):
+				row.db_set("custom_noon_item_status", derived.rows[row.name], update_modified=False)
+	note.db_set(values, update_modified=False, notify=True, commit=True)
+	return note.get("custom_shipping_status")
+
+
+def run_refresh(delivery_note):
+	"""Background job of a webhook refresh (one per submitted Noon note, ``enqueue_note_refreshes``)."""
+	frappe.set_user("Administrator")
+	try:
+		refresh(delivery_note)
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(title="Noon shipment refresh failed", message=frappe.get_traceback())
+
+
+def enqueue_note_refreshes(marketplace_order_name):
+	"""Queue a refresh for every submitted Noon Delivery Note of the Marketplace Order (the
+	``FBPI::ORDER_SYNC`` webhook path, ``orders.refresh_order``). One deduplicated job per note, queued after
+	the caller's commit. Draft notes are ignored. Read as the system: the webhook is already authenticated."""
+	supplier = transporter_name()
+	orders = frappe.get_all(
+		"Sales Order", filters={"custom_marketplace_order": marketplace_order_name, "docstatus": 1}, pluck="name"
+	)
+	if not supplier or not orders:
+		return []
+	parents = frappe.get_all(
+		"Delivery Note Item",
+		filters={"against_sales_order": ["in", orders], "docstatus": 1, "parenttype": "Delivery Note"},
+		pluck="parent",
+		distinct=True,
+		parent_doctype="Delivery Note",
+	)
+	notes = frappe.get_all(
+		"Delivery Note",
+		filters={
+			"name": ["in", parents],
+			"docstatus": 1,
+			"is_return": 0,
+			"transporter": supplier,
+			"custom_integration_status": ["in", [CREATED, CANCELLATION_UNKNOWN]],
+		},
+		pluck="name",
+	) if parents else []
+	for note in notes:
+		frappe.enqueue(
+			"marketplace_integrations.integrations.noon.delivery_note_shipment.run_refresh",
+			queue="short",
+			timeout=120,
+			job_id=_REFRESH_JOB.format(note),
+			deduplicate=True,
+			enqueue_after_commit=True,
+			delivery_note=note,
+		)
+	return notes
+
+
+# ---------------------------------------------------------------------------
+# Nightly reconcile
+# ---------------------------------------------------------------------------
 
 
 def reconcile():
-	"""The contract's ``reconcile``. Placeholder, implemented in issue #415 phase 3 (the nightly Noon check):
-	it does nothing."""
+	"""The contract's ``reconcile`` (called by ``carrier_shipments.reconcile_open_notes``, 23:59): queue the one
+	long job ``run_reconcile`` (``job_id`` "noon-reconcile", deduplicated)."""
+	frappe.enqueue(
+		"marketplace_integrations.integrations.noon.delivery_note_shipment.run_reconcile",
+		queue="long",
+		timeout=3600,
+		job_id=RECONCILE_JOB,
+		deduplicate=True,
+	)
+
+
+def run_reconcile():
+	"""Check every open Noon note, one at a time (committed per note, one note's failure never stops the rest):
+
+	- Creating (stale) / Creation Unknown: ``carrier_shipments.check``, a lookup that never creates.
+	- Cancellation Unknown: ``refresh`` asks Noon first and resolves a cancel Noon already did.
+	- Draft with a shipment number (Not Created / Creation Failed): GetShipment found = the error
+	  "draft holds a Noon shipment" for Needs Attention; the shipment is never adopted automatically.
+	- Created (draft or submitted): ``refresh``; cancelled units / differing items set the error."""
+	from marketplace_integrations.services import carrier_shipments
+
+	frappe.set_user("Administrator")
+	supplier = transporter_name()
+	if not supplier:
+		return
+	notes = frappe.get_all(
+		"Delivery Note",
+		filters={
+			"transporter": supplier,
+			"is_return": 0,
+			"docstatus": ["<", 2],
+			"custom_integration_status": ["in", [CREATING, UNKNOWN, CANCELLATION_UNKNOWN, CREATED, NOT_CREATED, FAILED]],
+		},
+		fields=["name", "docstatus", "custom_integration_status", "custom_carrier_reference"],
+		limit_page_length=0,
+	)
+	for note in notes:
+		try:
+			_reconcile_note(note, carrier_shipments)
+			frappe.db.commit()
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(title="Noon shipment reconcile failed", message=f"{note.name}\n{frappe.get_traceback()}")
+
+
+def _reconcile_note(note, carrier_shipments):
+	status = cstr(note.custom_integration_status) or NOT_CREATED
+	if status == CREATING and not carrier_shipments.is_stale_creating(note.name):
+		return
+	if status in (CREATING, UNKNOWN):
+		carrier_shipments.check(note.name)
+	elif status in (CANCELLATION_UNKNOWN, CREATED):
+		refresh(note.name)
+	elif note.docstatus == 0 and cstr(note.custom_carrier_reference).strip():
+		doc = frappe.get_doc("Delivery Note", note.name)
+		if noon_order_name(doc) and find_remote(doc) is not None:
+			frappe.db.set_value(
+				"Delivery Note",
+				note.name,
+				"custom_last_integration_error",
+				_("This draft holds a Noon shipment ({0}). Check it in Noon before sending or deleting the draft.").format(
+					cstr(note.custom_carrier_reference)
+				),
+				update_modified=False,
+			)
 
 
 def problem_states():
-	"""The contract's ``problem_states``: Noon has no exception or return status (its problems come from the
-	Integration Status and, in phase 3, from differing units)."""
-	return {}
+	"""The contract's ``problem_states``: Needs Attention "Carrier Exception" rows for a note whose units differ
+	at Noon (Mixed) or that Noon shows cancelled while the note is still open (the refresh wrote the reason
+	to ``custom_last_integration_error``)."""
+	from marketplace_integrations.services import marketplace_attention as attention
+
+	return {attention.CARRIER_EXCEPTION: [SHIPPING_MIXED, SHIPPING_CANCELLED]}
 
 
 def terminal_states():

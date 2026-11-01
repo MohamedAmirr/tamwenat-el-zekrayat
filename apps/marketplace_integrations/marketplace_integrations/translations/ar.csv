@@ -1957,3 +1957,12 @@ Checking with Noon...,جارٍ التحقق لدى Noon...
 Check with Noon,التحقق من Noon
 Cancel the Noon shipment of this Delivery Note? This cannot be undone.,هل تريد إلغاء شحنة Noon لمذكرة التسليم هذه؟ لا يمكن التراجع عن ذلك.
 The Noon shipment was cancelled. The Delivery Note can now be deleted.,أُلغيت شحنة Noon. يمكن الآن حذف مذكرة التسليم.
+Noon returned a unit status this app does not know or no longer lists a unit.,أرجعت Noon حالة وحدة لا يعرفها التطبيق أو لم تعد تعرض إحدى الوحدات.
+Noon shows this shipment as cancelled. Cancel the Delivery Note here.,تعرض Noon هذه الشحنة ملغاة. ألغِ مذكرة التسليم هنا.
+Noon cancelled {0} of {1} units of this shipment.,ألغت Noon {0} من {1} وحدات من هذه الشحنة.
+The units of this shipment have different statuses at Noon.,وحدات هذه الشحنة لها حالات مختلفة في Noon.
+The items of the Noon shipment differ from the units sent. Items are never changed here: cancel the shipment and amend the Delivery Note.,أصناف شحنة Noon تختلف عن الوحدات المرسلة. لا تُغيَّر الأصناف هنا: ألغِ الشحنة وعدّل مذكرة التسليم.
+Noon did not answer the order lookup ({0}).,لم ترد Noon على الاستعلام عن الطلب ({0}).
+Noon has no shipment with number {0}.,ليس لدى Noon شحنة بالرقم {0}.
+This draft holds a Noon shipment ({0}). Check it in Noon before sending or deleting the draft.,هذه المسودة تحمل شحنة Noon ({0}). افحصها في Noon قبل إرسال المسودة أو حذفها.
+{0} shipment is cancelled but this Delivery Note is still submitted. Press Cancel.,شحنة {0} ملغاة لكن مذكرة التسليم هذه ما زالت معتمدة. اضغط إلغاء.
