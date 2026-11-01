@@ -14,6 +14,7 @@ from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api import bosta_shipments
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as shipment
+from marketplace_integrations.services import carrier_log, carrier_shipments
 from marketplace_integrations.tests.bosta_fixtures import BostaFixtureMixin, FakeResponse, created
 from marketplace_integrations.tests.utils import make_role_user
 
@@ -34,9 +35,9 @@ def stored(note, *fields):
 class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTestCase):
 	def _start(self, note):
 		"""request_create then the job body, as the worker would run it."""
-		shipment.request_create(note.name)
+		carrier_shipments.request_create(note.name)
 		kwargs = self.enqueue.call_args.kwargs
-		shipment.run_create(note.name, kwargs["log"], kwargs["lookup_first"])
+		carrier_shipments.run_create(note.name, kwargs["log"], kwargs["lookup_first"])
 		return kwargs["log"]
 
 	def _found(self, note):
@@ -157,7 +158,7 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		note = self.make_note(confirm_cod=False)
 
 		with self.assertRaises(frappe.ValidationError):
-			shipment.request_create(note.name)
+			carrier_shipments.request_create(note.name)
 
 		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Not Created")
 		self.assertEqual(self.http.sent(), [])
@@ -185,8 +186,8 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 	def test_request_queues_exactly_one_job_and_a_second_request_changes_nothing(self):
 		note = self.make_note()
 
-		first = shipment.request_create(note.name)
-		second = shipment.request_create(note.name)
+		first = carrier_shipments.request_create(note.name)
+		second = carrier_shipments.request_create(note.name)
 
 		self.assertEqual(first, {"status": "Creating", "queued": True})
 		self.assertEqual(second["queued"], False)
@@ -199,20 +200,66 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		self.assertEqual(stored(note, "custom_carrier_reference").custom_carrier_reference, note.name)
 		self.assertEqual(self.http.sent(), [])
 
-	def test_request_refuses_a_missing_city_without_leaving_the_note_creating(self):
+	def test_an_empty_city_is_filled_from_the_address_before_the_job_is_queued(self):
+		note = self.make_note(city="")
+		frappe.db.set_value("Delivery Note", note.name, "custom_bosta_city_name", "")
+
+		result = carrier_shipments.request_create(note.name)
+
+		self.assertEqual(result, {"status": "Creating", "queued": True})
+		values = stored(note, "custom_bosta_city", "custom_bosta_city_name")
+		self.assertEqual((values.custom_bosta_city, values.custom_bosta_city_name), ("EG-01", "Cairo"))
+
+	def test_the_city_autofill_alone_does_not_bump_modified(self):
+		# The Creating write of request_create bumps ``modified`` on purpose; the autofill must not, so a
+		# form opened before it still submits.
+		note = self.make_note(city="")
+		frappe.db.set_value("Delivery Note", note.name, "custom_bosta_city_name", "")
+		modified = stored(note, "modified").modified
+
+		self.assertTrue(shipment.autofill_city(frappe.get_doc("Delivery Note", note.name)))
+
+		values = stored(note, "custom_bosta_city", "modified")
+		self.assertEqual(values.custom_bosta_city, "EG-01")
+		self.assertEqual(values.modified, modified)
+
+	def test_a_city_that_is_already_set_is_never_replaced_by_the_address_city(self):
+		note = self.make_note(city="EG-25")
+
+		carrier_shipments.request_create(note.name)
+
+		self.assertEqual(stored(note, "custom_bosta_city").custom_bosta_city, "EG-25")
+
+	def test_an_empty_city_the_address_cannot_fill_asks_the_person_without_leaving_the_note_creating(self):
+		frappe.db.set_value("Address", self.address.name, "city", "Nowhere Land")
 		note = self.make_note(city="")
 
-		with self.assertRaises(frappe.ValidationError):
-			shipment.request_create(note.name)
+		result = carrier_shipments.request_create(note.name)
 
+		self.assertEqual(result, {"status": "Not Created", "queued": False, "needs_city": True})
 		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Not Created")
 		self.assertEqual(frappe.db.count("Integration Request", {"reference_docname": note.name}), 0)
+		self.assertEqual(self.enqueue.call_count, 0)
+
+	def test_a_failed_city_lookup_asks_the_person_instead_of_failing(self):
+		note = self.make_note(city="")
+		self.http.queue["all_districts"].append(TimeoutError("slow"))
+
+		result = carrier_shipments.request_create(note.name)
+
+		self.assertTrue(result.get("needs_city"))
+		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Not Created")
+
+	def test_the_validation_still_refuses_an_empty_city_when_it_is_called_directly(self):
+		note = self.make_note(city="")
+		with self.assertRaises(frappe.ValidationError):
+			shipment.validate_ready(frappe.get_doc("Delivery Note", note.name))
 
 	def test_request_refuses_a_stale_form(self):
 		note = self.make_note()
 
 		with self.assertRaises(frappe.TimestampMismatchError):
-			shipment.request_create(note.name, "2001-01-01 00:00:00.000000")
+			carrier_shipments.request_create(note.name, "2001-01-01 00:00:00.000000")
 
 	def test_request_needs_submit_permission_on_the_note(self):
 		note = self.make_note()
@@ -349,7 +396,7 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 	def test_a_job_for_a_note_that_is_not_creating_does_nothing(self):
 		note = self.make_note()
 
-		shipment.run_create(note.name)
+		carrier_shipments.run_create(note.name)
 
 		self.assertEqual(self.http.sent(), [])
 
@@ -372,41 +419,9 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		self._start(note)
 		self.assertFalse(self.enqueue.call_args.kwargs["lookup_first"])
 
-		shipment.request_create(note.name)
+		carrier_shipments.request_create(note.name)
 
 		self.assertTrue(self.enqueue.call_args.kwargs["lookup_first"])
-
-	def test_generic_retry_never_starts_a_bosta_create(self):
-		from marketplace_integrations.services import carrier_shipments
-
-		note = self.make_note()
-		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Creation Failed")
-		calls_before = self.enqueue.call_count
-
-		with self.assertRaises(frappe.ValidationError):
-			carrier_shipments.retry_shipment(note.name)
-		with self.assertRaises(frappe.ValidationError):
-			shipment.retry(note.name)
-
-		self.assertEqual(self.enqueue.call_count, calls_before)
-		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Creation Failed")
-
-	def test_the_noon_retry_endpoint_does_not_start_a_bosta_create_for_a_write_only_user(self):
-		from marketplace_integrations.api import noon_fulfillment
-
-		note = self.make_note()
-		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Creation Failed")
-		user, _role = make_role_user(self, "Bosta Writer", {"Delivery Note": ["read", "write"]})
-		calls_before = self.enqueue.call_count
-		frappe.set_user(user)
-		try:
-			with self.assertRaises(frappe.ValidationError):
-				noon_fulfillment.retry_delivery_note_shipment(note.name)
-		finally:
-			frappe.set_user("Administrator")
-
-		self.assertEqual(self.enqueue.call_count, calls_before)
-		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Creation Failed")
 
 	# -- Check with Bosta --------------------------------------------------------------------
 
@@ -430,7 +445,7 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 			return result
 
 		with patch.object(shipment, "find_remote_delivery", side_effect=find_then_move_on):
-			result = shipment.check_with_bosta(note.name)
+			result = carrier_shipments.check(note.name)
 
 		self.assertFalse(result["found"])
 		values = stored(note, "custom_integration_status", "lr_no", "custom_last_integration_error")
@@ -445,7 +460,7 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		self._start(note)
 		self.http.queue["search"].append(FakeResponse(500, {"success": False, "message": "<b>down</b>"}))
 
-		result = shipment.check_with_bosta(note.name)
+		result = carrier_shipments.check(note.name)
 
 		self.assertIn("<b>down</b>", result["message"])
 		self.assertIn("<b>down</b>", stored(note, "custom_last_integration_error").custom_last_integration_error)
@@ -456,7 +471,7 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		self._start(note)
 		self.http.queue["search"].append(FakeResponse(200, NONE_FOUND))
 
-		result = shipment.check_with_bosta(note.name)
+		result = carrier_shipments.check(note.name)
 
 		self.assertFalse(result["found"])
 		self.assertEqual([kind for kind, _ in self.http.sent()], ["create", "search"])
@@ -470,17 +485,17 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		self._start(note)
 		self.http.queue["search"].append(self._found(note))
 
-		result = shipment.check_with_bosta(note.name)
+		result = carrier_shipments.check(note.name)
 
 		self.assertEqual(result["status"], "Created")
 		self.assertEqual(stored(note, "lr_no").lr_no, "TRK-9")
 
 	def test_check_with_bosta_refuses_a_note_that_is_still_being_sent(self):
 		note = self.make_note()
-		shipment.request_create(note.name)
+		carrier_shipments.request_create(note.name)
 
 		with self.assertRaises(frappe.ValidationError):
-			shipment.check_with_bosta(note.name)
+			carrier_shipments.check(note.name)
 
 	# -- guards ------------------------------------------------------------------------------
 
@@ -505,7 +520,7 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 
 	def test_started_shipment_locks_the_carrier_cod_city_and_items(self):
 		note = self.make_note()
-		shipment.request_create(note.name)
+		carrier_shipments.request_create(note.name)
 		changes = {
 			"custom_cod_amount": 5,
 			"custom_cod_confirmed": 0,
@@ -523,6 +538,22 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		doc.items[0].qty = doc.items[0].qty + 1
 		with self.assertRaises(frappe.ValidationError):
 			doc.save()
+
+	def test_started_shipment_locks_the_receiver_phone_and_address_but_db_set_still_writes(self):
+		note = self.make_note()
+		doc = frappe.get_doc("Delivery Note", note.name)
+		doc.contact_mobile = "01011111111"
+		doc.save()  # still editable before the start
+		carrier_shipments.request_create(note.name)
+		for fieldname, value in {"contact_mobile": "01022222222", "shipping_address_name": "X-Other"}.items():
+			with self.subTest(fieldname):
+				doc = frappe.get_doc("Delivery Note", note.name)
+				doc.set(fieldname, value)
+				with self.assertRaises(frappe.ValidationError):
+					doc.save()
+		# the edit dialog's write path (db_set, no validate) is not blocked
+		frappe.get_doc("Delivery Note", note.name).db_set("contact_mobile", "01033333333")
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "contact_mobile"), "01033333333")
 
 	def test_a_failed_note_can_still_be_edited(self):
 		note = self.make_note()
@@ -612,23 +643,31 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		note = self.make_note()
 		opened = str(stored(note, "modified").modified)
 
-		def changed_meanwhile(doc):
+		def changed_meanwhile(doc, action="create"):
 			frappe.db.set_value("Delivery Note", doc.name, "custom_bosta_city_name", "Giza")
 
-		with patch.object(shipment, "_validate_ready", side_effect=changed_meanwhile):
+		with patch.object(shipment, "validate_ready", side_effect=changed_meanwhile):
 			with self.assertRaises(frappe.TimestampMismatchError):
-				shipment.request_create(note.name, opened)
+				carrier_shipments.request_create(note.name, opened)
 		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Not Created")
 
 	def test_request_refuses_a_cod_unconfirmed_between_validation_and_the_lock(self):
 		note = self.make_note()
 
-		def unconfirmed_meanwhile(doc):
-			frappe.db.set_value("Delivery Note", doc.name, "custom_cod_confirmed", 0, update_modified=False)
+		real = shipment.validate_ready
+		calls = []
 
-		with patch.object(shipment, "_validate_ready", side_effect=unconfirmed_meanwhile):
+		def unconfirmed_meanwhile(doc, action="create"):
+			# the first call is the pre-lock validation; the second runs under the lock and is real
+			if not calls:
+				calls.append(doc.name)
+				frappe.db.set_value("Delivery Note", doc.name, "custom_cod_confirmed", 0, update_modified=False)
+				return None
+			return real(doc, action)
+
+		with patch.object(shipment, "validate_ready", side_effect=unconfirmed_meanwhile):
 			with self.assertRaises(frappe.ValidationError):
-				shipment.request_create(note.name)
+				carrier_shipments.request_create(note.name)
 		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Not Created")
 
 	def test_a_failed_replay_does_not_turn_a_created_shipment_into_unknown(self):
@@ -639,7 +678,7 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 			patch.object(statuses, "replay_pending_events", side_effect=RuntimeError("replay broke")),
 			patch.object(statuses, "update_sales_order_summary_of"),
 		):
-			shipment._after_created(note.name, "DELIVERY-1")  # must not raise
+			shipment.after_created(note.name, {"_id": "DELIVERY-1"})  # must not raise
 
 		self.assertTrue(
 			frappe.db.exists("Error Log", {"method": "Bosta: pending events could not be replayed"})
@@ -647,8 +686,6 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		)
 
 	def test_a_note_amended_from_a_bosta_note_loses_the_bosta_fields_when_the_carrier_changed(self):
-		from marketplace_integrations.services import carrier_shipments
-
 		note = self.make_note()
 		frappe.db.set_value(
 			"Delivery Note",

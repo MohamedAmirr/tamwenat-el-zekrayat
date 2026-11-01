@@ -26,7 +26,6 @@ ORDER_IMPORT_LOOKBACK_DAYS = 7
 SHIPMENT_CREATE_PATH = "/fbpi/v1/shipment/create"
 SHIPMENT_GET_PATH = "/fbpi/v1/shipment/get"
 SHIPMENT_CANCEL_PATH = "/fbpi/v1/shipment/cancel"
-SHIPMENT_COURIER_AWBS_ADD_PATH = "/fbpi/v1/shipment/courier-awbs/add"
 NOON_LOGISTICS_AWBS_GET_PATH = "/fbpi/v1/shipment/noon-logistics-awbs/get"
 FBPI_ORDER_UPDATE_PATH = "/fbpi/v1/fbpi-order/update"
 SHIPMENT_INVOICE_UPLOAD_PATH = "/fbpi/v1/shipment/invoice/upload"
@@ -73,8 +72,8 @@ RETURN_REFERENCES_LIST_PATH = "/returns/v1/return-references/list"
 # same on nearly every order, so the recent orders are enough.
 MERCHANT_CODES_SCAN_ORDERS = 200
 
-# #153 review finding #3: bounds the daily AWB scan to shipments modified
-# within this window (and not Cancelled/Discarded) rather than scanning
+# #153 review finding #3: bounds the daily AWB scan to Delivery Notes with a live
+# Noon shipment modified within this window rather than scanning
 # every AWB this account has ever had. Not reused from
 # ORDER_IMPORT_LOOKBACK_DAYS above - that 7-day window exists for a
 # different purpose (re-listing recently-created orders to catch a later
@@ -85,16 +84,6 @@ AWB_SCAN_LOOKBACK_DAYS = 30
 # #153 review finding #4: Noon's ListReturnReferences contract caps
 # merchant_codes at 200 items.
 MERCHANT_CODES_MAX = 200
-
-# #164: Needs Attention flags a shipment row still in Pending (CreateShipment
-# not yet sent or not yet confirmed) longer than this, measured from the
-# shipment row's creation. 1 hour is a placeholder with no documented basis.
-NOON_PENDING_SHIPMENT_STUCK_HOURS = 1
-
-# #368: Needs Attention reminds the user about a Created shipment that nobody marked handed over
-# (no handed_over_on, no live Delivery Note) after this many hours, measured from the shipment
-# row's creation. 36 hours was chosen by the user; Noon's API has no handover signal to detect it.
-NOON_HANDOVER_REMINDER_HOURS = 36
 
 # Changed-stock sweep (integrations/noon/sweep.py::sweep_changed_bins), registered
 # in hooks.py scheduler_events["cron"]. Frappe has no every-N-minutes bucket.

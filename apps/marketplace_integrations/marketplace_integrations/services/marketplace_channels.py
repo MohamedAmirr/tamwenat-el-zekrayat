@@ -21,10 +21,12 @@ not part of that definition.
 import frappe
 
 from marketplace_integrations.services.marketplace_attention import (
-	BOSTA_PLATFORM,
 	get_attention_counts,
 	get_attention_items,
 )
+
+#: The Bosta carrier row's platform value: the ``CARRIERS`` key (Needs Attention filters carriers by it).
+BOSTA_PLATFORM = "Bosta"
 
 EMPTY_COUNTS = {
 	"orders_needing_attention": 0,

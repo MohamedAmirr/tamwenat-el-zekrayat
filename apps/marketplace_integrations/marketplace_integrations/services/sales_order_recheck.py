@@ -123,25 +123,8 @@ def bump_orders_for_mapping(mapping, method=None):
 			limit=MAX_ORDERS_PER_EVENT,
 		)
 		_queue_bumps(names, recheck_queued=False)
-		_queue_handover_retries(mapping.marketplace_account)
 	except Exception:
 		_log_failure(mapping)
-
-
-def _queue_handover_retries(marketplace_account):
-	"""A saved mapping may fix handed-over Noon units that were left off a Delivery Note (#368):
-	queue the automatic retry for the account's orders that have an unresolved record."""
-	from marketplace_integrations.integrations.noon.fulfillment import orders_with_unresolved_handovers
-
-	for order_name in orders_with_unresolved_handovers(marketplace_account):
-		frappe.enqueue(
-			"marketplace_integrations.integrations.noon.fulfillment.retry_unresolved_handovers",
-			queue="short",
-			enqueue_after_commit=True,
-			job_id=f"marketplace-noon-handover-retry-{order_name}-mapping",
-			deduplicate=True,
-			marketplace_order=order_name,
-		)
 
 
 def _queue_bumps(order_names, recheck_queued):

@@ -1,11 +1,12 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-"""Bosta shipment created when a Delivery Note is submitted (epic #413, issue #408).
+"""Bosta adapter of the neutral carrier contract (``services/carrier_shipments.py``; epic #413, #408, #415).
 
 Delivery Note-first (``docs/marketplace-integrations/delivery-note-first.md``): the Delivery Note
-with transporter "Bosta" is the shipment. Submit starts a background job (``request_create`` then
-``run_create``) and the note submits only once the shipment is Created (``require_created``).
+with transporter "Bosta" is the shipment. Submit starts a background job (``carrier_shipments.request_create``
+then ``run_create``) and the note submits only once the shipment is Created (``require_shipment_created``).
+This module holds only the Bosta parts: the contract methods and the Bosta-only helpers (city, COD, label).
 
 Native fields used: ``transporter`` (Supplier "Bosta", created by a patch), ``lr_no`` (the Bosta
 tracking number) and ``lr_date``. The generic shipping fields (``custom_integration_status``,
@@ -14,8 +15,8 @@ tracking number) and ``lr_date``. The generic shipping fields (``custom_integrat
 ``custom_last_integration_error``, ``custom_carrier_request_snapshot``) are carrier neutral; the
 Bosta-only ones are ``custom_bosta_city`` and ``custom_bosta_city_name``.
 
-The Integration Log is the native Integration Request (service "Bosta") with custom fields. It never
-holds the API key, the webhook secret, or the receiver's name, phone or address.
+The Integration Log is the native Integration Request (service "Bosta", ``services/carrier_log.py``). It
+never holds the API key, the webhook secret, or the receiver's name, phone or address.
 
 COD: while the note is editable (Not Created / Creation Failed) the default COD is recomputed on every
 save until the person confirms it (``custom_cod_confirmed``: ticked, or a changed COD); Submit refuses a
@@ -28,19 +29,17 @@ Rules enforced here:
   which survives Integration Request cleanup) and creates only when Bosta has none. There is no automatic retry
   of a create. A timeout, a connection error, a 5xx/429, a malformed 2xx or an ambiguous lookup is
   "Creation Unknown", never a failure.
-- No lock is held across an HTTP call. Write-backs commit, take the row lock as the next statement
-  and write only if the note is still Creating (``_finish``).
+- No lock is held across an HTTP call (the neutral ``_finish`` commits, takes the row lock as the next
+  statement and writes only if the note is still Creating).
 - The worker writes with ``db_set`` (no validate, no hooks): a system write-back.
 """
 
 import html
 import json
-import uuid
 
 import frappe
 from frappe import _
-from frappe.utils import add_to_date, cint, cstr, flt, get_datetime, getdate, now_datetime
-from frappe.utils.background_jobs import is_job_enqueued
+from frappe.utils import cint, cstr, flt, getdate, now_datetime
 
 from marketplace_integrations.integrations.bosta import city_match, locations
 from marketplace_integrations.integrations.bosta.client import (
@@ -50,6 +49,21 @@ from marketplace_integrations.integrations.bosta.client import (
 	response_body,
 )
 from marketplace_integrations.integrations.bosta.constants import BOSTA_EXCLUDED_PLATFORMS
+from marketplace_integrations.services import carrier_log
+from marketplace_integrations.services.carrier_log import (
+	CANCELLATION_PENDING,
+	CANCELLATION_UNKNOWN,
+	CANCELLED,
+	CREATED,
+	CREATING,
+	EDITABLE_STATUSES,
+	FAILED,
+	LIVE_STATUSES,
+	NOT_CREATED,
+	UNKNOWN,
+	Failed,
+	Unknown,
+)
 
 #: ``supplier_name`` of the native Supplier used as the Delivery Note ``transporter``. The Supplier's
 #: document name depends on Buying Settings, so it is looked up by this name, never assumed.
@@ -58,21 +72,20 @@ SUPPLIER_NAME = "Bosta"
 SHIPPING_CARRIER = SUPPLIER_NAME
 
 BOSTA_DELIVERY_TYPE = 10
+#: Customer Return Pickup: a type 25 delivery whose COD is negative (the refund the courier hands over).
+BOSTA_RETURN_PICKUP_TYPE = 25
+#: ``custom_return_source`` of a return the staff want Bosta to collect from the customer.
+RETURN_PICKUP = "Customer Return Pickup"
+#: ``custom_return_source`` of the draft return the app makes when Bosta returns a delivery (automatic only).
+RETURNED_BY_BOSTA = "Returned by Bosta"
+# The adapter's optional "return source" that marks a return it created (read by the Needs Attention report).
+RETURNED_SOURCE = RETURNED_BY_BOSTA
+#: Set on the draft the app makes itself (``returns.create_returned_draft``); a person's save never has it.
+AUTOMATIC_RETURN_FLAG = "bosta_automatic_return"
 BOSTA_COD_LIMIT = 30000
-#: A Creating note with no queued job older than this counts as stuck (Check with Bosta can resolve it).
-STALE_CREATING_MINUTES = 5
+# The Integration Status values, LIVE_STATUSES and EDITABLE_STATUSES come from ``services/carrier_log.py``
+# (shared with the neutral service).
 
-NOT_CREATED = "Not Created"
-CREATING = "Creating"
-UNKNOWN = "Creation Unknown"
-CREATED = "Created"
-FAILED = "Creation Failed"
-CANCELLED = "Cancelled"
-#: Statuses where the shipment is started or live: transporter, items, COD, city and AWB are locked and
-#: the note cannot be cancelled or deleted.
-LIVE_STATUSES = (CREATING, UNKNOWN, CREATED, "Cancellation Pending", "Cancellation Unknown")
-#: Statuses where the person may still change the note and (re)start the create.
-EDITABLE_STATUSES = ("", NOT_CREATED, FAILED)
 
 #: Written by the app only (workers and APIs); a person's save never changes them.
 SYSTEM_FIELDS = (
@@ -85,6 +98,7 @@ SYSTEM_FIELDS = (
 	"custom_last_integration_error",
 	"custom_carrier_request_snapshot",
 	"custom_actual_shipping_cost",
+	"custom_actual_cost_received_on",
 	"custom_bosta_last_event_at",
 )
 #: Cleared on a new or amended note: Amend copies even ``no_copy`` fields (conventions).
@@ -92,17 +106,16 @@ CLEARED_ON_NEW = (*SYSTEM_FIELDS, "custom_bosta_city", "custom_bosta_city_name")
 #: Fields a person edits that must stay put once the shipment is started.
 LOCKED_FIELDS = ("transporter", "lr_no", "custom_cod_amount", "custom_bosta_city", "custom_bosta_city_name")
 
-_CREATE_JOB = "bosta-create|{}"
+#: What Bosta received as the receiver phone and drop-off address (``build_payload``). After the start only
+#: the Edit Bosta Shipment dialog changes them (``editing.edit_shipment``, which writes with ``db_set``).
+RECEIVER_FIELDS = ("contact_mobile", "shipping_address_name", "shipping_address")
+
 _LABEL_JOB = "bosta-label|{}"
 _RETRYABLE_HTTP = {408, 429}
 
-
-class _Unknown(Exception):
-	"""The outcome of a call is not known: the shipment may or may not exist at Bosta."""
-
-
-class _Failed(Exception):
-	"""Bosta definitively refused the request (a readable message)."""
+# The answers an adapter call raises are the neutral ones (``services/carrier_log.py``).
+_Unknown = Unknown
+_Failed = Failed
 
 
 # ---------------------------------------------------------------------------
@@ -116,10 +129,13 @@ def bosta_supplier():
 
 
 def applies_to(doc):
-	"""A non-return note whose transporter is the Bosta Supplier."""
-	if doc.get("is_return") or not doc.get("transporter"):
+	"""A note whose transporter is the Bosta Supplier: a normal note, or a return the staff marked
+	"Customer Return Pickup" (a plain return or one returned by Bosta is not a Bosta shipment)."""
+	if not doc.get("transporter"):
 		return False
-	return frappe.db.get_value("Supplier", doc.transporter, "supplier_name") == SUPPLIER_NAME
+	if doc.get("is_return") and doc.get("custom_return_source") != RETURN_PICKUP:
+		return False
+	return frappe.db.get_value("Supplier", doc.get("transporter"), "supplier_name") == SUPPLIER_NAME
 
 
 def status_of(doc_or_name):
@@ -159,6 +175,24 @@ def excluded_platform(sales_order):
 
 def _rows(doc):
 	return sorted((cstr(row.name), cstr(row.item_code), flt(row.qty, 6)) for row in doc.get("items") or [])
+
+
+def _only_reduced(before, doc):
+	"""A draft Customer Return Pickup may have the returned quantity of a row lowered (never raised, never a
+	row added, removed or changed to another Item) before it is submitted: what the customer really hands
+	back can be less than what the delivery had. Bosta's request does not carry the items."""
+	if not (doc.get("is_return") and doc.docstatus == 0):
+		return False
+	old = {cstr(row.name): row for row in before.get("items") or []}
+	new = {cstr(row.name): row for row in doc.get("items") or []}
+	if set(old) != set(new):
+		return False
+	return all(
+		cstr(new[name].item_code) == cstr(old[name].item_code)
+		and flt(new[name].qty) * flt(old[name].qty) > 0  # same sign (returns are negative), not zero
+		and abs(flt(new[name].qty, 6)) <= abs(flt(old[name].qty, 6))
+		for name in old
+	)
 
 
 def default_cod(doc):
@@ -202,6 +236,13 @@ def _check_cod(cod):
 		)
 
 
+def _check_returned_cod(value):
+	"""The Returned COD is entered as zero or more; the request sends it negative. No other ceiling is
+	defined (the spec's business-policy limit is open), so none is checked."""
+	if flt(value) < 0:
+		frappe.throw(_("Returned COD cannot be negative."), title=_("Bosta shipment"))
+
+
 def _apply_cod_rule(doc, before):
 	"""Editable Bosta note: until the person confirms the COD (ticks ``custom_cod_confirmed`` or changes the
 	amount) the default is recomputed on every save, so a carrier chosen after the first save or removed
@@ -228,8 +269,31 @@ def clear_inherited(doc):
 		doc.lr_date = None
 
 
+def guard_always(doc):
+	"""``validate`` of every Delivery Note (the optional contract hook): a person cannot set or clear "Returned
+	by Bosta" on ``custom_return_source`` (only the app does, on the draft it makes for a returned delivery).
+	An amended copy keeps what its source note had."""
+	if doc.docstatus == 2 or doc.get("_action") == "cancel" or doc.flags.get(AUTOMATIC_RETURN_FLAG):
+		return
+	after = cstr(doc.get("custom_return_source"))
+	if doc.is_new():
+		before = ""
+		if doc.get("amended_from"):
+			before = cstr(frappe.db.get_value("Delivery Note", doc.amended_from, "custom_return_source"))
+	else:
+		before = cstr((doc.get_doc_before_save() or doc).get("custom_return_source"))
+	if before != after and RETURNED_BY_BOSTA in (before, after):
+		frappe.throw(
+			_("The return source \"Returned by Bosta\" is set by the app only. It cannot be set or cleared by hand."),
+			title=_("Bosta shipment"),
+		)
+
+
 def guard_changes(doc):
-	"""``validate``: set up a new note; keep app-written fields and a started shipment untouched."""
+	"""``validate``: set up a new note; keep app-written fields and a started shipment untouched. A cancel
+	changes none of them and must never be blocked by this guard."""
+	if doc.docstatus == 2 or doc.get("_action") == "cancel":
+		return
 	ours = applies_to(doc)
 	platform = excluded_platform(sales_order_of(doc)) if ours else None
 	if platform:
@@ -248,7 +312,13 @@ def guard_changes(doc):
 			# Amend copies the old note's tracking number, which belongs to that note's shipment.
 			doc.lr_no = None
 			doc.lr_date = None
-		if ours:
+		if ours and doc.get("is_return"):
+			# make_sales_return copies the original delivery's tracking number: the pickup gets its own from
+			# Bosta, and the original's must not look like it to the webhook match.
+			doc.lr_no = None
+			doc.lr_date = None
+			_check_returned_cod(doc.get("custom_returned_cod"))
+		elif ours:
 			_apply_cod_rule(doc, doc)
 			_check_cod(doc.custom_cod_amount)
 		return
@@ -259,10 +329,25 @@ def guard_changes(doc):
 	for fieldname in SYSTEM_FIELDS:
 		doc.set(fieldname, before.get(fieldname))
 	if cstr(before.get("custom_integration_status")) in EDITABLE_STATUSES:
-		if ours:
+		if ours and doc.get("is_return"):
+			if cstr(before.get("custom_return_source")) != cstr(doc.get("custom_return_source")):
+				# The return just became (or changed to) a pickup: the tracking number it copied from the
+				# delivery belongs to that delivery, not to this pickup (same as on insert).
+				doc.lr_no = None
+				doc.lr_date = None
+			_check_returned_cod(doc.get("custom_returned_cod"))
+		elif ours:
 			_apply_cod_rule(doc, before)
 			_check_cod(doc.get("custom_cod_amount"))
 		return
+	if doc.get("is_return") and (
+		flt(before.get("custom_returned_cod"), 2) != flt(doc.get("custom_returned_cod"), 2)
+		or cstr(before.get("custom_return_source")) != cstr(doc.get("custom_return_source"))
+	):
+		frappe.throw(
+			_("The returned COD and return source cannot be changed after the Bosta return pickup was started."),
+			title=_("Bosta shipment"),
+		)
 	if (
 		any(cstr(before.get(f)) != cstr(doc.get(f)) for f in LOCKED_FIELDS)
 		or flt(before.get("custom_cod_amount"), 2) != flt(doc.get("custom_cod_amount"), 2)
@@ -272,7 +357,15 @@ def guard_changes(doc):
 			_("The carrier, tracking number, COD amount and city cannot be changed after the Bosta shipment was started."),
 			title=_("Bosta shipment"),
 		)
-	if _rows(before) != _rows(doc):
+	if any(cstr(before.get(f)) != cstr(doc.get(f)) for f in RECEIVER_FIELDS):
+		frappe.throw(
+			_(
+				"The receiver phone and shipping address cannot be changed after the Bosta shipment was "
+				"started. Use Edit Bosta Shipment."
+			),
+			title=_("Bosta shipment"),
+		)
+	if _rows(before) != _rows(doc) and not _only_reduced(before, doc):
 		frappe.throw(
 			_(
 				"Items, quantities and rows cannot be changed after the Bosta shipment was started. "
@@ -282,31 +375,12 @@ def guard_changes(doc):
 		)
 
 
-def require_created(doc):
-	"""``before_submit``: a Bosta Delivery Note needs a Created shipment (judged by the stored status,
-	not by the copy a client sent)."""
-	if status_of(doc) == CREATED:
-		return
-	frappe.throw(
-		_("The Bosta shipment of this Delivery Note is not Created yet, so it cannot be submitted."),
-		title=_("Bosta shipment"),
-	)
-
-
-def guard_cancel_or_delete(doc):
-	"""``before_cancel`` and ``on_trash``: refuse while a Bosta shipment is live (cancelling it at
-	Bosta is a later feature, epic #413)."""
-	if status_of(doc) in LIVE_STATUSES:
-		frappe.throw(
-			_("This Delivery Note has a Bosta shipment ({0}), so it cannot be cancelled or deleted.").format(
-				_(status_of(doc))
-			),
-			title=_("Bosta shipment"),
-		)
-
 
 def refuse_sales_order_cancel(order):
 	"""Sales Order ``before_cancel``: refuse while a draft Delivery Note has a live Bosta shipment."""
+	supplier = bosta_supplier()
+	if not supplier:
+		return
 	notes = frappe.get_all(
 		"Delivery Note Item",
 		filters={"against_sales_order": order.name, "docstatus": 0, "parenttype": "Delivery Note"},
@@ -318,7 +392,11 @@ def refuse_sales_order_cancel(order):
 		return
 	live = frappe.get_all(
 		"Delivery Note",
-		filters={"name": ["in", notes], "custom_integration_status": ["in", list(LIVE_STATUSES)]},
+		filters={
+			"name": ["in", notes],
+			"transporter": supplier,
+			"custom_integration_status": ["in", list(LIVE_STATUSES)],
+		},
 		pluck="name",
 	)
 	if live:
@@ -328,97 +406,6 @@ def refuse_sales_order_cancel(order):
 			),
 			title=_("Bosta shipment"),
 		)
-
-
-def queue(doc):
-	"""Bosta never creates on insert (Submit starts it), so there is nothing to queue."""
-	return None
-
-
-def retry(delivery_note):
-	"""The generic retry (``carrier_shipments.retry_shipment``, reached with write permission only) never
-	starts a Bosta create: Submit does, with the submit permission and the stale-modified check
-	(``api/bosta_shipments.request_shipment``)."""
-	frappe.throw(
-		_("A Bosta shipment is started by submitting the Delivery Note, not by a retry."), title=_("Bosta shipment")
-	)
-
-
-# ---------------------------------------------------------------------------
-# Integration Log (native Integration Request + custom fields)
-# ---------------------------------------------------------------------------
-
-
-def _attempt_number(delivery_note):
-	"""The next attempt number shown on the log (display only: Log Settings deletes old logs, so no
-	decision may depend on it; ``request_create`` decides the lookup from ``custom_carrier_reference``)."""
-	return (
-		frappe.db.count(
-			"Integration Request",
-			{
-				"integration_request_service": SERVICE_NAME,
-				"reference_doctype": "Delivery Note",
-				"reference_docname": delivery_note,
-				"custom_operation_type": "Create",
-			},
-		)
-		+ 1
-	)
-
-
-def _sanitized(payload):
-	"""A payload without the receiver's name, phone and address, for the log."""
-	if not isinstance(payload, dict):
-		return {}
-	clean = {k: v for k, v in payload.items() if k not in ("receiver", "dropOffAddress")}
-	address = payload.get("dropOffAddress")
-	if isinstance(address, dict) and address.get("city"):
-		clean["dropOffAddress"] = {"city": address["city"]}
-	return clean
-
-
-def open_log(delivery_note, operation, attempt=None, correlation_id=None, reference=None):
-	"""Insert the Integration Log row of one operation; returns its name. Inserted as the system after
-	the caller's own permission check (Integration Request only grants System Manager)."""
-	log = frappe.get_doc(
-		{
-			"doctype": "Integration Request",
-			"integration_request_service": SERVICE_NAME,
-			"reference_doctype": "Delivery Note",
-			"reference_docname": delivery_note,
-			"status": "Queued",
-			"custom_operation_type": operation,
-			"custom_attempt_no": attempt,
-			"custom_correlation_id": correlation_id or uuid.uuid4().hex,
-			"custom_external_reference": reference,
-		}
-	)
-	log.insert(ignore_permissions=True)
-	return log.name
-
-
-def close_log(name, result, **values):
-	"""Complete the log row. ``values`` may hold ``error``, ``data`` (sanitized), ``output``,
-	``http_status``, ``error_code`` and ``delivery_id``."""
-	if not name:
-		return
-	update = {
-		"status": {"Success": "Completed"}.get(result, "Failed"),
-		"custom_result": result,
-		"custom_completed_at": now_datetime(),
-	}
-	for key, fieldname in (
-		("error", "error"),
-		("data", "data"),
-		("output", "output"),
-		("http_status", "custom_http_status"),
-		("error_code", "custom_error_code"),
-		("delivery_id", "custom_delivery_id"),
-	):
-		if values.get(key) not in (None, ""):
-			value = values[key]
-			update[fieldname] = value if isinstance(value, (int, float)) else cstr(value)[:2000]
-	frappe.db.set_value("Integration Request", name, update, update_modified=False)
 
 
 # ---------------------------------------------------------------------------
@@ -516,9 +503,43 @@ def get_city_options(delivery_note):
 	return {"cities": locations.get_cities(), "suggested": suggested}
 
 
-def _validate_ready(doc):
-	"""Everything that can be refused before Bosta is contacted. A configuration problem is thrown here,
-	so a note is never left Creating for it."""
+def autofill_city(doc):
+	"""Fill the Bosta city of an editable draft note from the address linked to the order, when it is empty
+	(``city_match.resolve_city``). A city that is already set is never touched or asked again. Written with
+	``update_modified=False`` so a form opened before it still submits. Returns whether the note now has a
+	city; a failed or unmatched lookup only leaves it empty (the caller then asks the person)."""
+	if cstr(doc.get("custom_bosta_city")).strip():
+		return True
+	if doc.docstatus != 0 or status_of(doc) not in EDITABLE_STATUSES:
+		return False
+	try:
+		suggested = city_match.resolve_city(_address_for(doc, sales_order_of(doc))) or {}
+		city = locations.get_city(suggested["city_id"]) if suggested.get("city_id") else None
+	except Exception:
+		frappe.clear_last_message()
+		return False
+	if not city:
+		return False
+	values = {"custom_bosta_city": city["code"], "custom_bosta_city_name": city["name"]}
+	frappe.db.set_value("Delivery Note", doc.name, values, update_modified=False)
+	doc.update(values)
+	return True
+
+
+def validate_ready(doc, action="create"):
+	"""Everything that can be refused before Bosta is contacted (the contract's ``validate_ready``). A
+	configuration problem is thrown here, so a note is never left Creating for it. ``action`` ``"lookup"`` and
+	``"cancel"`` only check the configuration (and, for a cancel, the tracking number). For a create, an empty
+	Bosta city is first filled from the order's address (``autofill_city``); if it is still empty nothing is
+	sent and ``{"needs_city": True}`` is returned (the form opens the city picker)."""
+	if action != "create":
+		BostaClient().ensure_ready()
+		if action == "cancel" and not cstr(doc.get("lr_no")).strip():
+			frappe.throw(_("This Delivery Note has no Bosta tracking number."))
+		return None
+	if not autofill_city(doc):
+		return {"needs_city": True}
+
 	if doc.docstatus != 0:
 		frappe.throw(_("Only a draft Delivery Note can be sent to Bosta."))
 	if not applies_to(doc):
@@ -531,11 +552,14 @@ def _validate_ready(doc):
 		frappe.throw(_("The Delivery Note has no items."))
 	if not cstr(doc.get("custom_bosta_city")).strip():
 		frappe.throw(_("Choose the Bosta city before sending the shipment."))
-	_check_cod(doc.get("custom_cod_amount"))
-	if not cint(doc.get("custom_cod_confirmed")):
-		frappe.throw(
-			_("Confirm the COD amount before sending the shipment: tick COD confirmed, or change the COD. 0 is allowed.")
-		)
+	if doc.get("is_return"):
+		_check_returned_cod(doc.get("custom_returned_cod"))
+	else:
+		_check_cod(doc.get("custom_cod_amount"))
+		if not cint(doc.get("custom_cod_confirmed")):
+			frappe.throw(
+				_("Confirm the COD amount before sending the shipment: tick COD confirmed, or change the COD. 0 is allowed.")
+			)
 	if not cstr(doc.get("customer_name")).strip():
 		frappe.throw(_("The receiver name is missing."))
 	if not _receiver_phone(doc, order):
@@ -552,63 +576,6 @@ def _validate_ready(doc):
 	BostaClient().ensure_ready()
 
 
-def request_create(delivery_note, modified=None):
-	"""Start the Bosta create of a draft note (the API has checked the submit permission). Idempotent:
-	a note that is already Creating or Created only returns its status."""
-	doc = frappe.get_doc("Delivery Note", delivery_note)
-	if modified and cstr(doc.modified) != cstr(modified) and status_of(doc) in EDITABLE_STATUSES:
-		frappe.throw(_("The Delivery Note was changed. Reload it and try again."), frappe.TimestampMismatchError)
-	if status_of(doc) not in (CREATING, CREATED):
-		_validate_ready(doc)
-	# Commit, then lock as the very next statement (MariaDB snapshot isolation).
-	frappe.db.commit()
-	locked = frappe.db.get_value(
-		"Delivery Note",
-		delivery_note,
-		["custom_integration_status", "docstatus", "modified", "custom_cod_confirmed"],
-		as_dict=True,
-		for_update=True,
-	)
-	if locked.docstatus != 0 or (cstr(locked.custom_integration_status) or NOT_CREATED) in (CREATING, CREATED):
-		frappe.db.commit()
-		return {"status": cstr(locked.custom_integration_status) or NOT_CREATED, "queued": False}
-	# What was validated above may have changed before the lock (a save, a COD edit): judge the locked row.
-	if (modified and cstr(locked.modified) != cstr(modified)) or not cint(locked.custom_cod_confirmed):
-		frappe.db.commit()
-		if not cint(locked.custom_cod_confirmed):
-			frappe.throw(
-				_("Confirm the COD amount before sending the shipment: tick COD confirmed, or change the COD. 0 is allowed.")
-			)
-		frappe.throw(_("The Delivery Note was changed. Reload it and try again."), frappe.TimestampMismatchError)
-	# A reference on the note means a create was tried before: look the delivery up first (durable, unlike
-	# the log rows). It is stored from the first attempt on and cleared on an amended note.
-	previous = cstr(frappe.db.get_value("Delivery Note", delivery_note, "custom_carrier_reference"))
-	reference = previous or doc.name
-	frappe.db.set_value(
-		"Delivery Note",
-		delivery_note,
-		{
-			"custom_integration_status": CREATING,
-			"custom_carrier_reference": reference,
-			"custom_last_integration_error": None,
-		},
-	)
-	log = open_log(delivery_note, "Create", attempt=_attempt_number(delivery_note), reference=reference)
-	frappe.enqueue(
-		"marketplace_integrations.integrations.bosta.delivery_note_shipment.run_create",
-		queue="short",
-		timeout=120,
-		job_id=_CREATE_JOB.format(delivery_note),
-		deduplicate=True,
-		enqueue_after_commit=True,
-		delivery_note=delivery_note,
-		log=log,
-		lookup_first=bool(previous),
-	)
-	frappe.db.commit()
-	return {"status": CREATING, "queued": True}
-
-
 # ---------------------------------------------------------------------------
 # Worker
 # ---------------------------------------------------------------------------
@@ -620,9 +587,14 @@ def build_payload(doc):
 	order = sales_order_of(doc)
 	settings = BostaClient().get_settings()
 	reference = cstr(doc.custom_carrier_reference) or doc.name
+	# A Customer Return Pickup (type 25) sends the customer's address as dropOffAddress (same builder as a
+	# delivery) and a negative COD: the entered Returned COD, which is never negative. Bosta returns the
+	# goods to ``businessLocationId`` (the pickup location of the settings, also used by a delivery).
+	is_pickup = bool(doc.get("is_return"))
+	returned_cod = flt(doc.get("custom_returned_cod"), 2)
 	return {
-		"type": BOSTA_DELIVERY_TYPE,
-		"cod": flt(doc.custom_cod_amount, 2),
+		"type": BOSTA_RETURN_PICKUP_TYPE if is_pickup else BOSTA_DELIVERY_TYPE,
+		"cod": (-returned_cod if returned_cod else 0) if is_pickup else flt(doc.custom_cod_amount, 2),
 		"receiver": {"firstName": cstr(doc.customer_name).strip(), "phone": _receiver_phone(doc, order)},
 		"dropOffAddress": {"city": cstr(doc.custom_bosta_city).strip(), "firstLine": _address_for(doc, order)["first_line"]},
 		"businessLocationId": settings.business_location_id,
@@ -701,65 +673,60 @@ def _create_remote(payload):
 	return data
 
 
-def run_create(delivery_note, log=None, lookup_first=True):
-	"""Create (or find) the Bosta delivery of one Creating note and write the result back. ``lookup_first``
-	is False only for the very first attempt of a note (``request_create`` decides it)."""
-	frappe.set_user("Administrator")
-	if status_of(delivery_note) != CREATING:
-		frappe.db.commit()
-		return
-	try:
-		doc = frappe.get_doc("Delivery Note", delivery_note)
-		payload = build_payload(doc)
-		frappe.db.commit()
-		data = None
-		if lookup_first:
-			data = find_remote_delivery(payload["uniqueBusinessReference"])
-		if data is None:
-			data = _create_remote(payload)
-		_finish_created(delivery_note, data, payload, log)
-	except _Failed as failure:
-		_finish(delivery_note, FAILED, {"custom_last_integration_error": cstr(failure)}, log, "Failed", error=cstr(failure))
-	except _Unknown as unknown:
-		_finish(delivery_note, UNKNOWN, {"custom_last_integration_error": cstr(unknown)}, log, "Unknown", error=cstr(unknown))
-	except Exception:
-		frappe.db.rollback()
-		frappe.log_error(title="Bosta shipment from Delivery Note failed", message=frappe.get_traceback())
-		message = _("Unexpected error while sending the shipment to Bosta; see the Error Log. It may or may not have reached Bosta.")
-		_finish(delivery_note, UNKNOWN, {"custom_last_integration_error": message}, log, "Unknown", error=message)
+def find_remote(doc):
+	"""The contract's ``find_remote``: the delivery whose reference is the note's, else ``None``."""
+	return find_remote_delivery(cstr(doc.get("custom_carrier_reference")) or doc.name)
 
 
-def _finish_created(delivery_note, data, payload, log):
-	tracking = cstr(data.get("trackingNumber")).strip()
-	values = {
+def create_remote(doc):
+	"""The contract's ``create_remote``: build the payload, release the transaction, POST."""
+	payload = build_payload(doc)
+	frappe.db.commit()
+	return _create_remote(payload)
+
+
+def created_values(doc, data):
+	"""The Delivery Note fields written once Created (also by ``carrier_shipments.check``)."""
+	payload = build_payload(doc)
+	return {
 		"custom_carrier_delivery_id": _delivery_id(data),
-		"lr_no": tracking,
+		"lr_no": cstr(data.get("trackingNumber")).strip(),
 		"lr_date": getdate(),
 		"custom_last_integration_error": None,
 		"custom_last_sync_at": now_datetime(),
 		"custom_carrier_request_snapshot": json.dumps(payload),
 	}
-	if _finish(
-		delivery_note, CREATED, values, log, "Success", data=json.dumps(_sanitized(payload)), delivery_id=_delivery_id(data)
-	):
-		_after_created(delivery_note, _delivery_id(data))
 
 
-def _after_created(delivery_note, delivery_id):
-	"""Once a note is Created: the Sales Order summary, the label job, and the webhook events that arrived
-	before the note could take them."""
+def _sanitized(payload):
+	"""A payload without the receiver's name, phone and address, for the log."""
+	if not isinstance(payload, dict):
+		return {}
+	clean = {k: v for k, v in payload.items() if k not in ("receiver", "dropOffAddress")}
+	address = payload.get("dropOffAddress")
+	if isinstance(address, dict) and address.get("city"):
+		clean["dropOffAddress"] = {"city": address["city"]}
+	return clean
+
+
+def log_data(values):
+	"""The create payload for the Integration Log, without the receiver's name, phone and address."""
+	snapshot = values.get("custom_carrier_request_snapshot")
+	return json.dumps(_sanitized(json.loads(snapshot))) if snapshot else None
+
+
+def after_created(delivery_note, data):
+	"""Once a note is Created: the Sales Order summary and the webhook events that arrived before the note
+	could take them. The label job is NOT queued here: the note is still a draft that the person's form is
+	about to submit, and a label job writing to it at that moment raced the submit (MySQL 1020 "Record has
+	changed since last read", a stale ``modified``), leaving the note Draft. ``after_submit`` queues it."""
 	from marketplace_integrations.integrations.bosta import statuses
 
+	if frappe.db.get_value("Delivery Note", delivery_note, "is_return"):
+		# A return pickup: not part of the Sales Order's shipping summary, and no label job.
+		return
+	delivery_id = _delivery_id(data)
 	_update_summary(delivery_note)
-	frappe.enqueue(
-		"marketplace_integrations.integrations.bosta.delivery_note_shipment.run_fetch_label",
-		queue="short",
-		timeout=120,
-		job_id=_LABEL_JOB.format(delivery_note),
-		deduplicate=True,
-		enqueue_after_commit=True,
-		delivery_note=delivery_note,
-	)
 	frappe.db.commit()
 	try:
 		statuses.replay_pending_events(delivery_id)
@@ -770,82 +737,174 @@ def _after_created(delivery_note, delivery_id):
 		frappe.log_error(title="Bosta: pending events could not be replayed", message=frappe.get_traceback())
 
 
-def _finish(delivery_note, status, values, log, result, **log_values):
-	"""Close the log and write the note back, only if it is still Creating. Commit, lock as the next
-	statement, write with ``db_set`` (system write-back, notifies open forms). Returns whether the note
-	was written. The error text is stored raw: it is escaped where it is rendered."""
-	close_log(log, result, **log_values)
-	frappe.db.commit()
-	locked = frappe.db.get_value("Delivery Note", delivery_note, "custom_integration_status", for_update=True)
-	if cstr(locked) != CREATING:
-		frappe.db.commit()
-		return False
-	doc = frappe.get_doc("Delivery Note", delivery_note)
-	doc.db_set(dict(values, custom_integration_status=status), update_modified=True, notify=True, commit=True)
-	return True
-
-
-# ---------------------------------------------------------------------------
-# Check with Bosta (lookup only, never creates)
-# ---------------------------------------------------------------------------
-
-
-def is_stale_creating(delivery_note):
-	"""A Creating note with no queued job whose last change is older than ``STALE_CREATING_MINUTES``."""
-	values = frappe.db.get_value("Delivery Note", delivery_note, ["custom_integration_status", "modified"], as_dict=True)
-	if not values or cstr(values.custom_integration_status) != CREATING:
-		return False
-	if is_job_enqueued(_CREATE_JOB.format(delivery_note)):
-		return False
-	return get_datetime(values.modified) <= add_to_date(now_datetime(), minutes=-STALE_CREATING_MINUTES)
-
-
-def check_with_bosta(delivery_note):
-	"""Ask Bosta whether a Creation Unknown (or stuck Creating) note's delivery exists. Found: Created.
-	Otherwise the note stays Creation Unknown: this never creates. The result is written only if the note
-	is still as it was when the check started. The caller checked write access. The returned ``message``
-	may hold Bosta's text: the caller escapes it where it is shown."""
-	start = frappe.db.get_value(
-		"Delivery Note", delivery_note, ["custom_integration_status", "modified", "custom_carrier_reference"], as_dict=True
+def after_submit(doc):
+	"""Optional contract hook (``carrier_shipments.after_submit``, the Delivery Note ``on_submit``): queue the
+	label job once the note is submitted, so it never writes to a draft that is being submitted. Runs after
+	the submit commits (``enqueue_after_commit``)."""
+	if doc.get("is_return") or status_of(doc) != CREATED or doc.get("custom_shipping_label"):
+		return
+	frappe.enqueue(
+		"marketplace_integrations.integrations.bosta.delivery_note_shipment.run_fetch_label",
+		queue="short",
+		timeout=120,
+		job_id=_LABEL_JOB.format(doc.name),
+		deduplicate=True,
+		enqueue_after_commit=True,
+		delivery_note=doc.name,
 	)
-	status = cstr(start.custom_integration_status) or NOT_CREATED
-	if status == CREATING and not is_stale_creating(delivery_note):
-		frappe.throw(_("The shipment is still being sent to Bosta. Check again in a few minutes."))
-	if status not in (CREATING, UNKNOWN):
-		frappe.throw(_("Only a note with an unknown Bosta result can be checked."))
-	reference = start.custom_carrier_reference or delivery_note
-	BostaClient().ensure_ready()
-	frappe.db.commit()
-	log = open_log(delivery_note, "Refresh", reference=reference)
-	frappe.db.commit()
-	changed = {
-		"status": status,
-		"found": False,
-		"message": _("The Delivery Note changed while checking with Bosta. Reload it and check again."),
+
+
+def refresh(delivery_note):
+	"""The contract's ``refresh``: read Bosta's state and apply it; returns the Bosta state name."""
+	from marketplace_integrations.integrations.bosta import statuses
+
+	return statuses.refresh_note(delivery_note)
+
+
+def reconcile():
+	"""The contract's ``reconcile``: queue the nightly reconciliation job."""
+	from marketplace_integrations.integrations.bosta import statuses
+
+	return statuses.reconcile_open_notes()
+
+
+def problem_states():
+	"""The contract's ``problem_states``: the neutral Needs Attention problem types and the Bosta shipping
+	statuses that raise them."""
+	from marketplace_integrations.integrations.bosta import statuses
+	from marketplace_integrations.services import marketplace_attention as attention
+
+	return {
+		attention.CARRIER_EXCEPTION: [statuses.BOSTA_STATE_NAMES[c] for c in statuses.PROBLEM_STATE_CODES],
+		attention.CARRIER_RETURN: [statuses.BOSTA_STATE_NAMES[c] for c in statuses.RETURNED_STATE_CODES],
 	}
+
+
+def terminal_states(is_return=False):
+	"""The contract's ``terminal_states``: the shipping statuses that never change again, so a note in one
+	is not a stale status. A Customer Return Pickup (``is_return``) also ends at the returned states."""
+	from marketplace_integrations.integrations.bosta import statuses
+
+	return statuses.terminal_state_names(is_return)
+
+
+# ---------------------------------------------------------------------------
+# Cancel at Bosta (#410)
+# ---------------------------------------------------------------------------
+
+
+def _terminate_outcome(client, response):
+	"""``(outcome, message)`` of a terminate answer: ``cancelled`` (a documented 200 with ``success``),
+	``unclear`` (a 404, errorCode 1066 or an "already terminated" text: the answer does not say whether the
+	delivery is cancelled, so ``cancel_at_bosta`` asks Bosta with one read), ``refused`` (any other 4xx that is
+	not 408 or 429: Bosta definitively says no) or ``unknown`` (everything else). A generic error is never read
+	as "not found"."""
+	status = response.status_code
+	body = response_body(response)
+	if 200 <= status < 300:
+		if body.get("success") is True:
+			return "cancelled", ""
+		return "unknown", client.error_message(response)
+	message = client.error_message(response)
+	if status == 404 or cstr(body.get("errorCode")) == "1066" or "already terminated" in message.lower():
+		return "unclear", message
+	if 400 <= status < 500 and status not in _RETRYABLE_HTTP:
+		return "refused", message
+	return "unknown", message
+
+
+#: Bosta answers a read of a terminated delivery with HTTP 400 ``{"message": "Delivery not found.",
+#: "errorCode": 1066}`` (seen on a real terminated delivery, 2026-11-01).
+DELIVERY_NOT_FOUND_ERROR_CODE = "1066"
+#: The Bosta state a terminated delivery reads back as (``statuses.BOSTA_STATE_NAMES[48]``).
+TERMINATED_STATE_CODE = 48
+
+
+def is_terminated_answer(response):
+	"""Is this GET answer Bosta's "Delivery not found" (HTTP 400, errorCode 1066) for a terminated delivery."""
+	return (
+		response.status_code == 400
+		and cstr(response_body(response).get("errorCode")) == DELIVERY_NOT_FOUND_ERROR_CODE
+	)
+
+
+def _read_state(client, tracking):
+	"""One GET of the delivery: ``("found", {"code", "name"})`` for a recognised state (a terminated delivery's
+	"Delivery not found" answer reads as Terminated, 48), ``("missing", None)`` for a 404, else
+	``("failed", None)`` (any error, timeout or unrecognised answer)."""
+	from marketplace_integrations.integrations.bosta import statuses
+
 	try:
-		data = find_remote_delivery(reference)
-	except _Unknown as unknown:
-		message = cstr(unknown)
-		if not _resolve_unknown(delivery_note, start, UNKNOWN, {"custom_last_integration_error": message}, log, "Unknown", error=message):
-			return changed
-		return {"status": UNKNOWN, "found": False, "message": message}
-	if data is None:
-		message = _("Bosta has no delivery with this reference yet. The result is still unknown.")
-		if not _resolve_unknown(delivery_note, start, UNKNOWN, {"custom_last_integration_error": message}, log, "Unknown", error=message):
-			return changed
-		return {"status": UNKNOWN, "found": False, "message": message}
-	values = {
-		"custom_carrier_delivery_id": _delivery_id(data),
-		"lr_no": cstr(data.get("trackingNumber")).strip(),
-		"lr_date": getdate(),
-		"custom_last_integration_error": None,
-		"custom_last_sync_at": now_datetime(),
-	}
-	if not _resolve_unknown(delivery_note, start, CREATED, values, log, "Success", delivery_id=_delivery_id(data)):
-		return changed
-	_after_created(delivery_note, _delivery_id(data))
-	return {"status": CREATED, "found": True}
+		response = client.get_delivery(tracking)
+		if is_terminated_answer(response):
+			return "found", {
+				"code": TERMINATED_STATE_CODE,
+				"name": statuses.BOSTA_STATE_NAMES[TERMINATED_STATE_CODE],
+			}
+		if response.status_code == 404:
+			return "missing", None
+		if not is_success_response(response):
+			return "failed", None
+		state = statuses._polled_state(response_body(response))
+	except Exception:
+		return "failed", None
+	if state and state["code"] in statuses.BOSTA_STATE_NAMES:
+		return "found", {"code": state["code"], "name": statuses.BOSTA_STATE_NAMES[state["code"]]}
+	return "failed", None
+
+
+def cancel_remote(doc):
+	"""The contract's ``cancel_remote``: terminate the note's Bosta delivery (the neutral
+	``carrier_shipments.cancel`` holds the state machine, the lock and the log).
+
+	One terminate call with the client's timeout, at most one GET. Returns ``_dict(outcome, message, values,
+	http_status)``: ``cancelled`` (a documented 200, or one GET showing 48/49 after a refusal or an unclear
+	answer) or ``refused`` (a refusal, or an unclear answer whose GET shows a live state). Raises ``Unknown``
+	(timeout, 5xx, 429, or a 404 / 1066 / "already terminated" answer whose GET finds nothing or fails). The
+	message is Bosta's raw text (the caller escapes it where it is shown)."""
+	from marketplace_integrations.integrations.bosta import statuses
+
+	tracking = cstr(doc.get("lr_no")).strip()
+	client = BostaClient()
+	try:
+		response = client.terminate_delivery(tracking)
+	except Exception as exc:
+		outcome, message, http_status = (
+			"unknown",
+			_("The Bosta request failed ({0}). It may or may not have reached Bosta.").format(cstr(exc)[:200]),
+			None,
+		)
+	else:
+		outcome, message = _terminate_outcome(client, response)
+		http_status = response.status_code
+	state = None
+	if outcome in ("refused", "unclear"):
+		# One read settles it. Cancelled (48/49) is Cancelled. For a plain refusal anything else keeps the
+		# shipment (back to Created). For an unclear answer a live state is also back to Created with the raw
+		# refusal, while "not found" and a failed read stay Cancellation Unknown.
+		kind, found = _read_state(client, tracking)
+		if kind == "found" and found["code"] in statuses.CANCELLED_STATE_CODES:
+			state, outcome = found, "cancelled"
+		elif outcome == "unclear":
+			outcome = "refused" if kind == "found" else "unknown"
+	if outcome == "unknown":
+		raise Unknown(message, http_status)
+	if state:
+		values = {"custom_shipping_status": state["name"]}
+	elif outcome == "cancelled":
+		# Bosta confirmed the terminate with a 200: the shipping status is the terminated label too
+		values = {"custom_shipping_status": statuses.BOSTA_STATE_NAMES[TERMINATED_STATE_CODE]}
+	else:
+		values = {}
+	return frappe._dict(outcome=outcome, message=message, values=values, http_status=http_status)
+
+
+def after_cancelled(delivery_note):
+	"""Once the note is Cancelled: the Sales Order summary."""
+	from marketplace_integrations.integrations.bosta import statuses
+
+	statuses.update_sales_order_summary_of(delivery_note)
+
 
 
 def _update_summary(delivery_note):
@@ -853,28 +912,6 @@ def _update_summary(delivery_note):
 
 	statuses.update_sales_order_summary_of(delivery_note)
 	frappe.db.commit()
-
-
-def _resolve_unknown(delivery_note, start, status, values, log, result, **log_values):
-	"""Like ``_finish`` but for a note that is Creation Unknown or a stuck Creating: ``start`` is the
-	status and ``modified`` read before the Bosta call; nothing is written if either changed since (a
-	retry, another check or the worker may have moved the note on). Returns whether it was written."""
-	close_log(log, result, **log_values)
-	frappe.db.commit()
-	locked = frappe.db.get_value(
-		"Delivery Note", delivery_note, ["custom_integration_status", "modified"], as_dict=True, for_update=True
-	)
-	if (
-		not locked
-		or cstr(locked.custom_integration_status) != cstr(start.custom_integration_status)
-		or cstr(locked.modified) != cstr(start.modified)
-	):
-		frappe.db.commit()
-		return False
-	frappe.get_doc("Delivery Note", delivery_note).db_set(
-		dict(values, custom_integration_status=status), update_modified=True, notify=True, commit=True
-	)
-	return True
 
 
 # ---------------------------------------------------------------------------
@@ -897,18 +934,18 @@ def fetch_label(delivery_note, raise_on_error=False):
 	from marketplace_integrations.integrations.bosta import labels
 
 	frappe.db.commit()
-	log = open_log(delivery_note, "Label Fetch")
+	log = carrier_log.open_log(SERVICE_NAME, delivery_note, "Label Fetch")
 	frappe.db.commit()
 	try:
 		result = labels.create_a4_arabic_label(delivery_note)
 	except Exception as exc:
 		frappe.db.rollback()
 		# labels.py escapes Bosta's text for the screen; the log keeps it raw (escaped where it is rendered).
-		close_log(log, "Failed", error=html.unescape(cstr(exc))[:500] or _("The label could not be fetched."))
+		carrier_log.close_log(log, "Failed", error=html.unescape(cstr(exc))[:500] or _("The label could not be fetched."))
 		frappe.db.commit()
 		if raise_on_error:
 			raise
 		return None
-	close_log(log, "Success")
+	carrier_log.close_log(log, "Success")
 	frappe.db.commit()
 	return result

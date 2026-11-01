@@ -306,7 +306,7 @@ class IntegrationTestPlatformPermissions(IntegrationTestCase):
 	def test_noon_user_reaches_noon_doctypes_and_talabat_user_does_not(self):
 		noon = self.make_user("Noon Staff", "Noon User")
 		talabat = self.make_user("Talabat Staff", "Talabat User")
-		for doctype in ("Noon AWB", "Noon Return"):
+		for doctype in ("Noon Return",):
 			for ptype in ("read", "create"):
 				with self.subTest(doctype=doctype, ptype=ptype):
 					self.assertTrue(frappe.has_permission(doctype, ptype, user=noon))

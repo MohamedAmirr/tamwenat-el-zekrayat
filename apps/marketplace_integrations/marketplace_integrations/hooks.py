@@ -41,8 +41,13 @@ boot_session = "marketplace_integrations.services.carrier_shipments.boot_session
 
 # include js in doctype views
 doctype_js = {
-	"Sales Order": "public/js/sales_order.js",
-	"Delivery Note": ["public/js/delivery_note.js", "public/js/delivery_note_shipping.js", "public/js/delivery_note_bosta.js"],
+	"Sales Order": ["public/js/noon_invoice.js", "public/js/sales_order.js"],
+	"Delivery Note": [
+		"public/js/delivery_note_shipping.js",
+		"public/js/noon_invoice.js",
+		"public/js/delivery_note_bosta.js",
+		"public/js/delivery_note_noon.js",
+	],
 }
 doctype_list_js = {"Sales Order": "public/js/sales_order_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
@@ -162,26 +167,20 @@ _RECHECK_EVENTS = {
 	"on_cancel": _RECHECK_HANDLER,
 	"on_trash": _RECHECK_HANDLER,
 }
-# #368: a Delivery Note that a Noon shipment row links to must stay deletable, so its on_trash
-# also runs the handler that clears that link (it never raises). on_cancel keeps the link on
-# purpose: the amend flow re-links through amended_from (integrations/noon/handover_state.py).
-_HANDOVER_CLEAR_HANDLER = "marketplace_integrations.integrations.noon.handover_state.clear_deleted_delivery_note"
-# #391: Delivery Note-first Noon fulfillment (services/carrier_shipments.py). after_insert only queues
-# the shipment job (enqueue_after_commit, deduplicated job id): it never raises and makes no HTTP call.
+# #391/#415: Delivery Note-first carrier shipments (the neutral contract in services/carrier_shipments.py,
+# one adapter per carrier). Nothing is queued on insert: Submit starts the shipment (api/carrier_shipments.py).
 # validate, before_submit, before_cancel and on_trash (#393) are deliberate refusals, so they do raise:
-# transporter, lr_no, carrier status and items locked once the shipment is started; no submit until it is
-# Created; no cancel or delete while its Noon shipment is live (a shipment that never reached Noon is
-# discarded locally). The Sales Order before_cancel refuses while a draft note has a live shipment. All
-# only touch Delivery Notes of a submitted Noon Sales Order.
+# the carrier fields and items are locked once the shipment is started; no submit until it is Created; no
+# cancel or delete while its shipment is live. The Sales Order before_cancel refuses while a draft note has
+# a live shipment. Each only touches the Delivery Notes its carrier adapter claims.
 _CARRIER_GUARD = "marketplace_integrations.services.carrier_shipments.guard_cancel_or_delete"
 doc_events = {
 	"Delivery Note": {
 		**_RECHECK_EVENTS,
-		# The guard comes first: it refuses (or discards a shipment that never reached Noon) before
-		# the handover handler resets the shipment's note link.
-		"on_trash": [_CARRIER_GUARD, _RECHECK_HANDLER, _HANDOVER_CLEAR_HANDLER],
+		"on_submit": [_RECHECK_HANDLER, "marketplace_integrations.services.carrier_shipments.after_submit"],
+		# The guard comes first: it refuses a delete while the shipment is live.
+		"on_trash": [_CARRIER_GUARD, _RECHECK_HANDLER],
 		"before_cancel": _CARRIER_GUARD,
-		"after_insert": "marketplace_integrations.services.carrier_shipments.queue_shipment",
 		"validate": "marketplace_integrations.services.carrier_shipments.validate_delivery_note",
 		"before_submit": "marketplace_integrations.services.carrier_shipments.require_shipment_created",
 	},
@@ -242,7 +241,7 @@ scheduler_events = {
 	"cron": {
 		"59 23 * * *": [
 			"marketplace_integrations.services.marketplace_order_reconciliation.enqueue_nightly_order_reconciliation",
-			"marketplace_integrations.integrations.bosta.statuses.reconcile_open_notes",
+			"marketplace_integrations.services.carrier_shipments.reconcile_open_notes",
 		],
 		SHOPIFY_INVENTORY_SWEEP_CRON: [
 			"marketplace_integrations.integrations.shopify.inventory_sync.sweep_changed_bins",
@@ -354,7 +353,7 @@ fixtures = [
 					"Sales Order-contact_mobile-read_only",
 					"Sales Order-contact_mobile-allow_on_submit",
 					# AWB / Carrier on the Delivery Note: relabelled native lr_no / transporter, and
-					# moved (field_order) under the customer on the Details tab, not collapsed.
+					# moved (field_order) into the Shipping section (Custom Field), not collapsed.
 					# Form layout: field_order also moves six native sections into the collapsed
 					# "More" section (Custom Field below); per_installed / per_returned lose their
 					# "saved only" depends_on so a new note and a saved note show the same fields.
@@ -363,6 +362,8 @@ fixtures = [
 					"Delivery Note-main-field_order",
 					"Delivery Note-per_installed-depends_on",
 					"Delivery Note-per_returned-depends_on",
+					# A Noon note has no Shipping Rule (integrations/noon/delivery_note_shipment.py clears it).
+					"Delivery Note-shipping_rule-depends_on",
 				],
 			]
 		],
@@ -386,14 +387,13 @@ fixtures = [
 					"Sales Order-custom_shipping_status_summary",
 					"Payment Entry-custom_marketplace_order",
 					"Payment Entry-custom_marketplace_transaction_id",
-					"Delivery Note-custom_carrier_status",
-					"Delivery Note-custom_carrier_error",
 					"Delivery Note-custom_more_section",
 					"Delivery Note-custom_shipping_section",
 					"Delivery Note-custom_integration_status",
 					"Delivery Note-custom_shipping_status",
 					"Delivery Note-custom_carrier_delivery_id",
 					"Delivery Note-custom_carrier_reference",
+					"Delivery Note-custom_shipping_status_column",
 					"Delivery Note-custom_shipping_column",
 					"Delivery Note-custom_cod_amount",
 					"Delivery Note-custom_cod_confirmed",
@@ -403,8 +403,16 @@ fixtures = [
 					"Delivery Note-custom_last_sync_at",
 					"Delivery Note-custom_bosta_last_event_at",
 					"Delivery Note-custom_actual_shipping_cost",
+					"Delivery Note-custom_actual_cost_received_on",
+					"Delivery Note-custom_return_source",
+					"Delivery Note-custom_returned_cod",
 					"Delivery Note-custom_last_integration_error",
 					"Delivery Note-custom_carrier_request_snapshot",
+					"Delivery Note-custom_noon_generate_awb",
+					"Delivery Note-custom_noon_invoice_uploaded_on",
+					"Delivery Note Item-custom_noon_item_status",
+					# #416: the row-form button of Mark as Out of Stock (hidden until sales_order.js shows it)
+					"Sales Order Item-custom_noon_mark_out_of_stock",
 					"Integration Request-custom_operation_type",
 					"Integration Request-custom_result",
 					"Integration Request-custom_external_reference",

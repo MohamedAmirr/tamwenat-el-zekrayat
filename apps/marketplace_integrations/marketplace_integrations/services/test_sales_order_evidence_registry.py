@@ -24,8 +24,6 @@ class UnitTestSalesOrderEvidenceRegistry(UnitTestCase):
 			"last_synced_snapshot": None,
 			"items": [],
 			"latest_payload": None,
-			"noon_shipments": [],
-			"noon_shipment_units": [],
 		}
 		values.update(fields)
 		return SimpleNamespace(**values)
@@ -62,8 +60,6 @@ class UnitTestSalesOrderEvidenceRegistry(UnitTestCase):
 				"Noon",
 				external_status="CANCELLED",
 				latest_payload=None,
-				noon_shipments=[],
-				noon_shipment_units=[],
 			)
 		)
 

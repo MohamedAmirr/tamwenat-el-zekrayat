@@ -202,7 +202,7 @@ class IntegrationTestBostaStatuses(BostaFixtureMixin, IntegrationTestCase):
 			{"custom_integration_status": "Created", "custom_carrier_delivery_id": "DELIVERY-1", "lr_no": "TRK-1"},
 		)
 		frappe.db.commit()
-		shipment._after_created(note.name, "DELIVERY-1")
+		shipment.after_created(note.name, {"_id": "DELIVERY-1"})
 
 		self.assertEqual(
 			frappe.db.get_value("Delivery Note", note.name, "custom_shipping_status"), "Received at warehouse"
@@ -355,7 +355,7 @@ class IntegrationTestBostaStatuses(BostaFixtureMixin, IntegrationTestCase):
 	def test_the_nightly_entry_is_registered_and_the_half_hour_poll_is_gone(self):
 		hooks = frappe.get_hooks("scheduler_events")
 		self.assertIn(
-			"marketplace_integrations.integrations.bosta.statuses.reconcile_open_notes", hooks["cron"]["59 23 * * *"]
+			"marketplace_integrations.services.carrier_shipments.reconcile_open_notes", hooks["cron"]["59 23 * * *"]
 		)
 		for jobs in hooks["cron"].values():
 			self.assertNotIn("marketplace_integrations.integrations.bosta.statuses.poll_incomplete_shipments", jobs)

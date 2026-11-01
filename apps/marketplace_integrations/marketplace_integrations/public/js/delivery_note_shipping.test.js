@@ -12,7 +12,7 @@ global.DOMParser = class {
 	}
 };
 
-function load({ boot = ["Bosta"], statuses = [], call_fails = false, call_error = null, can_write = true } = {}) {
+function load({ boot = ["Bosta"], statuses = [], call_fails = false, call_error = null, can_write = true, call_result = null } = {}) {
 	const handlers = {};
 	const calls = [];
 	const dialogs = [];
@@ -45,7 +45,7 @@ function load({ boot = ["Bosta"], statuses = [], call_fails = false, call_error 
 		call: (opts) => {
 			calls.push(opts);
 			if (call_error) return Promise.reject(call_error);
-			return call_fails ? Promise.reject(new Error("refused")) : Promise.resolve({ message: opts.result || {} });
+			return call_fails ? Promise.reject(new Error("refused")) : Promise.resolve({ message: opts.result || call_result || {} });
 		},
 		db: {
 			get_value: () => Promise.resolve({ message: queue.length > 1 ? queue.shift() : queue[0] || {} }),
@@ -57,10 +57,11 @@ function load({ boot = ["Bosta"], statuses = [], call_fails = false, call_error 
 	shipping.poll_ms = 1;
 	shipping.max_wait_ms = 30;
 	shipping.register_carrier("Bosta", {
-		request_method: "x.request",
-		check_method: "x.check",
-		refresh_method: "x.refresh",
+		before_send: (frm) => frm.doc.custom_cod_confirmed !== 0,
+		refresh: (frm) => (frm.carrier_refreshed = true),
 		add_buttons: (frm) => frm.extra_buttons++,
+		pick_city: (frm) => (frm.city_picked = (frm.city_picked || 0) + 1),
+		locked_fields: ["contact_mobile"],
 	});
 	return { handlers, calls, dialogs, msgprints, alerts, shipping };
 }
@@ -134,6 +135,18 @@ test("the intro follows the integration status and shows the tracking number (lr
 	assert.equal(fresh.intro, null);
 });
 
+test("a submitted note cancelled at the carrier says the next Cancel makes no carrier call", () => {
+	const { handlers } = load();
+	const submitted = make_form({ custom_integration_status: "Cancelled", docstatus: 1 });
+	handlers.refresh(submitted);
+	assert.equal(submitted.intro.color, "orange");
+	assert.match(submitted.intro.text, /Cancelled at Bosta\. This Delivery Note is still submitted/);
+	assert.match(submitted.intro.text, /Bosta will not be asked again/);
+	const draft = make_form({ custom_integration_status: "Cancelled", docstatus: 0 });
+	handlers.refresh(draft);
+	assert.equal(draft.intro.color, "yellow");
+});
+
 test("shipping status shows as text in an indicator", () => {
 	const { handlers } = load();
 	const frm = make_form({ custom_integration_status: "Created", custom_shipping_status: "Delivered" });
@@ -174,7 +187,7 @@ test("the Check button calls the carrier method and reloads the form", async () 
 	const frm = make_form({ custom_integration_status: "Creation Unknown" });
 	handlers.refresh(frm);
 	await frm.buttons[0].action();
-	assert.equal(calls[0].method, "x.check");
+	assert.equal(calls[0].method, "marketplace_integrations.api.carrier_shipments.check_shipment");
 	assert.deepEqual(calls[0].args, { delivery_note: "MAT-DN-1" });
 	assert.equal(frm.reloads, 1);
 });
@@ -189,41 +202,28 @@ test("the carrier's answer to Check is escaped before it is shown as an alert", 
 	assert.ok(shipping);
 });
 
-test("the COD amount and its confirmation are read-only once the shipment started, editable before", () => {
+test("the carrier's locked fields are read-only once the shipment started, editable before", () => {
 	const { handlers } = load();
 	const draft = make_form({ custom_integration_status: "Not Created" });
 	handlers.refresh(draft);
-	assert.equal(draft.df["custom_cod_amount.read_only"], 0);
-	assert.equal(draft.df["custom_cod_confirmed.read_only"], 0);
-	const started = make_form({ custom_integration_status: "Creating" });
-	handlers.refresh(started);
-	assert.equal(started.df["custom_cod_amount.read_only"], 1);
-	assert.equal(started.df["custom_cod_confirmed.read_only"], 1);
+	assert.equal(draft.df["contact_mobile.read_only"], 0);
 	const created = make_form({ custom_integration_status: "Created" });
 	handlers.refresh(created);
-	assert.equal(created.df["custom_cod_amount.read_only"], 1);
+	assert.equal(created.df["contact_mobile.read_only"], 1);
 });
 
-test("changing the COD confirms it while the note is editable, and only then", () => {
+test("unlocking restores the field's own read-only setting instead of forcing 0", () => {
 	const { handlers } = load();
-	const draft = make_form({ custom_integration_status: "Not Created", custom_cod_confirmed: 0 });
-	handlers.custom_cod_amount(draft);
-	assert.equal(draft.values.custom_cod_confirmed, 1);
-	const started = make_form({ custom_integration_status: "Created", custom_cod_confirmed: 0 });
-	handlers.custom_cod_amount(started);
-	assert.deepEqual(started.values, {});
-	const other = make_form({ transporter_name: "Noon", custom_cod_confirmed: 0 });
-	handlers.custom_cod_amount(other);
-	assert.deepEqual(other.values, {});
-});
-
-test("submit with an unconfirmed COD asks to confirm it and does not call the carrier", () => {
-	const { handlers, calls, msgprints } = load();
-	const frm = make_form({ custom_integration_status: "Not Created", custom_cod_confirmed: 0 });
-	assert.equal(handlers.before_submit(frm), undefined);
-	assert.equal(global.frappe.validated, false);
-	assert.equal(calls.length, 0);
-	assert.match(msgprints[0].message, /Confirm the COD amount/);
+	global.frappe.meta = { get_docfield: (doctype, fieldname) => ({ read_only: fieldname === "contact_mobile" ? 1 : 0 }) };
+	const draft = make_form({ custom_integration_status: "Not Created" });
+	handlers.refresh(draft);
+	assert.equal(draft.df["contact_mobile.read_only"], 1);
+	const created = make_form({ custom_integration_status: "Created" });
+	handlers.refresh(created);
+	assert.equal(created.df["contact_mobile.read_only"], 1);
+	global.frappe.meta = { get_docfield: () => ({ read_only: 0 }) };
+	handlers.refresh(draft);
+	assert.equal(draft.df["contact_mobile.read_only"], 0);
 });
 
 test("submit of a note already Created continues without a dialog", () => {
@@ -238,6 +238,38 @@ test("submit of a note no carrier owns is left alone", () => {
 	const { handlers, calls } = load();
 	assert.equal(handlers.before_submit(make_form({ transporter_name: "Noon" })), undefined);
 	assert.equal(calls.length, 0);
+});
+
+test("a return is a carrier note only when marked Customer Return Pickup, and its submit never waits", () => {
+	const { shipping, handlers, calls, dialogs } = load();
+	const plain = make_form({ is_return: 1, custom_integration_status: "Not Created" });
+	assert.equal(shipping.carrier_name(plain), null);
+	assert.equal(shipping.carrier_name(make_form({ is_return: 1, custom_return_source: "Returned by Bosta" })), null);
+	const pickup = make_form({ is_return: 1, custom_return_source: "Customer Return Pickup", custom_integration_status: "Not Created" });
+	assert.equal(shipping.carrier_name(pickup), "Bosta");
+	assert.equal(handlers.before_submit(pickup), undefined);
+	assert.equal(calls.length, 0);
+	assert.equal(dialogs.length, 0);
+	assert.equal(global.frappe.validated, true);
+});
+
+test("a pickup request through the button waits for Created and does not talk about submitting", async () => {
+	const { shipping, calls, dialogs } = load({
+		statuses: [{ custom_integration_status: "Creating" }, { custom_integration_status: "Created" }],
+	});
+	const frm = make_form({ custom_integration_status: "Not Created" });
+	await shipping.send_and_wait(frm, "Bosta", false);
+	assert.equal(calls[0].method, "marketplace_integrations.api.carrier_shipments.request_shipment");
+	assert.match(dialogs[0].html, /Sending the return pickup request to Bosta/);
+	assert.doesNotMatch(dialogs[0].html, /submitted/);
+	assert.equal(frm.reloads, 1);
+});
+
+test("a failed pickup request does not say the Delivery Note was not submitted", () => {
+	const { shipping } = load();
+	for (const status of ["Creation Unknown", "Creation Failed", "Creating"]) {
+		assert.doesNotMatch(shipping.failure_html("Bosta", status, "x", false), /not submitted/, status);
+	}
 });
 
 test("submit of an unsaved form asks to save first and does not call the carrier", () => {
@@ -255,12 +287,24 @@ test("submit waits for Created, reloads the form, then lets the submit continue"
 	});
 	const frm = make_form({ custom_integration_status: "Not Created" });
 	await handlers.before_submit(frm);
-	assert.equal(calls[0].method, "x.request");
+	assert.equal(calls[0].method, "marketplace_integrations.api.carrier_shipments.request_shipment");
 	assert.deepEqual(calls[0].args, { delivery_note: "MAT-DN-1", modified: "2026-10-31 10:00:00" });
 	assert.equal(dialogs[0].config.title, "Sending to Bosta...");
 	assert.equal(dialogs[0].hidden, true);
 	assert.equal(frm.reloads, 1);
 	assert.equal(global.frappe.validated, true);
+});
+
+test("submit stops and opens the city picker when the server found no city for the address", async () => {
+	const { handlers, calls, dialogs, alerts } = load({ call_result: { status: "Not Created", queued: false, needs_city: true } });
+	const frm = make_form({ custom_integration_status: "Not Created" });
+	await handlers.before_submit(frm);
+	assert.equal(calls.length, 1);
+	assert.equal(global.frappe.validated, false);
+	assert.equal(frm.city_picked, 1);
+	assert.equal(frm.reloads, 0);
+	assert.equal(dialogs[0].hidden, true);
+	assert.match(alerts[0].message, /Choose the Bosta city, then submit again/);
 });
 
 test("submit stops with the carrier error when creation fails", async () => {
@@ -298,7 +342,7 @@ test("the Check with Bosta button of the Unknown dialog calls the check method a
 	const frm = make_form({ custom_integration_status: "Not Created" });
 	await handlers.before_submit(frm);
 	await msgprints[0].primary_action.action();
-	assert.equal(calls[calls.length - 1].method, "x.check");
+	assert.equal(calls[calls.length - 1].method, "marketplace_integrations.api.carrier_shipments.check_shipment");
 	assert.equal(frm.reloads, 1);
 });
 
@@ -343,6 +387,24 @@ test("Close, keep sending ends the wait with a quiet alert and keeps the form un
 	assert.match(alerts[0].message, /Still sending to Bosta/);
 });
 
+test("after Close, keep sending the lock is free and Submit again starts a new request", async () => {
+	const { handlers, dialogs, calls, shipping } = load({ statuses: [{ custom_integration_status: "Creating" }] });
+	const frm = make_form({ custom_integration_status: "Not Created" });
+	const first = handlers.before_submit(frm);
+	await new Promise((resolve) => setTimeout(resolve, 2));
+	dialogs[0].config.primary_action();
+	await first;
+	assert.equal(global.frappe.validated, false);
+	assert.equal(shipping.is_busy(frm), false);
+	global.frappe.validated = true;
+	const second = handlers.before_submit(frm);
+	await new Promise((resolve) => setTimeout(resolve, 2));
+	assert.equal(calls.length, 2);
+	assert.equal(dialogs.length, 2);
+	dialogs[1].config.primary_action();
+	await second;
+});
+
 test("closing the dialog abandons the wait without submitting", async () => {
 	const { handlers, dialogs } = load({ statuses: [{ custom_integration_status: "Creating" }] });
 	const promise = handlers.before_submit(make_form({ custom_integration_status: "Not Created" }));
@@ -352,46 +414,90 @@ test("closing the dialog abandons the wait without submitting", async () => {
 	assert.equal(global.frappe.validated, false);
 });
 
-test("a confirmed COD that differs from the computed one shows a note with both amounts, escaped", async () => {
-	const { shipping } = load();
-	shipping.register_carrier("Bosta", { request_method: "x.request", cod_hint_method: "x.hint" });
-	const comments = [];
-	const frm = make_form({ custom_integration_status: "Not Created", custom_cod_amount: 100, currency: "EGP" });
-	frm.dashboard.add_comment = (text, color, permanent) => comments.push({ text, color, permanent });
-	const calls = [];
-	global.frappe.call = (opts) => {
-		calls.push(opts);
-		return Promise.resolve({ message: { default: 250 } });
-	};
-	await shipping.show_cod_hint(frm, "Bosta");
-	assert.equal(calls[0].method, "x.hint");
-	assert.equal(comments.length, 1);
-	assert.match(comments[0].text, /100 differs .* \(250\)/);
-	assert.equal(comments[0].color, "yellow");
+test("a carrier's before_send returning false stops the submit before the carrier is called", () => {
+	const { handlers, calls } = load();
+	const frm = make_form({ custom_integration_status: "Not Created", custom_cod_confirmed: 0 });
+	assert.equal(handlers.before_submit(frm), undefined);
+	assert.equal(global.frappe.validated, false);
+	assert.equal(calls.length, 0);
 });
 
-test("no COD note when the amount matches, the form is unsaved or dirty, or the shipment started", async () => {
-	const { shipping } = load();
-	shipping.register_carrier("Bosta", { request_method: "x.request", cod_hint_method: "x.hint" });
-	let called = 0;
-	global.frappe.call = () => {
-		called++;
-		return Promise.resolve({ message: { default: null } });
+test("the shell runs the carrier's refresh hook on every form refresh", () => {
+	const { handlers } = load();
+	const frm = make_form({ custom_integration_status: "Not Created" });
+	handlers.refresh(frm);
+	assert.equal(frm.carrier_refreshed, true);
+});
+
+function hold_calls() {
+	const held = [];
+	global.frappe.call = (opts) => {
+		held.push(opts);
+		return new Promise((resolve, reject) => (opts.release = { resolve, reject }));
 	};
-	const comments = [];
-	const add = (frm) => (frm.dashboard.add_comment = (text) => comments.push(text));
-	const same = make_form({ custom_integration_status: "Not Created" });
-	add(same);
-	await shipping.show_cod_hint(same, "Bosta");
-	assert.equal(called, 1);
-	assert.equal(comments.length, 0);
-	for (const frm of [
-		make_form({ custom_integration_status: "Creating" }),
-		make_form({ custom_integration_status: "Not Created", custom_cod_confirmed: 0 }),
-		make_form({ custom_integration_status: "Not Created" }, { dirty: true }),
-	]) {
-		add(frm);
-		await shipping.show_cod_hint(frm, "Bosta");
-	}
-	assert.equal(called, 1);
+	return held;
+}
+
+test("a double click on Check sends one request; the button works again once it is over", async () => {
+	const { handlers } = load();
+	const frm = make_form({ custom_integration_status: "Creation Unknown" });
+	handlers.refresh(frm);
+	const held = hold_calls();
+	const first = frm.buttons[0].action();
+	await frm.buttons[0].action();
+	assert.equal(held.length, 1);
+	held[0].release.resolve({ message: {} });
+	await first;
+	assert.equal(frm.reloads, 1);
+	const again = frm.buttons[0].action();
+	assert.equal(held.length, 2);
+	held[1].release.resolve({ message: {} });
+	await again;
+});
+
+test("a failed request releases the button", async () => {
+	const { handlers } = load();
+	const frm = make_form({ custom_integration_status: "Created" });
+	handlers.refresh(frm);
+	const held = hold_calls();
+	const first = frm.buttons[0].action();
+	held[0].release.reject(new Error("boom"));
+	await assert.rejects(first);
+	const again = frm.buttons[0].action();
+	assert.equal(held.length, 2);
+	held[1].release.resolve({ message: {} });
+	await again;
+});
+
+test("Refresh and Check share one lock per note, other notes are not blocked", async () => {
+	const { shipping, alerts } = load();
+	const a = make_form({});
+	const b = make_form({ name: "MAT-DN-2" });
+	let ran = 0;
+	let release;
+	const first = shipping.exclusive(a, () => new Promise((resolve) => (release = resolve)));
+	assert.equal(shipping.is_busy(a), true);
+	let busy_called = 0;
+	await shipping.exclusive(a, () => ran++, () => busy_called++);
+	await shipping.exclusive(b, () => ran++);
+	assert.deepEqual([ran, busy_called], [1, 1]);
+	// the ignored click says why, without naming a carrier
+	assert.equal(alerts.length, 1);
+	assert.equal(alerts[0].message, "A shipping request is still running.");
+	assert.equal(alerts[0].indicator, "orange");
+	release();
+	await first;
+	assert.equal(shipping.is_busy(a), false);
+});
+
+test("a second submit while a request is in flight does not start another and stops the submit", async () => {
+	const { handlers, calls } = load({ statuses: [{ custom_integration_status: "Created" }] });
+	const frm = make_form({ custom_integration_status: "Not Created" });
+	const first = handlers.before_submit(frm);
+	frappe.validated = true;
+	await handlers.before_submit(frm);
+	assert.equal(frappe.validated, false);
+	assert.equal(calls.length, 1);
+	await first;
+	assert.equal(global.frappe.marketplace_integrations.shipping.is_busy(frm), false);
 });

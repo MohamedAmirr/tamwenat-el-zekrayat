@@ -65,11 +65,11 @@ class IntegrationTestNoonItemEditGuard(IntegrationTestNoonFulfillmentBase):
 			["marketplace_integrations.integrations.bosta.statuses.keep_stored_summary"],
 		)
 
-	def test_noon_quantity_change_is_refused_with_a_message_pointing_to_the_fulfillment_tab(self):
+	def test_noon_quantity_change_is_refused_with_a_message_pointing_to_the_supported_actions(self):
 		a = self.fx.items["A"].name
 		with self.assertRaises(frappe.ValidationError) as caught:
 			self._update(self._trans_items(**{a: {"qty": 1}}))
-		self.assertIn("Noon Fulfillment", str(caught.exception))
+		self.assertIn("Mark as Out of Stock", str(caught.exception))
 		self.assertEqual(self._qty("A"), 3)
 
 	def test_noon_rate_change_is_refused(self):
@@ -85,7 +85,7 @@ class IntegrationTestNoonItemEditGuard(IntegrationTestNoonFulfillmentBase):
 				row.set(field, value)
 				with self.assertRaises(frappe.ValidationError) as caught:
 					row.save()
-				self.assertIn("Noon Fulfillment", str(caught.exception))
+				self.assertIn("Mark as Out of Stock", str(caught.exception))
 
 	def test_noon_row_removal_is_refused(self):
 		payload = [entry for entry in self._trans_items() if entry["item_code"] != self.fx.items["B"].name]

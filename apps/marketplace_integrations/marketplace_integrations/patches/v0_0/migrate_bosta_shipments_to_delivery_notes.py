@@ -38,7 +38,7 @@ NEW_FIELD_NAMES = (
 	"custom_shipping_",
 	"custom_integration_status",
 	"custom_carrier_",
-	"custom_cod_amount",
+	"custom_cod_",
 	"custom_bosta_",
 	"custom_last_",
 	"custom_actual_shipping_cost",

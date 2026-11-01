@@ -1044,21 +1044,20 @@ class IntegrationTestNoonOrderImport(IntegrationTestCase):
 
 
 class IntegrationTestNoonOrderImportConcurrency(IntegrationTestCase):
-	"""#146 decision 10's single most important test: a ``Marketplace Order
-	Shipment`` row committed by a concurrent fulfillment write mid-poll must
+	"""#146 decision 10's single most important test: a value committed by a
+	concurrent fulfillment write mid-poll (here ``noon_pending_oos_units``;
+	the shipment child tables that first motivated it are gone, #415) must
 	survive that poll's own later save of the same Marketplace Order.
 
-	``Document.save()`` -> ``update_children()`` re-syncs EVERY ``Table``
-	field on a parent doc on every save, deleting any child-table row of
-	that parent whose ``name`` is absent from the in-memory copy currently
-	being saved (confirmed directly against the installed
-	``frappe/model/document.py``). Before the #146 fix, a poll that read the
-	order's row BEFORE a concurrent fulfillment write committed would carry
-	a stale in-memory ``noon_shipments`` list for the rest of its own
-	transaction, and its own later ``doc.save()`` would silently delete the
-	fulfillment write's just-committed row - the fulfillment write and the
-	poll would never otherwise conflict or error, so this would fail
-	silently. The fix is ``frappe.db.get_value(..., for_update=True)`` as
+	``Document.save()`` writes the whole in-memory row and, through
+	``update_children()``, re-syncs EVERY ``Table`` field on a parent doc
+	(confirmed directly against the installed ``frappe/model/document.py``).
+	Before the #146 fix, a poll that read the order's row BEFORE a concurrent
+	fulfillment write committed would carry a stale in-memory copy for the
+	rest of its own transaction, and its own later ``doc.save()`` would
+	silently overwrite the fulfillment write's just-committed values - the
+	fulfillment write and the poll would never otherwise conflict or error,
+	so this would fail silently. The fix is ``frappe.db.get_value(..., for_update=True)`` as
 	the very FIRST read ``import_order()`` performs against this order row
 	(before even the ``existing_name``/``had_sales_order_before`` checks),
 	matched by the identical locking read at the top of every
@@ -1142,10 +1141,7 @@ class IntegrationTestNoonOrderImportConcurrency(IntegrationTestCase):
 				if not poll_about_to_read.wait(timeout=5):
 					errors.append(("writer", "poll thread never signalled poll_about_to_read"))
 				time.sleep(0.2)
-				order.append(
-					"noon_shipments",
-					{"integration_shipment_nr": "CONC-SHIP-1", "status": "Pending", "awb_source": "Noon"},
-				)
+				order.noon_pending_oos_units = frappe.as_json(["1"])
 				order.save()
 				frappe.db.commit()
 			except Exception:
@@ -1193,16 +1189,11 @@ class IntegrationTestNoonOrderImportConcurrency(IntegrationTestCase):
 
 		self.assertFalse(errors, f"Concurrency test thread(s) raised: {errors}")
 
-		shipment_rows = frappe.get_all(
-			"Marketplace Order Shipment",
-			filters={"parenttype": "Marketplace Order", "parent": order_name},
-			fields=["integration_shipment_nr"],
-		)
 		self.assertEqual(
-			[row.integration_shipment_nr for row in shipment_rows],
-			["CONC-SHIP-1"],
-			"The concurrently committed shipment row must survive the poll's own save of the same order "
-			"(#146 decision 10). An empty result here means Document.save() -> update_children() deleted "
+			frappe.parse_json(frappe.db.get_value("Marketplace Order", order_name, "noon_pending_oos_units")),
+			["1"],
+			"The concurrently committed value must survive the poll's own save of the same order "
+			"(#146 decision 10). A different value here means the poll saved a stale in-memory copy over "
 			"it, i.e. the row lock did not actually serialize the two writers.",
 		)
 

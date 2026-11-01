@@ -525,62 +525,41 @@ class IntegrationTestUpsertReturnItemRace(IntegrationTestNoonReturnsBase):
 
 
 class IntegrationTestAccountAwbNumbers(IntegrationTestNoonReturnsBase):
-	def _make_order_with_shipment(self, fbpi_order_nr, shipment_nr, status, awb_nr, modified=None):
-		order = _make_order(self.account, fbpi_order_nr)
-		order.append(
-			"noon_shipments",
-			{"integration_shipment_nr": shipment_nr, "status": status, "awb_source": "Own Courier"},
-		)
-		order.append(
-			"noon_shipment_awbs",
-			{
-				"integration_shipment_nr": shipment_nr,
-				"courier": "test-courier",
-				"awb_nr": awb_nr,
-				"source": "Own Courier",
-				"status": "Added",
-			},
-		)
-		order.save(ignore_permissions=True)
-		if modified is not None:
-			frappe.db.set_value(
-				"Marketplace Order Shipment",
-				{"parent": order.name, "integration_shipment_nr": shipment_nr},
-				"modified",
-				modified,
-				update_modified=False,
-			)
-		return order
+	"""The scan reads AWBs from the Noon Delivery Notes of the account's orders (#415)."""
 
-	def test_cancelled_shipment_awb_excluded(self):
-		"""#153 review finding #3: a Cancelled shipment's AWB is excluded from
-		the scan."""
-		self._make_order_with_shipment("FBPI-CANCEL", "FBPI-CANCEL-1", "Cancelled", "AWB-CANCELLED")
-		self._make_order_with_shipment("FBPI-ACTIVE", "FBPI-ACTIVE-1", "Created", "AWB-ACTIVE")
+	_ADAPTER = "marketplace_integrations.integrations.noon.delivery_note_shipment"
 
-		awbs = returns._account_awb_numbers(self.account)
-		self.assertIn("AWB-ACTIVE", awbs)
-		self.assertNotIn("AWB-CANCELLED", awbs)
+	def test_awbs_come_from_the_delivery_notes_of_the_accounts_orders(self):
+		order = _make_order(self.account, "FBPI-AWB-1")
 
-	def test_discarded_shipment_awb_excluded(self):
-		"""A Discarded shipment's AWB is likewise excluded."""
-		self._make_order_with_shipment("FBPI-DISCARD", "FBPI-DISCARD-1", "Discarded", "AWB-DISCARDED")
+		with patch(f"{self._ADAPTER}.recent_awbs_of_orders", return_value=["AWB-1"]) as recent:
+			awbs = returns._account_awb_numbers(self.account)
 
-		awbs = returns._account_awb_numbers(self.account)
-		self.assertNotIn("AWB-DISCARDED", awbs)
+		self.assertEqual(awbs, ["AWB-1"])
+		names, since = recent.call_args[0]
+		self.assertIn(order.name, names)
+		# The lookback window bounds the scan.
+		expected = frappe.utils.add_to_date(now_datetime(), days=-AWB_SCAN_LOOKBACK_DAYS)
+		self.assertLess(abs((since - expected).total_seconds()), 60)
 
-	def test_stale_shipment_outside_lookback_excluded(self):
-		"""A shipment last modified before the lookback window is excluded
-		even though it is still in a non-terminal status."""
-		stale_modified = frappe.utils.add_to_date(now_datetime(), days=-(AWB_SCAN_LOOKBACK_DAYS + 1))
-		self._make_order_with_shipment(
-			"FBPI-STALE", "FBPI-STALE-1", "Created", "AWB-STALE", modified=stale_modified
-		)
-		self._make_order_with_shipment("FBPI-FRESH", "FBPI-FRESH-1", "Created", "AWB-FRESH")
+	def test_an_account_without_orders_has_no_awbs_and_asks_nothing(self):
+		with patch(f"{self._ADAPTER}.recent_awbs_of_orders") as recent:
+			self.assertEqual(returns._account_awb_numbers(self.account), [])
+		recent.assert_not_called()
 
-		awbs = returns._account_awb_numbers(self.account)
-		self.assertIn("AWB-FRESH", awbs)
-		self.assertNotIn("AWB-STALE", awbs)
+	def test_recent_awbs_reads_only_live_recent_notes_and_cleans_the_values(self):
+		from marketplace_integrations.integrations.noon import delivery_note_shipment as adapter
+
+		since = frappe.utils.add_to_date(now_datetime(), days=-AWB_SCAN_LOOKBACK_DAYS)
+		answers = [["SO-1"], ["DN-1", "DN-2"], ["b-2", " a-1 ", "", None, "a-1"]]
+		with patch(f"{self._ADAPTER}.frappe.get_all", side_effect=answers) as get_all:
+			awbs = adapter.recent_awbs_of_orders(["MKTORD-1"], since)
+
+		self.assertEqual(awbs, ["a-1", "b-2"])
+		note_filters = get_all.call_args_list[2].kwargs["filters"]
+		self.assertEqual(note_filters["custom_integration_status"], ["in", list(adapter._CLAIMING_STATUSES)])
+		self.assertEqual(note_filters["modified"], [">=", since])
+		self.assertEqual(note_filters["docstatus"], ["<", 2])
 
 
 class IntegrationTestRunAwbScanIsolation(IntegrationTestNoonReturnsBase):

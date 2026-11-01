@@ -6,9 +6,10 @@
 // This shell owns what every carrier shares: the intro text per Integration Status, the "Sending to
 // <carrier>..." dialog that Submit waits on, the Check / Refresh buttons and the shipping status
 // indicator. A carrier plugs in by calling register_carrier() from its own file (see
-// delivery_note_bosta.js) with the server methods and an optional add_buttons(frm). Which carriers
-// show the section is decided by the server (frappe.boot.marketplace_shipping_carriers), and every
-// rule is enforced server side (services/carrier_shipments.py): this script only shows and drives.
+// the carrier's own delivery_note_<carrier>.js file) with optional before_send(frm) -> bool, refresh(frm), add_buttons(frm) and
+// pick_city(frm). The shell calls the neutral API (api/carrier_shipments.py). Which carriers show the
+// section is decided by the server (frappe.boot.marketplace_shipping_carriers), and every rule is
+// enforced server side (services/carrier_shipments.py): this script only shows and drives.
 //
 // Wrapped in a function: doctype_js files share one scope with ERPNext's own Delivery Note script.
 (function () {
@@ -22,16 +23,23 @@
 	const FAILED = "Creation Failed";
 	const CANCEL_STATUSES = ["Cancellation Pending", "Cancellation Unknown", "Cancelled"];
 	const EDITABLE = ["", NOT_CREATED, FAILED];
+	const RETURN_PICKUP = "Customer Return Pickup";
 
+	const API = "marketplace_integrations.api.carrier_shipments.";
 	const carriers = {};
 
-	// carrier = { request_method, check_method, refresh_method, add_buttons(frm) } (all optional but
-	// request_method). The key is the Supplier name stored in Delivery Note.transporter_name.
+	// carrier = { before_send(frm) -> bool, refresh(frm), add_buttons(frm), pick_city(frm), locked_fields }
+	// (all optional). before_send returns false to stop the Submit (it shows why); refresh runs on every
+	// form refresh; pick_city opens the carrier's picker when the server answers needs_city; locked_fields
+	// are read-only once the shipment is started. The key is the Supplier name stored in
+	// Delivery Note.transporter_name.
 	function register_carrier(name, carrier) {
 		carriers[name] = carrier;
 	}
 
+	// A return is a carrier note only when the staff chose the carrier to collect it.
 	function carrier_name(frm) {
+		if (frm.doc && frm.doc.is_return && frm.doc.custom_return_source !== RETURN_PICKUP) return null;
 		const name = frm.doc && frm.doc.transporter_name;
 		const enabled = (frappe.boot && frappe.boot.marketplace_shipping_carriers) || [];
 		return name && enabled.includes(name) && carriers[name] ? name : null;
@@ -83,6 +91,12 @@
 			);
 		} else if (status === FAILED) {
 			frm.set_intro(__("{0} did not create the shipment: {1}", [name, error]), "red");
+		} else if (status === "Cancelled" && frm.doc.docstatus === 1) {
+			// cancelled at the carrier, not yet in ERPNext: the next Cancel makes no carrier call
+			frm.set_intro(
+				__("Cancelled at {0}. This Delivery Note is still submitted: press Cancel to cancel it here. {0} will not be asked again.", [name]),
+				"orange"
+			);
 		} else if (CANCEL_STATUSES.includes(status)) {
 			frm.set_intro(__("{0} shipment: {1}", [name, escape(__(status))]), "yellow");
 		}
@@ -98,20 +112,47 @@
 		);
 	}
 
+	// One carrier request per Delivery Note at a time: a second click (or another carrier button) while one
+	// is in flight does nothing. The lock is held until the request and the form reload are over, success or
+	// failure. `on_busy` runs instead of `fn` when the note is busy (a flow that waits to be told how it ended).
+	const busy = new Set();
+	function is_busy(frm) {
+		return busy.has(frm.doc.name);
+	}
+	function exclusive(frm, fn, on_busy) {
+		if (is_busy(frm)) {
+			// the click did nothing: say why
+			frappe.show_alert({ message: __("A shipping request is still running."), indicator: "orange" });
+			return Promise.resolve(on_busy ? on_busy() : undefined);
+		}
+		const key = frm.doc.name;
+		busy.add(key);
+		let result;
+		try {
+			result = Promise.resolve(fn());
+		} catch (error) {
+			busy.delete(key);
+			return Promise.reject(error);
+		}
+		return result.finally(() => busy.delete(key));
+	}
+
 	function call_and_reload(frm, method, freeze_message, on_result) {
-		return frappe
-			.call({ method, type: "POST", args: { delivery_note: frm.doc.name }, freeze: true, freeze_message })
-			.then((r) => {
-				if (on_result) on_result(r.message || {});
-				return frm.reload_doc();
-			});
+		return exclusive(frm, () =>
+			frappe
+				.call({ method, type: "POST", args: { delivery_note: frm.doc.name }, freeze: true, freeze_message })
+				.then((r) => {
+					if (on_result) on_result(r.message || {});
+					return frm.reload_doc();
+				})
+		);
 	}
 
 	// Asks the carrier whether it has the shipment (never creates), then reloads the form. The carrier's
 	// text is escaped: frappe.show_alert renders HTML.
 	function check_with_carrier(frm, carrier) {
 		const escape = frappe.utils.escape_html;
-		return call_and_reload(frm, carriers[carrier].check_method, __("Checking with {0}...", [carrier]), (result) => {
+		return call_and_reload(frm, API + "check_shipment", __("Checking with {0}...", [carrier]), (result) => {
 			frappe.show_alert({
 				message: escape(
 					result.status === CREATED
@@ -127,12 +168,12 @@
 		if (frm.is_new() || !frm.doc || !frappe.model.can_write("Delivery Note")) return;
 		const hooks = carriers[carrier];
 		const status = status_of(frm);
-		if (frm.doc.docstatus === 0 && [UNKNOWN, CREATING].includes(status) && hooks.check_method) {
+		if (frm.doc.docstatus === 0 && [UNKNOWN, CREATING].includes(status)) {
 			frm.add_custom_button(__("Check with {0}", [carrier]), () => check_with_carrier(frm, carrier));
 		}
-		if ([CREATED, ...CANCEL_STATUSES].includes(status) && hooks.refresh_method) {
+		if ([CREATED, ...CANCEL_STATUSES].includes(status)) {
 			frm.add_custom_button(__("Refresh from {0}", [carrier]), () =>
-				call_and_reload(frm, hooks.refresh_method, __("Reading the status from {0}...", [carrier]))
+				call_and_reload(frm, API + "refresh_shipment", __("Reading the status from {0}...", [carrier]))
 			);
 		}
 		if (hooks.add_buttons) hooks.add_buttons(frm);
@@ -140,9 +181,22 @@
 
 	// ---- Submit: wait for the carrier shipment, then let the native submit continue -------------
 
-	function failure_html(carrier_name_, status, error) {
+	// `submitting` is false for a button request (the return pickup): nothing was being submitted then.
+	function failure_html(carrier_name_, status, error, submitting = true) {
 		const escape = frappe.utils.escape_html;
 		const carrier = escape(carrier_name_);
+		if (!submitting) {
+			if (status === UNKNOWN) {
+				return (
+					`<p>${__("It is not known whether {0} created the request.", [carrier])}</p>` +
+					`<p class="text-muted">${__("Use Check with {0} on the Delivery Note before trying again.", [carrier])}</p>`
+				);
+			}
+			if (status === FAILED) {
+				return `<p>${__("{0} did not create the request: {1}", [carrier, escape(error || "")])}</p>`;
+			}
+			return `<p>${__("{0} is taking longer than expected.", [carrier])}</p><p class="text-muted">${__("Open the Delivery Note later and check its Integration Status.")}</p>`;
+		}
 		if (status === UNKNOWN) {
 			return (
 				`<p>${__("It is not known whether {0} created the shipment. The Delivery Note was not submitted.", [carrier])}</p>` +
@@ -160,7 +214,8 @@
 	// frappe.validated = false and shows why.
 	function before_submit(frm) {
 		const carrier = carrier_name(frm);
-		if (!carrier) return;
+		// A return is submitted without waiting: submitting it is the receipt; its pickup is its own button.
+		if (!carrier || frm.doc.is_return) return;
 		if (status_of(frm) === CREATED) return;
 		const hooks = carriers[carrier];
 		if (frm.is_dirty()) {
@@ -168,14 +223,25 @@
 			frappe.validated = false;
 			return;
 		}
-		if (!frm.doc.custom_cod_confirmed) {
-			frappe.msgprint({
-				message: __("Confirm the COD amount before submitting: tick COD confirmed, or change the COD. 0 is allowed."),
-				indicator: "orange",
-			});
+		if (hooks.before_send && hooks.before_send(frm) === false) {
 			frappe.validated = false;
 			return;
 		}
+		return send_and_wait(frm, carrier, true);
+	}
+
+	// Starts the carrier request (the create of a delivery, or the pickup of a return) and waits for it in a
+	// dialog. Resolves once the note is Created (form reloaded); otherwise sets frappe.validated = false and
+	// shows why. `submitting` is true when it is the native Submit that waits.
+	function send_and_wait(frm, carrier, submitting) {
+		// a request already in flight: this click starts nothing and the submit must not go on
+		return exclusive(frm, () => send_and_wait_locked(frm, carrier, submitting), () => {
+			frappe.validated = false;
+		});
+	}
+
+	function send_and_wait_locked(frm, carrier, submitting) {
+		const hooks = carriers[carrier];
 		return new Promise((resolve) => {
 			let dialog = null;
 			let timer = null;
@@ -195,17 +261,19 @@
 				if (keep_sending) {
 					frappe.show_alert({
 						message: frappe.utils.escape_html(
-							__("Still sending to {0}. Open the Delivery Note later: if the shipment is Created, submit it again.", [carrier])
+							submitting
+								? __("Still sending to {0}. Open the Delivery Note later: if the shipment is Created, submit it again.", [carrier])
+								: __("Still sending to {0}. Open the Delivery Note later and check its Integration Status.", [carrier])
 						),
 						indicator: "blue",
 					});
 				} else {
 					frappe.msgprint({
-						message: failure_html(carrier, status, error),
+						message: failure_html(carrier, status, error, submitting),
 						indicator: "red",
 						title: __("{0} shipment", [carrier]),
 						primary_action:
-							status === UNKNOWN && hooks.check_method
+							status === UNKNOWN
 								? {
 										label: __("Check with {0}", [carrier]),
 										action: () => {
@@ -232,7 +300,11 @@
 			});
 			dialog.show();
 			dialog.fields_dict.body.$wrapper.html(
-				`<p>${frappe.utils.escape_html(__("Please wait. The Delivery Note is submitted once {0} has created the shipment.", [carrier]))}</p>`
+				`<p>${frappe.utils.escape_html(
+						submitting
+							? __("Please wait. The Delivery Note is submitted once {0} has created the shipment.", [carrier])
+							: __("Please wait. Sending the return pickup request to {0}.", [carrier])
+					)}</p>`
 			);
 			const started = Date.now();
 			const poll = () =>
@@ -240,7 +312,8 @@
 					.get_value("Delivery Note", frm.doc.name, ["custom_integration_status", "custom_last_integration_error"])
 					.then(
 						(r) => {
-							const row = (r && r.message) || {};
+							if (settled) return;
+								const row = (r && r.message) || {};
 							const status = row.custom_integration_status || NOT_CREATED;
 							if (status === CREATED) return finish(true);
 							if (status === FAILED || status === UNKNOWN) return finish(false, status, row.custom_last_integration_error);
@@ -251,14 +324,33 @@
 					);
 			frappe
 				.call({
-					method: hooks.request_method,
+					method: API + "request_shipment",
 					type: "POST",
 					args: { delivery_note: frm.doc.name, modified: frm.doc.modified },
 					// the server's refusal is shown below (parsed and escaped), not by frappe.call
 					silent: true,
 				})
 				.then(
-					() => poll(),
+					(response) => {
+						const result = (response && response.message) || {};
+						if (result.needs_city && hooks.pick_city) {
+							// the server found no city for the address: ask the person, who then saves and submits again
+							if (settled) return;
+							settled = true;
+							if (dialog) dialog.hide();
+							frappe.validated = false;
+							frappe.show_alert({
+								message: submitting
+									? __("Choose the {0} city, then submit again.", [carrier])
+									: __("Choose the {0} city, save, then request the pickup again.", [carrier]),
+								indicator: "orange",
+							});
+							hooks.pick_city(frm);
+							resolve();
+							return;
+						}
+						return poll();
+					},
 					(error) => {
 						// the server refused (validation)
 						if (settled) return;
@@ -276,43 +368,15 @@
 		});
 	}
 
-	function money(value, currency) {
-		return typeof format_currency === "function" ? format_currency(value, currency) : String(value);
-	}
-
-	// A confirmed COD is never recomputed (it may be a deliberate choice), so when the items or the
-	// advance changed since, say what the computed amount is. The merchant decides; nothing is written.
-	// The saved note is judged by the server, so an unsaved form shows no hint.
-	function show_cod_hint(frm, carrier) {
-		const hooks = carriers[carrier];
-		if (!hooks.cod_hint_method || frm.is_new() || frm.is_dirty() || !is_editable(frm) || !frm.doc.custom_cod_confirmed) return;
-		if (!frm.dashboard || !frm.dashboard.add_comment) return;
-		return frappe
-			.call({ method: hooks.cod_hint_method, type: "POST", args: { delivery_note: frm.doc.name } })
-			.then((r) => {
-				const hint = r && r.message;
-				if (!hint || hint.default === null || hint.default === undefined) return;
-				frm.dashboard.add_comment(
-					frappe.utils.escape_html(
-						__("The COD amount {0} differs from the amount calculated from the current items and advance ({1}). Change the COD if it is no longer right.", [
-							money(frm.doc.custom_cod_amount, frm.doc.currency),
-							money(hint.default, frm.doc.currency),
-						])
-					),
-					"yellow",
-					true
-				);
-			})
-			.catch(() => {
-				// a hint only: a failed lookup must not disturb the form
-			});
-	}
-
-	// The COD amount and its confirmation can only change while the note is editable.
-	function set_cod_state(frm) {
-		const read_only = is_editable(frm) ? 0 : 1;
-		frm.set_df_property("custom_cod_amount", "read_only", read_only);
-		frm.set_df_property("custom_cod_confirmed", "read_only", read_only);
+	// Fields the carrier was sent (carrier.locked_fields) lock once the shipment is started; the server
+	// refuses a change too.
+	function set_locked_fields(frm, carrier) {
+		const locked = !is_editable(frm);
+		((carriers[carrier] && carriers[carrier].locked_fields) || []).forEach((fieldname) => {
+			// unlocking restores the field's own setting, not 0 (a field read-only by design stays so)
+			const df = frappe.meta && frappe.meta.get_docfield ? frappe.meta.get_docfield("Delivery Note", fieldname) : null;
+			frm.set_df_property(fieldname, "read_only", locked ? 1 : (df && df.read_only) || 0);
+		});
 	}
 
 	const api = {
@@ -321,9 +385,11 @@
 		max_wait_ms: MAX_WAIT_MS,
 		carrier_name,
 		failure_html,
+		send_and_wait,
+		exclusive,
+		is_busy,
 		server_message,
 		is_editable,
-		show_cod_hint,
 	};
 
 	if (typeof frappe !== "undefined") {
@@ -334,17 +400,11 @@
 				refresh(frm) {
 					const carrier = carrier_name(frm);
 					if (!carrier) return;
-					set_cod_state(frm);
+					set_locked_fields(frm, carrier);
 					show_intro(frm, carrier);
 					show_shipping_status(frm);
-					show_cod_hint(frm, carrier);
+					if (carriers[carrier].refresh) carriers[carrier].refresh(frm);
 					add_buttons(frm, carrier);
-				},
-				// Editing the COD is the person's choice: it confirms the amount.
-				custom_cod_amount(frm) {
-					if (carrier_name(frm) && is_editable(frm) && !frm.doc.custom_cod_confirmed) {
-						frm.set_value("custom_cod_confirmed", 1);
-					}
 				},
 				before_submit,
 			});

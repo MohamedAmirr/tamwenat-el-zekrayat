@@ -1,14 +1,15 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-"""Desk boundary for the Bosta shipment of a Delivery Note (epic #413). Each endpoint only authorizes,
-validates and delegates to ``integrations/bosta/delivery_note_shipment.py``."""
+"""Desk boundary for the Bosta-only parts of a Bosta Delivery Note (epic #413): label, cities, COD hint and
+edit. Request, check, refresh and cancel are neutral (``api/carrier_shipments.py``). Each endpoint only
+authorizes, validates and delegates to ``integrations/bosta/``."""
 
 import frappe
 from frappe import _
 
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as shipment
-from marketplace_integrations.integrations.bosta import locations, statuses
+from marketplace_integrations.integrations.bosta import editing, locations
 
 
 def _bosta_note(delivery_note, ptype):
@@ -18,32 +19,6 @@ def _bosta_note(delivery_note, ptype):
 	if not shipment.applies_to(doc):
 		frappe.throw(_("This Delivery Note is not a Bosta shipment."))
 	return doc
-
-
-@frappe.whitelist(methods=["POST"])
-def request_shipment(delivery_note: str, modified: str | None = None):
-	"""Start the Bosta create of a draft Delivery Note (needs submit permission on it)."""
-	_bosta_note(delivery_note, "submit")
-	return shipment.request_create(delivery_note, modified)
-
-
-@frappe.whitelist(methods=["POST"])
-def check_with_bosta(delivery_note: str):
-	"""Look the note's delivery up at Bosta (never creates; needs write permission)."""
-	_bosta_note(delivery_note, "write")
-	return shipment.check_with_bosta(delivery_note)
-
-
-@frappe.whitelist(methods=["POST"])
-def refresh_from_bosta(delivery_note: str):
-	"""Read the note's delivery state from Bosta and apply it (needs write permission)."""
-	doc = _bosta_note(delivery_note, "write")
-	if shipment.status_of(doc) not in (shipment.CREATED, "Cancellation Pending", "Cancellation Unknown", shipment.CANCELLED):
-		frappe.throw(_("Only a note with a created Bosta shipment can be refreshed."))
-	try:
-		return {"shipping_status": statuses.refresh_note(delivery_note)}
-	except statuses.RateLimited:
-		frappe.throw(_("Bosta is busy. Try again in a few minutes."))
 
 
 @frappe.whitelist(methods=["POST"])
@@ -75,3 +50,17 @@ def get_cod_hint(delivery_note: str):
 	"""The computed COD when it differs from the merchant's confirmed amount (a hint, never a write)."""
 	_bosta_note(delivery_note, "read")
 	return shipment.cod_hint(delivery_note)
+
+
+@frappe.whitelist(methods=["POST"])
+def get_edit_values(delivery_note: str):
+	"""The phone, city and first address line Bosta holds for the note (the edit dialog's start values)."""
+	_bosta_note(delivery_note, "write")
+	return editing.get_edit_values(delivery_note)
+
+
+@frappe.whitelist(methods=["POST"])
+def edit_shipment(delivery_note: str, receiver_phone: str, city_id: str, address_first_line: str):
+	"""Send a changed receiver phone and drop-off address to Bosta (needs write permission on the note)."""
+	_bosta_note(delivery_note, "write")
+	return editing.edit_shipment(delivery_note, receiver_phone, city_id, address_first_line)

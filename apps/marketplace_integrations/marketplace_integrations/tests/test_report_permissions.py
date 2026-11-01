@@ -26,7 +26,6 @@ REPORT_REF_DOCTYPES = (
 	"Marketplace Order",
 	"Marketplace Sync Log",
 	"Marketplace Product Mapping",
-	"Noon AWB",
 	"Noon Connection",
 	"Noon Return",
 	"Shopify Connection",

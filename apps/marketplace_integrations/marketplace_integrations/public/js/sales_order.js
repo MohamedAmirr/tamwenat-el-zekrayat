@@ -148,15 +148,7 @@
 					field.$wrapper.html(`<p class="text-muted">${frappe.utils.escape_html(__("Marketplace Order summary unavailable."))}</p>`);
 					return;
 				}
-				// The Noon shipments summary comes from the same call that drives the Noon
-				// Fulfillment buttons (load_noon_fulfillment), so wait for it before rendering.
-				const noon_state = summary.platform === "Noon" ? frm.__mi_noon_state || Promise.resolve(null) : Promise.resolve(null);
-				return noon_state.then((state) => {
-				if (request !== frm.__mi_marketplace_request || frm.doc.name !== sales_order) return;
-				const noon = noon_fulfillment_module();
-				let html = marketplace_summary_html(summary);
-				if (state && noon) html += noon.noon_shipments_html(state.shipments);
-				field.$wrapper.html(html);
+				field.$wrapper.html(marketplace_summary_html(summary));
 				const refresh = MARKETPLACE_REFRESH_METHODS[summary.platform];
 				if (refresh) {
 					field.$wrapper.append(`<p><button class="btn btn-default" data-marketplace-action="refresh">${frappe.utils.escape_html(__(refresh[1]))}</button></p>`);
@@ -181,7 +173,6 @@
 							frm.reload_doc();
 						});
 					}
-				});
 				});
 			},
 			() => {
@@ -503,26 +494,23 @@
 	// Noon fulfillment lives on the Sales Order form (the buttons and dialogs are in
 	// public/js/noon_fulfillment.js, loaded on demand). Only a submitted Sales Order linked to a
 	// Noon Marketplace Order gets it; every endpoint it calls still checks permission on the
-	// Marketplace Order. Sets frm.__mi_noon_state to the pending state so the Marketplace Order
-	// tab can list the shipments from the same call.
+	// Marketplace Order.
 	function load_noon_fulfillment(frm) {
-		frm.__mi_noon_state = null;
 		const doc = frm.doc;
 		if (
 			!doc ||
 			doc.docstatus !== 1 ||
 			!doc.custom_marketplace_order ||
-			doc.custom_marketplace_platform !== "Noon" ||
-			!frappe.model.can_read("Marketplace Order")
+			doc.custom_marketplace_platform !== "Noon"
 		)
 			return Promise.resolve(null);
+		// Marketplace Order read is checked inside add_noon_fulfillment_actions: the item-row Mark as
+		// Out of Stock needs only write on the Sales Order.
 		const load = frappe.require ? frappe.require(NOON_FULFILLMENT_ASSET).catch(() => {}) : Promise.resolve();
-		const state = load.then(() => {
+		return load.then(() => {
 			const noon = noon_fulfillment_module();
 			return noon ? noon.add_noon_fulfillment_actions(frm) : null;
 		});
-		frm.__mi_noon_state = state;
-		return state;
 	}
 
 	// #368: Noon has no order-level update, so the server refuses item, quantity and rate edits on a
@@ -534,7 +522,7 @@
 		if (typeof frm.set_intro !== "function") return;
 		frm.set_intro(
 			__(
-				"Items and quantities of a Noon order cannot be changed here. Use the Noon Fulfillment buttons on this Sales Order (Mark Out of Stock or Cancel Shipment)."
+				"Items and quantities of a Noon order cannot be changed here. Use Mark as Out of Stock on an item row of this Sales Order, or cancel and amend the Delivery Note."
 			),
 			"orange"
 		);

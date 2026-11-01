@@ -17,11 +17,6 @@ import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import now_datetime
 
-from marketplace_integrations.integrations.noon import handover_state
-from marketplace_integrations.integrations.noon.constants import (
-	NOON_HANDOVER_REMINDER_HOURS,
-	NOON_PENDING_SHIPMENT_STUCK_HOURS,
-)
 from marketplace_integrations.integrations.shopify.test_products import (
 	make_shopify_account,
 )
@@ -43,6 +38,7 @@ from marketplace_integrations.services.marketplace_attention import (
 	PAYMENT_ENTRY_CANCELLED,
 	PAYMENT_ERROR,
 	PAYMENT_EXCESS,
+	RETIRED_FULFILLMENT_ACTIONS,
 	SYNC_ERROR,
 	UNMAPPED_ITEMS,
 	WEBHOOK_RETRIES_EXHAUSTED,
@@ -259,7 +255,7 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		}
 		return self._track(frappe.get_doc(values).insert())
 
-	def make_order(self, account, items=None, shipments=None, **overrides):
+	def make_order(self, account, items=None, **overrides):
 		order_id = overrides.pop("external_order_id", f"order-{frappe.generate_hash(length=8)}")
 		values = {
 			"doctype": "Marketplace Order",
@@ -269,8 +265,6 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 			"items": items or [],
 			**overrides,
 		}
-		if shipments:
-			values["noon_shipments"] = shipments
 		order = frappe.get_doc(values)
 		order.flags.skip_sync_status_update = True
 		order.order_identity_key = compute_order_identity_key(account.name, order_id)
@@ -662,7 +656,7 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 			sync_type="Fulfillment",
 			marketplace_order=order.name,
 			attempted_at=now_datetime() - timedelta(minutes=10),
-			request_data=frappe.as_json({"action": "CreateShipment"}),
+			request_data=frappe.as_json({"action": "UpdateOrder"}),
 		)
 
 		rows = self.items_for(account, FULFILLMENT_ERROR)
@@ -675,7 +669,7 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 			sync_type="Fulfillment",
 			status="Success",
 			marketplace_order=order.name,
-			request_data=frappe.as_json({"action": "AddAwb"}),
+			request_data=frappe.as_json({"action": "UploadOrderInvoice"}),
 		)
 		self.assertEqual(len(self.items_for(account, FULFILLMENT_ERROR)), 1)
 
@@ -684,7 +678,7 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 			sync_type="Fulfillment",
 			status="Success",
 			marketplace_order=order.name,
-			request_data=frappe.as_json({"action": "CreateShipment"}),
+			request_data=frappe.as_json({"action": "UpdateOrder"}),
 		)
 		self.assertEqual(self.items_for(account, FULFILLMENT_ERROR), [])
 
@@ -698,61 +692,27 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 			request_data=frappe.as_json({"action": action, **request_data}),
 		)
 
-	def test_fulfillment_errors_are_tracked_per_shipment(self):
+	def test_fulfillment_errors_are_tracked_per_order_and_action(self):
 		account = self.make_noon_account()
 		order = self.make_order(account)
-		failed = self.make_fulfillment_log(
-			account, order, "CreateShipment", minutes_ago=10, integration_shipment_nr="S-1"
-		)
-		resolved = self.make_fulfillment_log(
-			account, order, "CreateShipment", minutes_ago=10, integration_shipment_nr="S-2"
-		)
-		self.make_fulfillment_log(account, order, "CreateShipment", "Success", integration_shipment_nr="S-2")
+		other_order = self.make_order(account)
+		failed = self.make_fulfillment_log(account, order, "UpdateOrder", minutes_ago=10)
+		resolved = self.make_fulfillment_log(account, other_order, "UpdateOrder", minutes_ago=10)
+		self.make_fulfillment_log(account, other_order, "UpdateOrder", "Success")
 
 		rows = self.items_for(account, FULFILLMENT_ERROR)
 
 		self.assertEqual([row["reference_name"] for row in rows], [failed.name])
 		self.assertNotIn(resolved.name, [row["reference_name"] for row in rows])
 
-	def test_get_shipment_error_is_resolved_by_a_create_shipment_recovery(self):
+	def test_error_rows_of_the_retired_shipment_actions_are_never_listed(self):
+		# The old Marketplace Order shipment flow is gone (#415): nothing is left to retry or discard.
 		account = self.make_noon_account()
 		order = self.make_order(account)
-		self.make_fulfillment_log(
-			account, order, "GetShipment", minutes_ago=10, integration_shipment_nr="S-1"
-		)
-		# A plain CreateShipment success without the recovery note does not resolve it.
-		self.make_fulfillment_log(
-			account, order, "CreateShipment", "Success", minutes_ago=5, integration_shipment_nr="S-1"
-		)
-		self.assertEqual(len(self.items_for(account, FULFILLMENT_ERROR)), 1)
+		for action in RETIRED_FULFILLMENT_ACTIONS:
+			self.make_fulfillment_log(account, order, action, integration_shipment_nr="S-1")
 
-		self.make_fulfillment_log(
-			account,
-			order,
-			"CreateShipment",
-			"Success",
-			integration_shipment_nr="S-1",
-			note="found via GetShipment retry",
-		)
 		self.assertEqual(self.items_for(account, FULFILLMENT_ERROR), [])
-
-	def test_discarding_a_shipment_resolves_its_errors_only(self):
-		account = self.make_noon_account()
-		order = self.make_order(account)
-		self.make_fulfillment_log(
-			account, order, "CreateShipment", minutes_ago=10, integration_shipment_nr="S-1"
-		)
-		self.make_fulfillment_log(
-			account, order, "CancelShipment", minutes_ago=10, integration_shipment_nr="S-1"
-		)
-		other = self.make_fulfillment_log(
-			account, order, "CreateShipment", minutes_ago=10, integration_shipment_nr="S-2"
-		)
-		self.make_fulfillment_log(account, order, "DiscardShipment", "Success", integration_shipment_nr="S-1")
-
-		rows = self.items_for(account, FULFILLMENT_ERROR)
-
-		self.assertEqual([row["reference_name"] for row in rows], [other.name])
 
 	def test_fulfillment_explanation_uses_the_message_never_the_traceback(self):
 		account = self.make_noon_account()
@@ -761,22 +721,22 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 			account,
 			sync_type="Fulfillment",
 			marketplace_order=order.name,
-			request_data=frappe.as_json({"action": "CreateShipment", "integration_shipment_nr": "S-1"}),
-			response_data=frappe.as_json("Noon rejected the shipment."),
+			request_data=frappe.as_json({"action": "UpdateOrder"}),
+			response_data=frappe.as_json("Noon rejected the update."),
 			traceback="Traceback (most recent call last): secret",
 		)
 		traceback_only = self.make_log(
 			account,
 			sync_type="Fulfillment",
 			marketplace_order=order.name,
-			request_data=frappe.as_json({"action": "CancelShipment", "integration_shipment_nr": "S-1"}),
+			request_data=frappe.as_json({"action": "UploadOrderInvoice"}),
 			traceback="Traceback (most recent call last): secret",
 		)
 
 		rows = {row["reference_name"]: row for row in self.items_for(account, FULFILLMENT_ERROR)}
 
-		self.assertIn("Noon rejected the shipment.", rows[with_message.name]["explanation"])
-		self.assertIn("Cancel shipment failed", rows[traceback_only.name]["explanation"])
+		self.assertIn("Noon rejected the update.", rows[with_message.name]["explanation"])
+		self.assertIn("Upload order invoice failed", rows[traceback_only.name]["explanation"])
 		for row in rows.values():
 			self.assertNotIn("Traceback", row["explanation"])
 			self.assertNotIn("secret", row["explanation"])
@@ -788,20 +748,13 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		# Marketplace Order.before_save refills an empty reference with external_order_id, so blank it in the DB.
 		frappe.db.set_value("Marketplace Order", no_reference.name, "platform_order_reference", "", update_modified=False)
 		verbs = {
-			"CreateShipment": "Create shipment",
-			"GetShipment": "Check shipment on Noon",
-			"CancelShipment": "Cancel shipment",
-			"AddShipmentCourierAwbs": "Add AWB",
 			"UpdateOrder": "Mark units Out of Stock",
-			"UploadShipmentInvoice": "Upload shipment invoice",
 			"UploadOrderInvoice": "Upload order invoice",
+			"ReleaseStuckOosReservation": "Release Out of Stock reservation",
 			"SomethingNew": "SomethingNew",
 		}
-		logs = {
-			action: self.make_fulfillment_log(account, order, action, integration_shipment_nr="S-1")
-			for action in verbs
-		}
-		fallback = self.make_fulfillment_log(account, no_reference, "CreateShipment", integration_shipment_nr="S-1")
+		logs = {action: self.make_fulfillment_log(account, order, action) for action in verbs}
+		fallback = self.make_fulfillment_log(account, no_reference, "UpdateOrder")
 
 		rows = {row["reference_name"]: row for row in self.items_for(account, FULFILLMENT_ERROR)}
 
@@ -847,36 +800,16 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 
 	# -- Noon rollup -------------------------------------------------------
 
-	def test_noon_problems_roll_up_to_one_row_per_order(self):
+	def test_noon_pending_out_of_stock_units_are_one_row_per_order(self):
 		account = self.make_noon_account()
-		order = self.make_order(
-			account,
-			shipments=[
-				{"integration_shipment_nr": "S-1", "status": "Error", "awb_source": "Noon"},
-				{"integration_shipment_nr": "S-2", "status": "Cancel Pending", "awb_source": "Noon"},
-				{
-					"integration_shipment_nr": "S-3",
-					"status": "Created",
-					"awb_source": "Noon",
-					"invoice_status": "Error",
-				},
-				{"integration_shipment_nr": "S-4", "status": "Created", "awb_source": "Noon"},
-			],
-			noon_pending_oos_units=frappe.as_json(["unit-1", "unit-2"]),
-		)
-		self.make_order(
-			account,
-			shipments=[{"integration_shipment_nr": "S-5", "status": "Created", "awb_source": "Noon"}],
-			noon_pending_oos_units=frappe.as_json([]),
-		)
+		order = self.make_order(account, noon_pending_oos_units=frappe.as_json(["unit-1", "unit-2"]))
+		self.make_order(account, noon_pending_oos_units=frappe.as_json([]))
 
 		rows = self.items_for(account, NOON_FULFILLMENT)
 
 		self.assertEqual([row["reference_name"] for row in rows], [order.name])
 		self.assertEqual(rows[0]["next_action"], "Open Order")
-		self.assertIn("3 shipment(s) need attention", rows[0]["explanation"])
-		self.assertIn("worst: Error", rows[0]["explanation"])
-		self.assertIn("2 unit(s) pending Out of Stock", rows[0]["explanation"])
+		self.assertEqual(rows[0]["explanation"], "2 unit(s) pending Out of Stock")
 
 	def test_noon_pending_oos_alone_is_flagged(self):
 		account = self.make_noon_account()
@@ -886,200 +819,11 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 
 		self.assertEqual([row["reference_name"] for row in rows], [order.name])
 
-	# -- Noon stuck Pending shipments and unlinked returns (#164) --------------
-
-	def age_shipments(self, order, hours):
-		"""Back-date every shipment row's ``creation`` (the stuck-Pending clock)."""
-		created = now_datetime() - timedelta(hours=hours)
-		for row in order.noon_shipments:
-			frappe.db.set_value(row.doctype, row.name, "creation", created, update_modified=False)
-
-	def make_pending_order(self, account, status="Pending", hours=None):
-		order = self.make_order(
-			account,
-			shipments=[{"integration_shipment_nr": "S-P", "status": status, "awb_source": "Noon"}],
-		)
-		self.age_shipments(order, NOON_PENDING_SHIPMENT_STUCK_HOURS + 1 if hours is None else hours)
-		return order
-
-	def test_pending_shipment_older_than_the_threshold_is_one_finding(self):
-		account = self.make_noon_account()
-		order = self.make_pending_order(account)
-
-		rows = self.items_for(account, NOON_FULFILLMENT)
-
-		self.assertEqual([row["reference_name"] for row in rows], [order.name])
-		self.assertIn("1 shipment(s) stuck in Pending", rows[0]["explanation"])
-
-	def test_two_stuck_pending_shipments_on_one_order_are_still_one_finding(self):
-		account = self.make_noon_account()
-		order = self.make_order(
-			account,
-			shipments=[
-				{"integration_shipment_nr": "S-1", "status": "Pending", "awb_source": "Noon"},
-				{"integration_shipment_nr": "S-2", "status": "Pending", "awb_source": "Noon"},
-			],
-		)
-		self.age_shipments(order, NOON_PENDING_SHIPMENT_STUCK_HOURS + 1)
-
-		rows = self.items_for(account, NOON_FULFILLMENT)
-
-		self.assertEqual(len(rows), 1)
-		self.assertIn("2 shipment(s) stuck in Pending", rows[0]["explanation"])
-
-	def test_pending_shipment_younger_than_the_threshold_is_not_a_finding(self):
-		account = self.make_noon_account()
-		self.make_pending_order(account, hours=0)
-
-		self.assertEqual(self.items_for(account, NOON_FULFILLMENT), [])
-
-	def test_old_cancelled_discarded_and_created_shipments_are_not_stuck_pending(self):
-		account = self.make_noon_account()
-		for status in ("Cancelled", "Discarded", "Created"):
-			self.make_pending_order(account, status=status)
-
-		self.assertEqual(self.items_for(account, NOON_FULFILLMENT), [])
-
-	def test_error_shipment_is_not_repeated_as_stuck_pending(self):
-		account = self.make_noon_account()
-		self.make_pending_order(account, status="Error")
-
-		rows = self.items_for(account, NOON_FULFILLMENT)
-
-		self.assertEqual(len(rows), 1)
-		self.assertNotIn("stuck in Pending", rows[0]["explanation"])
-
-	# ---- #368: a Created shipment nobody marked handed over ----------------------------------
-
-	def make_unhanded_order(self, account, status="Created", hours=None):
-		return self.make_pending_order(
-			account,
-			status=status,
-			hours=NOON_HANDOVER_REMINDER_HOURS + 1 if hours is None else hours,
-		)
-
-	def test_the_reminder_threshold_is_36_hours(self):
-		self.assertEqual(NOON_HANDOVER_REMINDER_HOURS, 36)
-
-	def test_created_shipment_not_handed_over_after_the_threshold_is_one_finding(self):
-		account = self.make_noon_account()
-		order = self.make_unhanded_order(account)
-
-		rows = self.items_for(account, NOON_FULFILLMENT)
-
-		self.assertEqual([row["reference_name"] for row in rows], [order.name])
-		self.assertIn("1 shipment(s) created but not marked handed over for over 36 hour(s)", rows[0]["explanation"])
-
-	def test_created_shipment_younger_than_the_threshold_is_not_a_finding(self):
-		account = self.make_noon_account()
-		self.make_unhanded_order(account, hours=NOON_HANDOVER_REMINDER_HOURS - 1)
-
-		self.assertEqual(self.items_for(account, NOON_FULFILLMENT), [])
-
-	def test_setting_handed_over_on_clears_the_reminder(self):
-		account = self.make_noon_account()
-		order = self.make_unhanded_order(account)
-		self.assertEqual(len(self.items_for(account, NOON_FULFILLMENT)), 1)
-
-		row = frappe.get_doc("Marketplace Order", order.name).noon_shipments[0]
-		frappe.db.set_value(row.doctype, row.name, "handed_over_on", now_datetime(), update_modified=False)
-
-		self.assertEqual(self.items_for(account, NOON_FULFILLMENT), [])
-
-	def test_a_live_delivery_note_clears_the_reminder_and_a_dead_one_does_not(self):
-		account = self.make_noon_account()
-		self.make_unhanded_order(account)
-		with patch.object(handover_state, "live_notes", return_value=["MAT-DN-1"]):
-			self.assertEqual(self.items_for(account, NOON_FULFILLMENT), [])
-		with patch.object(handover_state, "live_notes", return_value=[]):
-			self.assertEqual(len(self.items_for(account, NOON_FULFILLMENT)), 1)
-
-	def test_old_cancelled_and_discarded_shipments_are_not_reminded(self):
-		account = self.make_noon_account()
-		for status in ("Cancelled", "Discarded"):
-			self.make_unhanded_order(account, status=status)
-
-		self.assertEqual(self.items_for(account, NOON_FULFILLMENT), [])
-
-	def test_the_reminder_shares_the_order_row_with_other_fulfillment_problems(self):
-		account = self.make_noon_account()
-		order = self.make_order(
-			account,
-			shipments=[
-				{"integration_shipment_nr": "S-1", "status": "Created", "awb_source": "Noon"},
-				{"integration_shipment_nr": "S-2", "status": "Error", "awb_source": "Noon"},
-			],
-		)
-		self.age_shipments(order, NOON_HANDOVER_REMINDER_HOURS + 1)
-
-		rows = self.items_for(account, NOON_FULFILLMENT)
-
-		self.assertEqual(len(rows), 1)
-		self.assertIn("not marked handed over", rows[0]["explanation"])
-		self.assertIn("need attention", rows[0]["explanation"])
-
-	def test_fresh_pending_shipment_on_an_old_order_is_not_a_finding(self):
-		account = self.make_noon_account()
-		order = self.make_order(account)
-		old = now_datetime() - timedelta(hours=NOON_PENDING_SHIPMENT_STUCK_HOURS + 5)
-		frappe.db.set_value("Marketplace Order", order.name, "creation", old, update_modified=False)
-		order.reload()
-		# Same shape as fulfillment.create_shipment: explicit creation on the child row.
-		order.append(
-			"noon_shipments",
-			{
-				"integration_shipment_nr": "S-NEW",
-				"status": "Pending",
-				"awb_source": "Noon",
-				"creation": now_datetime(),
-			},
-		)
-		order.save()
-
-		self.assertEqual(self.items_for(account, NOON_FULFILLMENT), [])
-
-	def test_invoice_error_on_cancelled_or_discarded_shipment_is_not_a_finding(self):
-		account = self.make_noon_account()
-		for status in ("Cancelled", "Discarded"):
-			self.make_order(
-				account,
-				shipments=[
-					{
-						"integration_shipment_nr": "S-X",
-						"status": status,
-						"awb_source": "Noon",
-						"invoice_status": "Error",
-					}
-				],
-			)
-
-		self.assertEqual(self.items_for(account, NOON_FULFILLMENT), [])
-
-	def test_invoice_error_on_a_created_shipment_is_still_a_finding(self):
-		account = self.make_noon_account()
-		order = self.make_order(
-			account,
-			shipments=[
-				{
-					"integration_shipment_nr": "S-I",
-					"status": "Created",
-					"awb_source": "Noon",
-					"invoice_status": "Error",
-				}
-			],
-		)
-
-		rows = self.items_for(account, NOON_FULFILLMENT)
-
-		self.assertEqual([row["reference_name"] for row in rows], [order.name])
-		self.assertIn("invoice upload(s) failed", rows[0]["explanation"])
+	# -- Noon unlinked returns (#164) ----------------------------------------------------------
 
 	def test_a_clean_noon_order_produces_no_finding(self):
 		account = self.make_noon_account()
-		self.make_order(
-			account,
-			shipments=[{"integration_shipment_nr": "S-OK", "status": "Created", "awb_source": "Noon"}],
-		)
+		self.make_order(account)
 
 		self.assertEqual(get_attention_items({"account": account.name}), [])
 
@@ -1128,7 +872,7 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 
 	def test_new_findings_are_permission_scoped_through_get_list(self):
 		account = self.make_noon_account()
-		self.make_pending_order(account)
+		self.make_order(account, noon_pending_oos_units=frappe.as_json(["unit-1"]))
 		self.make_noon_return(account, f"PI-P-{self.suffix}")
 		real_get_list = frappe.get_list
 		doctypes = []
@@ -1143,7 +887,7 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 			get_attention_items({"account": account.name})
 
 		self.assertIn("Noon Return", doctypes)
-		self.assertIn("Marketplace Order Shipment", doctypes)
+		self.assertIn("Marketplace Order", doctypes)
 
 	# -- filters, counts, permissions ---------------------------------------
 
@@ -1165,7 +909,7 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		other = self.make_talabat_account()
 		order = self.make_order(account, erpnext_sync_status="Sync Error", items=[self.talabat_item("SKU-X")])
 		self.make_log(account)
-		self.make_fulfillment_log(account, order, "CreateShipment", integration_shipment_nr="S-1")
+		self.make_fulfillment_log(account, order, "UpdateOrder")
 		self.make_order(other, erpnext_sync_status="Synced")
 
 		counts = get_attention_counts([account.name, other.name])

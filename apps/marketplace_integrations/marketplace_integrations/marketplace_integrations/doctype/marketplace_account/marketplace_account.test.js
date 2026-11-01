@@ -23,6 +23,10 @@ const {
 	LOAD_SHOPIFY_GATEWAYS_LABEL,
 	show_shopify_gateway_picker,
 	configure_view_shortcuts,
+	configure_noon,
+	check_noon_warehouse,
+	NOON_CHECK_WAREHOUSE_LABEL,
+	NOON_FIELDS,
 } = require("./marketplace_account.js");
 
 function make_frm(doc, { is_new = false } = {}) {
@@ -482,4 +486,94 @@ test("reconcile_shopify_inventory shows the skipped account's real reason, escap
 	for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve));
 
 	assert.match(msgprint_args.message, /Warehouse &lt;b>x&lt;\/b>/);
+});
+
+test("Check Noon Warehouse appears only on a saved, enabled Noon account with write permission", () => {
+	const make_noon_frm = (doc, options) => {
+		const frm = make_frm(doc, options);
+		frm.set_intro = () => {};
+		return frm;
+	};
+	global.frappe = { model: { can_write: () => true } };
+
+	let frm = make_noon_frm({ platform: "Noon", enabled: 1, connection: "NC-1" });
+	configure_noon(frm);
+	assert.ok(frm.buttons.includes(NOON_CHECK_WAREHOUSE_LABEL));
+
+	frm = make_noon_frm({ platform: "Noon", enabled: 1, connection: "NC-1" }, { is_new: true });
+	configure_noon(frm);
+	assert.ok(!frm.buttons.includes(NOON_CHECK_WAREHOUSE_LABEL));
+
+	frm = make_noon_frm({ platform: "Noon", enabled: 0, connection: "NC-1" });
+	configure_noon(frm);
+	assert.ok(!frm.buttons.includes(NOON_CHECK_WAREHOUSE_LABEL));
+
+	frm = make_noon_frm({ platform: "Shopify", enabled: 1, connection: "SC-1" });
+	configure_noon(frm);
+	assert.ok(!frm.buttons.includes(NOON_CHECK_WAREHOUSE_LABEL));
+
+	global.frappe = { model: { can_write: () => false } };
+	frm = make_noon_frm({ platform: "Noon", enabled: 1, connection: "NC-1" });
+	configure_noon(frm);
+	assert.ok(!frm.buttons.includes(NOON_CHECK_WAREHOUSE_LABEL));
+});
+
+test("the warehouse check fields are shown only for Noon", () => {
+	for (const fieldname of [
+		"noon_fulfillment_system_code",
+		"noon_warehouse_active",
+		"noon_warehouse_checked_on",
+		"noon_fbpi_code",
+	]) {
+		assert.ok(NOON_FIELDS.includes(fieldname));
+	}
+});
+
+test("check_noon_warehouse calls the endpoint with the account and reloads the form", async () => {
+	let call_options;
+	let alert_args;
+	let reloaded = false;
+	global.frappe = {
+		call(options) {
+			call_options = options;
+			return Promise.resolve({ message: { fulfillment_system_code: "FBPI" } });
+		},
+		show_alert(args) {
+			alert_args = args;
+		},
+		msgprint() {
+			assert.fail("a saved form must not ask to save first");
+		},
+	};
+	const frm = {
+		doc: { name: "MKTACC-1" },
+		is_dirty: () => false,
+		reload_doc: () => {
+			reloaded = true;
+			return Promise.resolve();
+		},
+	};
+
+	await check_noon_warehouse(frm);
+
+	assert.equal(call_options.method, "marketplace_integrations.api.noon_catalog.check_noon_warehouse");
+	assert.deepEqual(call_options.args, { account: "MKTACC-1" });
+	assert.equal(alert_args.indicator, "green");
+	assert.equal(reloaded, true);
+});
+
+test("check_noon_warehouse asks to save an edited form first and sends nothing", async () => {
+	let message;
+	global.frappe = {
+		call() {
+			assert.fail("no call while the form has unsaved edits");
+		},
+		msgprint(text) {
+			message = text;
+		},
+	};
+
+	await check_noon_warehouse({ doc: { name: "MKTACC-1" }, is_dirty: () => true });
+
+	assert.equal(message, "Save the Marketplace Account first.");
 });
