@@ -1,25 +1,410 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-from unittest.mock import MagicMock, patch
+"""Bosta states on the Delivery Note: webhook record/apply, Refresh, nightly reconciliation, Sales Order
+counts (epic #413, #409). Real database; only the HTTP layer is faked and ``frappe.enqueue`` patched."""
 
-from frappe.tests import UnitTestCase
+import hashlib
+import json
+from unittest.mock import patch
 
+import frappe
+from frappe.tests import IntegrationTestCase
+
+from marketplace_integrations.integrations.bosta import delivery_note_shipment as shipment
 from marketplace_integrations.integrations.bosta import statuses
+from marketplace_integrations.tests.bosta_fixtures import BostaFixtureMixin, FakeResponse, created
 
 
-class UnitTestBostaStatuses(UnitTestCase):
-	def test_polled_state_requires_a_documented_integer_code(self):
-		state = statuses._polled_state({"data": {"state": {"code": 10, "value": "Pickup requested"}}})
-		self.assertEqual(state, {"code": 10, "snapshot": {"code": 10, "value": "Pickup requested"}})
-		for body in ({}, {"data": {}}, {"data": {"state": []}}, {"data": {"state": {"value": "x"}}}):
-			self.assertIsNone(statuses._polled_state(body))
+def event(note_tracking="TRK-1", state=24, ts=1000, delivery_id="DELIVERY-1", **extra):
+	return {
+		"_id": delivery_id,
+		"trackingNumber": note_tracking,
+		"state": state,
+		"type": "SEND",
+		"timeStamp": ts,
+		**extra,
+	}
 
-	def test_disabled_settings_skips_polling_without_querying_shipments(self):
-		with (
-			patch.object(statuses, "retry_failed_cancellations"),
-			patch.object(statuses.frappe, "get_single", return_value=MagicMock(enabled=0)),
-			patch.object(statuses.frappe, "get_all") as get_all,
+
+def delivery_body(state, fee=None):
+	data = {"state": {"code": state, "value": "x"}, "type": "SEND"}
+	if fee is not None:
+		data["shipmentFees"] = fee
+	return FakeResponse(200, {"success": True, "data": data})
+
+
+class IntegrationTestBostaStatuses(BostaFixtureMixin, IntegrationTestCase):
+	def _created_note(self, order=None, tracking="TRK-1", delivery_id="DELIVERY-1"):
+		note = self.make_note(order)
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{
+				"custom_integration_status": "Created",
+				"custom_carrier_delivery_id": delivery_id,
+				"custom_carrier_reference": note.name,
+				"lr_no": tracking,
+			},
+		)
+		frappe.db.commit()
+		return note
+
+	def _apply(self, payload):
+		statuses.process_webhook_event(payload)
+		key = hashlib.sha256(
+			f"{payload['trackingNumber']}|{payload['state']}|{payload['timeStamp']}".encode()
+		).hexdigest()
+		return statuses.apply_event(frappe.db.get_value("Integration Request", {"custom_dedupe_key": key}))
+
+	def _clean_logs(self):
+		frappe.db.delete(
+			"Integration Request",
+			{"custom_operation_type": "Webhook", "custom_delivery_id": ["like", "DELIVERY-%"]},
+		)
+		frappe.db.commit()
+
+	def setUp(self):
+		super().setUp()
+		self._clean_logs()
+
+	def tearDown(self):
+		super().tearDown()
+		self._clean_logs()
+
+	# -- webhook -----------------------------------------------------------------------------
+
+	def test_a_webhook_is_recorded_before_anything_is_applied_and_queued(self):
+		note = self._created_note()
+
+		self.assertEqual(statuses.process_webhook_event(event()), "queued")
+
+		log = frappe.get_all("Integration Request", filters={"custom_delivery_id": "DELIVERY-1"}, fields=["*"])[0]
+		self.assertEqual(log.custom_operation_type, "Webhook")
+		self.assertEqual(log.is_remote_request, 1)
+		self.assertEqual(
+			set(json.loads(log.data)), {"_id", "trackingNumber", "state", "timeStamp", "type", "exceptionCode"}
+		)
+		self.assertEqual(self.enqueue.call_args.kwargs["job_id"], f"bosta-event|{log.name}")
+		self.assertFalse(frappe.db.get_value("Delivery Note", note.name, "custom_shipping_status"))
+
+	def test_the_same_event_twice_is_applied_once(self):
+		self._created_note()
+
+		self.assertEqual(statuses.process_webhook_event(event()), "queued")
+		self.assertEqual(statuses.process_webhook_event(event()), "duplicate")
+
+		self.assertEqual(self.enqueue.call_count, 1)
+		self.assertEqual(frappe.db.count("Integration Request", {"custom_delivery_id": "DELIVERY-1"}), 1)
+
+	def test_apply_writes_the_state_and_the_sales_order_counts(self):
+		order = self.make_order()
+		note = self._created_note(order)
+
+		self.assertEqual(self._apply(event(state=24, ts=1000)), "applied")
+
+		values = frappe.db.get_value(
+			"Delivery Note", note.name, ["custom_shipping_status", "custom_bosta_last_event_at"], as_dict=True
+		)
+		self.assertEqual(values.custom_shipping_status, "Received at warehouse")
+		self.assertEqual(values.custom_bosta_last_event_at, "1000")
+		summary = frappe.db.get_value("Sales Order", order.name, "custom_shipping_status_summary")
+		self.assertEqual(json.loads(summary), {"Received at warehouse": 1})
+
+	def test_an_older_or_equal_event_is_ignored(self):
+		note = self._created_note()
+		self._apply(event(state=24, ts=2000))
+
+		self.assertEqual(self._apply(event(state=41, ts=1500, delivery_id="DELIVERY-1")), "ignored")
+
+		self.assertEqual(
+			frappe.db.get_value("Delivery Note", note.name, "custom_shipping_status"), "Received at warehouse"
+		)
+
+	def test_an_event_for_an_unknown_delivery_is_logged_and_ignored(self):
+		self.assertEqual(self._apply(event("NOPE", delivery_id="DELIVERY-NOPE")), "ignored")
+
+	def test_a_delivery_matches_by_exact_tracking_number_not_a_case_variant(self):
+		note = self._created_note(tracking="TRKabc", delivery_id="DELIVERY-A")
+
+		self.assertEqual(self._apply(event("TRKABC", delivery_id="DELIVERY-B")), "ignored")
+		self.assertFalse(frappe.db.get_value("Delivery Note", note.name, "custom_shipping_status"))
+
+	def test_bosta_cancelling_a_created_note_marks_it_cancelled_and_leaves_docstatus(self):
+		note = self._created_note()
+
+		self._apply(event(state=49, ts=3000))
+
+		values = frappe.db.get_value(
+			"Delivery Note", note.name, ["custom_integration_status", "custom_shipping_status", "docstatus"], as_dict=True
+		)
+		self.assertEqual(values.custom_integration_status, "Cancelled")
+		self.assertEqual(values.custom_shipping_status, "Canceled")
+		self.assertEqual(values.docstatus, 0)
+
+	def test_an_event_that_contradicts_the_note_asks_bosta_and_applies_its_answer(self):
+		note = self.make_note()
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{"custom_integration_status": "Cancelled", "custom_carrier_delivery_id": "DELIVERY-1", "lr_no": "TRK-1"},
+		)
+		self.http.queue["get"].append(delivery_body(45))
+
+		self._apply(event(state=45, ts=4000))
+
+		self.assertEqual(len([c for c in self.http.calls if c[0] == "get"]), 1)
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "custom_shipping_status"), "Delivered")
+
+	def test_a_late_event_writes_nothing_even_when_it_was_read_before_a_newer_one_was_written(self):
+		note = self._created_note()
+		self._apply(event(state=24, ts=2000))
+		before = frappe.db.get_value(
+			"Delivery Note", note.name, ["custom_shipping_status", "custom_bosta_last_event_at", "modified"], as_dict=True
+		)
+
+		# The compare happens inside the row lock, in _write_state itself.
+		outcome = statuses._write_state(note.name, 41, 1500, event=True)
+
+		self.assertEqual(outcome, "older")
+		after = frappe.db.get_value(
+			"Delivery Note", note.name, ["custom_shipping_status", "custom_bosta_last_event_at", "modified"], as_dict=True
+		)
+		self.assertEqual(after, before)
+
+	def test_events_arriving_out_of_order_leave_the_newest_state(self):
+		note = self._created_note()
+
+		for state, ts in ((45, 5000), (41, 3000), (24, 1000)):
+			self._apply(event(state=state, ts=ts))
+
+		values = frappe.db.get_value(
+			"Delivery Note", note.name, ["custom_shipping_status", "custom_bosta_last_event_at"], as_dict=True
+		)
+		self.assertEqual(values.custom_shipping_status, "Delivered")
+		self.assertEqual(values.custom_bosta_last_event_at, "5000")
+
+	def test_an_event_for_a_note_still_creating_stays_pending_and_is_applied_after_created(self):
+		note = self.make_note()
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Creating")
+		frappe.db.commit()
+
+		self.assertEqual(self._apply(event(state=24, ts=1000)), "pending")
+
+		log = frappe.get_value("Integration Request", {"custom_delivery_id": "DELIVERY-1"}, ["name", "status"], as_dict=True)
+		self.assertEqual(log.status, "Queued")
+		self.assertFalse(frappe.db.get_value("Delivery Note", note.name, "custom_shipping_status"))
+
+		# The worker writes Created, then replays what arrived meanwhile.
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{"custom_integration_status": "Created", "custom_carrier_delivery_id": "DELIVERY-1", "lr_no": "TRK-1"},
+		)
+		frappe.db.commit()
+		shipment._after_created(note.name, "DELIVERY-1")
+
+		self.assertEqual(
+			frappe.db.get_value("Delivery Note", note.name, "custom_shipping_status"), "Received at warehouse"
+		)
+		self.assertEqual(frappe.db.get_value("Integration Request", log.name, "status"), "Completed")
+
+	def test_a_matched_event_for_a_note_creating_stays_pending(self):
+		note = self.make_note()
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{"custom_integration_status": "Creating", "custom_carrier_delivery_id": "DELIVERY-1", "lr_no": "TRK-1"},
+		)
+		frappe.db.commit()
+
+		self.assertEqual(self._apply(event(state=24, ts=1000)), "pending")
+
+		self.assertEqual(
+			frappe.db.get_value("Integration Request", {"custom_delivery_id": "DELIVERY-1"}, "status"), "Queued"
+		)
+
+	def test_the_nightly_job_applies_a_pending_event_and_expires_an_old_one(self):
+		note = self._created_note()
+		keep = self.make_note()
+		frappe.db.set_value("Delivery Note", keep.name, "custom_integration_status", "Creating")
+		frappe.db.commit()
+		self._apply(event("TRK-OLD", state=24, ts=10, delivery_id="DELIVERY-OLD"))
+		old = frappe.db.get_value("Integration Request", {"custom_delivery_id": "DELIVERY-OLD"}, "name")
+		frappe.db.set_value("Integration Request", old, "creation", frappe.utils.add_days(frappe.utils.now_datetime(), -4), update_modified=False)
+		# An event of the Created note that was left pending by an earlier failure of the apply job.
+		statuses.process_webhook_event(event(state=41, ts=2000))
+		frappe.db.commit()
+
+		statuses.run_reconcile()
+
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "custom_shipping_status"), "Picked up")
+		row = frappe.db.get_value("Integration Request", old, ["status", "output"], as_dict=True)
+		self.assertEqual(row.status, "Completed")
+		self.assertIn("ignored", row.output)
+
+	def test_a_conflict_whose_refresh_fails_is_a_failed_event_not_a_successful_one(self):
+		note = self.make_note()
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{"custom_integration_status": "Cancelled", "custom_carrier_delivery_id": "DELIVERY-1", "lr_no": "TRK-1"},
+		)
+		self.http.queue["get"].append(FakeResponse(500, {"success": False, "message": "down"}))
+
+		self.assertEqual(self._apply(event(state=45, ts=4000)), "failed")
+
+		log = frappe.db.get_value(
+			"Integration Request", {"custom_delivery_id": "DELIVERY-1"}, ["custom_result", "status", "error"], as_dict=True
+		)
+		self.assertEqual(log.custom_result, "Failed")
+		self.assertEqual(log.status, "Failed")
+		self.assertIn("conflict", log.error)
+		self.assertFalse(frappe.db.get_value("Delivery Note", note.name, "custom_shipping_status"))
+
+	def test_a_rate_limited_conflict_refresh_is_also_a_failed_event(self):
+		note = self.make_note()
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{"custom_integration_status": "Cancelled", "custom_carrier_delivery_id": "DELIVERY-1", "lr_no": "TRK-1"},
+		)
+		self.http.queue["get"].append(FakeResponse(429, {"success": False}))
+
+		self.assertEqual(self._apply(event(state=45, ts=4000)), "failed")
+
+		self.assertEqual(
+			frappe.db.get_value("Integration Request", {"custom_delivery_id": "DELIVERY-1"}, "custom_result"), "Failed"
+		)
+
+	def test_malformed_events_are_an_error(self):
+		for payload in (None, {}, event(state="x"), event(ts=None)):
+			with self.subTest(payload=payload), self.assertRaises(frappe.ValidationError):
+				statuses.process_webhook_event(payload)
+
+	# -- refresh -----------------------------------------------------------------------------
+
+	def test_refresh_reads_the_state_and_the_fee_after_the_http_call(self):
+		note = self._created_note()
+		self.http.queue["get"].append(delivery_body(41, fee=55.5))
+
+		state = statuses.refresh_note(note.name)
+
+		self.assertEqual(state, "Picked up")
+		values = frappe.db.get_value(
+			"Delivery Note", note.name, ["custom_shipping_status", "custom_actual_shipping_cost", "custom_last_sync_at"], as_dict=True
+		)
+		self.assertEqual(values.custom_actual_shipping_cost, 55.5)
+		self.assertTrue(values.custom_last_sync_at)
+
+	def test_refresh_stops_on_rate_limit_without_writing(self):
+		note = self._created_note()
+		self.http.queue["get"].append(FakeResponse(429, {"success": False}))
+
+		with self.assertRaises(statuses.RateLimited):
+			statuses.refresh_note(note.name)
+
+		self.assertFalse(frappe.db.get_value("Delivery Note", note.name, "custom_shipping_status"))
+
+	# -- nightly reconciliation --------------------------------------------------------------
+
+	def test_the_nightly_job_resolves_an_unknown_create_by_lookup_and_never_creates(self):
+		note = self.make_note()
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Creation Unknown")
+		body = {
+			"success": True,
+			"data": {"count": 1, "deliveries": [{"_id": "D-7", "trackingNumber": "T-7", "businessReference": note.name}]},
+		}
+		self.http.queue["search"].append(FakeResponse(200, body))
+
+		statuses.run_reconcile()
+
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "custom_integration_status"), "Created")
+		self.assertEqual([kind for kind, _ in self.http.sent()], ["search"])
+
+	def test_one_failing_note_does_not_stop_the_run(self):
+		first = self._created_note(tracking="TRK-A", delivery_id="DELIVERY-A")
+		second = self._created_note(tracking="TRK-B", delivery_id="DELIVERY-B")
+		self.http.queue["get"] += [FakeResponse(500, {"success": False}), delivery_body(45)]
+
+		statuses.run_reconcile()
+
+		states = {
+			frappe.db.get_value("Delivery Note", n.name, "custom_shipping_status") for n in (first, second)
+		}
+		self.assertIn("Delivered", states)
+
+	def test_a_rate_limit_stops_the_run_early(self):
+		self._created_note(tracking="TRK-A", delivery_id="DELIVERY-A")
+		self._created_note(tracking="TRK-B", delivery_id="DELIVERY-B")
+		self.http.queue["get"] += [FakeResponse(429, {"success": False}), delivery_body(45)]
+
+		statuses.run_reconcile()
+
+		self.assertEqual(len(self.http.calls_of("get")), 1)
+
+	def test_delivered_and_canceled_notes_are_not_polled_again(self):
+		note = self._created_note()
+		frappe.db.set_value("Delivery Note", note.name, "custom_shipping_status", "Delivered")
+
+		statuses.run_reconcile()
+
+		self.assertEqual(self.http.calls_of("get"), [])
+		self.assertNotIn(note.name, statuses._open_notes())
+
+	def test_the_nightly_entry_is_registered_and_the_half_hour_poll_is_gone(self):
+		hooks = frappe.get_hooks("scheduler_events")
+		self.assertIn(
+			"marketplace_integrations.integrations.bosta.statuses.reconcile_open_notes", hooks["cron"]["59 23 * * *"]
+		)
+		for jobs in hooks["cron"].values():
+			self.assertNotIn("marketplace_integrations.integrations.bosta.statuses.poll_incomplete_shipments", jobs)
+		self.assertNotIn("*/30 * * * *", hooks["cron"])
+
+	# -- summary -----------------------------------------------------------------------------
+
+	def test_two_delivered_and_one_in_transit_note_are_counted(self):
+		order = self.make_order(qty=3)
+		notes = [self._created_note(order, f"T{i}", f"DELIVERY-{i}") for i in range(3)]
+		for note, state in zip(notes, ("Delivered", "Delivered", "In transit between Hubs"), strict=True):
+			frappe.db.set_value("Delivery Note", note.name, "custom_shipping_status", state)
+
+		statuses.update_sales_order_summary(order.name)
+
+		summary = frappe.db.get_value("Sales Order", order.name, "custom_shipping_status_summary")
+		self.assertEqual(json.loads(summary), {"Delivered": 2, "In transit between Hubs": 1})
+
+	def test_the_summary_counts_only_bosta_notes(self):
+		order = self.make_order(qty=2)
+		bosta_note = self._created_note(order, "T1", "DELIVERY-1")
+		other = self._created_note(order, "T2", "DELIVERY-2")
+		frappe.db.set_value("Delivery Note", bosta_note.name, "custom_shipping_status", "Delivered")
+		frappe.db.set_value("Delivery Note", other.name, {"custom_shipping_status": "Delivered", "transporter": None})
+
+		statuses.update_sales_order_summary(order.name)
+
+		summary = frappe.db.get_value("Sales Order", order.name, "custom_shipping_status_summary")
+		self.assertEqual(json.loads(summary), {"Delivered": 1})
+
+	def test_the_summary_commits_then_locks_the_sales_order_before_counting(self):
+		order = self.make_order()
+		self._created_note(order)
+		events = []
+		real_get_value = frappe.db.get_value
+		real_commit = frappe.db.commit
+
+		def spy_get_value(*args, **kwargs):
+			if kwargs.get("for_update"):
+				events.append(("lock", args[0], args[1]))
+			return real_get_value(*args, **kwargs)
+
+		def spy_commit(*args, **kwargs):
+			events.append(("commit",))
+			return real_commit(*args, **kwargs)
+
+		with patch.object(frappe.db, "get_value", side_effect=spy_get_value), patch.object(
+			frappe.db, "commit", side_effect=spy_commit
 		):
-			self.assertEqual(statuses.poll_incomplete_shipments(), 0)
-		get_all.assert_not_called()
+			statuses.update_sales_order_summary(order.name)
+
+		self.assertEqual(events[:2], [("commit",), ("lock", "Sales Order", order.name)])

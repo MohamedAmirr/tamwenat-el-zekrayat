@@ -22,7 +22,7 @@ const SAMPLE = {
 		last_sync_error: "<img src=x onerror=alert(1)>",
 		last_sync: { status: "Error" },
 	},
-	bosta: { status: "Out for delivery", tracking_number: "TRK-1" },
+	bosta: { summary: { "Out for delivery": 2, Delivered: 1 } },
 };
 
 function fake_element() {
@@ -147,7 +147,7 @@ test("the card shows the readable platform number, escapes server text and total
 	assert.match(html, /ORD-77/);
 	assert.doesNotMatch(html, /MKTORD-/);
 	assert.match(html, /Rice x 2/);
-	assert.match(html, /TRK-1/);
+	assert.match(html, /Delivered: <bdi dir="ltr">1<\/bdi>/);
 	assert.match(html, /Out for delivery/);
 	assert.match(html, /Ahmed &lt;b&gt;/);
 	assert.doesNotMatch(html, /<img/);
