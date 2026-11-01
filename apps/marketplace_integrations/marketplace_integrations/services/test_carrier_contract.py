@@ -4,12 +4,13 @@
 """The neutral carrier contract (#415): every adapter in ``CARRIERS`` exposes every contract method, and the
 neutral files hold no carrier name and no carrier-specific field."""
 
+import inspect
 import re
 from pathlib import Path
 
 from frappe.tests import IntegrationTestCase
 
-from marketplace_integrations.services import carrier_shipments
+from marketplace_integrations.services import carrier_shipments, marketplace_attention
 
 APP = Path(__file__).resolve().parent.parent
 
@@ -61,3 +62,10 @@ class IntegrationTestCarrierContract(IntegrationTestCase):
 					continue
 				self.assertIsNone(CARRIER_NAMES.search(line), f"{relative}:{number} names a carrier: {line}")
 				self.assertIsNone(CARRIER_FIELDS.search(line), f"{relative}:{number} uses a carrier field: {line}")
+
+	def test_needs_attention_carrier_collectors_are_neutral(self):
+		# The rest of marketplace_attention.py is platform-specific; only the carrier collectors are neutral.
+		for function in (marketplace_attention._collect_carrier_items, marketplace_attention._collect_carrier_return_reviews):
+			source = inspect.getsource(function)
+			self.assertIsNone(CARRIER_NAMES.search(source), f"{function.__name__} names a carrier")
+			self.assertIsNone(CARRIER_FIELDS.search(source), f"{function.__name__} uses a carrier field")

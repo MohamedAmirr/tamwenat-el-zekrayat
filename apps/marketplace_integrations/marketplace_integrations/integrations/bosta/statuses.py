@@ -36,6 +36,9 @@ TERMINAL_STATE_CODES = (45, 49)
 POLL_MAX_AGE_DAYS = 60
 #: A webhook that no note could take yet (a create still in flight) is kept this long, then ignored.
 PENDING_EVENT_DAYS = 3
+#: One nightly run applies "Delivery not found" (1066) to Created notes only up to this many: more than that
+#: many at once points at a wrong API key or account, not at that many cancelled deliveries.
+MASS_1066_LIMIT = 3
 #: Bosta states that mean the delivery was cancelled or terminated by Bosta.
 CANCELLED_STATE_CODES = (48, 49)
 #: Bosta states that mean the shipment came back to the merchant ("Returned to business", "Returned to
@@ -336,6 +339,13 @@ def _write_state(note, code, timestamp=None, fee=None, event=False):
 		# text is cleared. Pending is not touched: its terminate call is still in flight.
 		values["custom_integration_status"] = shipment.CREATED
 		values["custom_last_integration_error"] = None
+	elif (
+		code not in CANCELLED_STATE_CODES
+		and status == shipment.CREATED
+		and cstr(current.custom_last_integration_error) == _mass_1066_message()
+	):
+		# Bosta shows a live state again: the nightly "wrong API key or account" warning is resolved
+		values["custom_last_integration_error"] = None
 	# A draft note may be open in a form about to be submitted: a bumped ``modified`` would make that
 	# native submit fail with "modified after you opened it", and the person changed nothing. ``notify``
 	# still refreshes an open form. A submitted note keeps the bump (nothing can be submitted from it).
@@ -373,10 +383,27 @@ def _write_state(note, code, timestamp=None, fee=None, event=False):
 # ---------------------------------------------------------------------------
 
 
-def refresh_note(delivery_note):
+def refresh_note(delivery_note, held=None):
 	"""Read the note's delivery from Bosta and apply its state. The HTTP call comes first; the lock and
-	the write after it. Raises ``RateLimited`` on HTTP 429. Returns the Bosta state name or ``None``."""
-	tracking = cstr(frappe.db.get_value("Delivery Note", delivery_note, "lr_no")).strip()
+	the write after it. Raises ``RateLimited`` on HTTP 429. Returns the Bosta state name or ``None``.
+
+	A submitted note that is already Cancelled with an error left by a blocked automatic cancel makes no
+	Bosta call (a terminated delivery reads back as not found): the automatic cancel is tried again.
+
+	``held`` (the nightly run passes a list): a "Delivery not found" answer for a Created note is not applied;
+	the note is appended to the list and the run decides (``MASS_1066_LIMIT``). Returns ``None`` then."""
+	current = frappe.db.get_value(
+		"Delivery Note", delivery_note, ["lr_no", "custom_integration_status", "docstatus", "custom_last_integration_error"], as_dict=True
+	)
+	if (
+		current
+		and cstr(current.custom_integration_status) == shipment.CANCELLED
+		and current.docstatus == 1
+		and cstr(current.custom_last_integration_error)
+	):
+		carrier_shipments.cancel_after_carrier_cancelled(delivery_note)
+		return BOSTA_STATE_NAMES[shipment.TERMINATED_STATE_CODE]
+	tracking = cstr(current.lr_no if current else "").strip()
 	if not tracking:
 		return None
 	frappe.db.commit()
@@ -394,6 +421,13 @@ def refresh_note(delivery_note):
 		# cancelled at Bosta (also when the cancel was made in Bosta's own app: the note is Created here). Same
 		# answer as ``delivery_note_shipment._read_state``. A Created note then becomes Cancelled and, if
 		# submitted, is cancelled natively (``_write_state``: this read changed the status).
+		if held is not None and shipment.status_of(delivery_note) == shipment.CREATED:
+			held.append(delivery_note)
+			carrier_log.close_log(
+				log, "Success", http_status=response.status_code, output="held: applied after the run's mass-answer check"
+			)
+			frappe.db.commit()
+			return None
 		_write_state(delivery_note, shipment.TERMINATED_STATE_CODE)
 		carrier_log.close_log(log, "Success", http_status=response.status_code)
 		frappe.db.commit()
@@ -441,6 +475,17 @@ def _open_notes():
 		fields=["name", "custom_shipping_status", "is_return"],
 	)
 	notes += [row.name for row in created if row.custom_shipping_status not in terminal_state_names(row.is_return)]
+	# Cancelled at Bosta but still submitted, with the reason an automatic cancel was blocked: try it again
+	notes += frappe.get_all(
+		"Delivery Note",
+		filters={
+			**base,
+			"docstatus": 1,
+			"custom_integration_status": shipment.CANCELLED,
+			"custom_last_integration_error": ["is", "set"],
+		},
+		pluck="name",
+	)
 	return notes
 
 
@@ -449,6 +494,7 @@ def run_reconcile():
 	reading Bosta's state. One note's failure does not stop the run; a 429 does."""
 	frappe.set_user("Administrator")
 	done = 0
+	held = []
 	try:
 		replay_pending_events()
 	except Exception:
@@ -462,7 +508,7 @@ def run_reconcile():
 			if status in (shipment.CREATING, shipment.UNKNOWN):
 				carrier_shipments.check(note)
 			else:
-				refresh_note(note)
+				refresh_note(note, held=held)
 			done += 1
 		except RateLimited:
 			frappe.log_error(title="Bosta reconciliation stopped: rate limited (429)", message=note)
@@ -471,7 +517,47 @@ def run_reconcile():
 			frappe.db.rollback()
 			frappe.log_error(title="Bosta reconciliation: note failed", message=f"{note}\n{frappe.get_traceback()}")
 		frappe.db.commit()
+	_settle_held_terminations(held)
 	return done
+
+
+def _mass_1066_message():
+	return _(
+		"Bosta answered \"Delivery not found\" for many Created shipments in one nightly check, so none of them "
+		"was cancelled. The Bosta API key or account may be wrong. Check it, then use Refresh from Bosta."
+	)
+
+
+def _settle_held_terminations(held):
+	"""The "Delivery not found" answers the nightly run held back for Created notes. Up to
+	``MASS_1066_LIMIT`` are real cancellations and are applied. More than that: none is applied (a wrong API key
+	or account answers every read the same way), ONE Needs Attention row (the first held note keeps an error;
+	the list shows a Carrier Exception) is raised and the Stock Managers get ONE notification. Running again
+	the same night finds the error already there and does not notify twice."""
+	if not held:
+		return
+	if len(held) <= MASS_1066_LIMIT:
+		for note in held:
+			try:
+				_write_state(note, shipment.TERMINATED_STATE_CODE)
+			except Exception:
+				frappe.db.rollback()
+				frappe.log_error(title="Bosta reconciliation: cancelled note failed", message=f"{note}\n{frappe.get_traceback()}")
+			frappe.db.commit()
+		return
+	first = held[0]
+	message = _mass_1066_message()
+	if cstr(frappe.db.get_value("Delivery Note", first, "custom_last_integration_error")) == message:
+		return
+	frappe.db.set_value("Delivery Note", first, "custom_last_integration_error", message, update_modified=False)
+	frappe.db.commit()
+	carrier_shipments.notify_stock_managers(
+		first,
+		_("Bosta said \"Delivery not found\" for {0} Created Delivery Notes in one night. None was cancelled: check the Bosta API key and account.").format(
+			len(held)
+		),
+	)
+	frappe.db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -518,6 +604,8 @@ def update_sales_order_summary(sales_order):
 				"is_return": 0,
 				"transporter": supplier,
 				"custom_carrier_delivery_id": ["!=", ""],
+					# a cancelled shipment is not live: it is not counted under a state
+					"custom_integration_status": ["!=", shipment.CANCELLED],
 			},
 			fields=["custom_shipping_status", "custom_integration_status"],
 		):

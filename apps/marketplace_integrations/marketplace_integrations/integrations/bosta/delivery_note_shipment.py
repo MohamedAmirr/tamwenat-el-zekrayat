@@ -78,6 +78,8 @@ BOSTA_RETURN_PICKUP_TYPE = 25
 RETURN_PICKUP = "Customer Return Pickup"
 #: ``custom_return_source`` of the draft return the app makes when Bosta returns a delivery (automatic only).
 RETURNED_BY_BOSTA = "Returned by Bosta"
+# The adapter's optional "return source" that marks a return it created (read by the Needs Attention report).
+RETURNED_SOURCE = RETURNED_BY_BOSTA
 #: Set on the draft the app makes itself (``returns.create_returned_draft``); a person's save never has it.
 AUTOMATIC_RETURN_FLAG = "bosta_automatic_return"
 BOSTA_COD_LIMIT = 30000
@@ -328,6 +330,11 @@ def guard_changes(doc):
 		doc.set(fieldname, before.get(fieldname))
 	if cstr(before.get("custom_integration_status")) in EDITABLE_STATUSES:
 		if ours and doc.get("is_return"):
+			if cstr(before.get("custom_return_source")) != cstr(doc.get("custom_return_source")):
+				# The return just became (or changed to) a pickup: the tracking number it copied from the
+				# delivery belongs to that delivery, not to this pickup (same as on insert).
+				doc.lr_no = None
+				doc.lr_date = None
 			_check_returned_cod(doc.get("custom_returned_cod"))
 		elif ours:
 			_apply_cod_rule(doc, before)
@@ -882,7 +889,13 @@ def cancel_remote(doc):
 			outcome = "refused" if kind == "found" else "unknown"
 	if outcome == "unknown":
 		raise Unknown(message, http_status)
-	values = {"custom_shipping_status": state["name"]} if state else {}
+	if state:
+		values = {"custom_shipping_status": state["name"]}
+	elif outcome == "cancelled":
+		# Bosta confirmed the terminate with a 200: the shipping status is the terminated label too
+		values = {"custom_shipping_status": statuses.BOSTA_STATE_NAMES[TERMINATED_STATE_CODE]}
+	else:
+		values = {}
 	return frappe._dict(outcome=outcome, message=message, values=values, http_status=http_status)
 
 

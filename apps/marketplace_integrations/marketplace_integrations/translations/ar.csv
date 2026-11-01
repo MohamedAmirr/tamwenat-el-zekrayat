@@ -27,7 +27,6 @@ Company,الشركة
 Confirmed,مؤكد
 Failed,فشل
 Released,محرر
-Fulfilled,تم تنفيذه
 Sales Order Item,عنصر أمر البيع
 Item Code,رمز الصنف
 Warehouse,المخزن
@@ -587,7 +586,6 @@ Bosta returned no pickup locations. The saved location is unchanged.,لم تُع
 Bosta returned no usable cities.,لم تُعِد Bosta مدنًا صالحة للاستخدام.
 Bosta returned the city list in an unrecognised format.,أعادت Bosta قائمة المدن بتنسيق غير معروف.
 Bosta returned the pickup locations in an unrecognised format.,أعادت Bosta مواقع الاستلام بتنسيق غير معروف.
-COD Amount,مبلغ الدفع عند الاستلام
 COD cannot be negative.,لا يمكن أن يكون مبلغ الدفع عند الاستلام سالبًا.
 CONFIRMED,تم التأكيد
 Cancel Noon Shipment,إلغاء شحنة Noon
@@ -791,7 +789,7 @@ Mapping is disabled.,الربط معطّل.
 Mapping no longer exists or was moved to another account.,الربط لم يعد موجودًا أو نُقل إلى حساب آخر.
 Mapping {0} does not belong to Marketplace Account {1}.,الربط {0} لا ينتمي إلى حساب السوق {1}.
 Maps each Shopify payment gateway (exact name) to the Mode of Payment and Clearing Account used for its mirrored Payment Entries.,يربط كل بوابة دفع في Shopify (بالاسم الدقيق) بطريقة الدفع وحساب التسوية المستخدمين في قيود الدفع المنسوخة لها.
-Mark as Out of Stock,تعليم كنفد من المخزون
+Mark as Out of Stock,وضع علامة نفاد من المخزون
 "Marketplace Account Warehouse must be a leaf Warehouse, not a group Warehouse.",يجب أن يكون مستودع حساب السوق مستودعًا فرعيًا، لا مستودع مجموعة.
 Marketplace Account and External Order ID are required to compute the order identity key.,حساب السوق ومعرّف الطلب الخارجي مطلوبان لحساب مفتاح هوية الطلب.
 Marketplace Account and External Reference are required to compute the mapping identity key.,حساب السوق والمرجع الخارجي مطلوبان لحساب مفتاح هوية الربط.
@@ -872,7 +870,7 @@ No final Talabat order lines are available to synchronize.,لا توجد بنو�
 No mapping exists for Talabat SKU {0}.,لا يوجد ربط لرمز منتج Talabat {0}.
 No payment transactions were received.,لم تُستلم أي معاملات دفع.
 No promotion applied,لم يُطبَّق أي عرض
-No units are currently eligible to mark Out of Stock.,لا توجد وحدات مؤهلة حاليًا للتعليم كنفدت من المخزون.
+No units are currently eligible to mark Out of Stock.,لا توجد وحدات مؤهلة حاليًا لوضع علامة نفاد من المخزون.
 No units are currently shippable for this order.,لا توجد وحدات قابلة للشحن حاليًا لهذا الطلب.
 None.,لا شيء.
 Noon,Noon
@@ -1265,10 +1263,10 @@ UNIT items require a non-negative quantity.,عناصر الوحدة تحتاج �
 Unavailable,غير متاح
 Unit {0} is no longer shippable.,الوحدة {0} لم تعد قابلة للشحن.
 Units,الوحدات
-Units are no longer eligible to mark Out of Stock.,الوحدات لم تعد مؤهلة للتعليم كنفدت من المخزون.
-Units reserved while a queued Noon UpdateOrder request marks them out of stock. Written only by integrations/noon/fulfillment.py.,الوحدات المحجوزة أثناء قيام طلب UpdateOrder في Noon بقائمة الانتظار بتعليمها كنفدت من المخزون. تُكتب فقط بواسطة integrations/noon/fulfillment.py.
+Units are no longer eligible to mark Out of Stock.,الوحدات لم تعد مؤهلة لوضع علامة نفاد من المخزون.
+Units reserved while a queued Noon UpdateOrder request marks them out of stock. Written only by integrations/noon/fulfillment.py.,الوحدات المحجوزة أثناء قيام طلب UpdateOrder في Noon بقائمة الانتظار بوضع علامة نفاد من المخزون عليها. تُكتب فقط بواسطة integrations/noon/fulfillment.py.
 "Units {0} are not shippable (already shipped, cancelled, or not yet acknowledged).",الوحدات {0} غير قابلة للشحن (شُحنت بالفعل، أو أُلغيت، أو لم يتم الإقرار بها بعد).
-Units {0} cannot be marked Out of Stock.,لا يمكن تعليم الوحدات {0} كنفدت من المخزون.
+Units {0} cannot be marked Out of Stock.,لا يمكن وضع علامة نفاد من المخزون على الوحدات {0}.
 Unknown Bosta city. Refresh the Bosta lists and choose the city again.,مدينة Bosta غير معروفة. حدّث قوائم Bosta واختر المدينة مرة أخرى.
 Unknown row error.,خطأ غير معروف في الصف.
 Unmapped,غير مربوط
@@ -1579,15 +1577,15 @@ Product Bundle {0}: component Item {1} needs a positive quantity.,حزمة ال�
 Marketplace Order {0} has no Sales Order yet.,طلب السوق {0} ليس له أمر بيع بعد.
 Sales Order {0} is not submitted.,أمر البيع {0} غير معتمد.
 Some handed-over units could not be added to the draft Delivery Note. Fix the product mapping or add them to a Delivery Note by hand.,تعذّرت إضافة بعض الوحدات المسلّمة إلى مسودة مذكرة التسليم. أصلح ربط المنتج أو أضفها إلى مذكرة تسليم يدويًا.
-"Items, quantities and rates of a Noon order cannot be changed in ERPNext because Noon has no order update. Use Mark as Out of Stock on an item row of the Sales Order, or cancel and amend the Delivery Note.",لا يمكن تغيير أصناف وكميات وأسعار طلب Noon في ERPNext لأن Noon لا تدعم تحديث الطلب. استخدم تعليم كنفد من المخزون على صف صنف في أمر البيع، أو ألغِ مذكرة التسليم وعدّلها.
+"Items, quantities and rates of a Noon order cannot be changed in ERPNext because Noon has no order update. Use Mark as Out of Stock on an item row of the Sales Order, or cancel and amend the Delivery Note.",لا يمكن تغيير أصناف وكميات وأسعار طلب Noon في ERPNext لأن Noon لا تدعم تحديث الطلب. استخدم «وضع علامة نفاد من المخزون» على صف صنف في أمر البيع، أو ألغِ مذكرة التسليم وعدّلها.
 Noon order items are locked,أصناف طلب Noon مقفلة
-"Items and quantities of a Noon order cannot be changed here. Use Mark as Out of Stock on an item row of this Sales Order, or cancel and amend the Delivery Note.",لا يمكن تغيير أصناف وكميات طلب Noon هنا. استخدم تعليم كنفد من المخزون على صف صنف في أمر البيع هذا، أو ألغِ مذكرة التسليم وعدّلها.
+"Items and quantities of a Noon order cannot be changed here. Use Mark as Out of Stock on an item row of this Sales Order, or cancel and amend the Delivery Note.",لا يمكن تغيير أصناف وكميات طلب Noon هنا. استخدم «وضع علامة نفاد من المخزون» على صف صنف في أمر البيع هذا، أو ألغِ مذكرة التسليم وعدّلها.
 Delivery Note,مذكرة التسليم
 AWB,بوليصة الشحن
 Bosta shipments cannot be created for {0} orders: {0} fulfils its own orders.,لا يمكن إنشاء شحنات Bosta لطلبات {0}: {0} تتولى تنفيذ طلباتها بنفسها.
 {0} failed - open the order.,فشل {0} - افتح الطلب.
 {0} of {1},{0} من {1}
-Mark units Out of Stock,تعليم الوحدات كنفدت من المخزون
+Mark units Out of Stock,وضع علامة نفاد من المخزون على الوحدات
 Upload order invoice,رفع فاتورة الطلب
 Release Out of Stock reservation,تحرير حجز النفاد من المخزون
 Pending,معلّق
@@ -1692,7 +1690,6 @@ Delivery ID,معرّف التسليم
 Carrier Creation Problem,مشكلة في إنشاء شحنة شركة الشحن
 Carrier Cancelled,تسليم ألغته شركة الشحن
 Bosta Delivery Notes,مذكرات تسليم Bosta
-Carrier Exception,استثناء شركة الشحن
 COD confirmed,تم تأكيد مبلغ الدفع عند الاستلام
 "Cash to collect on delivery. 0 means prepaid. Until confirmed, the default (the note's total minus the order's advance) is recalculated on every save.",النقد المطلوب تحصيله عند التسليم. 0 يعني مدفوع مسبقًا. حتى يتم التأكيد، يُعاد حساب القيمة الافتراضية (إجمالي المذكرة ناقص دفعة أمر البيع المقدمة) عند كل حفظ.
 "Close, keep sending",إغلاق مع متابعة الإرسال
@@ -1818,18 +1815,18 @@ The Noon warehouse of Marketplace Account {0} was never checked. Press Check Noo
 The Noon warehouse of Marketplace Account {0} is not active at Noon.,مستودع Noon لحساب السوق {0} غير نشط لدى Noon.
 Sales Order {0} is not a submitted Noon order.,أمر البيع {0} ليس طلب Noon معتمدًا.
 Row {0} is not an item of Sales Order {1}.,الصف {0} ليس صنفًا في أمر البيع {1}.
-"Item {0} is in Delivery Note {1}. Noon accepts Out of Stock only before a shipment exists: remove the item from a draft note, or cancel the note, first.",الصنف {0} موجود في مذكرة التسليم {1}. تقبل Noon تعليم نفاد المخزون قبل وجود الشحنة فقط: أزل الصنف من المسودة أو ألغِ المذكرة أولًا.
-No unit of item {0} can be marked Out of Stock.,لا يمكن تعليم أي وحدة من الصنف {0} كنفدت من المخزون.
+"Item {0} is in Delivery Note {1}. Noon accepts Out of Stock only before a shipment exists: remove the item from a draft note, or cancel the note, first.",الصنف {0} موجود في مذكرة التسليم {1}. تقبل Noon وضع علامة نفاد المخزون قبل وجود الشحنة فقط: أزل الصنف من المسودة أو ألغِ المذكرة أولًا.
+No unit of item {0} can be marked Out of Stock.,لا يمكن وضع علامة نفاد من المخزون على أي وحدة من الصنف {0}.
 The Noon request failed ({0}). It may or may not have reached Noon.,فشل طلب Noon ({0}). قد يكون وصل إلى Noon وقد لا يكون.
 Noon does not show the units as Out of Stock yet. Retry in a moment.,لا تعرض Noon الوحدات كنافدة من المخزون بعد. أعد المحاولة بعد قليل.
 "Noon confirmed, but the Sales Order could not be updated. See the Error Log.",أكدت Noon ذلك، لكن تعذّر تحديث أمر البيع. راجع سجل الأخطاء.
 "Noon confirmed, but the Sales Order was not updated.",أكدت Noon ذلك، لكن لم يتم تحديث أمر البيع.
 The Out of Stock reservation was released.,تم تحرير حجز نفاد المخزون.
-Marking Out of Stock failed unexpectedly. See the Error Log.,فشل تعليم نفاد المخزون بشكل غير متوقع. راجع سجل الأخطاء.
+Marking Out of Stock failed unexpectedly. See the Error Log.,فشل وضع علامة نفاد المخزون بشكل غير متوقع. راجع سجل الأخطاء.
 "This marks the Item Out of Stock on the whole order: every row of this Item is removed, not only this row. It is final at Noon: it cannot be fulfilled later even if it is restocked, and Noon may charge cancellation fees. Continue?",يعلّم هذا الصنف كنفد من المخزون على الطلب كله: تُزال جميع صفوف هذا الصنف وليس هذا الصف فقط. وهو نهائي لدى Noon: لا يمكن تنفيذه لاحقًا حتى لو أُعيد توفيره، وقد تفرض Noon رسوم إلغاء. هل تريد المتابعة؟
 Check Noon,فحص Noon
 "Still sending to Noon. Open the Sales Order later to see the result.",ما زال الإرسال إلى Noon جاريًا. افتح أمر البيع لاحقًا لرؤية النتيجة.
-The item was marked Out of Stock at Noon and removed from the order.,تم تعليم الصنف كنفد من المخزون لدى Noon وإزالته من الطلب.
+The item was marked Out of Stock at Noon and removed from the order.,تم وضع علامة نفاد من المخزون على الصنف لدى Noon وإزالته من الطلب.
 It is not known whether Noon marked the item Out of Stock.,من غير المعروف ما إذا كانت Noon قد علّمت الصنف كنفد من المخزون.
 Check Noon asks Noon first and never sends the request twice.,فحص Noon يسأل Noon أولًا ولا يرسل الطلب مرتين أبدًا.
 "Noon marked the item Out of Stock, but the Sales Order was not updated.",علّمت Noon الصنف كنفد من المخزون، لكن لم يتم تحديث أمر البيع.
@@ -1866,6 +1863,11 @@ The amount Bosta hands to the customer at pickup (zero or more). Sent to Bosta a
 Request Bosta Return Pickup,طلب استلام المرتجع من Bosta
 Save the Delivery Note first, then request the pickup.,احفظ مذكرة التسليم أولًا ثم اطلب الاستلام.
 Please wait. Sending the return pickup request to {0}.,يرجى الانتظار. يجري إرسال طلب استلام المرتجع إلى {0}.
+A shipping request is still running.,طلب شحن ما زال قيد التنفيذ.
+carrier,شركة الشحن
+The Noon account could not be used. See the Error Log.,تعذّر استخدام حساب Noon. راجع سجل الأخطاء.
+"Bosta answered ""Delivery not found"" for many Created shipments in one nightly check, so none of them was cancelled. The Bosta API key or account may be wrong. Check it, then use Refresh from Bosta.","أجابت Bosta بعبارة ""Delivery not found"" عن عدد كبير من الشحنات بحالة Created في فحص ليلي واحد، لذلك لم يُلغَ أي منها. قد يكون مفتاح Bosta API أو الحساب خاطئًا. تحقق منه ثم استخدم تحديث من Bosta."
+"Bosta said ""Delivery not found"" for {0} Created Delivery Notes in one night. None was cancelled: check the Bosta API key and account.","قالت Bosta ""Delivery not found"" عن {0} من مذكرات التسليم بحالة Created في ليلة واحدة. لم يُلغَ أي منها: تحقق من مفتاح Bosta API والحساب."
 Still sending to {0}. Open the Delivery Note later and check its Integration Status.,ما زال الإرسال إلى {0} جاريًا. افتح مذكرة التسليم لاحقًا وتحقق من حالة التكامل.
 "Choose the {0} city, save, then request the pickup again.","اختر مدينة {0} ثم احفظ ثم اطلب الاستلام مرة أخرى."
 It is not known whether {0} created the request.,من غير المعروف ما إذا كانت {0} قد أنشأت الطلب.

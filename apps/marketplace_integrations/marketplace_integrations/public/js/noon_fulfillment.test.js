@@ -105,6 +105,21 @@ test("only the order-level buttons exist (Mark as Out of Stock is the row button
 	}
 });
 
+test("Release Stuck Out of Stock Reservation says when nothing was queued", async () => {
+	for (const [queued, indicator, text] of [
+		[true, "green", /Release queued/],
+		[false, "blue", /already queued or running/],
+	]) {
+		const { module_exports, confirms, alerts } = load(() => ({ queued }));
+		module_exports.run_noon_release_stuck_oos_reservation(ctx());
+		confirms[0].proceed();
+		await settle();
+		assert.equal(alerts.length, 1);
+		assert.equal(alerts[0].indicator, indicator);
+		assert.match(alerts[0].message, text);
+	}
+});
+
 test("the row button shows only for rows the server offered and asks for confirmation first", () => {
 	const { module_exports, confirms, calls } = load();
 	const shown = [];

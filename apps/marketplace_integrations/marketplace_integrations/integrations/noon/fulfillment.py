@@ -157,10 +157,15 @@ def _pending_oos_units(order):
 	return set(units)
 
 
-def _release_pending_oos_units(marketplace_order_name, mp_item_nrs):
+def _release_pending_oos_units(marketplace_order_name, mp_item_nrs, skip_if_inflight=False):
 	"""Free units from the reservation. Internal bookkeeping: written as the system (the callers checked the
-	user's right on the Sales Order; a Sales Order writer has no Marketplace Order rights)."""
+	user's right on the Sales Order; a Sales Order writer has no Marketplace Order rights).
+	``skip_if_inflight`` (the stuck-reservation release): the in-flight check is made again inside the order
+	lock, so a press that reserved units after the job's first check keeps its reservation."""
 	order = _lock_and_load_order(marketplace_order_name, as_system=True)
+	if skip_if_inflight and _oos_inflight(order.name):
+		frappe.db.commit()
+		return
 	order.noon_pending_oos_units = frappe.as_json(sorted(_pending_oos_units(order) - set(mp_item_nrs)))
 	order.save()
 	frappe.db.commit()
@@ -303,26 +308,22 @@ def _is_definite_refusal(status_code):
 	return 400 <= status_code < 500 and status_code not in (408, 429)
 
 
-_OOS_INFLIGHT = "noon-oos-inflight|{}"
+_OOS_INFLIGHT = "noon-oos-inflight|{}|{}"
 _OOS_INFLIGHT_TTL = 600  # a little over the job timeout (300 s): a hard-killed worker's mark expires
 
 
+# One cache key per request (no get-then-set of a shared list): two presses cannot overwrite each other's mark.
 def _oos_inflight(order_name):
-	return frappe.cache().get_value(_OOS_INFLIGHT.format(order_name)) or []
+	"""The marks of the Out of Stock requests of this order that are queued or running (truthy while any)."""
+	return frappe.cache().get_keys(_OOS_INFLIGHT.format(order_name, "*"))
 
 
 def _oos_inflight_add(order_name, request_id):
-	frappe.cache().set_value(
-		_OOS_INFLIGHT.format(order_name), [*_oos_inflight(order_name), request_id], expires_in_sec=_OOS_INFLIGHT_TTL
-	)
+	frappe.cache().set_value(_OOS_INFLIGHT.format(order_name, request_id), 1, expires_in_sec=_OOS_INFLIGHT_TTL)
 
 
 def _oos_inflight_remove(order_name, request_id):
-	left = [rid for rid in _oos_inflight(order_name) if rid != request_id]
-	if left:
-		frappe.cache().set_value(_OOS_INFLIGHT.format(order_name), left, expires_in_sec=_OOS_INFLIGHT_TTL)
-	else:
-		frappe.cache().delete_value(_OOS_INFLIGHT.format(order_name))
+	frappe.cache().delete_value(_OOS_INFLIGHT.format(order_name, request_id))
 
 
 def release_stuck_oos_reservation(marketplace_order_name):
@@ -362,7 +363,24 @@ def run_release_stuck_oos(marketplace_order_name):
 		account, _client = _account_and_client(order)
 		external_order_id = order.external_order_id
 		frappe.db.commit()  # release the order lock before the Noon call
-		raw_order = get_fbpi_order(account, external_order_id)
+		# logged like the other Noon calls (an Integration Request row; the answer holds customer data and is not kept)
+		log = carrier_log.open_log(
+			SERVICE_NAME,
+			order.name,
+			OUT_OF_STOCK_OPERATION,
+			reference=external_order_id,
+			reference_doctype="Marketplace Order",
+		)
+		frappe.db.commit()
+		try:
+			raw_order = get_fbpi_order(account, external_order_id)
+		except Exception as exc:
+			frappe.clear_messages()
+			carrier_log.close_log(log, "Unknown", error=strip_html(cstr(exc))[:200])
+			frappe.db.commit()
+			raise
+		carrier_log.close_log(log, "Success", http_status=200)
+		frappe.db.commit()
 	except Exception:
 		frappe.db.rollback()
 		_log_fulfillment(
@@ -372,7 +390,7 @@ def run_release_stuck_oos(marketplace_order_name):
 	at_noon = [nr for nr in held if _is_out_of_stock(raw_order, nr)]
 	free = [nr for nr in held if nr not in at_noon]
 	if free and not _oos_inflight(order.name):
-		_release_pending_oos_units(order.name, free)
+		_release_pending_oos_units(order.name, free, skip_if_inflight=True)
 	_log_fulfillment(
 		order,
 		"ReleaseStuckOosReservation",
@@ -547,13 +565,18 @@ def mark_row_out_of_stock(sales_order_name, row_name):
 	units = sorted(entry["units"])
 	held = _pending_oos_units(order)
 	is_retry = bool(held & set(units))
-	order.noon_pending_oos_units = frappe.as_json(sorted(held | set(units)))
-	order.save()
-	frappe.db.commit()
-
 	request_id = frappe.generate_hash(length=16)
 	newly_reserved = set(units) - held
-	_oos_inflight_add(order.name, request_id)  # the stuck-reservation release refuses while this is set
+	# The mark is set BEFORE the reservation is saved, while the order lock is held: the stuck-reservation
+	# release refuses while any mark is set, so it can never see the new reservation without the mark.
+	_oos_inflight_add(order.name, request_id)
+	try:
+		order.noon_pending_oos_units = frappe.as_json(sorted(held | set(units)))
+		order.save()
+		frappe.db.commit()
+	except Exception:
+		_oos_inflight_remove(order.name, request_id)
+		raise
 	try:
 		job = frappe.enqueue(
 			run_mark_out_of_stock,
@@ -982,7 +1005,8 @@ def run_upload_order_invoice(marketplace_order_name, invoice_idempotency_key, sa
 	try:
 		_account, client = _account_and_client(order)
 	except Exception:
-		_set_order_invoice_error(order, cstr(frappe.get_traceback()).strip()[:500])
+		frappe.log_error(title="Noon order invoice: account unusable", message=frappe.get_traceback())
+		_set_order_invoice_error(order, _("The Noon account could not be used. See the Error Log."))
 		return
 	invoice_file = order.noon_order_invoice_file
 	invoice_nr = order.noon_order_invoice_nr
@@ -1020,7 +1044,7 @@ def run_upload_order_invoice(marketplace_order_name, invoice_idempotency_key, sa
 		order = _lock_and_load_order(marketplace_order_name)
 		if order.noon_order_invoice_idempotency_key == invoice_idempotency_key:
 			order.noon_order_invoice_status = "Error"
-			order.noon_order_invoice_last_error = cstr(frappe.get_traceback()).strip()[:500]
+			order.noon_order_invoice_last_error = _("The invoice could not be sent. See the Error Log.")
 			order.save()
 			set_invoice_result(
 				invoice_idempotency_key, "failed", _("The invoice could not be sent. See the Error Log.")

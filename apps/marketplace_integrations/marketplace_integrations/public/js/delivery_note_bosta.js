@@ -229,7 +229,12 @@
 							silent: true,
 						})
 						.then(
-							() => Promise.resolve(frm.reload_doc()).then(() => (frm.doc.custom_integration_status === "Cancelled" ? done({}) : show_unknown(frm, __("Bosta still shows the shipment as not cancelled."), { done, stop, retry }))),
+							() =>
+								Promise.resolve(frm.reload_doc()).then(() =>
+									frm.doc.custom_integration_status === "Cancelled"
+										? done({})
+										: show_unknown(frm, __("Bosta still shows the shipment as not cancelled."), { done, stop, retry })
+								),
 							(error) => show_unknown(frm, message_of(error), { done, stop, retry })
 						),
 				stop
@@ -449,7 +454,6 @@
 		// Sent to Bosta; after the start only Edit Bosta Shipment changes them.
 		locked_fields: ["contact_mobile", "shipping_address_name", "shipping_address"],
 	};
-
 
 	if (typeof frappe !== "undefined" && frappe.marketplace_integrations && frappe.marketplace_integrations.shipping) {
 		frappe.marketplace_integrations.shipping.register_carrier("Bosta", hooks);

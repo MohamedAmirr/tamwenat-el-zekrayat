@@ -713,6 +713,8 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 			noon.refresh(note.name)
 		native.assert_called_once_with(note.name)
 		frappe.db.set_value("Delivery Note", note.name, "docstatus", 0, update_modified=False)
+		frappe.db.set_value("Delivery Note Item", {"parent": note.name}, "docstatus", 0, update_modified=False)
+		frappe.db.commit()
 
 	def test_a_shipment_of_another_order_or_with_a_foreign_unit_is_never_adopted(self):
 		fx = self._order([("SKU-A", 1)], ["SKU-A"])

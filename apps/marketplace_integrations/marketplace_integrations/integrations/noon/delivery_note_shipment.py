@@ -859,6 +859,10 @@ def upload_invoice_for_note(delivery_note, file_url, invoice_nr, issued_at, idem
 		frappe.throw(_("Invalid upload key."))
 	# One upload per note at a time: a double press must not send two (a Retry of the same key is allowed).
 	marker_key = _INVOICE_INFLIGHT.format(doc.name)
+	# Check and set the marker under the note's row lock (commit, then lock as the next statement): two presses
+	# cannot both read "none running" and both set it. The lock is released by the commit below.
+	frappe.db.commit()
+	frappe.db.get_value("Delivery Note", doc.name, "name", for_update=True)
 	running = frappe.cache().get_value(marker_key)
 	if running and running != cstr(idempotency_key):
 		frappe.throw(_("An invoice upload for this Delivery Note is already running. Wait for it to finish."))

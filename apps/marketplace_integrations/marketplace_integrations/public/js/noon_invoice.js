@@ -42,7 +42,7 @@
 	function start(options) {
 		if (options.uploaded || options.uploaded_on) {
 			const when = options.uploaded_on
-				? __("An invoice was already uploaded on {0}.", [frappe.utils.escape_html(String(options.uploaded_on))])
+				? __("An invoice was already uploaded on {0}.", [frappe.utils.escape_html(frappe.datetime.str_to_user(options.uploaded_on))])
 				: __("An invoice was already uploaded.");
 			frappe.confirm(
 				`${when} ${frappe.utils.escape_html(__("The new upload replaces it at Noon. Continue?"))}`,

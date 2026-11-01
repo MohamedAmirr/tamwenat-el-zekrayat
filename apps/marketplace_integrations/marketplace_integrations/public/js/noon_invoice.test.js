@@ -28,6 +28,7 @@ function load(script = () => ({})) {
 	const confirms = [];
 	global.frappe = {
 		utils: { escape_html },
+		datetime: { str_to_user: (value) => `user:${value}` },
 		ui: {
 			Dialog: class {
 				constructor(config) {
@@ -110,7 +111,10 @@ test("a second upload warns first that the new one replaces the earlier one; the
 	invoice.start(options({ uploaded_on: "2026-11-01 10:00:00" }));
 	assert.equal(dialogs.length, 0);
 	assert.equal(confirms.length, 1);
-	assert.match(confirms[0].message, /already uploaded on 2026-11-01 10:00:00/);
+	assert.match(confirms[0].message, /already uploaded on user:2026-11-01 10:00:00/);
+	// the date is escaped where shown
+	invoice.start(options({ uploaded_on: "<b>" }));
+	assert.match(confirms[1].message, /uploaded on user:&lt;b&gt;/);
 	assert.match(confirms[0].message, /replaces it at Noon/);
 	confirms[0].proceed();
 	assert.equal(dialogs.length, 1);

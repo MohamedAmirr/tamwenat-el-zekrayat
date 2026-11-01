@@ -534,34 +534,33 @@ test("an unsaved return asks to save first and sends nothing", async () => {
 	assert.equal(msgprints[0].message, "Save the Delivery Note first, then request the pickup.");
 });
 
+// The real neutral shell (its lock), not a copy of it.
 function use_lock() {
-	const busy = new Set();
-	global.frappe.marketplace_integrations.shipping.exclusive = (frm, fn, on_busy) => {
-		if (busy.has(frm.doc.name)) return Promise.resolve(on_busy && on_busy());
-		busy.add(frm.doc.name);
-		return Promise.resolve(fn()).finally(() => busy.delete(frm.doc.name));
-	};
-	return busy;
+	const path = require.resolve("./delivery_note_shipping.js");
+	delete require.cache[path];
+	const shell = require(path);
+	global.frappe.marketplace_integrations.shipping = shell;
+	return shell;
 }
 
 test("a double click on Fetch Bosta Label sends one request and the lock is released", async () => {
 	const { mod, calls } = load();
-	const busy = use_lock();
+	const shell = use_lock();
 	const frm = make_form({ custom_integration_status: "Created" });
 	const first = mod.fetch_label(frm);
 	await mod.fetch_label(frm);
 	assert.equal(calls.length, 1);
 	await first;
 	assert.equal(frm.reloads, 1);
-	assert.equal(busy.size, 0);
+	assert.equal(shell.is_busy(frm), false);
 });
 
 test("the lock is released when the request fails", async () => {
 	const { mod, calls } = load({ responses: { fetch_label: new Error("down") } });
-	const busy = use_lock();
+	const shell = use_lock();
 	const frm = make_form({ custom_integration_status: "Created" });
 	await assert.rejects(mod.fetch_label(frm));
-	assert.equal(busy.size, 0);
+	assert.equal(shell.is_busy(frm), false);
 	await assert.rejects(mod.fetch_label(frm));
 	assert.equal(calls.length, 2);
 });
@@ -576,4 +575,38 @@ test("a cancel while another request is in flight sends nothing and stops the na
 	assert.equal(global.frappe.validated, false);
 	assert.equal(calls.length, 1);
 	await first;
+});
+
+test("the Edit dialog's Send button comes back when another request holds the note, and sends nothing", async () => {
+	const { mod, dialogs, calls, alerts } = load();
+	const shell = use_lock();
+	const frm = make_form({ custom_integration_status: "Created" });
+	await mod.edit_shipment(frm);
+	let release;
+	const holder = shell.exclusive(frm, () => new Promise((resolve) => (release = resolve)));
+	const before = calls.length;
+	await dialogs[0].config.primary_action({ phone: "0111", city: "c1", first_line: "New street 22" });
+	assert.equal(dialogs[0].primary.disabled, false);
+	assert.equal(calls.length, before);
+	assert.equal(alerts.length, 1);
+	assert.equal(alerts[0].indicator, "orange");
+	release();
+	await holder;
+});
+
+test("Check with Bosta while another request holds the note does nothing and ends the cancel attempt", async () => {
+	const { mod, dialogs, calls } = load({ responses: { cancel_shipment: { outcome: "unknown", message: "" } } });
+	const shell = use_lock();
+	const frm = make_form({ custom_integration_status: "Created", transporter_name: "Bosta" });
+	global.frappe.validated = true;
+	const pending = mod.before_cancel(frm);
+	await new Promise((resolve) => setImmediate(resolve));
+	let release;
+	const holder = shell.exclusive(frm, () => new Promise((resolve) => (release = resolve)));
+	await dialogs[0].config.secondary_action();
+	assert.equal(calls.filter((c) => c.method.endsWith("refresh_shipment")).length, 0);
+	await pending;
+	assert.equal(global.frappe.validated, false);
+	release();
+	await holder;
 });

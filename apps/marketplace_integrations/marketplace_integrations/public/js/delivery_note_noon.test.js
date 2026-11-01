@@ -80,6 +80,15 @@ function make_form(doc = {}) {
 	};
 }
 
+// The real neutral shell (its lock), not a copy of it.
+function use_real_shell() {
+	const path = require.resolve("./delivery_note_shipping.js");
+	delete require.cache[path];
+	const shell = require(path);
+	global.frappe.marketplace_integrations.shipping = shell;
+	return shell;
+}
+
 test("Noon registers its hooks with the shared shipping shell", () => {
 	const { registered } = load();
 	assert.deepEqual(Object.keys(registered), ["Noon"]);
@@ -137,8 +146,17 @@ test("ticking the checkbox clears a typed AWB; an untouched or generated note is
 	assert.equal(typed.props["lr_no.read_only"], 1);
 
 	const generated = make_form({ custom_integration_status: "Creation Failed", custom_noon_generate_awb: 1, lr_no: "AWB1" });
+	mod.refresh(generated);
 	mod.custom_noon_generate_awb(generated);
 	assert.equal(generated.values.lr_no, undefined);
+
+	// typing an AWB, then ticking the box (the live checkbox and AWB alone do not make it "generated")
+	const ticked_after_typing = make_form({ custom_integration_status: "Not Created", lr_no: "TYPED" });
+	mod.refresh(ticked_after_typing);
+	ticked_after_typing.doc.custom_noon_generate_awb = 1;
+	mod.custom_noon_generate_awb(ticked_after_typing);
+	assert.equal(ticked_after_typing.values.lr_no, "");
+	assert.equal(ticked_after_typing.props["lr_no.read_only"], 1);
 
 	const other = make_form({ transporter_name: "Bosta", custom_noon_generate_awb: 1, lr_no: "X" });
 	mod.custom_noon_generate_awb(other);
@@ -319,19 +337,34 @@ test("the draft Cancel Noon Shipment button confirms, cancels and reloads", asyn
 });
 
 test("a second cancel while one is in flight sends nothing and stops; the lock is released afterwards", async () => {
-	const { mod, calls } = load({ responses: { cancel_shipment: { status: "Cancelled", outcome: "cancelled", message: "" } } });
-	const busy = new Set();
-	global.frappe.marketplace_integrations.shipping.exclusive = (frm, fn, on_busy) => {
-		if (busy.has(frm.doc.name)) return Promise.resolve(on_busy && on_busy());
-		busy.add(frm.doc.name);
-		return Promise.resolve(fn()).finally(() => busy.delete(frm.doc.name));
-	};
+	const { mod, calls, alerts } = load({ responses: { cancel_shipment: { status: "Cancelled", outcome: "cancelled", message: "" } } });
+	const shell = use_real_shell();
 	const frm = make_form({ custom_integration_status: "Created" });
 	const first = mod.before_cancel(frm);
 	frappe.validated = true;
 	await mod.before_cancel(frm);
 	assert.equal(frappe.validated, false);
 	assert.equal(calls.length, 1);
+	// the click was not silent
+	assert.equal(alerts.length, 1);
+	assert.equal(alerts[0].indicator, "orange");
 	await first;
-	assert.equal(busy.size, 0);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(shell.is_busy(frm), false);
+});
+
+test("Check with Noon while another request runs does nothing and ends the cancel attempt", async () => {
+	const { mod, dialogs, calls } = load({ responses: { cancel_shipment: { outcome: "unknown", message: "" } } });
+	const shell = use_real_shell();
+	const frm = make_form({ custom_integration_status: "Created" });
+	const pending = mod.before_cancel(frm);
+	await new Promise((resolve) => setImmediate(resolve));
+	let release;
+	const holder = shell.exclusive(frm, () => new Promise((resolve) => (release = resolve)));
+	await dialogs[0].config.secondary_action();
+	assert.equal(calls.filter((c) => c.method.endsWith("refresh_shipment")).length, 0);
+	await pending;
+	assert.equal(frappe.validated, false);
+	release();
+	await holder;
 });

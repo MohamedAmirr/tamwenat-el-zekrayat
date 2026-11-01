@@ -587,7 +587,7 @@
   "fieldname": "custom_carrier_reference",
   "fieldtype": "Data",
   "label": "Carrier Reference",
-  "insert_after": "lr_date",
+  "insert_after": "custom_carrier_delivery_id",
   "name": "Delivery Note-custom_carrier_reference",
   "hidden": 0,
   "modified": "2026-10-31 12:00:00.000000",
@@ -642,7 +642,7 @@
   "translatable": 0,
   "no_copy": 1,
   "description": "Cash to collect on delivery. 0 means prepaid. Until confirmed, the default (the note's total minus the order's advance) is recalculated on every save.",
-  "depends_on": "eval:!doc.is_return && (frappe.boot.marketplace_shipping_carriers||[]).includes(doc.transporter_name)"
+  "depends_on": "eval:!doc.is_return && doc.transporter_name==\"Bosta\""
  },
  {
   "doctype": "Custom Field",
@@ -660,7 +660,7 @@
   "description": "Tick to keep the COD amount as it is, including 0. Required before the shipment is sent.",
   "default": "0",
   "no_copy": 1,
-  "depends_on": "eval:!doc.is_return && (frappe.boot.marketplace_shipping_carriers||[]).includes(doc.transporter_name)"
+  "depends_on": "eval:!doc.is_return && doc.transporter_name==\"Bosta\""
  },
  {
   "doctype": "Custom Field",
@@ -712,7 +712,8 @@
   "translatable": 0,
   "no_copy": 1,
   "read_only": 1,
-  "allow_on_submit": 1
+  "allow_on_submit": 1,
+  "depends_on": "eval:doc.custom_shipping_label"
  },
  {
   "doctype": "Custom Field",
@@ -737,7 +738,7 @@
   "fieldname": "custom_bosta_last_event_at",
   "fieldtype": "Data",
   "label": "Last Bosta Event",
-  "insert_after": "custom_noon_invoice_uploaded_on",
+  "insert_after": "custom_last_sync_at",
   "name": "Delivery Note-custom_bosta_last_event_at",
   "hidden": 1,
   "modified": "2026-11-02 13:00:00.000000",
@@ -848,7 +849,7 @@
   "fieldname": "custom_carrier_request_snapshot",
   "fieldtype": "JSON",
   "label": "Carrier Request Snapshot",
-  "insert_after": "custom_last_integration_error",
+  "insert_after": "custom_noon_invoice_uploaded_on",
   "name": "Delivery Note-custom_carrier_request_snapshot",
   "hidden": 1,
   "modified": "2026-10-31 12:00:00.000000",
@@ -881,7 +882,7 @@
   "fieldname": "custom_noon_invoice_uploaded_on",
   "fieldtype": "Datetime",
   "label": "Noon Invoice Uploaded On",
-  "insert_after": "custom_last_sync_at",
+  "insert_after": "custom_last_integration_error",
   "name": "Delivery Note-custom_noon_invoice_uploaded_on",
   "hidden": 0,
   "modified": "2026-11-01 21:00:00.000000",

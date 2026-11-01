@@ -120,7 +120,11 @@
 		return busy.has(frm.doc.name);
 	}
 	function exclusive(frm, fn, on_busy) {
-		if (is_busy(frm)) return Promise.resolve(on_busy ? on_busy() : undefined);
+		if (is_busy(frm)) {
+			// the click did nothing: say why
+			frappe.show_alert({ message: __("A shipping request is still running."), indicator: "orange" });
+			return Promise.resolve(on_busy ? on_busy() : undefined);
+		}
 		const key = frm.doc.name;
 		busy.add(key);
 		let result;
@@ -258,8 +262,8 @@
 					frappe.show_alert({
 						message: frappe.utils.escape_html(
 							submitting
-									? __("Still sending to {0}. Open the Delivery Note later: if the shipment is Created, submit it again.", [carrier])
-									: __("Still sending to {0}. Open the Delivery Note later and check its Integration Status.", [carrier])
+								? __("Still sending to {0}. Open the Delivery Note later: if the shipment is Created, submit it again.", [carrier])
+								: __("Still sending to {0}. Open the Delivery Note later and check its Integration Status.", [carrier])
 						),
 						indicator: "blue",
 					});
@@ -308,7 +312,8 @@
 					.get_value("Delivery Note", frm.doc.name, ["custom_integration_status", "custom_last_integration_error"])
 					.then(
 						(r) => {
-							const row = (r && r.message) || {};
+							if (settled) return;
+								const row = (r && r.message) || {};
 							const status = row.custom_integration_status || NOT_CREATED;
 							if (status === CREATED) return finish(true);
 							if (status === FAILED || status === UNKNOWN) return finish(false, status, row.custom_last_integration_error);
@@ -366,10 +371,12 @@
 	// Fields the carrier was sent (carrier.locked_fields) lock once the shipment is started; the server
 	// refuses a change too.
 	function set_locked_fields(frm, carrier) {
-		const read_only = is_editable(frm) ? 0 : 1;
-		((carriers[carrier] && carriers[carrier].locked_fields) || []).forEach((fieldname) =>
-			frm.set_df_property(fieldname, "read_only", read_only)
-		);
+		const locked = !is_editable(frm);
+		((carriers[carrier] && carriers[carrier].locked_fields) || []).forEach((fieldname) => {
+			// unlocking restores the field's own setting, not 0 (a field read-only by design stays so)
+			const df = frappe.meta && frappe.meta.get_docfield ? frappe.meta.get_docfield("Delivery Note", fieldname) : null;
+			frm.set_df_property(fieldname, "read_only", locked ? 1 : (df && df.read_only) || 0);
+		});
 	}
 
 	const api = {

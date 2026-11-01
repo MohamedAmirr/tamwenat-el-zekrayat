@@ -212,6 +212,20 @@ test("the carrier's locked fields are read-only once the shipment started, edita
 	assert.equal(created.df["contact_mobile.read_only"], 1);
 });
 
+test("unlocking restores the field's own read-only setting instead of forcing 0", () => {
+	const { handlers } = load();
+	global.frappe.meta = { get_docfield: (doctype, fieldname) => ({ read_only: fieldname === "contact_mobile" ? 1 : 0 }) };
+	const draft = make_form({ custom_integration_status: "Not Created" });
+	handlers.refresh(draft);
+	assert.equal(draft.df["contact_mobile.read_only"], 1);
+	const created = make_form({ custom_integration_status: "Created" });
+	handlers.refresh(created);
+	assert.equal(created.df["contact_mobile.read_only"], 1);
+	global.frappe.meta = { get_docfield: () => ({ read_only: 0 }) };
+	handlers.refresh(draft);
+	assert.equal(draft.df["contact_mobile.read_only"], 0);
+});
+
 test("submit of a note already Created continues without a dialog", () => {
 	const { handlers, dialogs } = load();
 	const frm = make_form({ custom_integration_status: "Created" });
@@ -373,6 +387,24 @@ test("Close, keep sending ends the wait with a quiet alert and keeps the form un
 	assert.match(alerts[0].message, /Still sending to Bosta/);
 });
 
+test("after Close, keep sending the lock is free and Submit again starts a new request", async () => {
+	const { handlers, dialogs, calls, shipping } = load({ statuses: [{ custom_integration_status: "Creating" }] });
+	const frm = make_form({ custom_integration_status: "Not Created" });
+	const first = handlers.before_submit(frm);
+	await new Promise((resolve) => setTimeout(resolve, 2));
+	dialogs[0].config.primary_action();
+	await first;
+	assert.equal(global.frappe.validated, false);
+	assert.equal(shipping.is_busy(frm), false);
+	global.frappe.validated = true;
+	const second = handlers.before_submit(frm);
+	await new Promise((resolve) => setTimeout(resolve, 2));
+	assert.equal(calls.length, 2);
+	assert.equal(dialogs.length, 2);
+	dialogs[1].config.primary_action();
+	await second;
+});
+
 test("closing the dialog abandons the wait without submitting", async () => {
 	const { handlers, dialogs } = load({ statuses: [{ custom_integration_status: "Creating" }] });
 	const promise = handlers.before_submit(make_form({ custom_integration_status: "Not Created" }));
@@ -438,7 +470,7 @@ test("a failed request releases the button", async () => {
 });
 
 test("Refresh and Check share one lock per note, other notes are not blocked", async () => {
-	const { shipping } = load();
+	const { shipping, alerts } = load();
 	const a = make_form({});
 	const b = make_form({ name: "MAT-DN-2" });
 	let ran = 0;
@@ -449,6 +481,10 @@ test("Refresh and Check share one lock per note, other notes are not blocked", a
 	await shipping.exclusive(a, () => ran++, () => busy_called++);
 	await shipping.exclusive(b, () => ran++);
 	assert.deepEqual([ran, busy_called], [1, 1]);
+	// the ignored click says why, without naming a carrier
+	assert.equal(alerts.length, 1);
+	assert.equal(alerts[0].message, "A shipping request is still running.");
+	assert.equal(alerts[0].indicator, "orange");
 	release();
 	await first;
 	assert.equal(shipping.is_busy(a), false);

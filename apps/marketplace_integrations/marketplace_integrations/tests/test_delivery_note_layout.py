@@ -26,11 +26,11 @@ EXPECTED = [
 	"custom_integration_status",
 	"custom_shipping_status",
 	"custom_last_sync_at",
-	"custom_noon_invoice_uploaded_on",
 	"custom_bosta_last_event_at",
 	"custom_actual_shipping_cost",
 	"custom_actual_cost_received_on",
 	"custom_last_integration_error",
+	"custom_noon_invoice_uploaded_on",
 	"custom_carrier_request_snapshot",
 	# column 3: delivery data
 	"custom_shipping_column",
@@ -61,7 +61,9 @@ class TestDeliveryNoteLayout(IntegrationTestCase):
 	def test_cod_and_city_show_only_for_a_managed_carrier(self):
 		meta = frappe.get_meta("Delivery Note")
 		for fieldname in ("custom_cod_amount", "custom_cod_confirmed"):
-			self.assertIn("marketplace_shipping_carriers", meta.get_field(fieldname).depends_on)
+			self.assertEqual(
+				meta.get_field(fieldname).depends_on, 'eval:!doc.is_return && doc.transporter_name=="Bosta"'
+			)
 		for fieldname in ("custom_bosta_city", "custom_bosta_city_name"):
 			self.assertEqual(meta.get_field(fieldname).depends_on, 'eval:doc.transporter_name=="Bosta"')
 		for fieldname in ("transporter", "lr_no", "lr_date"):

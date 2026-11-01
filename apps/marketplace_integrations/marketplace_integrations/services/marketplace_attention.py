@@ -71,6 +71,7 @@ from marketplace_integrations.integrations.shopify.webhooks import MAX_WEBHOOK_D
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_product_mapping.marketplace_product_mapping import (
 	compute_mapping_identity_key,
 )
+from marketplace_integrations.services import carrier_log
 from marketplace_integrations.services.carrier_shipments import CARRIERS
 from marketplace_integrations.services.sales_order_sync import (
 	FINAL_ITEM_STATUSES,
@@ -512,37 +513,45 @@ def _collect_carrier_items(problem_type=None):
 	def statuses_of(kind):
 		return sorted({status for found in states.values() for status in found.get(kind, [])})
 
-	# A started shipment, whatever the carrier calls its id (Noon has none): judged by the Integration Status.
+	# A started shipment, whatever the carrier calls its id (some have none): judged by the Integration Status.
 	shipped = {
-		"custom_integration_status": ["in", ["Created", "Cancellation Pending", "Cancellation Unknown", "Cancelled"]]
+		"custom_integration_status": [
+			"in",
+			[carrier_log.CREATED, carrier_log.CANCELLATION_PENDING, carrier_log.CANCELLATION_UNKNOWN, carrier_log.CANCELLED],
+		]
 	}
+	not_started = ["", carrier_log.NOT_CREATED]
 	if problem_type in (None, CARRIER_CREATION_PROBLEM):
-		collect({"custom_integration_status": ["in", ["Creation Failed", "Creation Unknown"]], "docstatus": 0})
+		collect({"custom_integration_status": ["in", [carrier_log.FAILED, carrier_log.UNKNOWN]], "docstatus": 0})
 		# A draft that was never started but carries an error: the carrier's nightly check found a shipment
 		# the draft does not know about (the adapter wrote the error).
 		collect(
 			{
-				"custom_integration_status": ["in", ["", "Not Created"]],
+				"custom_integration_status": ["in", not_started],
 				"custom_last_integration_error": ["is", "set"],
 				"docstatus": 0,
 			}
 		)
 	if problem_type in (None, CARRIER_CANCELLED):
-		collect({**shipped, "custom_integration_status": "Cancelled"})
+		collect({**shipped, "custom_integration_status": carrier_log.CANCELLED})
 	for kind in (CARRIER_EXCEPTION, CARRIER_RETURN):
 		if problem_type in (None, kind) and statuses_of(kind):
 			collect({**shipped, "custom_shipping_status": ["in", statuses_of(kind)]})
 	if problem_type in (None, CARRIER_EXCEPTION):
 		# A live shipment whose last refresh/call left an error (the carrier's answer could not be applied):
 		# an exception whatever its status says.
-		collect({"custom_integration_status": "Created", "custom_last_integration_error": ["is", "set"]})
+		collect({"custom_integration_status": carrier_log.CREATED, "custom_last_integration_error": ["is", "set"]})
 		# A submitted note the carrier cancelled whose automatic native cancel was blocked (the reason is the error).
 		collect(
-			{"custom_integration_status": "Cancelled", "docstatus": 1, "custom_last_integration_error": ["is", "set"]}
+			{
+					"custom_integration_status": carrier_log.CANCELLED,
+					"docstatus": 1,
+					"custom_last_integration_error": ["is", "set"],
+				}
 		)
 	if problem_type in (None, CARRIER_STATUS_STALE):
 		collect(
-			{**shipped, "custom_integration_status": "Created", "creation": [">=", recent]},
+			{**shipped, "custom_integration_status": carrier_log.CREATED, "creation": [">=", recent]},
 			or_filters=[["custom_last_sync_at", "<=", stale_cutoff], ["custom_last_sync_at", "is", "not set"]],
 		)
 	rows = list(by_name.values())
@@ -550,7 +559,7 @@ def _collect_carrier_items(problem_type=None):
 	adapters = {}
 
 	def adapter_of(row):
-		# A return note belongs to a carrier only when the carrier owns it (Bosta: a Customer Return Pickup).
+		# A return note belongs to a carrier only when the carrier owns it (the adapter decides in applies_to).
 		key = (row.transporter, cint(row.is_return), row.custom_return_source if row.is_return else "")
 		if key not in adapters:
 			adapters[key] = next(
@@ -585,7 +594,7 @@ def _collect_carrier_items(problem_type=None):
 	# carrier cancelled this delivery". Read from the Cancel log rows (a derived set, after the Delivery Note
 	# read check above).
 	cancelled_here = set()
-	cancelled_names = [row.name for row in rows if row.custom_integration_status == "Cancelled"]
+	cancelled_names = [row.name for row in rows if row.custom_integration_status == carrier_log.CANCELLED]
 	if cancelled_names:
 		cancelled_here = {
 			row.reference_docname
@@ -627,17 +636,20 @@ def _collect_carrier_items(problem_type=None):
 		seen = row.custom_last_sync_at or row.modified
 		error = row.custom_last_integration_error
 		if (
-			(status in ("Creation Failed", "Creation Unknown") or (status in ("", "Not Created", None) and error))
+			(
+				status in (carrier_log.FAILED, carrier_log.UNKNOWN)
+				or (status in (*not_started, None) and error)
+			)
 			and row.docstatus == 0
 			and problem_type in (None, CARRIER_CREATION_PROBLEM)
 		):
 			add(CARRIER_CREATION_PROBLEM, carrier, row, f"{name}: {error}" if error else _(status), row.modified)
-		if status == "Cancelled" and row.docstatus == 1 and error:
+		if status == carrier_log.CANCELLED and row.docstatus == 1 and error:
 			# The automatic native cancel after the carrier's cancel was blocked (or failed): the reason is
 			# in the error and a person must cancel the note by hand.
 			if problem_type in (None, CARRIER_EXCEPTION):
 				add(CARRIER_EXCEPTION, carrier, row, f"{name}: {error}", seen)
-		elif status == "Cancelled" and row.docstatus == 1 and problem_type in (None, CARRIER_CANCELLED):
+		elif status == carrier_log.CANCELLED and row.docstatus == 1 and problem_type in (None, CARRIER_CANCELLED):
 			# Cancelled at the carrier but still submitted here (the local cancel failed): stays until it is
 			# cancelled in ERPNext, however the carrier was told.
 			add(
@@ -648,7 +660,7 @@ def _collect_carrier_items(problem_type=None):
 				seen,
 			)
 		elif (
-			status == "Cancelled"
+			status == carrier_log.CANCELLED
 			and row.name not in cancelled_here
 			and seen >= cancelled_cutoff
 			and problem_type in (None, CARRIER_CANCELLED)
@@ -656,8 +668,8 @@ def _collect_carrier_items(problem_type=None):
 			add(CARRIER_CANCELLED, carrier, row, _("{0} cancelled this delivery.").format(name), seen)
 		if (
 			(
-				(shipping_status in states[carrier].get(CARRIER_EXCEPTION, []) and status != "Cancelled")
-				or (status == "Created" and error)
+				(shipping_status in states[carrier].get(CARRIER_EXCEPTION, []) and status != carrier_log.CANCELLED)
+				or (status == carrier_log.CREATED and error)
 			)
 			and problem_type in (None, CARRIER_EXCEPTION)
 		):
@@ -677,7 +689,7 @@ def _collect_carrier_items(problem_type=None):
 				seen,
 			)
 		if (
-			status == "Created"
+			status == carrier_log.CREATED
 			and shipping_status not in adapter.terminal_states(bool(row.is_return))
 			and row.creation >= recent
 			and seen <= stale_cutoff
@@ -697,9 +709,12 @@ def _collect_carrier_return_reviews():
 	"""One row per draft Sales Return that a returned shipment created (#411), for the Stock User who checks
 	the goods and submits it. It clears once the return is submitted or cancelled. The carrier is the one of
 	the delivery the return is against. Read with the caller's permissions (``get_list``)."""
+	sources = [a.RETURNED_SOURCE for a in CARRIERS.values() if getattr(a, "RETURNED_SOURCE", None)]
+	if not sources:
+		return []
 	rows = frappe.get_list(
 		"Delivery Note",
-		filters={"is_return": 1, "docstatus": 0, "custom_return_source": ["like", "Returned by %"]},
+		filters={"is_return": 1, "docstatus": 0, "custom_return_source": ["in", sources]},
 		fields=["name", "return_against", "creation"],
 		limit_page_length=0,
 	)

@@ -74,6 +74,17 @@ class IntegrationTestBostaReturnPickup(BostaFixtureMixin, IntegrationTestCase):
 		self.assertFalse(values.lr_no)
 		self.assertFalse(values.lr_date)
 
+	def test_marking_a_saved_return_as_pickup_later_also_clears_the_copied_tracking_number(self):
+		draft = self._return(source=None)
+		frappe.db.set_value("Delivery Note", draft.name, {"lr_no": "TRK-OUT", "lr_date": "2026-11-01"})
+		draft = frappe.get_doc("Delivery Note", draft.name)
+		draft.custom_return_source = PICKUP
+		draft.custom_returned_cod = 0
+		draft.save()
+		values = stored(draft, "lr_no", "lr_date")
+		self.assertFalse(values.lr_no)
+		self.assertFalse(values.lr_date)
+
 	# -- who owns a return -------------------------------------------------------------------
 
 	def test_only_a_pickup_return_belongs_to_bosta(self):

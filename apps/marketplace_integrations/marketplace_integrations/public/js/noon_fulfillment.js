@@ -386,12 +386,14 @@
 						freeze: true,
 						freeze_message: __("Queueing..."),
 					})
-					.then(() => {
+					.then((r) => {
+							const queued = Boolean(r && r.message && r.message.queued);
 						frappe.show_alert({
-							message: __("Release queued. Reload the order in a moment."),
-							indicator: "green",
+							message: queued
+									? __("Release queued. Reload the order in a moment.")
+									: __("A Noon fulfillment action for this order is already queued or running."),
+							indicator: queued ? "green" : "blue",
 						});
-						ctx.reload();
 					});
 			}
 		);

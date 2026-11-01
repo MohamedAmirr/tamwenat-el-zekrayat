@@ -324,7 +324,7 @@ def run_create(delivery_note, log=None, lookup_first=True):
 		_finish(delivery_note, UNKNOWN, {"custom_last_integration_error": cstr(unknown)}, log, "Unknown", error=cstr(unknown))
 	except Exception:
 		frappe.db.rollback()
-		service = adapter.SERVICE_NAME if adapter else "Carrier"
+		service = adapter.SERVICE_NAME if adapter else _("carrier")
 		frappe.log_error(title=f"{service} shipment from Delivery Note failed", message=frappe.get_traceback())
 		message = _(
 			"Unexpected error while sending the shipment to {0}; see the Error Log. It may or may not have reached {0}."
@@ -355,10 +355,15 @@ def _finish(delivery_note, status, values, log, result, expected=CREATING, **log
 
 def is_stale_creating(delivery_note):
 	"""A Creating note with no queued job whose last change is older than ``STALE_CREATING_MINUTES``."""
-	values = frappe.db.get_value("Delivery Note", delivery_note, ["custom_integration_status", "modified"], as_dict=True)
+	values = frappe.db.get_value(
+		"Delivery Note",
+		delivery_note,
+		["custom_integration_status", "modified", "is_return", "transporter", "custom_return_source"],
+		as_dict=True,
+	)
 	if not values or cstr(values.custom_integration_status) != CREATING:
 		return False
-	adapter = adapter_for(frappe.get_doc("Delivery Note", delivery_note))
+	adapter = adapter_for(values)
 	if adapter and is_job_enqueued(_CREATE_JOB.format(adapter.SHIPPING_CARRIER.lower(), delivery_note)):
 		return False
 	return get_datetime(values.modified) <= add_to_date(now_datetime(), minutes=-STALE_CREATING_MINUTES)
@@ -536,13 +541,32 @@ def cancel(delivery_note):
 def cancel_after_carrier_cancelled(delivery_note):
 	"""Called by an adapter right after its refresh, webhook or nightly read wrote the Integration Status
 	Cancelled (the carrier itself confirmed the cancel; never on Unknown or Pending). A submitted note is
-	then cancelled natively (``doc.cancel()``) with no call to the carrier, as the system. Idempotent (a
+	then cancelled natively (``doc.cancel()``) with no call to the carrier. The cancel runs in a short
+	background job (``run_auto_cancel``, queued after the caller's commit, one per note), so it runs as the
+	system without changing the session user of the request or job that read the carrier. Idempotent (a
 	cancelled or draft note is left alone) and never raises: the caller's own work (a log row, the next
 	note of a nightly run) must not fail because of it.
 
 	Blocked (a linked submitted document) or failing: the note stays submitted, its
 	``custom_last_integration_error`` holds the reason (Needs Attention "Carrier Exception") and the people
 	in ``_notify_recipients`` are told a manual step is needed, once per distinct reason."""
+	try:
+		frappe.enqueue(
+			"marketplace_integrations.services.carrier_shipments.run_auto_cancel",
+			queue="short",
+			timeout=300,
+			job_id=f"auto-cancel|{delivery_note}",
+			deduplicate=True,
+			enqueue_after_commit=True,
+			delivery_note=delivery_note,
+		)
+	except Exception:
+		frappe.log_error(title="Queueing the automatic cancel of a Delivery Note failed", message=f"{delivery_note}\n{frappe.get_traceback()}")
+
+
+def run_auto_cancel(delivery_note):
+	"""The job of ``cancel_after_carrier_cancelled``: runs as the system. Never raises."""
+	frappe.set_user("Administrator")
 	try:
 		_auto_cancel(delivery_note)
 	except Exception:
@@ -571,16 +595,11 @@ def _auto_cancel(delivery_note):
 		frappe.db.commit()
 		return
 	service = adapter.SERVICE_NAME
-	session_user = frappe.session.user
 	try:
-		# As the system: the cancel must not depend on whoever's request or job happened to read the carrier.
-		frappe.set_user("Administrator")
-		try:
-			_check_native_cancel_not_blocked(doc)
-			doc.flags.ignore_permissions = True
-			doc.cancel()
-		finally:
-			frappe.set_user(session_user)
+		# The job runs as the system: the cancel does not depend on whoever read the carrier.
+		_check_native_cancel_not_blocked(doc)
+		doc.flags.ignore_permissions = True
+		doc.cancel()
 	except Exception as exc:
 		frappe.db.rollback()
 		if not isinstance(exc, frappe.ValidationError):
@@ -639,6 +658,28 @@ def _notify_recipients(doc):
 	return frappe.get_all("User", filters={"name": ["in", list(candidates)], "enabled": 1}, pluck="name")
 
 
+def notify_stock_managers(delivery_note, subject):
+	"""One native Notification Log per enabled Stock Manager, linked to ``delivery_note``. Must not raise."""
+	from frappe.desk.doctype.notification_log.notification_log import enqueue_create_notification
+
+	try:
+		users = frappe.get_all(
+			"User",
+			filters={
+				"name": ["in", frappe.get_all("Has Role", filters={"role": "Stock Manager", "parenttype": "User"}, pluck="parent") or [""]],
+				"enabled": 1,
+			},
+			pluck="name",
+		)
+		users = [user for user in users if user != "Guest"]
+		if users:
+			enqueue_create_notification(
+				users, {"type": "Alert", "subject": subject, "document_type": "Delivery Note", "document_name": delivery_note}
+			)
+	except Exception:
+		frappe.log_error(title="Delivery Note notification failed", message=f"{delivery_note}\n{frappe.get_traceback()}")
+
+
 def _notify(doc, subject):
 	"""One native Notification Log per recipient, linked to the Delivery Note. Must not raise."""
 	from frappe.desk.doctype.notification_log.notification_log import enqueue_create_notification
@@ -668,6 +709,9 @@ def _check_native_cancel_not_blocked(doc):
 	doc.ignore_linked_doctypes = NATIVE_CANCEL_IGNORED_LINKS
 	check_if_doc_is_linked(doc, method="Cancel")
 	check_if_doc_is_dynamically_linked(doc, method="Cancel")
+	# ERPNext's own cancel refuses a note whose Sales Order is Closed or On Hold (not checked for a return)
+	if not doc.get("is_return") and hasattr(doc, "check_sales_order_on_hold_or_close"):
+		doc.check_sales_order_on_hold_or_close("against_sales_order")
 
 
 def reconcile_open_notes():

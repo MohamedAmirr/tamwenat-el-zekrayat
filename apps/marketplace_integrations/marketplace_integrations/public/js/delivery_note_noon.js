@@ -62,13 +62,15 @@
 	}
 
 	function refresh(frm) {
+		// the saved state (refresh runs after load and save): the live checkbox and AWB cannot tell a generated AWB from a typed one
+		frm.__noon_awb_generated = awb_generated(frm);
 		set_awb_state(frm);
 		show_invoice_intro(frm);
 	}
 
 	// Ticking the box means Noon generates the AWB: a typed AWB is cleared (the server refuses both).
 	function custom_noon_generate_awb(frm) {
-		if (frm.doc.transporter_name !== CARRIER || !is_editable(frm) || awb_generated(frm)) return;
+		if (frm.doc.transporter_name !== CARRIER || !is_editable(frm) || frm.__noon_awb_generated) return;
 		if (frm.doc.custom_noon_generate_awb && (frm.doc.lr_no || "").trim()) frm.set_value("lr_no", "");
 		set_awb_state(frm);
 	}
