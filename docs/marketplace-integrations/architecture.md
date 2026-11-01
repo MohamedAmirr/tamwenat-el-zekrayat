@@ -243,12 +243,20 @@ Noon keeps `custom_carrier_status` / `custom_carrier_error` for now.
   are JSON in `Sales Order.custom_shipping_status_summary` (read by the list formatter and the hover card).
 - **Guards** (`validate`): items, quantities, carrier, tracking number, COD and city are locked once
   the shipment started; integration fields cannot be hand-edited; a note with a live shipment cannot
-  be cancelled or deleted, and its Sales Order cannot be cancelled (Batch B adds cancel/edit).
+  be cancelled or deleted until it is Cancelled at Bosta, and its Sales Order cannot be cancelled.
+- **Cancel, edit, returns, costs (Batch B, #410-#412, partial).** `delivery_note_shipment.cancel_at_bosta`
+  (API `bosta_shipments.cancel_at_bosta`) terminates the delivery and sets Cancellation Pending, then
+  Cancelled / Cancellation Unknown / back to Created; the native cancel (form `before_cancel`) or delete
+  follows once Cancelled. `integrations/bosta/editing.py` (APIs `get_edit_values`, `edit_shipment`) sends
+  changed receiver phone / drop-off address with `PUT` and records them on the note and the snapshot.
+  `integrations/bosta/returns.py` makes one draft Sales Return (`custom_return_source`) when a returned
+  state (`statuses.RETURNED_STATE_CODES`) arrives. New Delivery Note fields `custom_return_source` and
+  `custom_actual_cost_received_on`. Open decisions: `docs/bosta-integration/README.md`.
 - **Needs Attention** (`services/marketplace_attention.py`, platform `Bosta`) reads Delivery Notes:
   Bosta Creation Problem (draft in Creation Failed/Unknown), Bosta Cancelled Delivery, Bosta Carrier
-  Exception, Bosta Return (no submitted return note), Bosta Status Stale. Bosta Cancelled Delivery
-  clears when the Delivery Note is cancelled in ERPNext or after 14 days (#410 must exclude cancels
-  the user started).
+  Exception, Bosta Return (no submitted return note), Bosta Return Review (the draft Sales Return, `role` "Stock User"), Bosta Status Stale. Bosta Cancelled Delivery
+  clears when the Delivery Note is cancelled in ERPNext or after 14 days, and skips a note with a Success
+  "Cancel" log row (cancelled from here).
 - **COD** defaults to the Sales Order total minus advance payments, proportionally per note, and is
   recomputed on every save while the note is editable until confirmed (`custom_cod_confirmed`: ticked,
   or the amount changed; a typed 0 means prepaid once confirmed). Submit refuses an unconfirmed COD.
@@ -266,7 +274,7 @@ Noon keeps `custom_carrier_status` / `custom_carrier_error` for now.
 
 **Bosta Settings and city lookup.** `Bosta Settings`, the pickup-location picker and
 `integrations/bosta/locations.py` are unchanged (see above). The Delivery Note's **Pick Bosta City**
-button uses `api.bosta_shipments.get_cities` and `resolve_city`. `get_cod_hint` returns the computed COD when it differs from the merchant's confirmed one (shown on the form, never blocks). A Sales Order `validate`/`before_update_after_submit` hook (`statuses.keep_stored_summary`) keeps the app-written summary from being overwritten by an older form copy.
+button uses `api.bosta_shipments.get_cities` and `resolve_city`; Submit first fills an empty city from the address (`delivery_note_shipment.autofill_city`) and only answers `needs_city` (the form opens the picker) when that finds none. `get_cod_hint` returns the computed COD when it differs from the merchant's confirmed one (shown on the form, never blocks). A Sales Order `validate`/`before_update_after_submit` hook (`statuses.keep_stored_summary`) keeps the app-written summary from being overwritten by an older form copy.
 
 **No district: Bosta resolves it (#318).** The create call is `POST /deliveries` **without**
 `?apiVersion=1` (that version requires a district and rejects a create without one with
