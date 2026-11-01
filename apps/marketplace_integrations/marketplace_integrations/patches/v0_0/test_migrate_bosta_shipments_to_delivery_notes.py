@@ -204,6 +204,63 @@ class IntegrationTestMigrateBostaShipments(BostaFixtureMixin, IntegrationTestCas
 		self.assertIn("DEL-HELD", str(caught.exception))
 		self.assertEqual(self._note_values(note).custom_carrier_delivery_id, "DEL-HELD")
 
+	def test_the_patch_creates_the_note_fields_it_writes_when_they_are_missing(self):
+		"""Regression: the patch runs before fixtures sync, so a field it writes that its own field list
+		missed (``custom_cod_confirmed``) made the copy fail with MySQL 1054 on a site without it."""
+		note = self.make_note(self.make_order())
+		self._shipment(note)
+		self.addCleanup(migration._ensure_custom_fields)
+		self.addCleanup(frappe.clear_cache, doctype="Delivery Note")
+		name = "Delivery Note-custom_cod_confirmed"
+		frappe.delete_doc("Custom Field", name, force=True, ignore_permissions=True)
+		if frappe.db.has_column("Delivery Note", "custom_cod_confirmed"):
+			frappe.db.sql_ddl("alter table `tabDelivery Note` drop column `custom_cod_confirmed`")
+		frappe.clear_cache(doctype="Delivery Note")
+		self.assertFalse(frappe.db.has_column("Delivery Note", "custom_cod_confirmed"))
+
+		migration.execute()
+
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "custom_cod_confirmed"), 1)
+		migration.execute()
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "custom_cod_confirmed"), 1)
+
+	def test_every_field_the_patch_writes_is_created_by_its_field_list(self):
+		written = [
+			("Delivery Note", f)
+			for f in (
+				"custom_integration_status",
+				"custom_carrier_delivery_id",
+				"custom_carrier_reference",
+				"custom_cod_amount",
+				"custom_cod_confirmed",
+				"custom_actual_shipping_cost",
+				"custom_shipping_status",
+				"custom_bosta_last_event_at",
+				"custom_bosta_city",
+				"custom_bosta_city_name",
+				"custom_last_sync_at",
+				"custom_shipping_label",
+			)
+		] + [
+			("Sales Order", "custom_shipping_status_summary"),
+			("Integration Request", "custom_operation_type"),
+			("Integration Request", "custom_result"),
+			("Integration Request", "custom_attempt_no"),
+			("Integration Request", "custom_external_reference"),
+			("Integration Request", "custom_delivery_id"),
+		]
+		import json
+		import os
+
+		path = os.path.join(os.path.dirname(migration.__file__), "..", "..", "fixtures", "custom_field.json")
+		with open(path) as handle:
+			selected = {
+				(e["dt"], e["fieldname"])
+				for e in json.load(handle)
+				if e["dt"] in migration.NEW_FIELD_DOCTYPES and e["fieldname"].startswith(migration.NEW_FIELD_NAMES)
+			}
+		self.assertEqual([w for w in written if w not in selected], [])
+
 	def test_the_migrated_note_is_cod_confirmed_and_the_sales_order_summary_is_recalculated(self):
 		order = self.make_order()
 		note = self.make_note(order)
