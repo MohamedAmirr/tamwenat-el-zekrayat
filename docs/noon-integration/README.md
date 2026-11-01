@@ -102,14 +102,13 @@ The Delivery Note of a Noon Sales Order is the shipment. The Noon adapter
   (UploadFbpiOrderInvoice). One idempotency key per press; Retry reuses it, a new press makes a new key (Noon
   supersedes the earlier invoice for the same shipment or order, so the dialog warns first). Both refuse unless
   `catalog.fbpi_ready(account)` is ok. The order invoice keeps its state in `Marketplace Order.noon_order_invoice_*`;
-  the note records `custom_noon_invoice_uploaded_on` and `custom_noon_invoice_items_hash` (written only on a
-  successful upload, cleared on amend). The dialog ("Sending to Noon...", polls `api.noon_fulfillment.check_invoice_upload`)
+  the note records `custom_noon_invoice_uploaded_on` (written only on a
+  successful upload, cleared on amend). One upload per note runs at a time (a double press is refused). The dialog ("Sending to Noon...", polls `api.noon_fulfillment.check_invoice_upload`)
   ends in a small alert or an error dialog with Retry. A shipment-invoice failure keeps no state on the note:
   Retry works from the open dialog (the key and the attached copy come back with the first answer), after a
   reload a new press is a new key. Rights: write on the Delivery Note / write on the Sales Order (no Marketplace
   Order right needed). Every call is an Integration Request (operation Invoice, reference the document, the
-  idempotency key as correlation id, no file bytes). If the note's items differ from the stored hash, Needs
-  Attention (Noon Fulfillment) says "The invoice may need re-upload"; nothing is re-uploaded.
+  idempotency key as correlation id, no file bytes); the invoice writes no Marketplace Sync Log row.
   Open items to verify on the first real use: when Noon accepts an invoice (order or shipment state), rate limits.
 
 ## Provider contract

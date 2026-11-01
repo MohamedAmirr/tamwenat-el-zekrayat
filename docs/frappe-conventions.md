@@ -170,6 +170,10 @@ apps/<app_name>/
 - `remove_orphan_doctypes` and the post-model-sync order: see `docs/frappe-best-practices.md`, Version compatibility.
 - `make_sales_return` copies native `lr_no`/`lr_date` to the return note. Any lookup by tracking number must filter `is_return: 0`, and an auto-made return should clear them.
 - A form `before_cancel` that calls an app endpoint which writes the note (bumping `modified`) must reload the doc before resolving, else the native cancel fails with "modified after you opened it". `frappe.validated = false` stops the cancel; delete has no client hook, so guard `on_trash` on the server.
+- **A pre-check that mimics the native cancel must use the same `ignore_linked_doctypes`.** `Document.check_no_back_links_exist` honours `doc.ignore_linked_doctypes`; ERPNext's `DeliveryNote.on_cancel` sets it (GL Entry, Stock Ledger Entry, Repost Item Valuation, Serial and Batch Bundle) and cancels Packing Slips first. A pre-check run before `cancel()` without that list sees its own stock/GL rows as blocking links (`carrier_shipments.NATIVE_CANCEL_IGNORED_LINKS`).
+- **Auto-cancel only on the transition you caused to be observed.** A status read may auto-cancel the note only when this read moved the status into Cancelled (or retries a Cancelled note that has a blocking error), never when the app's own cancel just wrote Cancelled. Run the cancel as Administrator and restore the user afterwards.
+- A contract hook that must run for notes no adapter owns (a person setting an app-only value) is `guard_always(doc)` on the adapter, called from `validate_delivery_note` for every adapter.
+- A File shared by content hash: deleting one File row removes the disk file only if no other row has the same `content_hash`, so removing a loose upload after attaching a copy is safe; compare `saved.name != file_doc.name`, not `file_url`.
 - Tests: do not name a mixin helper `_created`; `BostaFixtureMixin` keeps its tracked-docs list in `self._created`.
 
 
