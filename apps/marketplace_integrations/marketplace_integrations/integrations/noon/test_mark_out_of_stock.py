@@ -256,6 +256,42 @@ class IntegrationTestNoonMarkOutOfStock(IntegrationTestNoonFulfillmentBase):
 		self.assertFalse(result["queued"])
 		self.assertEqual(self._pending(fixture), set())
 
+	def test_a_sales_order_writer_without_marketplace_order_rights_can_press_again_and_hit_a_dedup(self):
+		fixture = self._order([("SKU-A", 1)], ["SKU-A"])
+		email = f"noon-oos-sales-user-{frappe.generate_hash(length=6)}@example.com"
+		user = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": "Noon Oos Test",
+				"send_welcome_email": 0,
+				"roles": [{"role": "Sales User"}],
+			}
+		).insert()
+		frappe.db.commit()
+		try:
+			frappe.set_user(email)
+			row = fixture.row_for("SKU-A").name
+			# The first press and the "already queued" press (the job is deduplicated away) both write the
+			# order as the system; the second reserves nothing new and releases nothing.
+			with patch(_ENQUEUE, return_value=MagicMock()):
+				fulfillment.mark_row_out_of_stock(fixture.name, row)
+			with patch(_ENQUEUE, return_value=None):
+				result = fulfillment.mark_row_out_of_stock(fixture.name, row)
+			self.assertFalse(result["queued"])
+			self.assertEqual(self._pending(fixture), {"1"})  # the running job keeps its reservation
+			# a first press whose job is dropped releases only what it reserved, also without order rights
+			frappe.set_user("Administrator")
+			self._reserve(fixture, [])
+			frappe.set_user(email)
+			with patch(_ENQUEUE, return_value=None):
+				fulfillment.mark_row_out_of_stock(fixture.name, row)
+			self.assertEqual(self._pending(fixture), set())
+		finally:
+			frappe.set_user("Administrator")
+			frappe.delete_doc("User", user.name, force=True, ignore_permissions=True)
+			frappe.db.commit()
+
 	# ---- worker --------------------------------------------------------------------------
 
 	def test_success_sends_update_order_once_then_refreshes_and_runs_the_local_step(self):
@@ -388,6 +424,41 @@ class IntegrationTestNoonMarkOutOfStock(IntegrationTestNoonFulfillmentBase):
 		client.request.assert_not_called()
 		self.assertEqual(self._result(fixture)["state"], "failed")
 		self.assertEqual(self._pending(fixture), set())
+
+	def test_release_stuck_reservation_asks_noon_and_keeps_units_noon_already_marked(self):
+		fixture = self._order([("SKU-A", 1), ("SKU-B", 1)], ["SKU-A", "SKU-B"])
+		self._reserve(fixture, ["1", "2"])
+		name = fixture.marketplace_order.name
+		nr = fixture.marketplace_order.external_order_id
+		with patch(_ENQUEUE) as enqueue:
+			enqueue.return_value = MagicMock()
+			self.assertEqual(fulfillment.release_stuck_oos_reservation(name), {"queued": True})
+		self.assertEqual(self._pending(fixture), {"1", "2"})  # nothing cleared by the request itself
+
+		with patch(_GET_ORDER, return_value=_noon_order(nr, ("1", _OOS), ("2", "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED"))):
+			fulfillment.run_release_stuck_oos(name)
+		self.assertEqual(self._pending(fixture), {"1"})  # Noon acted on unit 1: it stays for the Retry
+
+		# an unusable Noon answer frees nothing
+		with patch(_GET_ORDER, side_effect=frappe.ValidationError("Noon down")):
+			fulfillment.run_release_stuck_oos(name)
+		self.assertEqual(self._pending(fixture), {"1"})
+
+	def test_release_stuck_reservation_is_refused_while_an_out_of_stock_job_runs(self):
+		fixture = self._order([("SKU-A", 1)], ["SKU-A"])
+		self._reserve(fixture, ["1"])
+		name = fixture.marketplace_order.name
+		fulfillment._oos_inflight_add(name, "req-live")
+		self.addCleanup(fulfillment._oos_inflight_remove, name, "req-live")
+		with patch(_ENQUEUE) as enqueue:
+			with self.assertRaises(frappe.ValidationError):
+				fulfillment.release_stuck_oos_reservation(name)
+			enqueue.assert_not_called()
+		# a worker that starts after the press still frees nothing while the marker is set
+		with patch(_GET_ORDER, return_value=_noon_order(fixture.marketplace_order.external_order_id)) as read:
+			fulfillment.run_release_stuck_oos(name)
+			read.assert_not_called()
+		self.assertEqual(self._pending(fixture), {"1"})
 
 	def test_the_log_holds_no_secrets_or_customer_data(self):
 		fixture = self._order([("SKU-A", 1)], ["SKU-A"])

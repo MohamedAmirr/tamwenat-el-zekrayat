@@ -158,7 +158,9 @@ def _pending_oos_units(order):
 
 
 def _release_pending_oos_units(marketplace_order_name, mp_item_nrs):
-	order = _lock_and_load_order(marketplace_order_name)
+	"""Free units from the reservation. Internal bookkeeping: written as the system (the callers checked the
+	user's right on the Sales Order; a Sales Order writer has no Marketplace Order rights)."""
+	order = _lock_and_load_order(marketplace_order_name, as_system=True)
 	order.noon_pending_oos_units = frappe.as_json(sorted(_pending_oos_units(order) - set(mp_item_nrs)))
 	order.save()
 	frappe.db.commit()
@@ -301,22 +303,82 @@ def _is_definite_refusal(status_code):
 	return 400 <= status_code < 500 and status_code not in (408, 429)
 
 
+_OOS_INFLIGHT = "noon-oos-inflight|{}"
+_OOS_INFLIGHT_TTL = 600  # a little over the job timeout (300 s): a hard-killed worker's mark expires
+
+
+def _oos_inflight(order_name):
+	return frappe.cache().get_value(_OOS_INFLIGHT.format(order_name)) or []
+
+
+def _oos_inflight_add(order_name, request_id):
+	frappe.cache().set_value(
+		_OOS_INFLIGHT.format(order_name), [*_oos_inflight(order_name), request_id], expires_in_sec=_OOS_INFLIGHT_TTL
+	)
+
+
+def _oos_inflight_remove(order_name, request_id):
+	left = [rid for rid in _oos_inflight(order_name) if rid != request_id]
+	if left:
+		frappe.cache().set_value(_OOS_INFLIGHT.format(order_name), left, expires_in_sec=_OOS_INFLIGHT_TTL)
+	else:
+		frappe.cache().delete_value(_OOS_INFLIGHT.format(order_name))
+
+
 def release_stuck_oos_reservation(marketplace_order_name):
-	"""Manually clear every Pending Noon Out of Stock unit reservation on
-	this order - recovers from a hard-killed worker process that never
-	reached ``run_mark_out_of_stock()``'s ``finally`` release (#146 review
-	finding #2). This reservation lives on the order itself
-	(``noon_pending_oos_units``). A legitimate in-flight job's own ``finally``
-	simply finds nothing left to release once this has already cleared it."""
+	"""Queue the recovery of a Pending Noon Out of Stock reservation orphaned by a worker that died before
+	``run_mark_out_of_stock()``'s ``finally`` (#146 review finding #2). Refuses while an Out of Stock job of
+	this order is queued or running (it owns the reservation). The job asks Noon first and frees only the
+	units Noon does not show Out of Stock (``run_release_stuck_oos``). Returns ``{"queued"}``."""
 	order = _lock_and_load_order(marketplace_order_name)
-	released = sorted(_pending_oos_units(order))
-	if not released:
+	if not _pending_oos_units(order):
+		frappe.db.commit()
 		frappe.throw(_("There is no pending Out of Stock reservation on this order."))
-	order.noon_pending_oos_units = frappe.as_json([])
-	order.save()
 	frappe.db.commit()
-	_log_fulfillment(order, "ReleaseStuckOosReservation", "Success", {"released_mp_item_nrs": released})
-	return {"released": released}
+	if _oos_inflight(order.name):
+		frappe.throw(_("An Out of Stock request of this order is still running. Wait for it to finish."))
+	job = frappe.enqueue(
+		run_release_stuck_oos,
+		queue="long",
+		timeout=300,
+		job_id=f"{RQ_JOB_PREFIX}-{order.name}-oos-release",
+		deduplicate=True,
+		marketplace_order_name=order.name,
+	)
+	return {"queued": job is not None}
+
+
+def run_release_stuck_oos(marketplace_order_name):
+	"""Worker of the recovery. Asks Noon (GetFbpiOrder) which reserved units are Out of Stock there: those stay
+	reserved (Noon acted; the Mark as Out of Stock Retry finishes the local step), the others are freed. An
+	unusable answer from Noon frees nothing. Logged to the Marketplace Sync Log."""
+	frappe.set_user("Administrator")
+	order = _lock_and_load_order(marketplace_order_name)
+	held = sorted(_pending_oos_units(order))
+	if not held or _oos_inflight(order.name):
+		frappe.db.commit()
+		return
+	try:
+		account, _client = _account_and_client(order)
+		external_order_id = order.external_order_id
+		frappe.db.commit()  # release the order lock before the Noon call
+		raw_order = get_fbpi_order(account, external_order_id)
+	except Exception:
+		frappe.db.rollback()
+		_log_fulfillment(
+			order, "ReleaseStuckOosReservation", "Error", {"mp_item_nrs": held}, traceback_text=frappe.get_traceback()
+		)
+		return
+	at_noon = [nr for nr in held if _is_out_of_stock(raw_order, nr)]
+	free = [nr for nr in held if nr not in at_noon]
+	if free and not _oos_inflight(order.name):
+		_release_pending_oos_units(order.name, free)
+	_log_fulfillment(
+		order,
+		"ReleaseStuckOosReservation",
+		"Success",
+		{"released_mp_item_nrs": free, "kept_out_of_stock_at_noon": at_noon},
+	)
 
 
 # ---------------------------------------------------------------------------
@@ -491,6 +553,7 @@ def mark_row_out_of_stock(sales_order_name, row_name):
 
 	request_id = frappe.generate_hash(length=16)
 	newly_reserved = set(units) - held
+	_oos_inflight_add(order.name, request_id)  # the stuck-reservation release refuses while this is set
 	try:
 		job = frappe.enqueue(
 			run_mark_out_of_stock,
@@ -505,10 +568,15 @@ def mark_row_out_of_stock(sales_order_name, row_name):
 			check_first=is_retry,
 		)
 	except Exception:
-		_release_pending_oos_units(order.name, newly_reserved)
+		_oos_inflight_remove(order.name, request_id)
+		if newly_reserved:
+			_release_pending_oos_units(order.name, newly_reserved)
 		raise
 	if job is None:
-		_release_pending_oos_units(order.name, newly_reserved)
+		_oos_inflight_remove(order.name, request_id)  # no job of this press will clear it
+		if newly_reserved:
+			# Already queued (a retry of the same units reserved nothing new): the running job keeps its reservation.
+			_release_pending_oos_units(order.name, newly_reserved)
 	return {"queued": job is not None, "request_id": request_id}
 
 
@@ -618,6 +686,7 @@ def run_mark_out_of_stock(marketplace_order_name, mp_item_nrs, sales_order, requ
 	order = _lock_and_load_order(marketplace_order_name)
 	if not set(mp_item_nrs) <= _pending_oos_units(order):
 		frappe.db.commit()
+		_oos_inflight_remove(marketplace_order_name, request_id)
 		_set_result(sales_order, request_id, "failed", _("The Out of Stock reservation was released."))
 		return
 	# a Retry's reservation outlives an Unknown answer of this run too (nothing is sent blind)
@@ -680,6 +749,7 @@ def run_mark_out_of_stock(marketplace_order_name, mp_item_nrs, sales_order, requ
 			_("Marking Out of Stock failed unexpectedly. See the Error Log."),
 		)
 	finally:
+		_oos_inflight_remove(marketplace_order_name, request_id)
 		if not keep_reservation:
 			_release_pending_oos_units(marketplace_order_name, mp_item_nrs)
 
@@ -707,8 +777,27 @@ def set_invoice_result(idempotency_key, state, message=""):
 	)
 
 
-def invoice_result(idempotency_key):
-	"""``{"state", "message"}`` of one invoice press, ``pending`` until the job has written one."""
+def _invoice_binding_key(idempotency_key):
+	return f"noon-invoice-document|{idempotency_key}"
+
+
+def bind_invoice_key(idempotency_key, doctype, name):
+	"""Remember which document a press key belongs to, so the poll of one document cannot read the result of
+	another's upload (a key is a secret-ish token, but the result text can name Noon's refusal)."""
+	frappe.cache().set_value(_invoice_binding_key(idempotency_key), f"{doctype}|{name}", expires_in_sec=_INVOICE_RESULT_TTL)
+
+
+def invoice_key_belongs_to(idempotency_key, doctype, name):
+	"""False only when the key is bound to a different document (an unbound or expired key is not refused)."""
+	bound = frappe.cache().get_value(_invoice_binding_key(idempotency_key))
+	return not bound or bound == f"{doctype}|{name}"
+
+
+def invoice_result(idempotency_key, doctype=None, name=None):
+	"""``{"state", "message"}`` of one invoice press, ``pending`` until the job has written one. With a
+	document given, a key bound to another document reads as ``pending``."""
+	if doctype and not invoice_key_belongs_to(idempotency_key, doctype, name):
+		return {"state": "pending", "message": ""}
 	return frappe.cache().get_value(_invoice_result_key(idempotency_key)) or {"state": "pending", "message": ""}
 
 
@@ -798,9 +887,11 @@ def attach_invoice_file(file_url, doctype, name):
 	if (
 		not file_doc.attached_to_doctype
 		and not file_doc.attached_to_name
-		and saved.file_url != file_doc.file_url
+		and saved.name != file_doc.name
 		and file_doc.owner == frappe.session.user
 	):
+		# Also when the attached copy shares the loose file's path (same content): Frappe's File removes the
+		# disk file only when no other File row has the same content hash, so the attached copy keeps it.
 		frappe.delete_doc("File", file_doc.name, ignore_permissions=True, force=True)
 	return saved.file_url
 
@@ -839,6 +930,7 @@ def upload_order_invoice(marketplace_order_name, file_url, invoice_nr, issued_at
 	order.noon_order_invoice_last_error = None
 	order.save()
 	set_invoice_result(order.noon_order_invoice_idempotency_key, "pending")
+	bind_invoice_key(order.noon_order_invoice_idempotency_key, *attach_to)
 	frappe.db.commit()
 	return _enqueue_order_invoice(order, sales_order)
 
@@ -886,13 +978,11 @@ def run_upload_order_invoice(marketplace_order_name, invoice_idempotency_key, sa
 	if not has_created_note(order.name):
 		message = _("The order no longer has a Created shipment.")
 		_set_order_invoice_error(order, message)
-		_log_fulfillment(order, "UploadOrderInvoice", "Error", {}, message)
 		return
 	try:
 		_account, client = _account_and_client(order)
 	except Exception:
 		_set_order_invoice_error(order, cstr(frappe.get_traceback()).strip()[:500])
-		_log_fulfillment(order, "UploadOrderInvoice", "Error", {}, traceback_text=frappe.get_traceback())
 		return
 	invoice_file = order.noon_order_invoice_file
 	invoice_nr = order.noon_order_invoice_nr
@@ -936,10 +1026,7 @@ def run_upload_order_invoice(marketplace_order_name, invoice_idempotency_key, sa
 				invoice_idempotency_key, "failed", _("The invoice could not be sent. See the Error Log.")
 			)
 		frappe.db.commit()
-		# Never include the base64 payload in the Sync Log.
-		_log_fulfillment(
-			order, "UploadOrderInvoice", "Error", request_metadata, traceback_text=frappe.get_traceback()
-		)
+		frappe.log_error(title="Noon order invoice failed", message=frappe.get_traceback())
 		return
 
 	order = _lock_and_load_order(marketplace_order_name)
@@ -950,7 +1037,6 @@ def run_upload_order_invoice(marketplace_order_name, invoice_idempotency_key, sa
 
 	if outcome != "done":
 		_set_order_invoice_error(order, remote_message[:500])
-		_log_fulfillment(order, "UploadOrderInvoice", "Error", request_metadata, remote_message)
 		return
 
 	order.noon_order_invoice_status = "Uploaded"
@@ -958,7 +1044,6 @@ def run_upload_order_invoice(marketplace_order_name, invoice_idempotency_key, sa
 	order.save()
 	set_invoice_result(invoice_idempotency_key, "done")
 	frappe.db.commit()
-	_log_fulfillment(order, "UploadOrderInvoice", "Success", request_metadata)
 
 
 def retry_order_invoice(marketplace_order_name, sales_order=None):
@@ -970,5 +1055,9 @@ def retry_order_invoice(marketplace_order_name, sales_order=None):
 	if order.noon_order_invoice_status not in ("Pending", "Error") or not order.noon_order_invoice_file:
 		frappe.throw(_("The order invoice has nothing to retry."))
 	set_invoice_result(order.noon_order_invoice_idempotency_key, "pending")
+	bind_invoice_key(
+		order.noon_order_invoice_idempotency_key,
+		*(("Sales Order", sales_order) if sales_order else ("Marketplace Order", order.name)),
+	)
 	frappe.db.commit()
 	return _enqueue_order_invoice(order, sales_order)

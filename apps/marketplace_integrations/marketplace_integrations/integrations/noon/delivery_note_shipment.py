@@ -38,7 +38,6 @@ refuses Submit-time creation unless ``catalog.fbpi_ready(account)`` says the sto
 """
 
 import base64
-import hashlib
 import json
 import re
 
@@ -112,7 +111,6 @@ SYSTEM_FIELDS = (
 	"custom_carrier_request_snapshot",
 	# the shipment invoice record: an amended note has not had its invoice uploaded
 	"custom_noon_invoice_uploaded_on",
-	"custom_noon_invoice_items_hash",
 )
 #: Fields a person edits that must stay put once the shipment is started (and the Generate AWB checkbox).
 LOCKED_FIELDS = ("transporter", "lr_no")
@@ -833,12 +831,10 @@ def after_cancelled(delivery_note):
 # event). The PDF is attached by a person; nothing is generated.
 
 _KEY_PATTERN = re.compile(r"[A-Za-z0-9]{1,64}")
-
-
-def items_hash(rows):
-	"""Fingerprint of the note's rows (name, Item, quantity), stored with an upload so a later change shows up."""
-	data = sorted((cstr(row.get("name")), cstr(row.get("item_code")), flt(row.get("qty"), 6)) for row in rows)
-	return hashlib.sha256(json.dumps(data).encode()).hexdigest()
+#: Cache marker "an invoice upload is queued or running for this note" (value: the press key), cleared by the
+#: job; it expires on its own after the job timeout (300 s) plus a margin, so a killed job cannot block forever.
+_INVOICE_INFLIGHT = "noon-shipment-invoice-inflight|{}"
+_INVOICE_INFLIGHT_TTL = 600
 
 
 def upload_invoice_for_note(delivery_note, file_url, invoice_nr, issued_at, idempotency_key=None):
@@ -859,30 +855,43 @@ def upload_invoice_for_note(delivery_note, file_url, invoice_nr, issued_at, idem
 		frappe.throw(_("Invoice Nr and Issued At are required."))
 	if idempotency_key is not None and not _KEY_PATTERN.fullmatch(cstr(idempotency_key)):
 		frappe.throw(_("Invalid upload key."))
+	if idempotency_key is not None and not fulfillment.invoice_key_belongs_to(idempotency_key, "Delivery Note", doc.name):
+		frappe.throw(_("Invalid upload key."))
+	# One upload per note at a time: a double press must not send two (a Retry of the same key is allowed).
+	marker_key = _INVOICE_INFLIGHT.format(doc.name)
+	running = frappe.cache().get_value(marker_key)
+	if running and running != cstr(idempotency_key):
+		frappe.throw(_("An invoice upload for this Delivery Note is already running. Wait for it to finish."))
 	# the caller has write permission on this note (api/noon_fulfillment.py); the File is attached to it
 	file_url = fulfillment.attach_invoice_file(file_url, "Delivery Note", doc.name)
 	key = cstr(idempotency_key) or frappe.generate_hash(length=32)
+	frappe.cache().set_value(marker_key, key, expires_in_sec=_INVOICE_INFLIGHT_TTL)
 	fulfillment.set_invoice_result(key, "pending")
+	fulfillment.bind_invoice_key(key, "Delivery Note", doc.name)
 	frappe.db.commit()
-	job = frappe.enqueue(
-		"marketplace_integrations.integrations.noon.delivery_note_shipment.run_upload_invoice",
-		queue="long",
-		timeout=300,
-		job_id=f"noon-shipment-invoice-{doc.name}-{key}",
-		deduplicate=True,
-		delivery_note=doc.name,
-		file_url=file_url,
-		invoice_nr=invoice_nr,
-		issued_at=cstr(issued_at),
-		idempotency_key=key,
-	)
+	try:
+		job = frappe.enqueue(
+			"marketplace_integrations.integrations.noon.delivery_note_shipment.run_upload_invoice",
+			queue="long",
+			timeout=300,
+			job_id=f"noon-shipment-invoice-{doc.name}-{key}",
+			deduplicate=True,
+			delivery_note=doc.name,
+			file_url=file_url,
+			invoice_nr=invoice_nr,
+			issued_at=cstr(issued_at),
+			idempotency_key=key,
+		)
+	except Exception:
+		frappe.cache().delete_value(marker_key)
+		raise
 	return {"queued": job is not None, "idempotency_key": key, "file_url": file_url}
 
 
 def run_upload_invoice(delivery_note, file_url, invoice_nr, issued_at, idempotency_key):
 	"""Job of ``upload_invoice_for_note``: UploadShipmentInvoice with the note's shipment number
 	(``custom_carrier_reference``), logged, never holding a lock across the call. Success records the upload
-	time and the items fingerprint on the note (``db_set``: a system write-back on a submitted note); every
+	time on the note (``db_set``: a system write-back on a submitted note); every
 	failure only reaches the result the dialog reads (Retry) and never touches the note's state."""
 	frappe.set_user("Administrator")
 	try:
@@ -921,10 +930,7 @@ def run_upload_invoice(delivery_note, file_url, invoice_nr, issued_at, idempoten
 			fulfillment.set_invoice_result(idempotency_key, "failed", message)
 			return
 		doc.db_set(
-			{
-				"custom_noon_invoice_uploaded_on": now_datetime(),
-				"custom_noon_invoice_items_hash": items_hash(doc.get("items") or []),
-			},
+			{"custom_noon_invoice_uploaded_on": now_datetime()},
 			update_modified=False,
 			notify=True,
 			commit=True,
@@ -936,36 +942,10 @@ def run_upload_invoice(delivery_note, file_url, invoice_nr, issued_at, idempoten
 		fulfillment.set_invoice_result(
 			idempotency_key, "failed", _("The invoice could not be sent. See the Error Log.")
 		)
-
-
-def outdated_invoices(rows):
-	"""``{Delivery Note name: Marketplace Order name}`` of the notes in ``rows`` (``name`` and
-	``custom_noon_invoice_items_hash``, already read with the caller's permissions) whose items differ from
-	the ones that were present at the upload: the invoice may need re-upload (Needs Attention). Read as the
-	system: only this derived answer leaves."""
-	stored = {row.name: row.custom_noon_invoice_items_hash for row in rows}
-	if not stored:
-		return {}
-	items = frappe.get_all(
-		"Delivery Note Item",
-		filters={"parent": ["in", list(stored)], "parenttype": "Delivery Note"},
-		fields=["parent", "name", "item_code", "qty", "against_sales_order"],
-		parent_doctype="Delivery Note",
-		limit_page_length=0,
-	)
-	by_note = {}
-	for item in items:
-		by_note.setdefault(item.parent, []).append(item)
-	result = {}
-	for note, note_items in by_note.items():
-		if items_hash(note_items) == stored[note]:
-			continue
-		orders = {item.against_sales_order for item in note_items if item.against_sales_order}
-		if len(orders) == 1:
-			order = frappe.db.get_value("Sales Order", next(iter(orders)), "custom_marketplace_order")
-			if order:
-				result[note] = order
-	return result
+	finally:
+		marker_key = _INVOICE_INFLIGHT.format(delivery_note)
+		if frappe.cache().get_value(marker_key) == idempotency_key:
+			frappe.cache().delete_value(marker_key)
 
 
 # ---------------------------------------------------------------------------
@@ -1069,6 +1049,11 @@ def refresh(delivery_note):
 	error is a readable ``frappe.ValidationError`` (the Refresh button shows it; jobs log it)."""
 	doc = frappe.get_doc("Delivery Note", delivery_note)
 	status = cstr(doc.get("custom_integration_status"))
+	if status == CANCELLED and doc.docstatus == 1 and cstr(doc.get("custom_last_integration_error")):
+		# Cancelled with an error left by an earlier blocked automatic cancel: retry it (a note this app's
+		# own Cancel just wrote Cancelled has no error and is left to the person about to cancel it).
+		_cancel_note_natively(delivery_note)
+		return frappe.db.get_value("Delivery Note", delivery_note, "custom_shipping_status")
 	if status not in (CREATED, CANCELLATION_UNKNOWN) or not noon_order_name(doc):
 		return doc.get("custom_shipping_status")
 	try:
@@ -1249,11 +1234,14 @@ def run_reconcile():
 	)
 	cutoff = add_days(now_datetime(), -REFRESH_MAX_AGE_DAYS)
 	# A Created note stops being read once Noon shows it Shipped or Cancelled, or after 60 days (two calls per
-	# note per night are not spent forever); the webhook and the Refresh button still work on it.
+	# note per night are not spent forever); the webhook and the Refresh button still work on it. A submitted
+	# Created note that shows Cancelled is kept: the refresh makes its Integration Status Cancelled, which
+	# cancels the note natively.
 	notes = [
 		note
 		for note in notes
 		if cstr(note.custom_integration_status) != CREATED
+		or (note.docstatus == 1 and cstr(note.custom_shipping_status) == SHIPPING_CANCELLED)
 		or (cstr(note.custom_shipping_status) not in (SHIPPING_SHIPPED, SHIPPING_CANCELLED) and note.creation >= cutoff)
 	]
 	for note in notes:
@@ -1296,6 +1284,6 @@ def problem_states():
 	return {attention.CARRIER_EXCEPTION: [SHIPPING_MIXED, SHIPPING_CANCELLED]}
 
 
-def terminal_states():
+def terminal_states(is_return=False):
 	"""The contract's ``terminal_states``: Cancelled never changes again."""
 	return [SHIPPING_CANCELLED]

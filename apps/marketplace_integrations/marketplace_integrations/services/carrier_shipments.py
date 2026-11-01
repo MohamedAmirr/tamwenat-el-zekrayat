@@ -18,6 +18,8 @@ An adapter is a module exposing (the contract; a contract test checks every adap
 - ``applies_to(doc)``: does the note (or a dict with ``is_return`` and ``transporter``) belong to it.
 - ``guard_changes(doc)``: ``validate``: set up a new note, keep app-written fields and a started shipment
   untouched. A deliberate refusal raises.
+- ``guard_always(doc)``: optional; ``validate`` of every Delivery Note, whoever owns it (a rule about a field
+  that decides ownership, e.g. who may set a return source). A deliberate refusal raises.
 - ``clear_inherited(doc)``: clear what an amended new note copied from a note of this carrier.
 - ``validate_ready(doc, action="create")``: everything refusable before the carrier is contacted (raises).
   ``action`` is ``"create"`` (also run again under the row lock), ``"lookup"`` or ``"cancel"`` (configuration
@@ -42,7 +44,8 @@ An adapter is a module exposing (the contract; a contract test checks every adap
 - ``refuse_sales_order_cancel(order)``: Sales Order ``before_cancel``.
 - ``problem_states()``: ``{problem_type: [shipping statuses]}`` for Needs Attention (the exception and return
   types only; the other types come from ``custom_integration_status``).
-- ``terminal_states()``: the shipping statuses that never change again (not a stale status).
+- ``terminal_states(is_return=False)``: the shipping statuses that never change again (not a stale status);
+  ``is_return`` is True for a return note the carrier owns (a pickup ends at different states).
 """
 
 import json
@@ -84,6 +87,16 @@ STALE_CREATING_MINUTES = 5
 STALE_CANCEL_MINUTES = 2
 
 _CREATE_JOB = "{}-create|{}"
+
+#: The linked doctypes ``DeliveryNote.on_cancel`` ignores (ERPNext sets ``ignore_linked_doctypes`` to the first
+#: four) plus the Packing Slips it cancels first.
+NATIVE_CANCEL_IGNORED_LINKS = (
+	"GL Entry",
+	"Stock Ledger Entry",
+	"Repost Item Valuation",
+	"Serial and Batch Bundle",
+	"Packing Slip",
+)
 
 
 def adapter_for(doc):
@@ -131,6 +144,10 @@ def validate_delivery_note(doc, method=None):
 			adapters.append(adapter)
 	for adapter in adapters:
 		adapter.guard_changes(doc)
+	for adapter in CARRIERS.values():
+		always = getattr(adapter, "guard_always", None)
+		if always:
+			always(doc)
 	if doc.is_new() and doc.get("amended_from") and not adapter_for(doc):
 		# Amend copies even no_copy fields: the carrier was changed, so clear what the source note's carrier left.
 		source = frappe.db.get_value("Delivery Note", doc.amended_from, ["is_return", "transporter", "custom_return_source"], as_dict=True)
@@ -158,7 +175,7 @@ def require_shipment_created(doc, method=None):
 
 
 def after_submit(doc, method=None):
-	"""``on_submit``: the optional adapter hook ``after_submit(doc)`` (Bosta queues its label here, never
+	"""``on_submit``: the optional adapter hook ``after_submit(doc)`` (an adapter queues follow-up work here, never
 	while the note is a draft being submitted). Must not raise."""
 	hook = getattr(adapter_for(doc), "after_submit", None)
 	if hook:
@@ -554,10 +571,16 @@ def _auto_cancel(delivery_note):
 		frappe.db.commit()
 		return
 	service = adapter.SERVICE_NAME
+	session_user = frappe.session.user
 	try:
-		_check_native_cancel_not_blocked(doc)
-		doc.flags.ignore_permissions = True
-		doc.cancel()
+		# As the system: the cancel must not depend on whoever's request or job happened to read the carrier.
+		frappe.set_user("Administrator")
+		try:
+			_check_native_cancel_not_blocked(doc)
+			doc.flags.ignore_permissions = True
+			doc.cancel()
+		finally:
+			frappe.set_user(session_user)
 	except Exception as exc:
 		frappe.db.rollback()
 		if not isinstance(exc, frappe.ValidationError):
@@ -574,8 +597,8 @@ def _auto_cancel(delivery_note):
 					delivery_note, service, reason
 				),
 			)
-		else:
-			frappe.db.commit()
+		# The notification is queued on this transaction: a later rollback by the caller must not lose it.
+		frappe.db.commit()
 		return
 	frappe.db.commit()
 	adapter.after_cancelled(delivery_note)
@@ -583,6 +606,7 @@ def _auto_cancel(delivery_note):
 		doc,
 		_("Delivery Note {0} was cancelled automatically because {1} cancelled the shipment.").format(delivery_note, service),
 	)
+	frappe.db.commit()
 
 
 def _submitter(doc):
@@ -636,9 +660,12 @@ def _notify(doc, subject):
 
 def _check_native_cancel_not_blocked(doc):
 	"""Raise the same link error the native cancel of a submitted note raises (the checks ``Document.cancel``
-	runs), before anything is cancelled at the carrier."""
+	runs), before anything is cancelled at the carrier. Like ERPNext's ``DeliveryNote.on_cancel`` it ignores
+	the documents the cancel itself reverses (ledger rows) or cancels first (Packing Slips), or every note
+	that moved stock would be refused."""
 	from frappe.model.delete_doc import check_if_doc_is_dynamically_linked, check_if_doc_is_linked
 
+	doc.ignore_linked_doctypes = NATIVE_CANCEL_IGNORED_LINKS
 	check_if_doc_is_linked(doc, method="Cancel")
 	check_if_doc_is_dynamically_linked(doc, method="Cancel")
 

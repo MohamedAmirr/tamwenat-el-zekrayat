@@ -17,7 +17,8 @@ confirmation and the staff Notification.
 import frappe
 from frappe.utils import flt
 
-RETURNED_BY_BOSTA = "Returned by Bosta"
+from marketplace_integrations.integrations.bosta.delivery_note_shipment import AUTOMATIC_RETURN_FLAG, RETURNED_BY_BOSTA
+
 _JOB = "bosta-returned-draft|{}"
 
 
@@ -66,6 +67,7 @@ def create_returned_draft(delivery_note):
 		# webhook match.
 		draft.lr_no = None
 		draft.lr_date = None
+		draft.flags[AUTOMATIC_RETURN_FLAG] = True
 		draft.insert(ignore_permissions=True)
 	except Exception:
 		frappe.db.rollback()

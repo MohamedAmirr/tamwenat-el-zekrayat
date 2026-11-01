@@ -90,8 +90,12 @@ DOCUMENTED_DELIVERY_TYPES = {
 RateLimited = carrier_log.RateLimited
 
 
-def terminal_state_names():
-	return [BOSTA_STATE_NAMES[code] for code in TERMINAL_STATE_CODES]
+def terminal_state_names(is_return=False):
+	"""The shipping statuses that never change again. For a Customer Return Pickup (``is_return``) the
+	returned states 46 and 60 are its successful end (the goods reached the merchant), so they are terminal
+	too; for a delivery they are not (the draft return of the goods is made, but the state is polled on)."""
+	codes = (*TERMINAL_STATE_CODES, *RETURNED_STATE_CODES) if is_return else TERMINAL_STATE_CODES
+	return [BOSTA_STATE_NAMES[code] for code in codes]
 
 
 # ---------------------------------------------------------------------------
@@ -154,18 +158,25 @@ def record_webhook_event(event):
 
 def _note_for(delivery_id, tracking_number):
 	"""The Delivery Note of a Bosta delivery: by delivery id, else tracking number. Exact comparison of
-	the normalized value (MariaDB's case-insensitive match must not pick a different row)."""
+	the normalized value (MariaDB's case-insensitive match must not pick a different row). A Sales Return
+	copies the tracking number of its delivery, so only a return the staff marked Customer Return Pickup (a
+	Bosta shipment of its own) can match; any other return is ignored."""
 	for fieldname, value in (("custom_carrier_delivery_id", delivery_id), ("lr_no", tracking_number)):
 		value = cstr(value).strip()
 		if not value:
 			continue
 		rows = frappe.get_all(
 			"Delivery Note",
-			filters={fieldname: value, "docstatus": ["<", 2], "is_return": 0},
-			fields=["name", fieldname],
-			limit_page_length=5,
+			filters={fieldname: value, "docstatus": ["<", 2]},
+			fields=["name", fieldname, "is_return", "custom_return_source"],
+			limit_page_length=20,
 		)
-		rows = [row for row in rows if cstr(row[fieldname]).strip() == value]
+		rows = [
+			row
+			for row in rows
+			if cstr(row[fieldname]).strip() == value
+			and (not row.is_return or row.custom_return_source == shipment.RETURN_PICKUP)
+		]
 		if len(rows) == 1:
 			return rows[0].name
 	return None
@@ -276,7 +287,14 @@ def _write_state(note, code, timestamp=None, fee=None, event=False):
 	current = frappe.db.get_value(
 		"Delivery Note",
 		note,
-		["custom_integration_status", "custom_bosta_last_event_at", "docstatus", "custom_shipping_status"],
+		[
+			"custom_integration_status",
+			"custom_bosta_last_event_at",
+			"docstatus",
+			"custom_shipping_status",
+			"custom_last_integration_error",
+			"is_return",
+		],
 		as_dict=True,
 		for_update=True,
 	)
@@ -325,16 +343,27 @@ def _write_state(note, code, timestamp=None, fee=None, event=False):
 		values, update_modified=current.docstatus != 0, notify=True, commit=True
 	)
 	# Only the CHANGE into a returned state queues the draft: states 46/60 are polled nightly, and a
-	# repeated read must not bring back a draft that staff cancelled.
-	if code in RETURNED_STATE_CODES and current.docstatus == 1 and previous_state != BOSTA_STATE_NAMES[code]:
+	# repeated read must not bring back a draft that staff cancelled. Never for a Customer Return Pickup: its
+	# returned state means the goods reached the merchant, and the note is already the return.
+	if (
+		code in RETURNED_STATE_CODES
+		and current.docstatus == 1
+		and not current.is_return
+		and previous_state != BOSTA_STATE_NAMES[code]
+	):
 		from marketplace_integrations.integrations.bosta import returns
 
 		returns.queue_returned_draft(note)
 		frappe.db.commit()
 	update_sales_order_summary_of(note)
-	if code in CANCELLED_STATE_CODES:
-		# Bosta confirmed the cancel: a submitted note is cancelled natively, with no further Bosta call
-		# (also retries a note whose earlier automatic cancel was blocked). Never raises.
+	if code in CANCELLED_STATE_CODES and (
+		values.get("custom_integration_status") == shipment.CANCELLED
+		or (status == shipment.CANCELLED and cstr(current.custom_last_integration_error))
+	):
+		# This read itself moved the note into Cancelled (Bosta cancelled the delivery), or the note is
+		# Cancelled with an error left by an earlier blocked automatic cancel (a retry): a submitted note is
+		# cancelled natively, with no further Bosta call. A note this app's own Cancel just wrote Cancelled
+		# (no error) is left to the person who is about to cancel it. Never raises.
 		carrier_shipments.cancel_after_carrier_cancelled(note)
 	return "applied"
 
@@ -357,10 +386,14 @@ def refresh_note(delivery_note):
 		raise RateLimited()
 	log = carrier_log.open_log(SERVICE_NAME, delivery_note, "Refresh")
 	if shipment.is_terminated_answer(response) and shipment.status_of(delivery_note) in (
+		shipment.CREATED,
 		shipment.CANCELLATION_PENDING,
 		shipment.CANCELLATION_UNKNOWN,
 	):
-		# A terminated delivery reads back "Delivery not found" (HTTP 400, errorCode 1066): the cancel took effect.
+		# A terminated delivery reads back "Delivery not found" (HTTP 400, errorCode 1066): the delivery is
+		# cancelled at Bosta (also when the cancel was made in Bosta's own app: the note is Created here). Same
+		# answer as ``delivery_note_shipment._read_state``. A Created note then becomes Cancelled and, if
+		# submitted, is cancelled natively (``_write_state``: this read changed the status).
 		_write_state(delivery_note, shipment.TERMINATED_STATE_CODE)
 		carrier_log.close_log(log, "Success", http_status=response.status_code)
 		frappe.db.commit()
@@ -405,9 +438,9 @@ def _open_notes():
 	created = frappe.get_all(
 		"Delivery Note",
 		filters={**base, "custom_integration_status": shipment.CREATED},
-		fields=["name", "custom_shipping_status"],
+		fields=["name", "custom_shipping_status", "is_return"],
 	)
-	notes += [row.name for row in created if row.custom_shipping_status not in terminal_state_names()]
+	notes += [row.name for row in created if row.custom_shipping_status not in terminal_state_names(row.is_return)]
 	return notes
 
 

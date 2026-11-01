@@ -17,15 +17,28 @@ EXPECTED = [
 	SECTION,
 	"transporter",
 	"lr_no",
+	"custom_noon_generate_awb",
 	"lr_date",
-	"custom_carrier_delivery_id",
+	"custom_carrier_delivery_id",  # hidden for every carrier
 	"custom_carrier_reference",
+	# column 2: status
 	"custom_shipping_status_column",
 	"custom_integration_status",
 	"custom_shipping_status",
+	"custom_last_sync_at",
+	"custom_noon_invoice_uploaded_on",
+	"custom_bosta_last_event_at",
+	"custom_actual_shipping_cost",
+	"custom_actual_cost_received_on",
+	"custom_last_integration_error",
+	"custom_carrier_request_snapshot",
+	# column 3: delivery data
 	"custom_shipping_column",
 	"custom_cod_amount",
 	"custom_cod_confirmed",
+	"custom_bosta_city",
+	"custom_bosta_city_name",
+	"custom_shipping_label",
 ]
 
 
@@ -36,6 +49,9 @@ class TestDeliveryNoteLayout(IntegrationTestCase):
 	def test_shipping_section_holds_native_carrier_fields_in_order(self):
 		start = self.order.index(SECTION)
 		self.assertEqual(self.order[start : start + len(EXPECTED)], EXPECTED)
+
+	def test_carrier_delivery_id_is_hidden_but_kept(self):
+		self.assertEqual(frappe.get_meta("Delivery Note").get_field("custom_carrier_delivery_id").hidden, 1)
 
 	def test_shipping_section_is_always_visible(self):
 		# Carrier lives inside it: a section hidden until a carrier is chosen could never be filled.

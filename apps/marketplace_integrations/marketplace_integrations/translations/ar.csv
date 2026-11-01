@@ -1024,12 +1024,13 @@ Refreshing from Shopify...,جارٍ التحديث من Shopify...
 Refreshing from Talabat...,جارٍ التحديث من Talabat...
 Register Webhook in Noon,تسجيل Webhook في Noon
 Release Stuck Out of Stock Reservation,تحرير حجز النفاد من المخزون العالق
-Releasing reservation...,جارٍ تحرير الحجز...
+Queueing...,جارٍ الإضافة إلى قائمة الانتظار...
 Reopen and {0} failed; the Sales Order was left Closed. {1},فشلت إعادة الفتح و{0}؛ تُرك أمر البيع مغلقًا. {1}
 Replace Item ID,معرّف العنصر المستبدَل
 Replacement Item ID,معرّف العنصر البديل
 Replacement items must be IN_CART and reference a REPLACED item.,يجب أن تكون العناصر البديلة بحالة IN_CART وأن تشير إلى عنصر مستبدَل (REPLACED).
-Reservation released.,تم تحرير الحجز.
+Release queued. Reload the order in a moment.,تمت جدولة التحرير. أعد تحميل الطلب بعد قليل.
+An Out of Stock request of this order is still running. Wait for it to finish.,طلب نفاد من المخزون لهذا الطلب لا يزال قيد التنفيذ. انتظر حتى ينتهي.
 Retried {0} order(s).,تمت إعادة محاولة {0} طلب.
 "Retried {0} order(s): {1} recovered, {2} still blocked.",تمت إعادة محاولة {0} طلب: تم استرداد {1}، ولا يزال {2} محظورًا.
 Retried {0} order(s); {1} request(s) failed.,تمت إعادة محاولة {0} طلب؛ فشل {1} طلب.
@@ -1246,7 +1247,7 @@ The webhook URL and key are missing. Save the Noon Connection again.,رابط We
 The workbook upload did not return a file.,لم يُرجع رفع ملف Excel أي ملف.
 There is no pending Out of Stock reservation on this order.,لا يوجد حجز نفاد من المخزون معلّق في Noon على هذا الطلب.
 This Site,هذا الموقع
-"This clears any pending Noon Out of Stock reservation on this order, in case a worker died before releasing it. Continue?",سيؤدي هذا إلى مسح أي حجز نفاد من المخزون معلّق في Noon على هذا الطلب، في حال توقف عامل قبل تحريره. هل تريد المتابعة؟
+"This asks Noon which reserved units are already Out of Stock and frees the rest, in case a worker died before releasing them. It runs in the background. Continue?",يسأل هذا Noon عن الوحدات المحجوزة التي هي بالفعل نفدت من المخزون ويحرر الباقي، في حال توقف عامل قبل تحريرها. يعمل في الخلفية. هل تريد المتابعة؟
 This fulfillment update is not valid from the current order status.,تحديث التنفيذ هذا غير صالح من حالة الطلب الحالية.
 "This importer requires Stock Settings > Item Naming By to be set to 'Item Code'. Naming Series-based item codes are not supported, because ERPNext overwrites item_code with the generated series name on save, which would silently break this importer's item_code-based identity.",يتطلب هذا المستورِد ضبط إعدادات المخزون > تسمية العنصر حسب على 'Item Code'. رموز العناصر المعتمدة على سلسلة التسمية غير مدعومة، لأن ERPNext يستبدل item_code باسم السلسلة المُنشأ عند الحفظ، مما سيُفسد بصمت هوية هذا المستورِد المعتمدة على item_code.
 "This log row has no Marketplace Order to resync - Order Import failures must be resolved by re-importing the order, not by resyncing.",صف السجل هذا ليس له طلب سوق لإعادة مزامنته - يجب حل حالات فشل استيراد الطلبات بإعادة استيراد الطلب، لا بإعادة المزامنة.
@@ -1795,7 +1796,7 @@ The items of the Noon shipment differ from the units sent. Items are never chang
 Noon did not answer the order lookup ({0}).,لم ترد Noon على الاستعلام عن الطلب ({0}).
 Noon has no shipment with number {0}.,ليس لدى Noon شحنة بالرقم {0}.
 Noon has a shipment with this number that belongs to another order. Check the shipment in Noon.,لدى Noon شحنة بهذا الرقم تخص طلبًا آخر. افحص الشحنة في Noon.
-"A Delivery Note of this order is still being sent to Noon, or Noon's answer is unknown. Wait for it, or check the shipment, before marking Out of Stock.","مذكرة تسليم لهذا الطلب ما زالت قيد الإرسال إلى Noon، أو رد Noon غير معروف. انتظرها، أو افحص الشحنة، قبل التعليم كنفدت من المخزون."
+"A Delivery Note of this order is still being sent to Noon, or Noon's answer is unknown. Wait for it, or check the shipment, before marking Out of Stock.","مذكرة تسليم لهذا الطلب ما زالت قيد الإرسال إلى Noon، أو رد Noon غير معروف. انتظرها، أو افحص الشحنة، قبل وضع علامة نفاد من المخزون."
 This draft holds a Noon shipment ({0}). Check it in Noon before sending or deleting the draft.,هذه المسودة تحمل شحنة Noon ({0}). افحصها في Noon قبل إرسال المسودة أو حذفها.
 {0} shipment is cancelled but this Delivery Note is still submitted. Press Cancel.,شحنة {0} ملغاة لكن مذكرة التسليم هذه ما زالت معتمدة. اضغط إلغاء.
 Noon Fulfillment System Code,رمز نظام التنفيذ في Noon
@@ -1825,7 +1826,7 @@ Noon does not show the units as Out of Stock yet. Retry in a moment.,لا تعر
 "Noon confirmed, but the Sales Order was not updated.",أكدت Noon ذلك، لكن لم يتم تحديث أمر البيع.
 The Out of Stock reservation was released.,تم تحرير حجز نفاد المخزون.
 Marking Out of Stock failed unexpectedly. See the Error Log.,فشل تعليم نفاد المخزون بشكل غير متوقع. راجع سجل الأخطاء.
-"Marking this item Out of Stock is final at Noon: it cannot be fulfilled later even if it is restocked, and Noon may charge cancellation fees. Continue?",تعليم هذا الصنف كنفد من المخزون نهائي لدى Noon: لا يمكن تنفيذه لاحقًا حتى لو أُعيد توفيره، وقد تفرض Noon رسوم إلغاء. هل تريد المتابعة؟
+"This marks the Item Out of Stock on the whole order: every row of this Item is removed, not only this row. It is final at Noon: it cannot be fulfilled later even if it is restocked, and Noon may charge cancellation fees. Continue?",يعلّم هذا الصنف كنفد من المخزون على الطلب كله: تُزال جميع صفوف هذا الصنف وليس هذا الصف فقط. وهو نهائي لدى Noon: لا يمكن تنفيذه لاحقًا حتى لو أُعيد توفيره، وقد تفرض Noon رسوم إلغاء. هل تريد المتابعة؟
 Check Noon,فحص Noon
 "Still sending to Noon. Open the Sales Order later to see the result.",ما زال الإرسال إلى Noon جاريًا. افتح أمر البيع لاحقًا لرؤية النتيجة.
 The item was marked Out of Stock at Noon and removed from the order.,تم تعليم الصنف كنفد من المخزون لدى Noon وإزالته من الطلب.
@@ -1857,7 +1858,6 @@ A shipment invoice can be uploaded only for a submitted Delivery Note whose Noon
 Invalid upload key.,مفتاح الرفع غير صالح.
 Invalid document type.,نوع المستند غير صالح.
 The Delivery Note no longer has a Created Noon shipment.,لم يعد لمذكرة التسليم شحنة Noon بحالة Created.
-The items changed after the invoice was uploaded. The invoice may need re-upload.,تغيّرت الأصناف بعد رفع الفاتورة. قد تحتاج الفاتورة إلى إعادة رفع.
 Returned COD,مبلغ الدفع عند الاستلام المرتجع
 Returned COD cannot be negative.,لا يمكن أن يكون مبلغ الدفع عند الاستلام المرتجع سالبًا.
 The returned COD and return source cannot be changed after the Bosta return pickup was started.,لا يمكن تغيير مبلغ الدفع عند الاستلام المرتجع ومصدر المرتجع بعد بدء طلب استلام المرتجع لدى Bosta.
@@ -1875,3 +1875,6 @@ Open the Delivery Note later and check its Integration Status.,افتح مذكر
 "{0} cancelled the shipment, but this Delivery Note could not be cancelled automatically: {1}","ألغت {0} الشحنة، لكن تعذّر إلغاء مذكرة التسليم هذه تلقائيًا: {1}"
 Delivery Note {0}: {1} cancelled the shipment but the note must be cancelled by hand. {2},مذكرة التسليم {0}: ألغت {1} الشحنة لكن يجب إلغاء المذكرة يدويًا. {2}
 Delivery Note {0} was cancelled automatically because {1} cancelled the shipment.,أُلغيت مذكرة التسليم {0} تلقائيًا لأن {1} ألغت الشحنة.
+The Delivery Note was already cancelled.,تم إلغاء مذكرة التسليم بالفعل.
+An invoice upload for this Delivery Note is already running. Wait for it to finish.,رفع فاتورة لمذكرة التسليم هذه قيد التنفيذ بالفعل. انتظر حتى ينتهي.
+"The return source ""Returned by Bosta"" is set by the app only. It cannot be set or cleared by hand.","مصدر المرتجع ""Returned by Bosta"" يضبطه التطبيق فقط. لا يمكن ضبطه أو مسحه يدويًا."

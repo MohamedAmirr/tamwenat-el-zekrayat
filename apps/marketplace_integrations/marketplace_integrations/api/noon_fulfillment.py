@@ -136,4 +136,4 @@ def check_invoice_upload(document_type: str, document_name: str, idempotency_key
 	if document_type not in ("Sales Order", "Delivery Note"):
 		frappe.throw(frappe._("Invalid document type."))
 	frappe.has_permission(document_type, "write", doc=document_name, throw=True)
-	return fulfillment.invoice_result(idempotency_key)
+	return fulfillment.invoice_result(idempotency_key, document_type, document_name)

@@ -327,6 +327,49 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 		self.assertEqual(self._sent_kinds(), [])
 		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Created")
 
+	def test_the_link_check_ignores_what_the_native_cancel_reverses_or_cancels_first(self):
+		from unittest.mock import patch
+
+		note = self._live()
+		doc = frappe.get_doc("Delivery Note", note.name)
+		seen = []
+
+		def record(checked, method=None):
+			seen.append(set(checked.ignore_linked_doctypes))
+
+		with (
+			patch("frappe.model.delete_doc.check_if_doc_is_linked", side_effect=record),
+			patch("frappe.model.delete_doc.check_if_doc_is_dynamically_linked", side_effect=record),
+		):
+			carrier_shipments._check_native_cancel_not_blocked(doc)
+
+		expected = {"GL Entry", "Stock Ledger Entry", "Repost Item Valuation", "Serial and Batch Bundle", "Packing Slip"}
+		self.assertEqual(seen, [expected, expected])
+
+	def test_a_read_leaves_a_note_the_app_cancelled_to_the_person_but_retries_a_blocked_automatic_cancel(self):
+		from unittest.mock import patch
+
+		note = self._live()
+		self._submit(note)
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Cancelled")
+		with patch.object(carrier_shipments, "cancel_after_carrier_cancelled") as auto:
+			statuses._write_state(note.name, 49)
+		auto.assert_not_called()  # cancelled by the app's own Cancel (no error): the person cancels the note
+
+		frappe.db.set_value("Delivery Note", note.name, "custom_last_integration_error", "blocked earlier")
+		with patch.object(carrier_shipments, "cancel_after_carrier_cancelled") as auto:
+			statuses._write_state(note.name, 49)
+		auto.assert_called_once_with(note.name)
+
+	def test_a_read_that_moves_the_note_into_cancelled_cancels_it_automatically(self):
+		from unittest.mock import patch
+
+		note = self._live()
+		self._submit(note)
+		with patch.object(carrier_shipments, "cancel_after_carrier_cancelled") as auto:
+			statuses._write_state(note.name, 49)
+		auto.assert_called_once_with(note.name)
+
 	def test_the_label_is_queued_by_the_submit_not_by_the_create(self):
 		from unittest.mock import patch
 
@@ -342,7 +385,7 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 	def test_a_terminated_delivery_reading_not_found_resolves_the_note_to_cancelled(self):
 		"""Real Bosta: a terminated delivery reads back HTTP 400, errorCode 1066 "Delivery not found."."""
 		not_found = FakeResponse(400, {"message": "Delivery not found.", "errorCode": 1066})
-		for status in ("Cancellation Pending", "Cancellation Unknown"):
+		for status in ("Created", "Cancellation Pending", "Cancellation Unknown"):
 			with self.subTest(status):
 				note = self._live(custom_integration_status=status)
 				self.http.queue["get"].append(not_found)
@@ -353,12 +396,22 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 				self.assertEqual(values.custom_integration_status, "Cancelled")
 				self.assertEqual(values.custom_shipping_status, "Terminated")
 
-		# A live (Created) note is not cancelled by the same answer: the read stays a failure.
-		live = self._live()
+		# A note that is not a live shipment (Creating) is not cancelled by the same answer: the read stays a failure.
+		creating = self._live(custom_integration_status="Creating")
 		self.http.queue["get"].append(not_found)
 		with self.assertRaises(frappe.ValidationError):
-			statuses.refresh_note(live.name)
-		self.assertEqual(stored(live, "custom_integration_status").custom_integration_status, "Created")
+			statuses.refresh_note(creating.name)
+		self.assertEqual(stored(creating, "custom_integration_status").custom_integration_status, "Creating")
+
+	def test_a_submitted_created_note_whose_delivery_reads_not_found_is_cancelled_automatically(self):
+		note = self._live()
+		self._submit(note)
+		self.http.queue["get"].append(FakeResponse(400, {"message": "Delivery not found.", "errorCode": 1066}))
+
+		statuses.refresh_note(note.name)
+
+		self.assertEqual(stored(note, "docstatus").docstatus, 2)
+		self.assertEqual(self._sent_kinds(), ["get"])
 
 	def test_a_cancel_whose_read_shows_delivery_not_found_is_cancelled(self):
 		note = self._live()

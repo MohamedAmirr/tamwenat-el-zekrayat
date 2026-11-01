@@ -666,10 +666,19 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 
 	def test_the_nightly_reconcile_stops_at_shipped_or_cancelled_and_after_60_days(self):
 		notes = {}
-		for key in ("acknowledged", "shipped", "cancelled", "old"):
+		for key in ("acknowledged", "shipped", "cancelled", "old", "cancelled_submitted"):
 			notes[key] = self._created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
-		for key, status in (("acknowledged", "Acknowledged"), ("shipped", "Shipped"), ("cancelled", "Cancelled"), ("old", "Acknowledged")):
+		for key, status in (
+			("acknowledged", "Acknowledged"),
+			("shipped", "Shipped"),
+			("cancelled", "Cancelled"),
+			("old", "Acknowledged"),
+			("cancelled_submitted", "Cancelled"),
+		):
 			frappe.db.set_value("Delivery Note", notes[key].name, "custom_shipping_status", status, update_modified=False)
+		# Noon shows it cancelled but the note is still Created and submitted: it must be refreshed so it
+		# becomes Cancelled and is cancelled natively.
+		self._submit_flags(notes["cancelled_submitted"])
 		frappe.db.set_value(
 			"Delivery Note", notes["old"].name, "creation", frappe.utils.add_days(frappe.utils.now_datetime(), -61), update_modified=False
 		)
@@ -680,8 +689,30 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 			noon.run_reconcile()
 
 		self.assertIn(notes["acknowledged"].name, seen)
+		self.assertIn(notes["cancelled_submitted"].name, seen)
 		for key in ("shipped", "cancelled", "old"):
 			self.assertNotIn(notes[key].name, seen)
+		frappe.db.set_value("Delivery Note", notes["cancelled_submitted"].name, "docstatus", 0, update_modified=False)
+		frappe.db.set_value("Delivery Note Item", {"parent": notes["cancelled_submitted"].name}, "docstatus", 0, update_modified=False)
+		frappe.db.commit()
+
+	def test_refresh_cancels_natively_only_when_it_moved_the_note_into_cancelled_or_retries_a_blocked_one(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		self._submit_flags(note)
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Cancelled", update_modified=False)
+		frappe.db.commit()
+		# Cancelled by this app's own Cancel (no error): a refresh leaves it to the person cancelling it.
+		with patch.object(noon, "_cancel_note_natively") as native:
+			noon.refresh(note.name)
+		native.assert_not_called()
+		# Cancelled with the error a blocked automatic cancel left: the refresh retries.
+		frappe.db.set_value("Delivery Note", note.name, "custom_last_integration_error", "blocked", update_modified=False)
+		frappe.db.commit()
+		with patch.object(noon, "_cancel_note_natively") as native:
+			noon.refresh(note.name)
+		native.assert_called_once_with(note.name)
+		frappe.db.set_value("Delivery Note", note.name, "docstatus", 0, update_modified=False)
 
 	def test_a_shipment_of_another_order_or_with_a_foreign_unit_is_never_adopted(self):
 		fx = self._order([("SKU-A", 1)], ["SKU-A"])
@@ -876,13 +907,12 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		self.assertEqual(kwargs["json"]["idempotency_key"], result["idempotency_key"])
 		self.assertEqual(kwargs["json"]["issued_at"], "2026-11-01")
 
-	def test_success_records_the_upload_time_and_the_items_fingerprint_and_logs_without_secrets(self):
+	def test_success_records_the_upload_time_and_logs_without_secrets(self):
 		note = self._submitted_created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
 		result, _enqueue = self._press(note, self._loose_pdf())
 		client = self._run_invoice(note, result["idempotency_key"])
 		stored = self._note(note.name)
 		self.assertTrue(stored.custom_noon_invoice_uploaded_on)
-		self.assertEqual(stored.custom_noon_invoice_items_hash, noon.items_hash(stored.items))
 		self.assertEqual(frappe.cache().get_value(f"noon-invoice-result|{result['idempotency_key']}")["state"], "done")
 		rows = frappe.get_all(
 			"Integration Request",
@@ -922,6 +952,40 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		second, _enqueue = self._press(note, self._loose_pdf(), invoice_nr="INV-2")
 		self._run_invoice(note, second["idempotency_key"])
 		self.assertGreater(str(self._note(note.name).custom_noon_invoice_uploaded_on), "2026-01-02")
+
+	def test_a_double_press_while_an_upload_runs_is_refused_and_the_job_clears_the_marker(self):
+		note = self._submitted_created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
+		first, _enqueue = self._press(note, self._loose_pdf())
+		with self.assertRaises(frappe.ValidationError):
+			self._press(note, self._loose_pdf(), invoice_nr="INV-2")
+		# the same key (a Retry of the running press) is not a second upload
+		retry, _enqueue = self._press(note, frappe._dict(file_url=first["file_url"]), key=first["idempotency_key"])
+		self.assertEqual(retry["idempotency_key"], first["idempotency_key"])
+		self._run_invoice(note, first["idempotency_key"])
+		second, _enqueue = self._press(note, self._loose_pdf(), invoice_nr="INV-2")
+		self.assertNotEqual(second["idempotency_key"], first["idempotency_key"])
+		self._run_invoice(note, second["idempotency_key"])
+
+	def test_a_key_is_bound_to_its_document(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._submitted_created_note(fx)
+		other = self._submitted_created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
+		first, _enqueue = self._press(note, self._loose_pdf())
+		fulfillment.set_invoice_result(first["idempotency_key"], "failed", "Noon said no")
+		self.assertEqual(fulfillment.invoice_result(first["idempotency_key"], "Delivery Note", note.name)["state"], "failed")
+		self.assertEqual(fulfillment.invoice_result(first["idempotency_key"], "Delivery Note", other.name)["state"], "pending")
+		with self.assertRaises(frappe.ValidationError):
+			self._press(other, frappe._dict(file_url=first["file_url"]), key=first["idempotency_key"])
+		self._run_invoice(note, first["idempotency_key"])
+
+	def test_a_loose_upload_that_shares_the_attached_copys_path_is_removed_but_the_file_stays(self):
+		note = self._submitted_created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
+		loose = self._loose_pdf()
+		result, _enqueue = self._press(note, loose)
+		self.assertFalse(frappe.db.exists("File", loose.name), "the orphan loose row is gone")
+		self.assertTrue(frappe.get_all("File", filters={"file_url": result["file_url"]}), "the attached copy remains")
+		self.assertTrue(frappe.get_doc("File", {"file_url": result["file_url"]}).get_content())
+		self._run_invoice(note, result["idempotency_key"])
 
 	def test_a_failure_shows_in_the_result_escaped_and_never_changes_the_note(self):
 		note = self._submitted_created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
@@ -989,39 +1053,13 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 				noon_fulfillment.upload_delivery_note_invoice(note.name, "/private/files/i.pdf", "INV-1", "2026-11-01")
 		self.assertEqual(upload.call_count, 1)
 
-	def test_needs_attention_says_the_invoice_may_need_reupload_when_the_items_changed(self):
-		from marketplace_integrations.services import marketplace_attention as attention
-
-		note = self._submitted_created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
-		result, _enqueue = self._press(note, self._loose_pdf())
-		self._run_invoice(note, result["idempotency_key"])
-
-		def rows_for_note():
-			return [
-				item
-				for item in attention._collect_outdated_noon_invoices({self.account.name: self.account})
-				if item["reference_name"] == note.name
-			]
-
-		self.assertEqual(rows_for_note(), [], "unchanged items: nothing to say")
-		frappe.db.set_value("Delivery Note Item", {"parent": note.name}, "qty", 2)
-		frappe.db.commit()
-		found = rows_for_note()
-		self.assertEqual(len(found), 1)
-		self.assertIn("may need re-upload", found[0]["explanation"])
-		self.assertEqual(found[0]["reference_doctype"], "Delivery Note")
-		# nothing was sent again
-		self.assertEqual(
-			frappe.db.count("Integration Request", {"custom_operation_type": "Invoice", "reference_docname": note.name}), 1
-		)
-
 	def test_amending_a_note_does_not_carry_the_invoice_record(self):
 		fx = self._order([("SKU-A", 1)], ["SKU-A"])
 		note = self._draft_note(fx, lr_no="TYPED-1")
 		frappe.db.set_value(
 			"Delivery Note",
 			note.name,
-			{"custom_noon_invoice_uploaded_on": "2026-11-01 10:00:00", "custom_noon_invoice_items_hash": "abc"},
+			{"custom_noon_invoice_uploaded_on": "2026-11-01 10:00:00"},
 			update_modified=False,
 		)
 		new = frappe.copy_doc(self._note(note.name), ignore_no_copy=False)  # Amend copies even no_copy fields
@@ -1029,4 +1067,3 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		new.custom_noon_generate_awb = 1
 		noon.guard_changes(new)
 		self.assertFalse(new.custom_noon_invoice_uploaded_on)
-		self.assertFalse(new.custom_noon_invoice_items_hash)

@@ -69,6 +69,7 @@ function load({ cities = [{ id: "c1", name: "Cairo", name_ar: "القاهرة" }
 function make_form(doc = {}) {
 	return {
 		doc: { name: "MAT-DN-1", docstatus: 0, ...doc },
+		perm: [{ read: 1, write: 1 }],
 		buttons: [],
 		values: null,
 		reloads: 0,
@@ -459,6 +460,51 @@ test("Request Bosta Return Pickup is hidden for other returns, started pickups a
 		mod.add_buttons(frm);
 		assert.ok(!frm.buttons.some((b) => b.label === "Request Bosta Return Pickup"), JSON.stringify(doc));
 	}
+});
+
+test("Request Bosta Return Pickup needs write permission on the note", () => {
+	const { mod } = load();
+	const frm = return_form();
+	frm.perm = [{ read: 1, write: 0 }];
+	mod.add_buttons(frm);
+	assert.ok(!frm.buttons.some((b) => b.label === "Request Bosta Return Pickup"));
+});
+
+test("a Retry that then fails does not reload the form twice per attempt (stop is not wrapped again)", async () => {
+	let answers = [{ outcome: "unknown", message: "" }, { outcome: "unknown", message: "" }];
+	const { mod, dialogs } = load({ responses: { cancel_shipment: () => answers.shift() } });
+	const frm = bosta_form();
+	global.frappe.validated = true;
+	const finished = mod.before_cancel(frm);
+	await new Promise((resolve) => setImmediate(resolve));
+	dialogs[0].config.primary_action(); // Retry
+	await new Promise((resolve) => setImmediate(resolve));
+	dialogs[1].hide(); // closing the second dialog stops the cancel
+	await finished;
+	assert.equal(global.frappe.validated, false);
+	assert.equal(frm.reloads, 1);
+});
+
+test("a Check that finds the note already cancelled automatically does not let the native cancel go on", async () => {
+	const { mod, dialogs, alerts } = load({
+		responses: { cancel_shipment: { outcome: "unknown", message: "" }, refresh_shipment: {} },
+	});
+	const frm = bosta_form();
+	frm.reload_doc = function () {
+		this.reloads++;
+		this.doc.custom_integration_status = "Cancelled";
+		this.doc.docstatus = 2;
+		return Promise.resolve();
+	};
+	global.frappe.validated = true;
+	const finished = mod.before_cancel(frm);
+	await new Promise((resolve) => setImmediate(resolve));
+
+	dialogs[0].config.secondary_action();
+	await finished;
+
+	assert.equal(global.frappe.validated, false);
+	assert.equal(alerts[0].indicator, "green");
 });
 
 test("a Created pickup return offers neither the label nor Edit Bosta Shipment", () => {

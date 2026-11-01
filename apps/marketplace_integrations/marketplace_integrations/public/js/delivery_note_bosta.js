@@ -160,10 +160,11 @@
 	// Calls the server once. `done` is called when Bosta confirmed (or the note was already Cancelled);
 	// `stop` when the cancel must not go on (a refusal, an unknown result or an error: a dialog says why).
 	function cancel_at_bosta(frm, { done, stop }) {
-		const retry = () => cancel_at_bosta(frm, { done, stop });
+		// The original `stop`: a retry must not wrap the wrapped one again.
+		const original_stop = stop;
+		const retry = () => cancel_at_bosta(frm, { done, stop: original_stop });
 		// The server wrote the note (Pending / Unknown / Created again) even when the cancel stops here: load it,
 		// so the next Save or Cancel does not fail with "modified after you opened it".
-		const original_stop = stop;
 		stop = () => Promise.resolve(frm.reload_doc()).then(() => original_stop());
 		// another carrier request is in flight: nothing is sent and the cancel does not go on
 		return exclusive(
@@ -267,7 +268,16 @@
 		return new Promise((resolve) => {
 			cancel_at_bosta(frm, {
 				// the server changed the note: load it before the native cancel saves it
-				done: () => Promise.resolve(frm.reload_doc()).then(() => resolve()),
+				done: () =>
+					Promise.resolve(frm.reload_doc()).then(() => {
+						// The note was already cancelled automatically (a Check read found Bosta's cancel): the
+						// native cancel must not go on over a cancelled document.
+						if (frm.doc.docstatus === 2) {
+							frappe.validated = false;
+							frappe.show_alert({ message: __("The Delivery Note was already cancelled."), indicator: "green" });
+						}
+						resolve();
+					}),
 				stop: () => {
 					frappe.validated = false;
 					resolve();
@@ -391,6 +401,9 @@
 	function can_request_pickup(frm) {
 		return Boolean(
 			frm.doc &&
+				frm.perm &&
+				frm.perm[0] &&
+				frm.perm[0].write &&
 				frm.doc.is_return &&
 				frm.doc.custom_return_source === RETURN_PICKUP &&
 				frm.doc.docstatus === 0 &&

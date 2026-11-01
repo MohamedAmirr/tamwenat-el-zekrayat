@@ -132,6 +132,7 @@ test("the row button shows only for rows the server offered and asks for confirm
 	assert.equal(confirms.length, 0);
 	module_exports.on_noon_row_button(frm, "Sales Order Item", "row-1");
 	assert.equal(confirms.length, 1);
+	assert.match(confirms[0].message, /whole order: every row of this Item is removed/);
 	assert.match(confirms[0].message, /final at Noon/);
 	assert.match(confirms[0].message, /cancellation fees/);
 	assert.equal(calls.length, 0, "nothing is sent before the user confirms");

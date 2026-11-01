@@ -76,6 +76,10 @@ BOSTA_DELIVERY_TYPE = 10
 BOSTA_RETURN_PICKUP_TYPE = 25
 #: ``custom_return_source`` of a return the staff want Bosta to collect from the customer.
 RETURN_PICKUP = "Customer Return Pickup"
+#: ``custom_return_source`` of the draft return the app makes when Bosta returns a delivery (automatic only).
+RETURNED_BY_BOSTA = "Returned by Bosta"
+#: Set on the draft the app makes itself (``returns.create_returned_draft``); a person's save never has it.
+AUTOMATIC_RETURN_FLAG = "bosta_automatic_return"
 BOSTA_COD_LIMIT = 30000
 # The Integration Status values, LIVE_STATUSES and EDITABLE_STATUSES come from ``services/carrier_log.py``
 # (shared with the neutral service).
@@ -171,6 +175,24 @@ def _rows(doc):
 	return sorted((cstr(row.name), cstr(row.item_code), flt(row.qty, 6)) for row in doc.get("items") or [])
 
 
+def _only_reduced(before, doc):
+	"""A draft Customer Return Pickup may have the returned quantity of a row lowered (never raised, never a
+	row added, removed or changed to another Item) before it is submitted: what the customer really hands
+	back can be less than what the delivery had. Bosta's request does not carry the items."""
+	if not (doc.get("is_return") and doc.docstatus == 0):
+		return False
+	old = {cstr(row.name): row for row in before.get("items") or []}
+	new = {cstr(row.name): row for row in doc.get("items") or []}
+	if set(old) != set(new):
+		return False
+	return all(
+		cstr(new[name].item_code) == cstr(old[name].item_code)
+		and flt(new[name].qty) * flt(old[name].qty) > 0  # same sign (returns are negative), not zero
+		and abs(flt(new[name].qty, 6)) <= abs(flt(old[name].qty, 6))
+		for name in old
+	)
+
+
 def default_cod(doc):
 	"""The note's share of what the customer still owes: its total minus the same share of the Sales
 	Order's advance (proportional when the note ships part of the order), never below 0."""
@@ -245,6 +267,26 @@ def clear_inherited(doc):
 		doc.lr_date = None
 
 
+def guard_always(doc):
+	"""``validate`` of every Delivery Note (the optional contract hook): a person cannot set or clear "Returned
+	by Bosta" on ``custom_return_source`` (only the app does, on the draft it makes for a returned delivery).
+	An amended copy keeps what its source note had."""
+	if doc.docstatus == 2 or doc.get("_action") == "cancel" or doc.flags.get(AUTOMATIC_RETURN_FLAG):
+		return
+	after = cstr(doc.get("custom_return_source"))
+	if doc.is_new():
+		before = ""
+		if doc.get("amended_from"):
+			before = cstr(frappe.db.get_value("Delivery Note", doc.amended_from, "custom_return_source"))
+	else:
+		before = cstr((doc.get_doc_before_save() or doc).get("custom_return_source"))
+	if before != after and RETURNED_BY_BOSTA in (before, after):
+		frappe.throw(
+			_("The return source \"Returned by Bosta\" is set by the app only. It cannot be set or cleared by hand."),
+			title=_("Bosta shipment"),
+		)
+
+
 def guard_changes(doc):
 	"""``validate``: set up a new note; keep app-written fields and a started shipment untouched. A cancel
 	changes none of them and must never be blocked by this guard."""
@@ -269,6 +311,10 @@ def guard_changes(doc):
 			doc.lr_no = None
 			doc.lr_date = None
 		if ours and doc.get("is_return"):
+			# make_sales_return copies the original delivery's tracking number: the pickup gets its own from
+			# Bosta, and the original's must not look like it to the webhook match.
+			doc.lr_no = None
+			doc.lr_date = None
 			_check_returned_cod(doc.get("custom_returned_cod"))
 		elif ours:
 			_apply_cod_rule(doc, doc)
@@ -312,7 +358,7 @@ def guard_changes(doc):
 			),
 			title=_("Bosta shipment"),
 		)
-	if _rows(before) != _rows(doc):
+	if _rows(before) != _rows(doc) and not _only_reduced(before, doc):
 		frappe.throw(
 			_(
 				"Items, quantities and rows cannot be changed after the Bosta shipment was started. "
@@ -727,12 +773,12 @@ def problem_states():
 	}
 
 
-def terminal_states():
+def terminal_states(is_return=False):
 	"""The contract's ``terminal_states``: the shipping statuses that never change again, so a note in one
-	is not a stale status."""
+	is not a stale status. A Customer Return Pickup (``is_return``) also ends at the returned states."""
 	from marketplace_integrations.integrations.bosta import statuses
 
-	return statuses.terminal_state_names()
+	return statuses.terminal_state_names(is_return)
 
 
 # ---------------------------------------------------------------------------

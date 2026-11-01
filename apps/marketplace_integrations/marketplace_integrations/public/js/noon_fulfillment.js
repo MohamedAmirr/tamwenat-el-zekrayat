@@ -171,7 +171,7 @@
 		frappe.confirm(
 			frappe.utils.escape_html(
 				__(
-					"Marking this item Out of Stock is final at Noon: it cannot be fulfilled later even if it is restocked, and Noon may charge cancellation fees. Continue?"
+					"This marks the Item Out of Stock on the whole order: every row of this Item is removed, not only this row. It is final at Noon: it cannot be fulfilled later even if it is restocked, and Noon may charge cancellation fees. Continue?"
 				)
 			),
 			() => send_noon_out_of_stock(frm, row_name)
@@ -372,12 +372,11 @@
 		if (invoice) invoice.send(order_invoice_options(ctx), {}, "retry");
 	}
 
-	// release_stuck_oos_reservation() runs synchronously (no Noon HTTP call, so nothing to
-	// enqueue), so it does not follow the queued/already-queued toast pattern.
+	// The server queues a job that asks Noon first: units Noon already shows Out of Stock stay reserved.
 	function run_noon_release_stuck_oos_reservation(ctx) {
 		frappe.confirm(
 			__(
-				"This clears any pending Noon Out of Stock reservation on this order, in case a worker died before releasing it. Continue?"
+				"This asks Noon which reserved units are already Out of Stock and frees the rest, in case a worker died before releasing them. It runs in the background. Continue?"
 			),
 			() => {
 				frappe
@@ -385,11 +384,11 @@
 						method: API + "release_stuck_oos_reservation",
 						args: { marketplace_order: ctx.marketplace_order },
 						freeze: true,
-						freeze_message: __("Releasing reservation..."),
+						freeze_message: __("Queueing..."),
 					})
 					.then(() => {
 						frappe.show_alert({
-							message: __("Reservation released."),
+							message: __("Release queued. Reload the order in a moment."),
 							indicator: "green",
 						});
 						ctx.reload();

@@ -322,14 +322,13 @@ class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):
 		self.assertEqual(self.order.noon_order_invoice_status, "Uploaded")
 		self.assertFalse(self.order.noon_order_invoice_last_error)
 		self.assertEqual(fulfillment.invoice_result(key), {"state": "done", "message": ""})
-		logs = frappe.get_all(
-			"Marketplace Sync Log",
-			filters={"marketplace_order": self.order.name, "sync_type": "Fulfillment", "status": "Success"},
-			fields=["request_data", "response_data"],
+		# the Integration Request is the only log (no Marketplace Sync Log row for the invoice)
+		self.assertFalse(
+			frappe.db.exists(
+				"Marketplace Sync Log", {"marketplace_order": self.order.name, "sync_type": "Fulfillment"}
+			)
 		)
-		self.assertEqual(len(logs), 1)
-		self.assertNotIn(kwargs["json"]["invoice"], (logs[0].request_data or "") + (logs[0].response_data or ""))
-		# the call is also an Integration Request (operation Invoice) on the document: no file bytes, no secrets
+		# the call is an Integration Request (operation Invoice) on the document: no file bytes, no secrets
 		rows = frappe.get_all(
 			"Integration Request",
 			filters={"custom_operation_type": "Invoice", "reference_doctype": "Marketplace Order", "reference_docname": self.order.name},

@@ -15,6 +15,7 @@ function load({ responses = {} } = {}) {
 	const confirms = [];
 	global.frappe = {
 		validated: true,
+		datetime: { str_to_user: (value) => `user:${value}` },
 		marketplace_integrations: { shipping: { register_carrier: (name, hooks) => (registered[name] = hooks) } },
 		ui: {
 			Dialog: class {
@@ -56,6 +57,7 @@ function load({ responses = {} } = {}) {
 function make_form(doc = {}) {
 	return {
 		doc: { name: "MAT-DN-1", docstatus: 0, transporter_name: "Noon", ...doc },
+		perm: [{ read: 1, write: 1 }],
 		buttons: [],
 		props: {},
 		values: {},
@@ -213,7 +215,16 @@ test("the form shows when the invoice was uploaded, escaped", () => {
 	const frm = make_form({ docstatus: 1, custom_noon_invoice_uploaded_on: "2026-11-01 <b>" });
 	frm.dashboard = { add_indicator: (text, color) => indicators.push({ text, color }) };
 	mod.refresh(frm);
-	assert.equal(indicators[0].text, "Invoice uploaded on 2026-11-01 &lt;b&gt;");
+	// shown in the user's date format (the fake formatter prefixes "user:"), then escaped
+	assert.equal(indicators[0].text, "Invoice uploaded on user:2026-11-01 &lt;b&gt;");
+});
+
+test("Upload Shipment Invoice is hidden without write permission on the note", () => {
+	const { mod } = load();
+	const frm = make_form({ docstatus: 1, custom_integration_status: "Created" });
+	frm.perm = [{ read: 1, write: 0 }];
+	mod.add_buttons(frm);
+	assert.deepEqual(frm.buttons, []);
 });
 
 test("before_cancel ignores a note that is not a created Noon shipment", async () => {
@@ -241,7 +252,8 @@ test("a Noon refusal stops the cancel and shows Noon's text escaped", async () =
 	const frm = make_form({ docstatus: 1, custom_integration_status: "Created" });
 	await mod.before_cancel(frm);
 	assert.equal(frappe.validated, false);
-	assert.equal(frm.reloads, 0);
+	// the server wrote the note while asking Noon: the form is loaded again so the next action is not stale
+	assert.equal(frm.reloads, 1);
 	assert.match(msgprints[0].message, /Noon refused: Not &lt;b&gt;allowed&lt;\/b&gt;/);
 	assert.match(msgprints[0].message, /Nothing was cancelled in ERPNext/);
 });
@@ -276,6 +288,25 @@ test("Retry asks the server again", async () => {
 	await pending;
 	assert.equal(calls.length, 2);
 	assert.equal(frappe.validated, true);
+});
+
+test("a Check that finds the note already cancelled automatically does not let the native cancel go on", async () => {
+	const { mod, dialogs, alerts } = load({
+		responses: { cancel_shipment: { outcome: "unknown", message: "" }, refresh_shipment: {} },
+	});
+	const frm = make_form({ docstatus: 1, custom_integration_status: "Created" });
+	frm.reload_doc = function () {
+		this.reloads++;
+		this.doc.custom_integration_status = "Cancelled";
+		this.doc.docstatus = 2;
+		return Promise.resolve();
+	};
+	const pending = mod.before_cancel(frm);
+	await new Promise((resolve) => setImmediate(resolve));
+	dialogs[0].config.secondary_action();
+	await pending;
+	assert.equal(frappe.validated, false);
+	assert.equal(alerts[0].indicator, "green");
 });
 
 test("the draft Cancel Noon Shipment button confirms, cancels and reloads", async () => {

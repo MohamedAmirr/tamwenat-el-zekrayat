@@ -78,7 +78,12 @@
 	// Calls the server once. `done` is called when Noon confirmed (or the note was already Cancelled);
 	// `stop` when the cancel must not go on (a refusal, an unknown result or an error: a dialog says why).
 	function cancel_at_noon(frm, { done, stop }) {
-		const retry = () => cancel_at_noon(frm, { done, stop });
+		// The original `stop`: a retry must not wrap the wrapped one again.
+		const original_stop = stop;
+		const retry = () => cancel_at_noon(frm, { done, stop: original_stop });
+		// The server wrote the note (Pending / Unknown / Created again) even when the cancel stops here: load it,
+		// so the next Save or Cancel does not fail with "modified after you opened it".
+		stop = () => Promise.resolve(frm.reload_doc()).then(() => original_stop());
 		// another carrier request is in flight: nothing is sent and the cancel does not go on
 		return exclusive(
 			frm,
@@ -109,7 +114,7 @@
 							return stop();
 						}
 					),
-			stop
+			original_stop
 		);
 	}
 
@@ -186,7 +191,16 @@
 		return new Promise((resolve) => {
 			cancel_at_noon(frm, {
 				// the server changed the note: load it before the native cancel saves it
-				done: () => Promise.resolve(frm.reload_doc()).then(() => resolve()),
+				done: () =>
+					Promise.resolve(frm.reload_doc()).then(() => {
+						// The note was already cancelled automatically (a Check read found Noon's cancel): the
+						// native cancel must not go on over a cancelled document.
+						if (frm.doc.docstatus === 2) {
+							frappe.validated = false;
+							frappe.show_alert({ message: __("The Delivery Note was already cancelled."), indicator: "green" });
+						}
+						resolve();
+					}),
 				stop: () => {
 					frappe.validated = false;
 					resolve();
@@ -246,11 +260,16 @@
 		});
 	}
 
+	// The upload endpoint needs write on the Delivery Note: others do not see the button.
+	function can_write(frm) {
+		return Boolean(frm.perm && frm.perm[0] && frm.perm[0].write);
+	}
+
 	function add_buttons(frm) {
 		if (frm.doc.docstatus === 0 && CANCELLABLE.includes(frm.doc.custom_integration_status || "")) {
 			frm.add_custom_button(__("Cancel Noon Shipment"), () => cancel_shipment(frm));
 		}
-		if (frm.doc.docstatus === 1 && frm.doc.custom_integration_status === "Created") {
+		if (frm.doc.docstatus === 1 && frm.doc.custom_integration_status === "Created" && can_write(frm)) {
 			frm.add_custom_button(__("Upload Shipment Invoice"), () => upload_shipment_invoice(frm));
 		}
 	}
@@ -259,7 +278,7 @@
 	function show_invoice_intro(frm) {
 		if (frm.doc.docstatus === 1 && frm.doc.custom_noon_invoice_uploaded_on && frm.dashboard && frm.dashboard.add_indicator) {
 			frm.dashboard.add_indicator(
-				__("Invoice uploaded on {0}", [frappe.utils.escape_html(String(frm.doc.custom_noon_invoice_uploaded_on))]),
+				__("Invoice uploaded on {0}", [frappe.utils.escape_html(frappe.datetime.str_to_user(frm.doc.custom_noon_invoice_uploaded_on))]),
 				"green"
 			);
 		}
