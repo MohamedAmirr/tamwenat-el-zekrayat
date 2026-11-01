@@ -21,6 +21,7 @@ const MARKETPLACE_ATTENTION_PROBLEM_TYPES = [
 	"Bosta Return",
 	"Bosta Status Stale",
 	"Bosta Cancelled Delivery",
+	"Bosta Return Review",
 	"Payment Error",
 	"Payment Excess",
 	"Payment Entry Cancelled",

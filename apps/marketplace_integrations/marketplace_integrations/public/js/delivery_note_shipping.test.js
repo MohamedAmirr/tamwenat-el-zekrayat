@@ -12,7 +12,7 @@ global.DOMParser = class {
 	}
 };
 
-function load({ boot = ["Bosta"], statuses = [], call_fails = false, call_error = null, can_write = true } = {}) {
+function load({ boot = ["Bosta"], statuses = [], call_fails = false, call_error = null, can_write = true, call_result = null } = {}) {
 	const handlers = {};
 	const calls = [];
 	const dialogs = [];
@@ -45,7 +45,7 @@ function load({ boot = ["Bosta"], statuses = [], call_fails = false, call_error 
 		call: (opts) => {
 			calls.push(opts);
 			if (call_error) return Promise.reject(call_error);
-			return call_fails ? Promise.reject(new Error("refused")) : Promise.resolve({ message: opts.result || {} });
+			return call_fails ? Promise.reject(new Error("refused")) : Promise.resolve({ message: opts.result || call_result || {} });
 		},
 		db: {
 			get_value: () => Promise.resolve({ message: queue.length > 1 ? queue.shift() : queue[0] || {} }),
@@ -61,6 +61,7 @@ function load({ boot = ["Bosta"], statuses = [], call_fails = false, call_error 
 		check_method: "x.check",
 		refresh_method: "x.refresh",
 		add_buttons: (frm) => frm.extra_buttons++,
+		pick_city: (frm) => (frm.city_picked = (frm.city_picked || 0) + 1),
 	});
 	return { handlers, calls, dialogs, msgprints, alerts, shipping };
 }
@@ -132,6 +133,18 @@ test("the intro follows the integration status and shows the tracking number (lr
 	const fresh = make_form({ custom_integration_status: "Not Created" });
 	handlers.refresh(fresh);
 	assert.equal(fresh.intro, null);
+});
+
+test("a submitted note cancelled at the carrier says the next Cancel makes no carrier call", () => {
+	const { handlers } = load();
+	const submitted = make_form({ custom_integration_status: "Cancelled", docstatus: 1 });
+	handlers.refresh(submitted);
+	assert.equal(submitted.intro.color, "orange");
+	assert.match(submitted.intro.text, /Cancelled at Bosta\. This Delivery Note is still submitted/);
+	assert.match(submitted.intro.text, /Bosta will not be asked again/);
+	const draft = make_form({ custom_integration_status: "Cancelled", docstatus: 0 });
+	handlers.refresh(draft);
+	assert.equal(draft.intro.color, "yellow");
 });
 
 test("shipping status shows as text in an indicator", () => {
@@ -261,6 +274,18 @@ test("submit waits for Created, reloads the form, then lets the submit continue"
 	assert.equal(dialogs[0].hidden, true);
 	assert.equal(frm.reloads, 1);
 	assert.equal(global.frappe.validated, true);
+});
+
+test("submit stops and opens the city picker when the server found no city for the address", async () => {
+	const { handlers, calls, dialogs, alerts } = load({ call_result: { status: "Not Created", queued: false, needs_city: true } });
+	const frm = make_form({ custom_integration_status: "Not Created" });
+	await handlers.before_submit(frm);
+	assert.equal(calls.length, 1);
+	assert.equal(global.frappe.validated, false);
+	assert.equal(frm.city_picked, 1);
+	assert.equal(frm.reloads, 0);
+	assert.equal(dialogs[0].hidden, true);
+	assert.match(alerts[0].message, /Choose the Bosta city, then submit again/);
 });
 
 test("submit stops with the carrier error when creation fails", async () => {

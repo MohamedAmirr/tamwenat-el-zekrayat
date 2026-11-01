@@ -32,6 +32,11 @@ POLL_MAX_AGE_DAYS = 60
 PENDING_EVENT_DAYS = 3
 #: Bosta states that mean the delivery was cancelled or terminated by Bosta.
 CANCELLED_STATE_CODES = (48, 49)
+#: Bosta states that mean the shipment came back to the merchant ("Returned to business", "Returned to
+#: stock"): the same pair the Needs Attention "Bosta Return" row uses. One draft Sales Return per note
+#: (``returns.create_returned_draft``) is made for them. Open question D13: which of the two is the
+#: "customer never received it" state; the draft is idempotent, so both is safe.
+RETURNED_STATE_CODES = (46, 60)
 
 # Names are deliberately from Bosta's supplied webhook guide.  We do not
 # derive a state name from an unknown numeric code or trust a free-text state
@@ -147,7 +152,7 @@ def _note_for(delivery_id, tracking_number):
 			continue
 		rows = frappe.get_all(
 			"Delivery Note",
-			filters={fieldname: value, "docstatus": ["<", 2]},
+			filters={fieldname: value, "docstatus": ["<", 2], "is_return": 0},
 			fields=["name", fieldname],
 			limit_page_length=5,
 		)
@@ -274,7 +279,12 @@ def _write_state(note, code, timestamp=None, fee=None, event=False):
 			outcome = "older"
 		elif status == shipment.CREATING:
 			outcome = "pending"
-		elif status != shipment.CREATED and not (status == shipment.CANCELLED and code in CANCELLED_STATE_CODES):
+		elif (
+			status not in (shipment.CREATED, shipment.CANCELLATION_UNKNOWN)
+			and not (
+				status in (shipment.CANCELLED, shipment.CANCELLATION_PENDING) and code in CANCELLED_STATE_CODES
+			)
+		):
 			outcome = "conflict"
 		if outcome:
 			frappe.db.commit()
@@ -284,14 +294,31 @@ def _write_state(note, code, timestamp=None, fee=None, event=False):
 		values["custom_bosta_last_event_at"] = str(timestamp)
 	if fee is not None:
 		values["custom_actual_shipping_cost"] = fee
-	if code in CANCELLED_STATE_CODES and status == shipment.CREATED:
+		# A Currency column cannot tell a real 0 from "not received yet": this timestamp can.
+		values["custom_actual_cost_received_on"] = now_datetime()
+	if code in CANCELLED_STATE_CODES and status in (
+		shipment.CREATED,
+		shipment.CANCELLATION_PENDING,
+		shipment.CANCELLATION_UNKNOWN,
+	):
+		# Bosta shows the delivery cancelled: a cancel this app started (Pending / Unknown) is resolved too.
 		values["custom_integration_status"] = shipment.CANCELLED
+	elif code not in CANCELLED_STATE_CODES and status == shipment.CANCELLATION_UNKNOWN:
+		# The cancel never took effect (Bosta shows a live state): back to Created, the stale "unknown"
+		# text is cleared. Pending is not touched: its terminate call is still in flight.
+		values["custom_integration_status"] = shipment.CREATED
+		values["custom_last_integration_error"] = None
 	# A draft note may be open in a form about to be submitted: a bumped ``modified`` would make that
 	# native submit fail with "modified after you opened it", and the person changed nothing. ``notify``
 	# still refreshes an open form. A submitted note keeps the bump (nothing can be submitted from it).
 	frappe.get_doc("Delivery Note", note).db_set(
 		values, update_modified=current.docstatus != 0, notify=True, commit=True
 	)
+	if code in RETURNED_STATE_CODES and current.docstatus == 1:
+		from marketplace_integrations.integrations.bosta import returns
+
+		returns.queue_returned_draft(note)
+		frappe.db.commit()
 	update_sales_order_summary_of(note)
 	return "applied"
 

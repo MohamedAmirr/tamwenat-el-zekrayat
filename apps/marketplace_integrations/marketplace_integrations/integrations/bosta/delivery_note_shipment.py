@@ -61,16 +61,21 @@ BOSTA_DELIVERY_TYPE = 10
 BOSTA_COD_LIMIT = 30000
 #: A Creating note with no queued job older than this counts as stuck (Check with Bosta can resolve it).
 STALE_CREATING_MINUTES = 5
+#: A Cancellation Pending note older than this lost its request (the call is synchronous, 10 s timeout):
+#: it may be cancelled again, which is safe because a refused repeat is resolved by one GET.
+STALE_CANCEL_MINUTES = 2
 
 NOT_CREATED = "Not Created"
 CREATING = "Creating"
 UNKNOWN = "Creation Unknown"
 CREATED = "Created"
 FAILED = "Creation Failed"
+CANCELLATION_PENDING = "Cancellation Pending"
+CANCELLATION_UNKNOWN = "Cancellation Unknown"
 CANCELLED = "Cancelled"
 #: Statuses where the shipment is started or live: transporter, items, COD, city and AWB are locked and
 #: the note cannot be cancelled or deleted.
-LIVE_STATUSES = (CREATING, UNKNOWN, CREATED, "Cancellation Pending", "Cancellation Unknown")
+LIVE_STATUSES = (CREATING, UNKNOWN, CREATED, CANCELLATION_PENDING, CANCELLATION_UNKNOWN)
 #: Statuses where the person may still change the note and (re)start the create.
 EDITABLE_STATUSES = ("", NOT_CREATED, FAILED)
 
@@ -85,6 +90,7 @@ SYSTEM_FIELDS = (
 	"custom_last_integration_error",
 	"custom_carrier_request_snapshot",
 	"custom_actual_shipping_cost",
+	"custom_actual_cost_received_on",
 	"custom_bosta_last_event_at",
 )
 #: Cleared on a new or amended note: Amend copies even ``no_copy`` fields (conventions).
@@ -294,13 +300,14 @@ def require_created(doc):
 
 
 def guard_cancel_or_delete(doc):
-	"""``before_cancel`` and ``on_trash``: refuse while a Bosta shipment is live (cancelling it at
-	Bosta is a later feature, epic #413)."""
+	"""``before_cancel`` and ``on_trash``: refuse while a Bosta shipment is live. A note whose Integration
+	Status is Cancelled (cancelled at Bosta, by this app or by Bosta) passes, without any call to Bosta."""
 	if status_of(doc) in LIVE_STATUSES:
 		frappe.throw(
-			_("This Delivery Note has a Bosta shipment ({0}), so it cannot be cancelled or deleted.").format(
-				_(status_of(doc))
-			),
+			_(
+				"This Delivery Note has a Bosta shipment ({0}). Cancel the shipment at Bosta first "
+				"(Cancel Bosta Shipment, or Cancel on a submitted note)."
+			).format(_(status_of(doc))),
 			title=_("Bosta shipment"),
 		)
 
@@ -516,6 +523,29 @@ def get_city_options(delivery_note):
 	return {"cities": locations.get_cities(), "suggested": suggested}
 
 
+def autofill_city(doc):
+	"""Fill the Bosta city of an editable draft note from the address linked to the order, when it is empty
+	(``city_match.resolve_city``). A city that is already set is never touched or asked again. Written with
+	``update_modified=False`` so a form opened before it still submits. Returns whether the note now has a
+	city; a failed or unmatched lookup only leaves it empty (the caller then asks the person)."""
+	if cstr(doc.get("custom_bosta_city")).strip():
+		return True
+	if doc.docstatus != 0 or status_of(doc) not in EDITABLE_STATUSES:
+		return False
+	try:
+		suggested = city_match.resolve_city(_address_for(doc, sales_order_of(doc))) or {}
+		city = locations.get_city(suggested["city_id"]) if suggested.get("city_id") else None
+	except Exception:
+		frappe.clear_last_message()
+		return False
+	if not city:
+		return False
+	values = {"custom_bosta_city": city["code"], "custom_bosta_city_name": city["name"]}
+	frappe.db.set_value("Delivery Note", doc.name, values, update_modified=False)
+	doc.update(values)
+	return True
+
+
 def _validate_ready(doc):
 	"""Everything that can be refused before Bosta is contacted. A configuration problem is thrown here,
 	so a note is never left Creating for it."""
@@ -554,11 +584,16 @@ def _validate_ready(doc):
 
 def request_create(delivery_note, modified=None):
 	"""Start the Bosta create of a draft note (the API has checked the submit permission). Idempotent:
-	a note that is already Creating or Created only returns its status."""
+	a note that is already Creating or Created only returns its status. An empty Bosta city is first filled
+	from the order's address (``autofill_city``); if it is still empty nothing is sent and the answer is
+	``needs_city`` (the form opens the city picker)."""
 	doc = frappe.get_doc("Delivery Note", delivery_note)
 	if modified and cstr(doc.modified) != cstr(modified) and status_of(doc) in EDITABLE_STATUSES:
 		frappe.throw(_("The Delivery Note was changed. Reload it and try again."), frappe.TimestampMismatchError)
 	if status_of(doc) not in (CREATING, CREATED):
+		if not autofill_city(doc):
+			# Nothing to send yet: the form asks the person to pick the city, then submits again.
+			return {"status": status_of(doc), "queued": False, "needs_city": True}
 		_validate_ready(doc)
 	# Commit, then lock as the very next statement (MariaDB snapshot isolation).
 	frappe.db.commit()
@@ -770,14 +805,15 @@ def _after_created(delivery_note, delivery_id):
 		frappe.log_error(title="Bosta: pending events could not be replayed", message=frappe.get_traceback())
 
 
-def _finish(delivery_note, status, values, log, result, **log_values):
-	"""Close the log and write the note back, only if it is still Creating. Commit, lock as the next
-	statement, write with ``db_set`` (system write-back, notifies open forms). Returns whether the note
-	was written. The error text is stored raw: it is escaped where it is rendered."""
+def _finish(delivery_note, status, values, log, result, expected=CREATING, **log_values):
+	"""Close the log and write the note back, only if it is still ``expected`` (Creating for a create,
+	Cancellation Pending for a cancel). Commit, lock as the next statement, write with ``db_set`` (system
+	write-back, notifies open forms). Returns whether the note was written. The error text is stored raw: it
+	is escaped where it is rendered."""
 	close_log(log, result, **log_values)
 	frappe.db.commit()
 	locked = frappe.db.get_value("Delivery Note", delivery_note, "custom_integration_status", for_update=True)
-	if cstr(locked) != CREATING:
+	if cstr(locked) != expected:
 		frappe.db.commit()
 		return False
 	doc = frappe.get_doc("Delivery Note", delivery_note)
@@ -846,6 +882,161 @@ def check_with_bosta(delivery_note):
 		return changed
 	_after_created(delivery_note, _delivery_id(data))
 	return {"status": CREATED, "found": True}
+
+
+# ---------------------------------------------------------------------------
+# Cancel at Bosta (#410)
+# ---------------------------------------------------------------------------
+
+
+def _terminate_outcome(client, response):
+	"""``(outcome, message)`` of a terminate answer: ``cancelled`` (a documented 200 with ``success``),
+	``unclear`` (a 404, errorCode 1066 or an "already terminated" text: the answer does not say whether the
+	delivery is cancelled, so ``cancel_at_bosta`` asks Bosta with one read), ``refused`` (any other 4xx that is
+	not 408 or 429: Bosta definitively says no) or ``unknown`` (everything else). A generic error is never read
+	as "not found"."""
+	status = response.status_code
+	body = response_body(response)
+	if 200 <= status < 300:
+		if body.get("success") is True:
+			return "cancelled", ""
+		return "unknown", client.error_message(response)
+	message = client.error_message(response)
+	if status == 404 or cstr(body.get("errorCode")) == "1066" or "already terminated" in message.lower():
+		return "unclear", message
+	if 400 <= status < 500 and status not in _RETRYABLE_HTTP:
+		return "refused", message
+	return "unknown", message
+
+
+def _read_state(client, tracking):
+	"""One GET of the delivery: ``("found", {"code", "name"})`` for a recognised state, ``("missing", None)``
+	for a 404, else ``("failed", None)`` (any error, timeout or unrecognised answer)."""
+	from marketplace_integrations.integrations.bosta import statuses
+
+	try:
+		response = client.get_delivery(tracking)
+		if response.status_code == 404:
+			return "missing", None
+		if not is_success_response(response):
+			return "failed", None
+		state = statuses._polled_state(response_body(response))
+	except Exception:
+		return "failed", None
+	if state and state["code"] in statuses.BOSTA_STATE_NAMES:
+		return "found", {"code": state["code"], "name": statuses.BOSTA_STATE_NAMES[state["code"]]}
+	return "failed", None
+
+
+def cancel_at_bosta(delivery_note):
+	"""Terminate the note's Bosta delivery (the API checked the cancel / write permission). The ERPNext
+	cancel or delete comes after, natively, and is allowed by ``guard_cancel_or_delete`` only once the
+	Integration Status is Cancelled.
+
+	Synchronous (one terminate call with the client's timeout, at most one GET). Created / Cancellation
+	Unknown -> Cancellation Pending (committed, no lock held across HTTP) -> Cancelled (a documented 200, or one
+	GET showing 48/49 after a refusal or an unclear answer), Cancellation Unknown (timeout, 5xx, 429, or a 404 / 1066 /
+	"already terminated" answer whose GET finds nothing or fails) or back to Created with the refusal in
+	``custom_last_integration_error`` (a refusal, or an unclear answer whose GET shows a live state). A note that is already Cancelled is answered
+	without calling Bosta: this is how a failed local cancel is retried.
+
+	Returns ``{"status", "outcome", "message"}``; ``outcome`` is ``cancelled``, ``refused`` or ``unknown`` and
+	``message`` is Bosta's raw text (the caller escapes it where it is shown)."""
+	from marketplace_integrations.integrations.bosta import statuses
+
+	BostaClient().ensure_ready()
+	# Commit, then lock as the very next statement (MariaDB snapshot isolation).
+	frappe.db.commit()
+	locked = frappe.db.get_value(
+		"Delivery Note",
+		delivery_note,
+		["custom_integration_status", "docstatus", "modified", "lr_no", "custom_carrier_reference"],
+		as_dict=True,
+		for_update=True,
+	)
+	status = cstr(locked.custom_integration_status) or NOT_CREATED
+	if status == CANCELLED and locked.docstatus != 2:
+		frappe.db.commit()
+		return {"status": CANCELLED, "outcome": "cancelled", "message": ""}
+	too_new = status == CANCELLATION_PENDING and get_datetime(locked.modified) > add_to_date(
+		now_datetime(), minutes=-STALE_CANCEL_MINUTES
+	)
+	if (
+		locked.docstatus == 2
+		or too_new
+		or status not in (CREATED, CANCELLATION_PENDING, CANCELLATION_UNKNOWN)
+	):
+		frappe.db.commit()
+		if too_new:
+			frappe.throw(_("Bosta is already being asked to cancel this shipment. Check again in a minute."))
+		frappe.throw(_("Only a note with a created Bosta shipment can be cancelled at Bosta."))
+	tracking = cstr(locked.lr_no).strip()
+	if not tracking:
+		frappe.db.commit()
+		frappe.throw(_("This Delivery Note has no Bosta tracking number."))
+	doc = frappe.get_doc("Delivery Note", delivery_note)
+	doc.db_set(
+		{"custom_integration_status": CANCELLATION_PENDING, "custom_last_integration_error": None},
+		update_modified=True,
+		notify=True,
+	)
+	log = open_log(delivery_note, "Cancel", reference=cstr(locked.custom_carrier_reference) or delivery_note)
+	frappe.db.commit()
+
+	client = BostaClient()
+	try:
+		response = client.terminate_delivery(tracking)
+	except Exception as exc:
+		outcome, message, http_status = (
+			"unknown",
+			_("The Bosta request failed ({0}). It may or may not have reached Bosta.").format(
+				cstr(exc)[:200]
+			),
+			None,
+		)
+	else:
+		outcome, message = _terminate_outcome(client, response)
+		http_status = response.status_code
+	state = None
+	if outcome in ("refused", "unclear"):
+		# One read settles it. Cancelled (48/49) is Cancelled. For a plain refusal anything else keeps the
+		# shipment (back to Created). For an unclear answer a live state is also back to Created with the raw
+		# refusal, while "not found" and a failed read stay Cancellation Unknown.
+		kind, found = _read_state(client, tracking)
+		if kind == "found" and found["code"] in statuses.CANCELLED_STATE_CODES:
+			state, outcome = found, "cancelled"
+		elif outcome == "unclear":
+			outcome = "refused" if kind == "found" else "unknown"
+
+	if outcome == "cancelled":
+		values = {"custom_last_integration_error": None, "custom_last_sync_at": now_datetime()}
+		if state:
+			values["custom_shipping_status"] = state["name"]
+		new_status, result = CANCELLED, "Success"
+	elif outcome == "refused":
+		values, new_status, result = {"custom_last_integration_error": message}, CREATED, "Failed"
+	else:
+		values, new_status, result = (
+			{"custom_last_integration_error": message},
+			CANCELLATION_UNKNOWN,
+			"Unknown",
+		)
+	written = _finish(
+		delivery_note,
+		new_status,
+		values,
+		log,
+		result,
+		expected=CANCELLATION_PENDING,
+		error=message if outcome != "cancelled" else None,
+		http_status=http_status,
+	)
+	if not written:
+		# A webhook or a refresh moved the note on while Bosta was asked; report what is stored now.
+		return {"status": status_of(delivery_note), "outcome": outcome, "message": message}
+	if new_status == CANCELLED:
+		statuses.update_sales_order_summary_of(delivery_note)
+	return {"status": new_status, "outcome": outcome, "message": message}
 
 
 def _update_summary(delivery_note):

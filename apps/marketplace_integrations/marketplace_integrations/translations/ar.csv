@@ -1838,7 +1838,6 @@ The receiver address is missing. Add a shipping address to the Delivery Note.,ع
 The receiver name is missing.,اسم المستلم مفقود.
 The receiver phone is missing. Add a contact phone to the Delivery Note.,هاتف المستلم مفقود. أضف رقم هاتف جهة اتصال إلى مذكرة التسليم.
 The shipment is still being sent to Bosta. Check again in a few minutes.,ما زالت الشحنة قيد الإرسال إلى Bosta. تحقق مرة أخرى بعد بضع دقائق.
-"This Delivery Note has a Bosta shipment ({0}), so it cannot be cancelled or deleted.",لمذكرة التسليم هذه شحنة Bosta ({0})، لذلك لا يمكن إلغاؤها أو حذفها.
 This Delivery Note is not a Bosta shipment.,مذكرة التسليم هذه ليست شحنة Bosta.
 This Delivery Note is not a Bosta shipment. Choose the carrier Bosta.,مذكرة التسليم هذه ليست شحنة Bosta. اختر شركة الشحن Bosta.
 Unexpected error while sending the shipment to Bosta; see the Error Log. It may or may not have reached Bosta.,خطأ غير متوقع أثناء إرسال الشحنة إلى Bosta؛ راجع سجل الأخطاء. قد تكون وصلت إلى Bosta وقد لا تكون.
@@ -1884,3 +1883,47 @@ The shipment could not be sent.,تعذّر إرسال الشحنة.
 Bosta accepted the request without a delivery ID and tracking number.,قبلت Bosta الطلب دون معرّف توصيل ورقم تتبع.
 "#146 decision 13: -, n = 1 + every shipment ever created on this order (including cancelled ones) - never reused.",قرار #146 رقم 13: -، n = 1 + كل شحنة أُنشئت على هذا الطلب (بما في ذلك الملغاة) - لا يُعاد استخدامه أبدًا.
 The COD amount {0} differs from the amount calculated from the current items and advance ({1}). Change the COD if it is no longer right.,مبلغ التحصيل عند الاستلام {0} يختلف عن المبلغ المحسوب من الأصناف الحالية والمبلغ المدفوع مقدمًا ({1}). غيّر مبلغ التحصيل إذا لم يعد صحيحًا.
+"This Delivery Note has a Bosta shipment ({0}). Cancel the shipment at Bosta first (Cancel Bosta Shipment, or Cancel on a submitted note).",لهذه المذكرة شحنة Bosta ({0}). ألغِ الشحنة في Bosta أولًا (إلغاء شحنة Bosta، أو إلغاء المذكرة إذا كانت مُرحَّلة).
+Bosta is already being asked to cancel this shipment. Check again in a minute.,يجري بالفعل طلب إلغاء هذه الشحنة من Bosta. تحقق مرة أخرى بعد دقيقة.
+Only a note with a created Bosta shipment can be cancelled at Bosta.,لا يمكن إلغاء الشحنة في Bosta إلا لمذكرة لها شحنة Bosta منشأة.
+This Delivery Note has no Bosta tracking number.,ليس لمذكرة التسليم هذه رقم تتبع Bosta.
+Nothing was changed in ERPNext. Check the delivery in Bosta before trying again.,لم يتغير شيء في ERPNext. تحقق من التوصيل في Bosta قبل المحاولة مرة أخرى.
+Enter the receiver phone.,أدخل هاتف المستلم.
+Address First Line must be more than 5 characters.,يجب أن يزيد السطر الأول من العنوان على 5 أحرف.
+Address First Line must be at most {0} characters.,يجب ألا يزيد السطر الأول من العنوان على {0} حرفًا.
+Only a note with a created Bosta shipment can be edited.,لا يمكن تعديل إلا مذكرة لها شحنة Bosta منشأة.
+This shipment has no Bosta state stored yet. Refresh from Bosta first.,لا توجد حالة Bosta محفوظة لهذه الشحنة بعد. حدّث من Bosta أولًا.
+Bosta does not allow editing a delivery in state {0}.,لا تسمح Bosta بتعديل توصيل في الحالة {0}.
+A cancelled Delivery Note cannot be edited.,لا يمكن تعديل مذكرة تسليم ملغاة.
+Nothing was changed.,لم يتغير شيء.
+Could not confirm that Bosta updated the delivery. {0},تعذر التأكد من أن Bosta حدّثت التوصيل. {0}
+The Bosta request failed. It may or may not have reached Bosta.,فشل طلب Bosta. قد يكون وصل إلى Bosta وقد لا يكون.
+"Bosta accepted the change, but this shipment was cancelled in the meantime, so ERPNext did not record it.",قبلت Bosta التغيير، لكن الشحنة أُلغيت في هذه الأثناء، لذلك لم يسجله ERPNext.
+Cancelling at Bosta...,جارٍ الإلغاء في Bosta...
+Bosta refused: {0},رفضت Bosta: {0}
+Nothing was cancelled in ERPNext.,لم يُلغَ شيء في ERPNext.
+Bosta did not confirm the cancellation. Nothing was cancelled in ERPNext.,لم تؤكد Bosta الإلغاء. لم يُلغَ شيء في ERPNext.
+Check with Bosta,التحقق من Bosta
+Checking with Bosta...,جارٍ التحقق من Bosta...
+Bosta still shows the shipment as not cancelled.,ما زالت Bosta تعرض الشحنة غير ملغاة.
+The shipment could not be cancelled at Bosta.,تعذر إلغاء الشحنة في Bosta.
+Cancel the Bosta shipment of this Delivery Note? This cannot be undone.,إلغاء شحنة Bosta لمذكرة التسليم هذه؟ لا يمكن التراجع عن ذلك.
+The Bosta shipment was cancelled. The Delivery Note can now be deleted.,أُلغيت شحنة Bosta. يمكن الآن حذف مذكرة التسليم.
+Cancel Bosta Shipment,إلغاء شحنة Bosta
+Edit Bosta Shipment,تعديل شحنة Bosta
+Choose the Bosta city.,اختر مدينة Bosta.
+Receiver Phone,هاتف المستلم
+Address First Line,السطر الأول من العنوان
+Send to Bosta,إرسال إلى Bosta
+Sending to Bosta...,جارٍ الإرسال إلى Bosta...
+Bosta updated the delivery.,حدّثت Bosta التوصيل.
+The delivery could not be updated at Bosta.,تعذر تحديث التوصيل في Bosta.
+Cancelled at {0}. This Delivery Note is still submitted: press Cancel to cancel it here. {0} will not be asked again.,أُلغيت الشحنة في {0}. ما زالت مذكرة التسليم مُرحَّلة: اضغط إلغاء لإلغائها هنا. لن يُطلب من {0} الإلغاء مرة أخرى.
+Actual Cost Received On,تاريخ استلام التكلفة الفعلية
+Return Source,مصدر المرتجع
+Customer Return Pickup,استلام مرتجع العميل
+Returned by Bosta,أعادته Bosta
+Edit,تعديل
+"Choose the {0} city, then submit again.",اختر مدينة {0} ثم قدّم المستند مرة أخرى.
+Bosta Return Review,مراجعة مرتجع Bosta
+Bosta returned shipment {0}. Check the returned goods and submit this draft return.,أعادت Bosta الشحنة {0}. افحص البضاعة المرتجعة ثم قدّم مسودة المرتجع هذه.

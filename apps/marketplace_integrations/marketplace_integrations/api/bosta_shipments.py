@@ -8,7 +8,7 @@ import frappe
 from frappe import _
 
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as shipment
-from marketplace_integrations.integrations.bosta import locations, statuses
+from marketplace_integrations.integrations.bosta import editing, locations, statuses
 
 
 def _bosta_note(delivery_note, ptype):
@@ -75,3 +75,28 @@ def get_cod_hint(delivery_note: str):
 	"""The computed COD when it differs from the merchant's confirmed amount (a hint, never a write)."""
 	_bosta_note(delivery_note, "read")
 	return shipment.cod_hint(delivery_note)
+
+
+@frappe.whitelist(methods=["POST"])
+def cancel_at_bosta(delivery_note: str):
+	"""Terminate the note's Bosta delivery (needs cancel permission on a submitted note, write on a draft).
+	Never cancels or deletes the Delivery Note itself: the native cancel or delete does, once Bosta agreed."""
+	doc = frappe.get_doc("Delivery Note", delivery_note)
+	frappe.has_permission("Delivery Note", "cancel" if doc.docstatus == 1 else "write", doc=doc, throw=True)
+	if not shipment.applies_to(doc):
+		frappe.throw(_("This Delivery Note is not a Bosta shipment."))
+	return shipment.cancel_at_bosta(delivery_note)
+
+
+@frappe.whitelist(methods=["POST"])
+def get_edit_values(delivery_note: str):
+	"""The phone, city and first address line Bosta holds for the note (the edit dialog's start values)."""
+	_bosta_note(delivery_note, "write")
+	return editing.get_edit_values(delivery_note)
+
+
+@frappe.whitelist(methods=["POST"])
+def edit_shipment(delivery_note: str, receiver_phone: str, city_id: str, address_first_line: str):
+	"""Send a changed receiver phone and drop-off address to Bosta (needs write permission on the note)."""
+	_bosta_note(delivery_note, "write")
+	return editing.edit_shipment(delivery_note, receiver_phone, city_id, address_first_line)

@@ -199,14 +199,50 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		self.assertEqual(stored(note, "custom_carrier_reference").custom_carrier_reference, note.name)
 		self.assertEqual(self.http.sent(), [])
 
-	def test_request_refuses_a_missing_city_without_leaving_the_note_creating(self):
+	def test_an_empty_city_is_filled_from_the_address_before_the_job_is_queued(self):
+		note = self.make_note(city="")
+		frappe.db.set_value("Delivery Note", note.name, "custom_bosta_city_name", "")
+		modified = stored(note, "modified").modified
+
+		result = shipment.request_create(note.name)
+
+		self.assertEqual(result, {"status": "Creating", "queued": True})
+		values = stored(note, "custom_bosta_city", "custom_bosta_city_name", "modified")
+		self.assertEqual((values.custom_bosta_city, values.custom_bosta_city_name), ("EG-01", "Cairo"))
+		# the form that was open stays submittable
+		self.assertEqual(values.modified, modified)
+
+	def test_a_city_that_is_already_set_is_never_replaced_by_the_address_city(self):
+		note = self.make_note(city="EG-25")
+
+		shipment.request_create(note.name)
+
+		self.assertEqual(stored(note, "custom_bosta_city").custom_bosta_city, "EG-25")
+
+	def test_an_empty_city_the_address_cannot_fill_asks_the_person_without_leaving_the_note_creating(self):
+		frappe.db.set_value("Address", self.address.name, "city", "Nowhere Land")
 		note = self.make_note(city="")
 
-		with self.assertRaises(frappe.ValidationError):
-			shipment.request_create(note.name)
+		result = shipment.request_create(note.name)
 
+		self.assertEqual(result, {"status": "Not Created", "queued": False, "needs_city": True})
 		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Not Created")
 		self.assertEqual(frappe.db.count("Integration Request", {"reference_docname": note.name}), 0)
+		self.assertEqual(self.enqueue.call_count, 0)
+
+	def test_a_failed_city_lookup_asks_the_person_instead_of_failing(self):
+		note = self.make_note(city="")
+		self.http.queue["all_districts"].append(TimeoutError("slow"))
+
+		result = shipment.request_create(note.name)
+
+		self.assertTrue(result.get("needs_city"))
+		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Not Created")
+
+	def test_the_validation_still_refuses_an_empty_city_when_it_is_called_directly(self):
+		note = self.make_note(city="")
+		with self.assertRaises(frappe.ValidationError):
+			shipment._validate_ready(frappe.get_doc("Delivery Note", note.name))
 
 	def test_request_refuses_a_stale_form(self):
 		note = self.make_note()

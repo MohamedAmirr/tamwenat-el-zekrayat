@@ -25,8 +25,9 @@
 
 	const carriers = {};
 
-	// carrier = { request_method, check_method, refresh_method, add_buttons(frm) } (all optional but
-	// request_method). The key is the Supplier name stored in Delivery Note.transporter_name.
+	// carrier = { request_method, check_method, refresh_method, add_buttons(frm), pick_city(frm) } (all
+	// optional but request_method; pick_city opens the carrier's city picker when the server answers
+	// needs_city). The key is the Supplier name stored in Delivery Note.transporter_name.
 	function register_carrier(name, carrier) {
 		carriers[name] = carrier;
 	}
@@ -83,6 +84,12 @@
 			);
 		} else if (status === FAILED) {
 			frm.set_intro(__("{0} did not create the shipment: {1}", [name, error]), "red");
+		} else if (status === "Cancelled" && frm.doc.docstatus === 1) {
+			// cancelled at the carrier, not yet in ERPNext: the next Cancel makes no carrier call
+			frm.set_intro(
+				__("Cancelled at {0}. This Delivery Note is still submitted: press Cancel to cancel it here. {0} will not be asked again.", [name]),
+				"orange"
+			);
 		} else if (CANCEL_STATUSES.includes(status)) {
 			frm.set_intro(__("{0} shipment: {1}", [name, escape(__(status))]), "yellow");
 		}
@@ -258,7 +265,21 @@
 					silent: true,
 				})
 				.then(
-					() => poll(),
+					(response) => {
+						const result = (response && response.message) || {};
+						if (result.needs_city && hooks.pick_city) {
+							// the server found no city for the address: ask the person, who then saves and submits again
+							if (settled) return;
+							settled = true;
+							if (dialog) dialog.hide();
+							frappe.validated = false;
+							frappe.show_alert({ message: __("Choose the {0} city, then submit again.", [carrier]), indicator: "orange" });
+							hooks.pick_city(frm);
+							resolve();
+							return;
+						}
+						return poll();
+					},
 					(error) => {
 						// the server refused (validation)
 						if (settled) return;

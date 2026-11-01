@@ -354,7 +354,7 @@ fixtures = [
 					"Sales Order-contact_mobile-read_only",
 					"Sales Order-contact_mobile-allow_on_submit",
 					# AWB / Carrier on the Delivery Note: relabelled native lr_no / transporter, and
-					# moved (field_order) under the customer on the Details tab, not collapsed.
+					# moved (field_order) into the Shipping section (Custom Field), not collapsed.
 					# Form layout: field_order also moves six native sections into the collapsed
 					# "More" section (Custom Field below); per_installed / per_returned lose their
 					# "saved only" depends_on so a new note and a saved note show the same fields.
@@ -394,6 +394,7 @@ fixtures = [
 					"Delivery Note-custom_shipping_status",
 					"Delivery Note-custom_carrier_delivery_id",
 					"Delivery Note-custom_carrier_reference",
+					"Delivery Note-custom_shipping_status_column",
 					"Delivery Note-custom_shipping_column",
 					"Delivery Note-custom_cod_amount",
 					"Delivery Note-custom_cod_confirmed",
@@ -403,6 +404,8 @@ fixtures = [
 					"Delivery Note-custom_last_sync_at",
 					"Delivery Note-custom_bosta_last_event_at",
 					"Delivery Note-custom_actual_shipping_cost",
+					"Delivery Note-custom_actual_cost_received_on",
+					"Delivery Note-custom_return_source",
 					"Delivery Note-custom_last_integration_error",
 					"Delivery Note-custom_carrier_request_snapshot",
 					"Integration Request-custom_operation_type",

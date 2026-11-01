@@ -344,7 +344,7 @@
   "translatable": 0,
   "fieldname": "custom_carrier_status",
   "fieldtype": "Select",
-  "insert_after": "lr_date",
+  "insert_after": "custom_shipping_status_column",
   "label": "Carrier Status",
   "name": "Delivery Note-custom_carrier_status",
   "options": "\nPending\nCreated\nError\nCancelled",
@@ -392,13 +392,13 @@
   "insert_after": "error",
   "name": "Integration Request-custom_operation_type",
   "hidden": 0,
-  "modified": "2026-10-31 12:00:00.000000",
+  "modified": "2026-11-01 12:00:00.000000",
   "module": null,
   "permlevel": 0,
   "translatable": 0,
   "read_only": 1,
   "no_copy": 1,
-  "options": "\nCreate\nCancel\nRefresh\nReturn Pickup\nLabel Fetch\nWebhook"
+  "options": "\nCreate\nCancel\nEdit\nRefresh\nReturn Pickup\nLabel Fetch\nWebhook"
  },
  {
   "doctype": "Custom Field",
@@ -560,7 +560,6 @@
   "module": null,
   "permlevel": 0,
   "translatable": 0,
-  "depends_on": "eval:(frappe.boot.marketplace_shipping_carriers||[]).includes(doc.transporter_name)",
   "collapsible": 0
  },
  {
@@ -569,7 +568,7 @@
   "fieldname": "custom_integration_status",
   "fieldtype": "Select",
   "label": "Integration Status",
-  "insert_after": "custom_shipping_section",
+  "insert_after": "custom_carrier_error",
   "name": "Delivery Note-custom_integration_status",
   "hidden": 0,
   "modified": "2026-10-31 12:00:00.000000",
@@ -607,7 +606,7 @@
   "fieldname": "custom_carrier_delivery_id",
   "fieldtype": "Data",
   "label": "Carrier Delivery ID",
-  "insert_after": "custom_shipping_status",
+  "insert_after": "lr_date",
   "name": "Delivery Note-custom_carrier_delivery_id",
   "hidden": 0,
   "modified": "2026-10-31 12:00:00.000000",
@@ -640,10 +639,24 @@
  {
   "doctype": "Custom Field",
   "dt": "Delivery Note",
-  "fieldname": "custom_shipping_column",
+  "fieldname": "custom_shipping_status_column",
   "fieldtype": "Column Break",
   "label": "",
   "insert_after": "custom_carrier_reference",
+  "name": "Delivery Note-custom_shipping_status_column",
+  "hidden": 0,
+  "modified": "2026-10-31 12:00:00.000000",
+  "module": null,
+  "permlevel": 0,
+  "translatable": 0
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Delivery Note",
+  "fieldname": "custom_shipping_column",
+  "fieldtype": "Column Break",
+  "label": "",
+  "insert_after": "custom_shipping_status",
   "name": "Delivery Note-custom_shipping_column",
   "hidden": 0,
   "modified": "2026-10-31 12:00:00.000000",
@@ -665,7 +678,8 @@
   "permlevel": 0,
   "translatable": 0,
   "no_copy": 1,
-  "description": "Cash to collect on delivery. 0 means prepaid. Until confirmed, the default (the note's total minus the order's advance) is recalculated on every save."
+  "description": "Cash to collect on delivery. 0 means prepaid. Until confirmed, the default (the note's total minus the order's advance) is recalculated on every save.",
+  "depends_on": "eval:(frappe.boot.marketplace_shipping_carriers||[]).includes(doc.transporter_name)"
  },
  {
   "doctype": "Custom Field",
@@ -682,7 +696,8 @@
   "translatable": 0,
   "description": "Tick to keep the COD amount as it is, including 0. Required before the shipment is sent.",
   "default": "0",
-  "no_copy": 1
+  "no_copy": 1,
+  "depends_on": "eval:(frappe.boot.marketplace_shipping_carriers||[]).includes(doc.transporter_name)"
  },
  {
   "doctype": "Custom Field",
@@ -785,7 +800,45 @@
   "translatable": 0,
   "no_copy": 1,
   "read_only": 1,
-  "allow_on_submit": 1
+  "allow_on_submit": 1,
+  "depends_on": "eval:doc.custom_actual_cost_received_on"
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Delivery Note",
+  "fieldname": "custom_actual_cost_received_on",
+  "fieldtype": "Datetime",
+  "label": "Actual Cost Received On",
+  "insert_after": "custom_actual_shipping_cost",
+  "name": "Delivery Note-custom_actual_cost_received_on",
+  "hidden": 0,
+  "modified": "2026-10-31 12:00:00.000000",
+  "module": null,
+  "permlevel": 0,
+  "translatable": 0,
+  "no_copy": 1,
+  "read_only": 1,
+  "allow_on_submit": 1,
+  "depends_on": "eval:doc.custom_actual_cost_received_on"
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Delivery Note",
+  "fieldname": "custom_return_source",
+  "fieldtype": "Select",
+  "label": "Return Source",
+  "insert_after": "return_against",
+  "name": "Delivery Note-custom_return_source",
+  "hidden": 0,
+  "modified": "2026-10-31 12:00:00.000000",
+  "module": null,
+  "permlevel": 0,
+  "translatable": 0,
+  "no_copy": 1,
+  "read_only": 1,
+  "allow_on_submit": 0,
+  "options": "\nCustomer Return Pickup\nReturned by Bosta",
+  "depends_on": "eval:doc.custom_return_source"
  },
  {
   "doctype": "Custom Field",
@@ -793,7 +846,7 @@
   "fieldname": "custom_last_integration_error",
   "fieldtype": "Small Text",
   "label": "Last Error",
-  "insert_after": "custom_actual_shipping_cost",
+  "insert_after": "custom_actual_cost_received_on",
   "name": "Delivery Note-custom_last_integration_error",
   "hidden": 0,
   "modified": "2026-10-31 12:00:00.000000",

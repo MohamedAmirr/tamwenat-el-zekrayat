@@ -50,6 +50,8 @@ Problem sources (``problem_type``):
   invoice error / Out of Stock parts have no age threshold.
 - Noon Return Unlinked (#164): one row per Noon Return with no Marketplace
   Order (no exact order_nr match, see integrations/noon/returns.py).
+- Bosta Return Review (#411): one row per draft Sales Return a returned Bosta shipment created, with
+  ``role`` "Stock User" (informational); it clears when the return is submitted or cancelled.
 - Bosta Creation Problem / Cancelled Delivery / Carrier Exception / Return / Status Stale: one
   row per Bosta Delivery Note (epic #413) whose create failed or has an unknown result, that Bosta
   cancelled, that is in an exception or returned state, or that Bosta has not updated for
@@ -71,7 +73,11 @@ import frappe
 from frappe import _
 from frappe.utils import add_to_date, cstr, flt, get_datetime, now_datetime
 
-from marketplace_integrations.integrations.bosta.statuses import BOSTA_STATE_NAMES, TERMINAL_STATE_CODES
+from marketplace_integrations.integrations.bosta.statuses import (
+	BOSTA_STATE_NAMES,
+	RETURNED_STATE_CODES,
+	TERMINAL_STATE_CODES,
+)
 from marketplace_integrations.integrations.noon import handover_state
 from marketplace_integrations.integrations.noon.constants import (
 	NOON_HANDOVER_REMINDER_HOURS,
@@ -99,6 +105,10 @@ BOSTA_CARRIER_EXCEPTION = "Bosta Carrier Exception"
 BOSTA_RETURN = "Bosta Return"
 BOSTA_STATUS_STALE = "Bosta Status Stale"
 BOSTA_CANCELLED = "Bosta Cancelled Delivery"
+BOSTA_RETURN_REVIEW = "Bosta Return Review"
+#: The role that checks the goods of a draft return Bosta's returned shipment created (informational: the
+#: list itself is scoped by Delivery Note read permission).
+BOSTA_RETURN_REVIEW_ROLE = "Stock User"
 PAYMENT_ERROR = "Payment Error"
 PAYMENT_EXCESS = "Payment Excess"
 PAYMENT_ENTRY_CANCELLED = "Payment Entry Cancelled"
@@ -106,7 +116,7 @@ BOSTA_PLATFORM = "Bosta"
 # #344: carrier exceptions. 48 and 49 are not listed (49 is a cancellation, which the poll
 # records as a Canceled shipment).
 BOSTA_PROBLEM_STATE_CODES = (47, 100, 101, 102, 103, 105)
-BOSTA_RETURN_STATE_CODES = (46, 60)
+BOSTA_RETURN_STATE_CODES = RETURNED_STATE_CODES
 BOSTA_STALE_DAYS = 5
 BOSTA_MAX_AGE_DAYS = 60
 #: A "Bosta Cancelled Delivery" item clears after this many days (or at once when the Delivery Note is
@@ -127,6 +137,7 @@ PROBLEM_TYPES = [
 	BOSTA_RETURN,
 	BOSTA_STATUS_STALE,
 	BOSTA_CANCELLED,
+	BOSTA_RETURN_REVIEW,
 	PAYMENT_ERROR,
 	PAYMENT_EXCESS,
 	PAYMENT_ENTRY_CANCELLED,
@@ -170,6 +181,7 @@ def get_attention_items(filters=None):
 		BOSTA_RETURN,
 		BOSTA_STATUS_STALE,
 		BOSTA_CANCELLED,
+		BOSTA_RETURN_REVIEW,
 	}
 	if (
 		not filters.account
@@ -273,6 +285,7 @@ def _item(
 		"action_state": extra.get("action_state"),
 		"linked_doctype": extra.get("linked_doctype"),
 		"linked_document": extra.get("linked_document"),
+		"role": extra.get("role"),
 	}
 
 
@@ -542,6 +555,7 @@ def _collect_bosta_items(problem_type=None):
 			or_filters=[["custom_last_sync_at", "<=", stale_cutoff], ["custom_last_sync_at", "is", "not set"]],
 		)
 	rows = list(by_name.values())
+	items = _collect_bosta_return_reviews(carrier) if problem_type in (None, BOSTA_RETURN_REVIEW) else []
 	returned = set()
 	if rows:
 		# The Delivery Note read check above authorizes this derived set only.
@@ -555,7 +569,24 @@ def _collect_bosta_items(problem_type=None):
 			)
 		}
 	state_names = {name: code for code, name in BOSTA_STATE_NAMES.items()}
-	items = []
+	# A cancel this app sent to Bosta and Bosta accepted (#410) was started by a person: not "Bosta cancelled
+	# this delivery". Read from the Cancel log rows (a derived set, after the Delivery Note read check above).
+	cancelled_here = set()
+	cancelled_names = [row.name for row in rows if row.custom_integration_status == "Cancelled"]
+	if cancelled_names:
+		cancelled_here = set(
+			frappe.get_all(
+				"Integration Request",
+				filters={
+					"integration_request_service": "Bosta",
+					"custom_operation_type": "Cancel",
+					"custom_result": "Success",
+					"reference_doctype": "Delivery Note",
+					"reference_docname": ["in", cancelled_names],
+				},
+				pluck="reference_docname",
+			)
+		)
 	for row in rows:
 		code = state_names.get(row.custom_shipping_status, 0)
 		status = row.custom_integration_status
@@ -572,9 +603,12 @@ def _collect_bosta_items(problem_type=None):
 					NEXT_OPEN_SHIPMENT,
 				)
 			)
-		# #410 (cancel from ERPNext) must leave out the cancels the user started themselves: Bosta
-		# cancelled-by-us and Bosta cancelled-on-its-own are not told apart here yet.
-		if status == "Cancelled" and seen >= cancelled_cutoff and problem_type in (None, BOSTA_CANCELLED):
+		if (
+			status == "Cancelled"
+			and row.name not in cancelled_here
+			and seen >= cancelled_cutoff
+			and problem_type in (None, BOSTA_CANCELLED)
+		):
 			items.append(
 				_item(
 					BOSTA_CANCELLED,
@@ -629,6 +663,33 @@ def _collect_bosta_items(problem_type=None):
 				)
 			)
 	return items
+
+
+def _collect_bosta_return_reviews(carrier):
+	"""One row per draft Sales Return that a returned Bosta shipment created (#411), for the Stock User who
+	checks the goods and submits it. It clears once the return is submitted or cancelled. Read with the
+	caller's permissions (``get_list``)."""
+	rows = frappe.get_list(
+		"Delivery Note",
+		filters={"is_return": 1, "docstatus": 0, "custom_return_source": "Returned by Bosta"},
+		fields=["name", "return_against", "creation"],
+		limit_page_length=0,
+	)
+	return [
+		_item(
+			BOSTA_RETURN_REVIEW,
+			carrier,
+			"Delivery Note",
+			row.name,
+			_("Bosta returned shipment {0}. Check the returned goods and submit this draft return.").format(
+				row.return_against
+			),
+			row.creation,
+			NEXT_OPEN_RETURN,
+			role=BOSTA_RETURN_REVIEW_ROLE,
+		)
+		for row in rows
+	]
 
 
 def _parse_request_data(value):
