@@ -256,6 +256,19 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		self.assertEqual(payload["dropOffAddress"], {"city": "EG-01", "firstLine": "12 Example Street"})
 		self.assertEqual(frappe.db.get_value("Integration Request", log, "custom_result"), "Success")
 
+	def test_a_confirmed_zero_cod_is_sent_as_zero_and_the_differs_hint_does_not_block_it(self):
+		note = self.make_note(self.make_order(rate=100, qty=2), cod=0)
+		# The merchant's 0 differs from the computed 200: the form says so, the shipment still goes.
+		self.assertEqual(shipment.cod_hint(note.name)["default"], 200)
+		self.http.queue["create"].append(created("TRK-1", "DELIVERY-1"))
+
+		self._start(note)
+
+		self.assertEqual(self.http.calls_of("create")[0]["cod"], 0)
+		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Created")
+		frappe.get_doc("Delivery Note", note.name).submit()
+		self.assertEqual(stored(note, "docstatus", "custom_cod_amount").custom_cod_amount, 0)
+
 	def test_a_definitive_refusal_is_creation_failed_and_the_message_is_stored_raw(self):
 		note = self.make_note()
 		self.http.queue["create"].append(
@@ -521,13 +534,139 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 
 		self.assertEqual(stored(note, "custom_bosta_city").custom_bosta_city, "EG-02")
 
-	def test_the_integration_fields_cannot_be_edited_by_hand(self):
+	def test_a_save_cannot_change_the_integration_fields_the_stored_values_are_kept(self):
 		note = self.make_note()
+		frappe.db.set_value("Delivery Note", note.name, "custom_carrier_delivery_id", "D-STORED")
 		doc = frappe.get_doc("Delivery Note", note.name)
 		doc.custom_integration_status = "Created"
+		doc.custom_carrier_delivery_id = "D-FORGED"
 
-		with self.assertRaises(frappe.ValidationError):
-			doc.save()
+		doc.save()
+
+		values = stored(note, "custom_integration_status", "custom_carrier_delivery_id")
+		self.assertEqual(values.custom_integration_status, "Not Created")
+		self.assertEqual(values.custom_carrier_delivery_id, "D-STORED")
+
+	def test_a_copy_loaded_before_a_label_or_status_write_still_submits_and_keeps_the_stored_values(self):
+		note = self.make_note()
+		frappe.db.set_value("Delivery Note", note.name, {"custom_integration_status": "Created", "lr_no": "TRK-1"})
+		frappe.db.commit()
+		stale = frappe.get_doc("Delivery Note", note.name)
+		# Written after the form was opened, as the label job and a webhook do (modified untouched).
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{"custom_shipping_label": "/private/files/l.pdf", "custom_shipping_status": "Delivered"},
+			update_modified=False,
+		)
+
+		stale.submit()
+
+		values = stored(note, "docstatus", "custom_shipping_label", "custom_shipping_status", "custom_integration_status")
+		self.assertEqual(values.docstatus, 1)
+		self.assertEqual(values.custom_shipping_label, "/private/files/l.pdf")
+		self.assertEqual(values.custom_shipping_status, "Delivered")
+		self.assertEqual(values.custom_integration_status, "Created")
+
+	# -- COD stays the merchant's choice until the shipment starts --------------------------------
+
+	def test_a_confirmed_cod_can_still_be_changed_and_a_changed_item_does_not_recompute_it(self):
+		note = self.make_note(self.make_order(rate=100, qty=4), cod=400)
+		doc = frappe.get_doc("Delivery Note", note.name)
+		doc.custom_cod_amount = 0
+		doc.save()
+		self.assertEqual(stored(note, "custom_cod_amount", "custom_cod_confirmed").custom_cod_confirmed, 1)
+		self.assertEqual(stored(note, "custom_cod_amount").custom_cod_amount, 0)
+
+		doc = frappe.get_doc("Delivery Note", note.name)
+		doc.custom_cod_amount = 123
+		doc.items[0].qty = 2
+		doc.save()
+
+		self.assertEqual(stored(note, "custom_cod_amount").custom_cod_amount, 123)
+
+	def test_the_cod_hint_names_the_computed_amount_only_when_it_differs_on_an_editable_note(self):
+		note = self.make_note(self.make_order(rate=100, qty=4), cod=400)
+		self.assertIsNone(shipment.cod_hint(note.name)["default"])
+
+		doc = frappe.get_doc("Delivery Note", note.name)
+		doc.items[0].qty = 2
+		doc.save()
+		self.assertEqual(stored(note, "custom_cod_amount").custom_cod_amount, 400)
+		self.assertEqual(shipment.cod_hint(note.name)["default"], 200)
+
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Creating")
+		self.assertIsNone(shipment.cod_hint(note.name)["default"])
+
+	def test_the_cod_hint_endpoint_needs_read_permission(self):
+		note = self.make_note()
+		email, _role = make_role_user(self, "Bosta No Access", {"Item": ["read"]})
+		frappe.set_user(email)
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				bosta_shipments.get_cod_hint(note.name)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_request_refuses_a_note_changed_between_validation_and_the_lock(self):
+		note = self.make_note()
+		opened = str(stored(note, "modified").modified)
+
+		def changed_meanwhile(doc):
+			frappe.db.set_value("Delivery Note", doc.name, "custom_bosta_city_name", "Giza")
+
+		with patch.object(shipment, "_validate_ready", side_effect=changed_meanwhile):
+			with self.assertRaises(frappe.TimestampMismatchError):
+				shipment.request_create(note.name, opened)
+		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Not Created")
+
+	def test_request_refuses_a_cod_unconfirmed_between_validation_and_the_lock(self):
+		note = self.make_note()
+
+		def unconfirmed_meanwhile(doc):
+			frappe.db.set_value("Delivery Note", doc.name, "custom_cod_confirmed", 0, update_modified=False)
+
+		with patch.object(shipment, "_validate_ready", side_effect=unconfirmed_meanwhile):
+			with self.assertRaises(frappe.ValidationError):
+				shipment.request_create(note.name)
+		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Not Created")
+
+	def test_a_failed_replay_does_not_turn_a_created_shipment_into_unknown(self):
+		from marketplace_integrations.integrations.bosta import statuses
+
+		note = self.make_note()
+		with (
+			patch.object(statuses, "replay_pending_events", side_effect=RuntimeError("replay broke")),
+			patch.object(statuses, "update_sales_order_summary_of"),
+		):
+			shipment._after_created(note.name, "DELIVERY-1")  # must not raise
+
+		self.assertTrue(
+			frappe.db.exists("Error Log", {"method": "Bosta: pending events could not be replayed"})
+			or frappe.db.exists("Error Log", {"error": ["like", "%replay broke%"]})
+		)
+
+	def test_a_note_amended_from_a_bosta_note_loses_the_bosta_fields_when_the_carrier_changed(self):
+		from marketplace_integrations.services import carrier_shipments
+
+		note = self.make_note()
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{"custom_integration_status": "Created", "custom_carrier_delivery_id": "D-1", "lr_no": "T-1", "custom_cod_amount": 90},
+		)
+		amended = frappe.copy_doc(frappe.get_doc("Delivery Note", note.name))
+		amended.amended_from = note.name
+		amended.transporter = None
+		amended.custom_carrier_delivery_id = "D-1"
+		amended.custom_integration_status = "Created"
+		amended.custom_shipping_status = "Delivered"
+		amended.lr_no = "T-1"
+
+		carrier_shipments.validate_delivery_note(amended)
+
+		for fieldname in ("custom_carrier_delivery_id", "custom_integration_status", "custom_shipping_status", "lr_no"):
+			self.assertFalse(amended.get(fieldname), fieldname)
 
 	def test_cancel_and_delete_are_refused_while_the_shipment_is_live(self):
 		for status in ("Creating", "Creation Unknown", "Created"):
@@ -574,6 +713,27 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		):
 			result = bosta_shipments.fetch_label(note.name)
 		self.assertEqual(result["file_url"], "/private/files/x.pdf")
+
+	def test_a_label_error_is_logged_raw_and_escaped_only_for_the_screen(self):
+		from marketplace_integrations.integrations.bosta import labels
+
+		note = self.make_note()
+		frappe.db.set_value("Delivery Note", note.name, {"custom_integration_status": "Created", "lr_no": "TRK-1"})
+		frappe.db.commit()
+		client = type("C", (), {"get_a4_arabic_awb": lambda self, numbers: None, "error_message": lambda self, r: "bad <b> & more"})()
+		with (
+			patch.object(labels, "BostaClient", return_value=client),
+			patch.object(labels, "is_success_response", return_value=False),
+		):
+			with self.assertRaises(frappe.ValidationError) as caught:
+				shipment.fetch_label(note.name, raise_on_error=True)
+		self.assertIn("&lt;b&gt;", str(caught.exception))
+		error = frappe.get_all(
+			"Integration Request",
+			filters={"reference_docname": note.name, "custom_operation_type": "Label Fetch"},
+			pluck="error",
+		)
+		self.assertEqual(error, ["bad <b> & more"])
 
 	def test_the_label_write_does_not_change_modified(self):
 		import base64

@@ -239,6 +239,68 @@ class IntegrationTestMigrateBostaShipments(BostaFixtureMixin, IntegrationTestCas
 		self.assertFalse(frappe.db.has_column("Sales Order", "custom_bosta_delivery_status"))
 		migration.execute()
 
+	def _old_flow_leftovers(self):
+		"""An old Sales Order field with its column and an old Custom DocPerm, removed again on cleanup (a
+		stopped patch must leave them in place)."""
+		fieldname = "custom_bosta_delivery_status"
+		if not frappe.db.exists("Custom Field", f"Sales Order-{fieldname}"):
+			frappe.get_doc(
+				{"doctype": "Custom Field", "dt": "Sales Order", "fieldname": fieldname, "fieldtype": "Data", "label": fieldname}
+			).insert(ignore_permissions=True)
+		perm = frappe.get_doc(
+			{"doctype": "Custom DocPerm", "parent": "Bosta Shipment", "parenttype": "DocType", "parentfield": "permissions",
+			 "role": "System Manager", "permlevel": 0, "read": 1}
+		)
+		perm.db_insert()
+		frappe.db.commit()
+
+		def clean():
+			frappe.db.delete("Custom DocPerm", {"parent": "Bosta Shipment"})
+			frappe.delete_doc("Custom Field", f"Sales Order-{fieldname}", force=True, ignore_permissions=True, ignore_missing=True)
+			if frappe.db.has_column("Sales Order", fieldname):
+				frappe.db.sql_ddl(f"alter table `tabSales Order` drop column `{fieldname}`")
+			frappe.db.commit()
+
+		self.addCleanup(clean)
+		return fieldname
+
+	def _assert_leftovers_survive(self, fieldname):
+		self.assertTrue(frappe.db.exists("Custom Field", f"Sales Order-{fieldname}"))
+		self.assertTrue(frappe.db.has_column("Sales Order", fieldname))
+		self.assertTrue(frappe.db.exists("Custom DocPerm", {"parent": "Bosta Shipment"}))
+
+	def test_a_stopped_run_leaves_the_old_fields_columns_and_permissions_in_place(self):
+		fieldname = self._old_flow_leftovers()
+		note = self.make_note(self.make_order())
+		self._shipment(note, name="BSH-LOOSE", delivery_note="")
+		with self.assertRaises(Exception):
+			migration.execute()
+		self._assert_leftovers_survive(fieldname)
+
+	def test_an_ambiguity_stop_also_changes_nothing(self):
+		fieldname = self._old_flow_leftovers()
+		note = self.make_note(self.make_order())
+		self._shipment(note, name="BSH-1", bosta_delivery_id="DEL-A")
+		self._shipment(note, name="BSH-2", bosta_delivery_id="DEL-B")
+		with self.assertRaises(Exception):
+			migration.execute()
+		self._assert_leftovers_survive(fieldname)
+		held = self.make_note(self.make_order())
+		frappe.db.set_value("Delivery Note", held.name, "custom_carrier_delivery_id", "DEL-HELD")
+		frappe.db.sql("delete from `tabBosta Shipment`")
+		self._shipment(held, bosta_delivery_id="DEL-OTHER")
+		with self.assertRaises(Exception):
+			migration.execute()
+		self._assert_leftovers_survive(fieldname)
+
+	def test_a_live_shipment_without_a_delivery_id_stops_the_patch_even_with_a_note(self):
+		note = self.make_note(self.make_order())
+		self._shipment(note, name="BSH-NO-ID", status="Pending Bosta", tracking_number="", bosta_delivery_id="")
+		with self.assertRaises(Exception) as caught:
+			migration.execute()
+		self.assertIn("BSH-NO-ID", str(caught.exception))
+		self.assertFalse(self._note_values(note).custom_carrier_delivery_id)
+
 	def test_the_patch_fails_loudly_when_the_doctype_row_exists_but_the_table_does_not(self):
 		frappe.db.sql_ddl("drop table if exists `tabBosta Shipment`")
 		real_exists = frappe.db.exists

@@ -75,6 +75,7 @@
 		request_method: API + "request_shipment",
 		check_method: API + "check_with_bosta",
 		refresh_method: API + "refresh_from_bosta",
+		cod_hint_method: API + "get_cod_hint",
 		add_buttons,
 	};
 

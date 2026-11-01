@@ -266,7 +266,7 @@ Noon keeps `custom_carrier_status` / `custom_carrier_error` for now.
 
 **Bosta Settings and city lookup.** `Bosta Settings`, the pickup-location picker and
 `integrations/bosta/locations.py` are unchanged (see above). The Delivery Note's **Pick Bosta City**
-button uses `api.bosta_shipments.get_cities` and `resolve_city`.
+button uses `api.bosta_shipments.get_cities` and `resolve_city`. `get_cod_hint` returns the computed COD when it differs from the merchant's confirmed one (shown on the form, never blocks). A Sales Order `validate`/`before_update_after_submit` hook (`statuses.keep_stored_summary`) keeps the app-written summary from being overwritten by an older form copy.
 
 **No district: Bosta resolves it (#318).** The create call is `POST /deliveries` **without**
 `?apiVersion=1` (that version requires a district and rejects a create without one with

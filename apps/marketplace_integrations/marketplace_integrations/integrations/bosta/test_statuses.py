@@ -361,6 +361,40 @@ class IntegrationTestBostaStatuses(BostaFixtureMixin, IntegrationTestCase):
 			self.assertNotIn("marketplace_integrations.integrations.bosta.statuses.poll_incomplete_shipments", jobs)
 		self.assertNotIn("*/30 * * * *", hooks["cron"])
 
+	def test_a_status_write_to_a_draft_note_does_not_change_modified_so_an_open_form_can_still_submit(self):
+		note = self._created_note()
+		stale = frappe.get_doc("Delivery Note", note.name)
+		before = frappe.db.get_value("Delivery Note", note.name, "modified")
+
+		self.assertEqual(self._apply(event(state=24, ts=2000)), "applied")
+
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "modified"), before)
+		stale.submit()
+		values = frappe.db.get_value("Delivery Note", note.name, ["docstatus", "custom_shipping_status"], as_dict=True)
+		self.assertEqual(values.docstatus, 1)
+		self.assertTrue(values.custom_shipping_status)
+
+	def test_an_older_form_copy_cannot_overwrite_the_sales_order_summary(self):
+		order = self.make_order(submit=False)
+		frappe.db.set_value("Sales Order", order.name, "custom_shipping_status_summary", None)
+		stale = frappe.get_doc("Sales Order", order.name)
+		frappe.db.set_value(
+			"Sales Order", order.name, "custom_shipping_status_summary", '{"Delivered": 1}', update_modified=False
+		)
+		stale.custom_shipping_status_summary = '{"Old": 9}'
+
+		stale.save()
+
+		self.assertEqual(
+			frappe.db.get_value("Sales Order", order.name, "custom_shipping_status_summary"), '{"Delivered": 1}'
+		)
+
+	def test_the_summary_guard_is_registered_for_both_sales_order_saves(self):
+		events = frappe.get_hooks("doc_events")["Sales Order"]
+		path = "marketplace_integrations.integrations.bosta.statuses.keep_stored_summary"
+		for name in ("validate", "before_update_after_submit"):
+			self.assertIn(path, [events[name]] if isinstance(events[name], str) else events[name])
+
 	# -- summary -----------------------------------------------------------------------------
 
 	def test_two_delivered_and_one_in_transit_note_are_counted(self):

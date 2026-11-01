@@ -199,6 +199,9 @@ doc_events = {
 		"before_cancel": "marketplace_integrations.services.carrier_shipments.refuse_sales_order_cancel",
 		"on_update_after_submit": _RECHECK_HANDLER,
 		"on_cancel": _RECHECK_HANDLER,
+		# #413: the Bosta count summary is written by the app only; an older form copy must not overwrite it.
+		"validate": "marketplace_integrations.integrations.bosta.statuses.keep_stored_summary",
+		"before_update_after_submit": "marketplace_integrations.integrations.bosta.statuses.keep_stored_summary",
 	},
 }
 

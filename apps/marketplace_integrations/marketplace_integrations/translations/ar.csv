@@ -1838,7 +1838,6 @@ The receiver address is missing. Add a shipping address to the Delivery Note.,ع
 The receiver name is missing.,اسم المستلم مفقود.
 The receiver phone is missing. Add a contact phone to the Delivery Note.,هاتف المستلم مفقود. أضف رقم هاتف جهة اتصال إلى مذكرة التسليم.
 The shipment is still being sent to Bosta. Check again in a few minutes.,ما زالت الشحنة قيد الإرسال إلى Bosta. تحقق مرة أخرى بعد بضع دقائق.
-The shipping fields are filled in by the Bosta integration and cannot be edited by hand.,حقول الشحن تملؤها وحدة تكامل Bosta ولا يمكن تعديلها يدويًا.
 "This Delivery Note has a Bosta shipment ({0}), so it cannot be cancelled or deleted.",لمذكرة التسليم هذه شحنة Bosta ({0})، لذلك لا يمكن إلغاؤها أو حذفها.
 This Delivery Note is not a Bosta shipment.,مذكرة التسليم هذه ليست شحنة Bosta.
 This Delivery Note is not a Bosta shipment. Choose the carrier Bosta.,مذكرة التسليم هذه ليست شحنة Bosta. اختر شركة الشحن Bosta.
@@ -1884,3 +1883,4 @@ The shipment could not be sent.,تعذّر إرسال الشحنة.
 "Tick to keep the COD amount as it is, including 0. Required before the shipment is sent.",فعّله للإبقاء على مبلغ الدفع عند الاستلام كما هو، بما في ذلك 0. مطلوب قبل إرسال الشحنة.
 Bosta accepted the request without a delivery ID and tracking number.,قبلت Bosta الطلب دون معرّف توصيل ورقم تتبع.
 "#146 decision 13: -, n = 1 + every shipment ever created on this order (including cancelled ones) - never reused.",قرار #146 رقم 13: -، n = 1 + كل شحنة أُنشئت على هذا الطلب (بما في ذلك الملغاة) - لا يُعاد استخدامه أبدًا.
+The COD amount {0} differs from the amount calculated from the current items and advance ({1}). Change the COD if it is no longer right.,مبلغ التحصيل عند الاستلام {0} يختلف عن المبلغ المحسوب من الأصناف الحالية والمبلغ المدفوع مقدمًا ({1}). غيّر مبلغ التحصيل إذا لم يعد صحيحًا.

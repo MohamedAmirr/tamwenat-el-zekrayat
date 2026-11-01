@@ -276,6 +276,38 @@
 		});
 	}
 
+	function money(value, currency) {
+		return typeof format_currency === "function" ? format_currency(value, currency) : String(value);
+	}
+
+	// A confirmed COD is never recomputed (it may be a deliberate choice), so when the items or the
+	// advance changed since, say what the computed amount is. The merchant decides; nothing is written.
+	// The saved note is judged by the server, so an unsaved form shows no hint.
+	function show_cod_hint(frm, carrier) {
+		const hooks = carriers[carrier];
+		if (!hooks.cod_hint_method || frm.is_new() || frm.is_dirty() || !is_editable(frm) || !frm.doc.custom_cod_confirmed) return;
+		if (!frm.dashboard || !frm.dashboard.add_comment) return;
+		return frappe
+			.call({ method: hooks.cod_hint_method, type: "POST", args: { delivery_note: frm.doc.name } })
+			.then((r) => {
+				const hint = r && r.message;
+				if (!hint || hint.default === null || hint.default === undefined) return;
+				frm.dashboard.add_comment(
+					frappe.utils.escape_html(
+						__("The COD amount {0} differs from the amount calculated from the current items and advance ({1}). Change the COD if it is no longer right.", [
+							money(frm.doc.custom_cod_amount, frm.doc.currency),
+							money(hint.default, frm.doc.currency),
+						])
+					),
+					"yellow",
+					true
+				);
+			})
+			.catch(() => {
+				// a hint only: a failed lookup must not disturb the form
+			});
+	}
+
 	// The COD amount and its confirmation can only change while the note is editable.
 	function set_cod_state(frm) {
 		const read_only = is_editable(frm) ? 0 : 1;
@@ -291,6 +323,7 @@
 		failure_html,
 		server_message,
 		is_editable,
+		show_cod_hint,
 	};
 
 	if (typeof frappe !== "undefined") {
@@ -304,6 +337,7 @@
 					set_cod_state(frm);
 					show_intro(frm, carrier);
 					show_shipping_status(frm);
+					show_cod_hint(frm, carrier);
 					add_buttons(frm, carrier);
 				},
 				// Editing the COD is the person's choice: it confirms the amount.

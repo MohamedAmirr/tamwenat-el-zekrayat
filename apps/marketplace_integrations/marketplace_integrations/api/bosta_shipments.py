@@ -68,3 +68,10 @@ def resolve_city(city_id: str):
 	frappe.has_permission("Delivery Note", "write", throw=True)
 	city = locations.get_city(city_id)
 	return {"code": city["code"], "name": city["name"]}
+
+
+@frappe.whitelist(methods=["POST"])
+def get_cod_hint(delivery_note: str):
+	"""The computed COD when it differs from the merchant's confirmed amount (a hint, never a write)."""
+	_bosta_note(delivery_note, "read")
+	return shipment.cod_hint(delivery_note)

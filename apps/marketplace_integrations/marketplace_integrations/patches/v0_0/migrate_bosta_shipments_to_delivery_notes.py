@@ -5,8 +5,11 @@
 
 Runs before fixtures sync, so it creates the Custom Fields it writes itself (from the fixture file).
 
+0. All checks run first and change nothing when they stop the patch (the old fields, columns, permissions
+   and notifications stay for the next run): the DocType row without its table, step 1, and the
+   ambiguity checks of step 2.
 1. Every Bosta Shipment that is not Canceled must have an existing Delivery Note (one that was deleted
-   counts as missing, and so does a row with no delivery id or tracking number yet). Otherwise the patch
+   counts as missing) and a Bosta delivery id (a row still being created has none). Otherwise the patch
    stops and lists all of them: drain or cancel them on the old code first, then migrate again.
 2. Each shipment with a Delivery Note and a Bosta delivery id is copied onto the note (Created, ids,
    tracking number in ``lr_no``, COD confirmed, fee, state, city, label File re-attached) with one
@@ -57,19 +60,25 @@ OLD_DOCTYPES = (OLD, "Bosta Shipment Item")
 
 
 def execute():
-	_retire_old_sales_order_fields()
-	_retire_notifications()
-	frappe.db.delete("Custom DocPerm", {"parent": ["in", list(OLD_DOCTYPES)]})
+	# Every check runs before anything is changed: a stopped run must leave the old fields, columns,
+	# permissions and notifications in place so it can be run again after the data is fixed. (The
+	# ALTER TABLE in the retire step commits implicitly, so nothing could be rolled back later.)
 	has_table = frappe.db.table_exists(OLD)
 	if frappe.db.exists("DocType", OLD) and not has_table:
 		raise Exception(
 			f"The DocType {OLD} exists but its table is missing. Restore the table (or restore a backup) "
 			"before migrating: the Bosta data would be lost."
 		)
+	chosen = {}
+	if has_table:
+		_stop_on_unmovable_shipments()
+		chosen = _plan_copies()
+	_retire_old_sales_order_fields()
+	_retire_notifications()
+	frappe.db.delete("Custom DocPerm", {"parent": ["in", list(OLD_DOCTYPES)]})
 	if has_table:
 		_ensure_custom_fields()
-		_stop_on_unmovable_shipments()
-		_copy_shipments()
+		_copy_shipments(chosen)
 	_retire_role()
 
 
@@ -110,7 +119,7 @@ def _stop_on_unmovable_shipments():
 		"""select s.name, s.sales_order, s.delivery_note, s.status, s.tracking_number, s.bosta_delivery_id
 		from `tabBosta Shipment` s
 		left join `tabDelivery Note` dn on dn.name = s.delivery_note
-		where s.status != 'Canceled' and dn.name is null
+		where s.status != 'Canceled' and (dn.name is null or ifnull(s.bosta_delivery_id, '') = '')
 		order by s.name""",
 		as_dict=True,
 	)
@@ -121,9 +130,9 @@ def _stop_on_unmovable_shipments():
 			for r in rows
 		)
 		raise Exception(
-			"These Bosta Shipments are not Canceled and have no existing Delivery Note, so they cannot be "
-			"moved. Create a Delivery Note for them or cancel them on the old code first, then migrate "
-			"again:\n" + lines
+			"These Bosta Shipments are not Canceled and have no existing Delivery Note or no Bosta delivery "
+			"id, so they cannot be moved. Create a Delivery Note for them, let them finish, or cancel them "
+			"on the old code first, then migrate again:\n" + lines
 		)
 
 
@@ -149,10 +158,9 @@ def _chosen_per_note(shipments):
 	return chosen, ambiguous
 
 
-def _copy_shipments():
-	from marketplace_integrations.integrations.bosta import statuses
-
-	supplier = frappe.db.get_value("Supplier", {"supplier_name": "Bosta"}, "name")
+def _plan_copies():
+	"""``{delivery note: shipment}`` to copy; raises (changing nothing) when a note has two different live
+	delivery ids or already holds another one."""
 	shipments = frappe.db.sql(
 		"""select s.* from `tabBosta Shipment` s
 		join `tabDelivery Note` dn on dn.name = s.delivery_note
@@ -161,8 +169,9 @@ def _copy_shipments():
 		as_dict=True,
 	)
 	chosen, ambiguous = _chosen_per_note(shipments)
+	can_hold = frappe.db.has_column("Delivery Note", "custom_carrier_delivery_id")
 	for note, row in chosen.items():
-		held = cstr(frappe.db.get_value("Delivery Note", note, "custom_carrier_delivery_id"))
+		held = cstr(frappe.db.get_value("Delivery Note", note, "custom_carrier_delivery_id")) if can_hold else ""
 		if held and held != cstr(row.bosta_delivery_id):
 			ambiguous.append(f"  {note}: holds Bosta delivery {held}, shipment {row.name} says {row.bosta_delivery_id}")
 	if ambiguous:
@@ -170,6 +179,13 @@ def _copy_shipments():
 			"These Delivery Notes have more than one different Bosta delivery, so the right one cannot be "
 			"chosen. Settle them on the old code first, then migrate again:\n" + "\n".join(ambiguous)
 		)
+	return chosen
+
+
+def _copy_shipments(chosen):
+	from marketplace_integrations.integrations.bosta import statuses
+
+	supplier = frappe.db.get_value("Supplier", {"supplier_name": "Bosta"}, "name")
 	for note, row in chosen.items():
 		current = frappe.db.get_value(
 			"Delivery Note", note, ["custom_carrier_delivery_id", "lr_no", "transporter"], as_dict=True

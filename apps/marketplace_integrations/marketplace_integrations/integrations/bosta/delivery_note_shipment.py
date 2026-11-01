@@ -33,6 +33,7 @@ Rules enforced here:
 - The worker writes with ``db_set`` (no validate, no hooks): a system write-back.
 """
 
+import html
 import json
 import uuid
 
@@ -91,8 +92,6 @@ CLEARED_ON_NEW = (*SYSTEM_FIELDS, "custom_bosta_city", "custom_bosta_city_name")
 #: Fields a person edits that must stay put once the shipment is started.
 LOCKED_FIELDS = ("transporter", "lr_no", "custom_cod_amount", "custom_bosta_city", "custom_bosta_city_name")
 
-#: Datetime and Currency system fields: their string form differs between the stored and the client copy.
-_NOT_COMPARED = ("custom_last_sync_at", "custom_bosta_last_event_at", "custom_actual_shipping_cost")
 _CREATE_JOB = "bosta-create|{}"
 _LABEL_JOB = "bosta-label|{}"
 _RETRYABLE_HTTP = {408, 429}
@@ -180,6 +179,19 @@ def default_cod(doc):
 	return max(flt(total - advance, 2), 0)
 
 
+def cod_hint(delivery_note):
+	"""The computed COD when it differs from the merchant's confirmed amount on an editable draft note, else
+	``{"default": None}``. A confirmed amount is never recomputed (it may be a deliberate choice); this only
+	lets the form say that the items or advance changed since."""
+	doc = frappe.get_doc("Delivery Note", delivery_note)
+	if doc.docstatus != 0 or status_of(doc) not in EDITABLE_STATUSES or not cint(doc.get("custom_cod_confirmed")):
+		return {"default": None}
+	default = default_cod(doc)
+	if flt(default, 2) == flt(doc.get("custom_cod_amount"), 2):
+		return {"default": None}
+	return {"default": default}
+
+
 def _check_cod(cod):
 	if flt(cod) < 0:
 		frappe.throw(_("COD cannot be negative."), title=_("Bosta shipment"))
@@ -201,6 +213,19 @@ def _apply_cod_rule(doc, before):
 		doc.custom_cod_confirmed = 1
 		return
 	doc.custom_cod_amount = default_cod(doc)
+
+
+def clear_inherited(doc):
+	"""``validate`` of a new note amended from a Bosta note that is no longer a Bosta note (the carrier was
+	changed): Amend copies even ``no_copy`` fields, so the old shipment's id, tracking number and status
+	would sit on a note that has no Bosta shipment."""
+	for fieldname in CLEARED_ON_NEW:
+		doc.set(fieldname, None)
+	doc.custom_cod_amount = None
+	doc.custom_cod_confirmed = 0
+	if doc.get("lr_no") and doc.lr_no == frappe.db.get_value("Delivery Note", doc.amended_from, "lr_no"):
+		doc.lr_no = None
+		doc.lr_date = None
 
 
 def guard_changes(doc):
@@ -228,15 +253,11 @@ def guard_changes(doc):
 			_check_cod(doc.custom_cod_amount)
 		return
 	before = doc.get_doc_before_save() or doc
+	# The app writes these with db_set (no validate). A posted copy loaded before such a write (a form
+	# open while the label or a status arrived) carries old values: put the stored ones back instead of
+	# refusing, so a person's save never changes them and never loses the app's write.
 	for fieldname in SYSTEM_FIELDS:
-		if fieldname in _NOT_COMPARED:
-			continue
-		if cstr(before.get(fieldname)) != cstr(doc.get(fieldname)):
-			# The app writes these with db_set (no validate); a person must not edit them away.
-			frappe.throw(
-				_("The shipping fields are filled in by the Bosta integration and cannot be edited by hand."),
-				title=_("Bosta shipment"),
-			)
+		doc.set(fieldname, before.get(fieldname))
 	if cstr(before.get("custom_integration_status")) in EDITABLE_STATUSES:
 		if ours:
 			_apply_cod_rule(doc, before)
@@ -542,11 +563,23 @@ def request_create(delivery_note, modified=None):
 	# Commit, then lock as the very next statement (MariaDB snapshot isolation).
 	frappe.db.commit()
 	locked = frappe.db.get_value(
-		"Delivery Note", delivery_note, ["custom_integration_status", "docstatus"], as_dict=True, for_update=True
+		"Delivery Note",
+		delivery_note,
+		["custom_integration_status", "docstatus", "modified", "custom_cod_confirmed"],
+		as_dict=True,
+		for_update=True,
 	)
 	if locked.docstatus != 0 or (cstr(locked.custom_integration_status) or NOT_CREATED) in (CREATING, CREATED):
 		frappe.db.commit()
 		return {"status": cstr(locked.custom_integration_status) or NOT_CREATED, "queued": False}
+	# What was validated above may have changed before the lock (a save, a COD edit): judge the locked row.
+	if (modified and cstr(locked.modified) != cstr(modified)) or not cint(locked.custom_cod_confirmed):
+		frappe.db.commit()
+		if not cint(locked.custom_cod_confirmed):
+			frappe.throw(
+				_("Confirm the COD amount before sending the shipment: tick COD confirmed, or change the COD. 0 is allowed.")
+			)
+		frappe.throw(_("The Delivery Note was changed. Reload it and try again."), frappe.TimestampMismatchError)
 	# A reference on the note means a create was tried before: look the delivery up first (durable, unlike
 	# the log rows). It is stored from the first attempt on and cleared on an amended note.
 	previous = cstr(frappe.db.get_value("Delivery Note", delivery_note, "custom_carrier_reference"))
@@ -728,7 +761,13 @@ def _after_created(delivery_note, delivery_id):
 		delivery_note=delivery_note,
 	)
 	frappe.db.commit()
-	statuses.replay_pending_events(delivery_id)
+	try:
+		statuses.replay_pending_events(delivery_id)
+	except Exception:
+		# The create is already logged Success: a replay problem must not turn it into Unknown. The
+		# pending events stay Queued and the nightly reconciliation retries them.
+		frappe.db.rollback()
+		frappe.log_error(title="Bosta: pending events could not be replayed", message=frappe.get_traceback())
 
 
 def _finish(delivery_note, status, values, log, result, **log_values):
@@ -864,7 +903,8 @@ def fetch_label(delivery_note, raise_on_error=False):
 		result = labels.create_a4_arabic_label(delivery_note)
 	except Exception as exc:
 		frappe.db.rollback()
-		close_log(log, "Failed", error=cstr(exc)[:500] or _("The label could not be fetched."))
+		# labels.py escapes Bosta's text for the screen; the log keeps it raw (escaped where it is rendered).
+		close_log(log, "Failed", error=html.unescape(cstr(exc))[:500] or _("The label could not be fetched."))
 		frappe.db.commit()
 		if raise_on_error:
 			raise

@@ -260,7 +260,11 @@ def _write_state(note, code, timestamp=None, fee=None, event=False):
 	Returns ``"applied"`` when written."""
 	frappe.db.commit()
 	current = frappe.db.get_value(
-		"Delivery Note", note, ["custom_integration_status", "custom_bosta_last_event_at"], as_dict=True, for_update=True
+		"Delivery Note",
+		note,
+		["custom_integration_status", "custom_bosta_last_event_at", "docstatus"],
+		as_dict=True,
+		for_update=True,
 	)
 	status = cstr(current.custom_integration_status)
 	stored = _as_documented_integer(current.custom_bosta_last_event_at)
@@ -282,7 +286,12 @@ def _write_state(note, code, timestamp=None, fee=None, event=False):
 		values["custom_actual_shipping_cost"] = fee
 	if code in CANCELLED_STATE_CODES and status == shipment.CREATED:
 		values["custom_integration_status"] = shipment.CANCELLED
-	frappe.get_doc("Delivery Note", note).db_set(values, update_modified=True, notify=True, commit=True)
+	# A draft note may be open in a form about to be submitted: a bumped ``modified`` would make that
+	# native submit fail with "modified after you opened it", and the person changed nothing. ``notify``
+	# still refreshes an open form. A submitted note keeps the bump (nothing can be submitted from it).
+	frappe.get_doc("Delivery Note", note).db_set(
+		values, update_modified=current.docstatus != 0, notify=True, commit=True
+	)
 	update_sales_order_summary_of(note)
 	return "applied"
 
@@ -305,10 +314,10 @@ def refresh_note(delivery_note):
 		raise RateLimited()
 	log = shipment.open_log(delivery_note, "Refresh")
 	if not is_success_response(response):
-		message = escape_html(client.error_message(response))
+		message = client.error_message(response)
 		shipment.close_log(log, "Failed", error=message, http_status=response.status_code)
 		frappe.db.commit()
-		frappe.throw(message)
+		frappe.throw(escape_html(message))
 	body = response_body(response)
 	state = _polled_state(body)
 	if state is None or state["code"] not in BOSTA_STATE_NAMES:
@@ -389,6 +398,14 @@ def update_sales_order_summary_of(delivery_note):
 	order = frappe.db.get_value("Delivery Note Item", {"parent": delivery_note, "parenttype": "Delivery Note"}, "against_sales_order")
 	if order:
 		update_sales_order_summary(order)
+
+
+def keep_stored_summary(doc, method=None):
+	"""Sales Order ``validate`` and ``before_update_after_submit``: the summary is written with
+	``db_set``/``set_value`` by the app only, so a form copy loaded before such a write must not put its old
+	value back. Restore the stored value (empty on a new or copied order)."""
+	before = doc.get_doc_before_save()
+	doc.custom_shipping_status_summary = before.get("custom_shipping_status_summary") if before else None
 
 
 def update_sales_order_summary(sales_order):

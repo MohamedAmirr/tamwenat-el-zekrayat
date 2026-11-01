@@ -69,6 +69,10 @@ def validate_delivery_note(doc, method=None):
 			adapters.append(adapter)
 	for adapter in adapters:
 		adapter.guard_changes(doc)
+	if doc.is_new() and doc.get("amended_from") and not bosta_shipment.applies_to(doc):
+		source = frappe.db.get_value("Delivery Note", doc.amended_from, ["is_return", "transporter"], as_dict=True)
+		if source and bosta_shipment.applies_to(source):
+			bosta_shipment.clear_inherited(doc)
 
 
 def require_shipment_created(doc, method=None):

@@ -351,3 +351,47 @@ test("closing the dialog abandons the wait without submitting", async () => {
 	await promise;
 	assert.equal(global.frappe.validated, false);
 });
+
+test("a confirmed COD that differs from the computed one shows a note with both amounts, escaped", async () => {
+	const { shipping } = load();
+	shipping.register_carrier("Bosta", { request_method: "x.request", cod_hint_method: "x.hint" });
+	const comments = [];
+	const frm = make_form({ custom_integration_status: "Not Created", custom_cod_amount: 100, currency: "EGP" });
+	frm.dashboard.add_comment = (text, color, permanent) => comments.push({ text, color, permanent });
+	const calls = [];
+	global.frappe.call = (opts) => {
+		calls.push(opts);
+		return Promise.resolve({ message: { default: 250 } });
+	};
+	await shipping.show_cod_hint(frm, "Bosta");
+	assert.equal(calls[0].method, "x.hint");
+	assert.equal(comments.length, 1);
+	assert.match(comments[0].text, /100 differs .* \(250\)/);
+	assert.equal(comments[0].color, "yellow");
+});
+
+test("no COD note when the amount matches, the form is unsaved or dirty, or the shipment started", async () => {
+	const { shipping } = load();
+	shipping.register_carrier("Bosta", { request_method: "x.request", cod_hint_method: "x.hint" });
+	let called = 0;
+	global.frappe.call = () => {
+		called++;
+		return Promise.resolve({ message: { default: null } });
+	};
+	const comments = [];
+	const add = (frm) => (frm.dashboard.add_comment = (text) => comments.push(text));
+	const same = make_form({ custom_integration_status: "Not Created" });
+	add(same);
+	await shipping.show_cod_hint(same, "Bosta");
+	assert.equal(called, 1);
+	assert.equal(comments.length, 0);
+	for (const frm of [
+		make_form({ custom_integration_status: "Creating" }),
+		make_form({ custom_integration_status: "Not Created", custom_cod_confirmed: 0 }),
+		make_form({ custom_integration_status: "Not Created" }, { dirty: true }),
+	]) {
+		add(frm);
+		await shipping.show_cod_hint(frm, "Bosta");
+	}
+	assert.equal(called, 1);
+});
