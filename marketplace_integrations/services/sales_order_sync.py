@@ -164,34 +164,10 @@ def sync_sales_order(marketplace_order, trigger_source="Manual"):
 	already_registered = marketplace_order in syncing
 	syncing.add(marketplace_order)
 	try:
-		result = _sync_sales_order(marketplace_order, trigger_source)
-		_queue_handover_retry(marketplace_order)
-		return result
+		return _sync_sales_order(marketplace_order, trigger_source)
 	finally:
 		if not already_registered:
 			syncing.discard(marketplace_order)
-
-
-def _queue_handover_retry(marketplace_order):
-	"""After a sync, draft again any handed-over Noon units that waited for the Sales Order (#368).
-
-	Queued after the commit, one job per order; a failure here never affects the sync itself.
-	"""
-	try:
-		from marketplace_integrations.integrations.noon.handover_state import has_unresolved
-
-		if has_unresolved(marketplace_order):
-			frappe.enqueue(
-				"marketplace_integrations.integrations.noon.fulfillment.retry_unresolved_handovers",
-				queue="short",
-				enqueue_after_commit=True,
-				job_id=f"marketplace-noon-handover-retry-{marketplace_order}",
-				deduplicate=True,
-				marketplace_order=marketplace_order,
-				after_sync=True,
-			)
-	except Exception:
-		frappe.log_error(title="Noon handover retry could not be queued", message=frappe.get_traceback())
 
 
 def _sync_sales_order(marketplace_order, trigger_source):

@@ -10,8 +10,6 @@ from marketplace_integrations.patches.v0_0.reconcile_platform_custom_docperms im
 
 SEEDED = "Marketplace Account"
 UNTOUCHED = "Noon Return"
-# Ships rows for ERPNext roles (Sales Manager, Stock User, Sales User) next to Bosta User.
-SHIPPED_ERPNEXT_ROLES = "Bosta Shipment"
 PLATFORM_ROLES = ("Talabat User", "Noon User", "Shopify User")
 # A role the shipped doctype JSON does not mention; the patch must never touch its rows.
 UNRELATED_ROLE = "Accounts User"
@@ -36,7 +34,7 @@ class IntegrationTestReconcilePlatformCustomDocperms(IntegrationTestCase):
 
 	def setUp(self):
 		self.snapshot = {}
-		for doctype in (SEEDED, UNTOUCHED, SHIPPED_ERPNEXT_ROLES):
+		for doctype in (SEEDED, UNTOUCHED):
 			self.snapshot[doctype] = frappe.get_all(
 				"Custom DocPerm", filters={"parent": doctype}, fields=["*"], order_by="idx asc"
 			)
@@ -114,22 +112,6 @@ class IntegrationTestReconcilePlatformCustomDocperms(IntegrationTestCase):
 	def test_no_custom_docperm_rows_is_a_no_op(self):
 		self.assertEqual(reconcile([UNTOUCHED]), {})
 		self.assertFalse(frappe.db.exists("Custom DocPerm", {"parent": UNTOUCHED}))
-
-	def test_erpnext_roles_in_the_shipped_json_are_left_alone(self):
-		# Stock User ships read/write/create/...; the site revoked all but read. Sales Manager
-		# has no row at all. Neither may be raised, inserted or touched; Bosta User is added.
-		self.insert_row(SHIPPED_ERPNEXT_ROLES, "Stock User", read=1)
-
-		changed = reconcile([SHIPPED_ERPNEXT_ROLES])
-
-		after = rows(SHIPPED_ERPNEXT_ROLES)
-		self.assertIn(SHIPPED_ERPNEXT_ROLES, changed)
-		stock_user = after[("Stock User", 0)]
-		self.assertEqual((stock_user.read, stock_user.write, stock_user.create), (1, 0, 0))
-		self.assertNotIn(("Sales Manager", 0), after)
-		self.assertNotIn(("Sales User", 0), after)
-		self.assertEqual(after[("Bosta User", 0)].create, 1)
-		self.assertEqual(reconcile([SHIPPED_ERPNEXT_ROLES]), {})
 
 	def test_missing_doctype_json_is_skipped(self):
 		# An orphan DocType row (no JSON shipped by this app version) must not abort migrate.

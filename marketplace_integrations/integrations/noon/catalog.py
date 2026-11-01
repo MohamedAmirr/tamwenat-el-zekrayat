@@ -6,9 +6,10 @@
 import frappe
 from frappe import _
 from frappe.query_builder import DocType
-from frappe.utils import cstr
+from frappe.utils import cint, cstr, escape_html, now_datetime
 
-from marketplace_integrations.integrations.noon.client import NoonClient
+from marketplace_integrations.integrations.noon.client import SERVICE_NAME, NoonClient
+from marketplace_integrations.services import carrier_log
 from marketplace_integrations.services.mappings import upsert_mapping_for_listing
 
 WAREHOUSES_PATH = "/warehouse-platform/v1/warehouses/list"
@@ -81,6 +82,95 @@ def list_warehouses(connection_name):
 		if not isinstance(next_token, str) or next_token in seen_tokens:
 			frappe.throw(_("Noon returned an invalid warehouse pagination cursor."))
 		seen_tokens.add(next_token)
+
+
+def _fail_warehouse_check(log, message):
+	"""Close the log row as Failed and commit it (a throw rolls the request back and would lose it), then
+	throw ``message`` (already escaped)."""
+	carrier_log.close_log(log, "Failed", error=message)
+	frappe.db.commit()
+	frappe.throw(message, title=_("Noon Warehouse"))
+
+
+def check_account_warehouse(account_name):
+	"""Ask Noon (ListWarehouses, all pages) for the account's ``noon_warehouse_code`` and store the answer on
+	the account: ``noon_fulfillment_system_code``, ``noon_warehouse_active`` and ``noon_warehouse_checked_on``
+	(sub-issue #416). ListWarehouses can only filter by fulfillment system code, so the account's warehouse is
+	picked from the list here. The write is a system write-back (``db_set``-style, no validate: the account's
+	own validate calls Noon again). The call is logged as an Integration Request (operation "Warehouse",
+	reference the account) without any secret. A Noon error is thrown escaped. Returns the stored values."""
+	account = get_account(account_name, permission="write")
+	code = cstr(account.noon_warehouse_code).strip()
+	if not code:
+		frappe.throw(_("Marketplace Account {0} requires a Noon Warehouse Code.").format(account.name))
+	log = carrier_log.open_log(
+		SERVICE_NAME, account.name, "Warehouse", reference=code, reference_doctype="Marketplace Account"
+	)
+	frappe.db.commit()  # no transaction open across the call
+	try:
+		warehouses = list_warehouses(account.connection)
+	except frappe.ValidationError as exc:
+		frappe.clear_messages()
+		_fail_warehouse_check(log, escape_html(cstr(exc)))
+	except Exception:
+		_fail_warehouse_check(log, _("Noon did not answer the warehouse request. Try again."))
+	match = next((row for row in warehouses if cstr(row["warehouse_code"]).strip() == code), None)
+	if not match:
+		# A warehouse Noon no longer lists must not stay "checked": the stored answer is cleared.
+		frappe.db.set_value(
+			"Marketplace Account",
+			account.name,
+			{"noon_fulfillment_system_code": "", "noon_warehouse_active": 0, "noon_warehouse_checked_on": None},
+			update_modified=False,
+		)
+		_fail_warehouse_check(
+			log, _("Noon has no warehouse with code {0}.").format(frappe.bold(escape_html(code)))
+		)
+	values = {
+		"noon_fulfillment_system_code": cstr(match["fulfillment_system_code"]).strip(),
+		"noon_warehouse_active": 1 if match["is_active"] is True else 0,
+		"noon_warehouse_checked_on": now_datetime(),
+	}
+	frappe.db.set_value("Marketplace Account", account.name, values, update_modified=False)
+	carrier_log.close_log(
+		log,
+		"Success",
+		output=f"fulfillment_system_code={values['noon_fulfillment_system_code']} is_active={values['noon_warehouse_active']}",
+	)
+	frappe.db.commit()
+	return {
+		"fulfillment_system_code": values["noon_fulfillment_system_code"],
+		"is_active": values["noon_warehouse_active"],
+		"checked_on": values["noon_warehouse_checked_on"],
+	}
+
+
+def fbpi_ready(account):
+	"""``(ok, reason)``: may FBPI work (a shipment, Mark Out of Stock, an invoice) go to Noon for this account?
+
+	``ok`` only when the account's FBPI Code is set, equals the stored Noon fulfillment system code, and the
+	stored warehouse is active. Otherwise ``reason`` is a translated, user-readable sentence (Noon's value is
+	escaped). ``account`` is a Marketplace Account document or its name. Reads stored values only: no call."""
+	if isinstance(account, str):
+		account = frappe.get_doc("Marketplace Account", account)
+	fbpi_code = cstr(account.get("noon_fbpi_code")).strip()
+	stored_code = cstr(account.get("noon_fulfillment_system_code")).strip()
+	if not fbpi_code:
+		return False, _(
+			"Marketplace Account {0} has no FBPI Code. Press Check Noon Warehouse, then type the code that means FBPI."
+		).format(account.name)
+	if not stored_code:
+		return False, _("The Noon warehouse of Marketplace Account {0} was never checked. Press Check Noon Warehouse.").format(
+			account.name
+		)
+	if stored_code != fbpi_code:
+		return False, _(
+			"The Noon fulfillment system code of Marketplace Account {0} ({1}) is not its FBPI Code ({2}). "
+			"Press Check Noon Warehouse again, or correct the FBPI Code."
+		).format(account.name, escape_html(stored_code), escape_html(fbpi_code))
+	if not cint(account.get("noon_warehouse_active")):
+		return False, _("The Noon warehouse of Marketplace Account {0} is not active at Noon.").format(account.name)
+	return True, ""
 
 
 def validate_warehouse_code(connection_name, warehouse_code):

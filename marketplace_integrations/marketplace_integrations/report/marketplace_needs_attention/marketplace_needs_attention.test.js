@@ -110,8 +110,8 @@ test("the reference shows the label with the docname in the tooltip, LTR-isolate
 
 test("a reference without a label falls back to the docname", () => {
 	assert.match(
-		reference_html({ reference_doctype: "Bosta Shipment", reference_name: "BOSTA-SHP-00001" }),
-		/<bdi dir="ltr">BOSTA-SHP-00001<\/bdi>/
+		reference_html({ reference_doctype: "Delivery Note", reference_name: "MAT-DN-2026-00001" }),
+		/<bdi dir="ltr">MAT-DN-2026-00001<\/bdi>/
 	);
 });
 

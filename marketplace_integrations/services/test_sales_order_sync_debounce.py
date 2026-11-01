@@ -418,9 +418,8 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 
 		base = frappe._dict(
 			platform="Noon",
+			name="NOON-ORDER-1",
 			items=[row(external_status="CONFIRMED", integration_status="ACKNOWLEDGED", current_quantity=2)],
-			noon_shipments=[],
-			noon_shipment_units=[],
 			refunds=None,
 		)
 		with_stale = frappe._dict(
@@ -429,16 +428,18 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 		shipped = frappe._dict(
 			base, items=[row(external_status="CONFIRMED", integration_status="SHIPPED", current_quantity=2)]
 		)
-		in_shipment = frappe._dict(
-			base,
-			noon_shipments=[frappe._dict(integration_shipment_nr="S-1", status="Created")],
-			noon_shipment_units=[frappe._dict(integration_shipment_nr="S-1", mp_item_nr="1")],
-		)
 		fingerprint = debounce.order_evidence_fingerprint
+		started_path = (
+			"marketplace_integrations.integrations.noon.delivery_note_shipment.started_units_of_order"
+		)
 
-		self.assertEqual(fingerprint(base), fingerprint(with_stale))
-		self.assertNotEqual(fingerprint(base), fingerprint(shipped))
-		self.assertNotEqual(fingerprint(base), fingerprint(in_shipment))
+		with patch(started_path, return_value=set()):
+			plain = fingerprint(base)
+			self.assertEqual(plain, fingerprint(with_stale))
+			self.assertNotEqual(plain, fingerprint(shipped))
+		# A live Noon Delivery Note that started a unit changes the evidence.
+		with patch(started_path, return_value={"1"}):
+			self.assertNotEqual(plain, fingerprint(base))
 
 	def test_linked_refunded_order_does_not_bump_when_unchanged_and_bumps_on_a_new_refund(self):
 		"""The "before" side is built from the same document + builder as the "after"

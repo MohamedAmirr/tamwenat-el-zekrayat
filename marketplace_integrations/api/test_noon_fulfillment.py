@@ -7,36 +7,29 @@ Thin by design, matching api/noon_orders.py's own test shape: every endpoint
 is checked for write permission on the Marketplace Order and that it is
 actually a Noon order, then delegates to
 ``integrations/noon/fulfillment.py`` (mocked out here - its own behavior is
-covered by integrations/noon/test_fulfillment.py).
+covered by integrations/noon/test_fulfillment.py). The shipment endpoints are gone (#415): shipments
+live on the Delivery Note (``api/carrier_shipments.py``).
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
 
+from marketplace_integrations.api import noon_fulfillment
 from marketplace_integrations.api.noon_fulfillment import (
-	_shipment_summaries,
-	add_awb,
-	cancel_shipment,
-	create_shipment,
-	discard_shipment,
+	check_invoice_upload,
+	check_mark_out_of_stock,
 	get_available_actions,
-	get_shippable_units,
-	mark_handed_over,
-	mark_out_of_stock,
+	get_order_invoice_state,
+	get_out_of_stock_rows,
+	mark_item_out_of_stock,
 	release_stuck_oos_reservation,
-	retry,
 	retry_order_invoice,
-	upload_invoice,
 	upload_order_invoice,
 )
-from marketplace_integrations.integrations.noon.test_fulfillment import (
-	_confirmed_acknowledged,
-	_delete_noon_account_fixtures,
-	_make_fulfillment_order,
-)
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
+from marketplace_integrations.tests.handover_fixture import SubmittedOrderFixture
 from marketplace_integrations.tests.utils import make_role_user
 
 
@@ -74,10 +67,9 @@ def _make_noon_account(account_name):
 
 
 class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
-	"""Covers permission checks shared by every endpoint (asserted once via
-	create_shipment and once via get_shippable_units - both go through the
-	same ``_get_noon_order()`` helper every other endpoint also uses) plus
-	one delegation test per endpoint."""
+	"""Covers the Marketplace Order permission check shared by the invoice and recovery endpoints (the same
+	``_get_noon_order()`` helper), the Sales Order write check of the Mark as Out of Stock endpoints, plus one
+	delegation test per endpoint."""
 
 	def setUp(self):
 		suffix = frappe.generate_hash(length=8)
@@ -93,26 +85,36 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 		frappe.delete_doc("Noon Connection", self.account.connection, ignore_permissions=True, force=True)
 		frappe.db.commit()
 
+	def test_the_shipment_endpoints_are_gone(self):
+		for name in (
+			"create_shipment",
+			"cancel_shipment",
+			"mark_handed_over",
+			"discard_shipment",
+			"add_awb",
+			"upload_invoice",
+			"retry",
+			"retry_delivery_note_shipment",
+		):
+			with self.subTest(endpoint=name):
+				self.assertFalse(hasattr(noon_fulfillment, name))
+
 	def test_requires_marketplace_order_write_permission(self):
 		email, _role = make_role_user(self, "Noon Fulfillment No Write", {"Marketplace Order": ["read"]})
 		with self.set_user(email):
 			self.assertTrue(frappe.has_permission("Marketplace Order", "read"))
 			self.assertFalse(frappe.has_permission("Marketplace Order", "write"))
 			with self.assertRaises(frappe.PermissionError):
-				get_shippable_units(self.order.name)
-			with self.assertRaises(frappe.PermissionError):
-				create_shipment(self.order.name, ["1"], "Noon")
+				release_stuck_oos_reservation(self.order.name)
 
 	def test_rejects_non_noon_order(self):
 		frappe.db.set_value("Marketplace Order", self.order.name, "platform", "Talabat")
 		with self.assertRaises(frappe.ValidationError):
-			get_shippable_units(self.order.name)
-		with self.assertRaises(frappe.ValidationError):
-			create_shipment(self.order.name, ["1"], "Noon")
+			release_stuck_oos_reservation(self.order.name)
 
 	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.get_available_actions")
-	def test_get_available_actions_adds_shipments_and_needs_only_read(self, mock_fn):
-		mock_fn.return_value = {"actions": ["retry"], "cancelled_on_noon": False}
+	def test_get_available_actions_needs_only_read(self, mock_fn):
+		mock_fn.return_value = {"actions": ["release_stuck_oos_reservation"], "cancelled_on_noon": False}
 		email, _role = make_role_user(self, "Noon Fulfillment Read Only", {"Marketplace Order": ["read"]})
 		# A document-level read also passes the platform filter (permissions.py), which needs the
 		# platform role; that role carries write too, so the rule "read only" is proved by the
@@ -123,7 +125,7 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 			patch("frappe.model.document.Document.check_permission", autospec=True) as check_permission,
 		):
 			result = get_available_actions(self.order.name)
-		self.assertEqual(result, {"actions": ["retry"], "cancelled_on_noon": False, "shipments": []})
+		self.assertEqual(result, {"actions": ["release_stuck_oos_reservation"], "cancelled_on_noon": False})
 		self.assertEqual([call.args[1] for call in check_permission.call_args_list], ["read"])
 
 	def test_get_available_actions_requires_read_and_a_noon_order(self):
@@ -135,124 +137,109 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			get_available_actions(self.order.name)
 
-	def test_shipment_summaries_list_awbs_delivery_note_and_unresolved_text(self):
-		doc = frappe._dict(
-			noon_shipments=[
-				frappe._dict(
-					integration_shipment_nr="ORD-1",
-					status="Created",
-					delivery_note="MAT-DN-0001",
-					skipped_units=frappe.as_json(
-						[{"external_sku": "SKU-1", "item": "ITEM-1", "qty": 1, "reason": "unmapped", "final": False}]
-					),
-				),
-				frappe._dict(integration_shipment_nr="ORD-2", status="Error", delivery_note=None, skipped_units=None),
-			],
-			noon_shipment_awbs=[
-				frappe._dict(integration_shipment_nr="ORD-1", courier="Aramex", awb_nr="AWB-1"),
-			],
-		)
-		self.assertEqual(
-			_shipment_summaries(doc),
-			[
-				{
-					"integration_shipment_nr": "ORD-1",
-					"status": "Created",
-					"items": [],
-					"awbs": [{"courier": "Aramex", "awb_nr": "AWB-1"}],
-					"delivery_note": "MAT-DN-0001",
-					"delivery_notes": ["MAT-DN-0001"],
-					# MAT-DN-0001 does not exist here, so it is not a live note and nothing was recorded.
-					"handed_over": False,
-					"unresolved": ["SKU-1: no enabled product mapping"],
-				},
-				{
-					"integration_shipment_nr": "ORD-2",
-					"status": "Error",
-					"items": [],
-					"awbs": [],
-					"delivery_note": "",
-					"delivery_notes": [],
-					"handed_over": False,
-					"unresolved": [],
-				},
-			],
-		)
+	def test_the_unit_checklist_endpoints_are_gone(self):
+		for name in ("get_shippable_units", "mark_out_of_stock"):
+			with self.subTest(endpoint=name):
+				self.assertFalse(hasattr(noon_fulfillment, name))
 
-	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.get_shippable_units")
-	def test_get_shippable_units_delegates(self, mock_fn):
-		mock_fn.return_value = [{"mp_item_nr": "1", "partner_sku": "SKU-1"}]
-		result = get_shippable_units(self.order.name)
-		self.assertEqual(result, [{"mp_item_nr": "1", "partner_sku": "SKU-1"}])
-		mock_fn.assert_called_once()
+	def _sales_order(self):
+		fixture = SubmittedOrderFixture(self.account, [("SKU-A", 1)])
+		self.addCleanup(fixture.cleanup)
+		return fixture
 
-	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.create_shipment")
-	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.mark_handed_over")
-	def test_retired_endpoints_refuse_and_point_to_the_delivery_note(self, mark_fn, create_fn):
-		"""#391: shipments come from a draft Delivery Note; the old endpoints only refuse."""
-		with self.assertRaises(frappe.ValidationError) as caught:
-			create_shipment(self.order.name, '["1", "2"]', "Noon")
-		self.assertIn("Create > Delivery Note", str(caught.exception))
+	def test_mark_item_out_of_stock_needs_write_on_the_sales_order_only(self):
+		"""A Sales Order writer without any Marketplace Order right can mark an item; read alone cannot."""
+		fixture = self._sales_order()
+		row = fixture.row_for("SKU-A").name
+		writer, _role = make_role_user(self, "Noon OOS Sales Writer", {"Sales Order": ["read", "write"]})
+		reader, _role = make_role_user(self, "Noon OOS Sales Reader", {"Sales Order": ["read"]})
+		with patch(
+			"marketplace_integrations.api.noon_fulfillment.fulfillment.mark_row_out_of_stock",
+			return_value={"queued": True, "request_id": "r1"},
+		) as mock_fn:
+			with self.set_user(writer):
+				self.assertFalse(frappe.has_permission("Marketplace Order", "read"))
+				self.assertEqual(mark_item_out_of_stock(fixture.name, row), {"queued": True, "request_id": "r1"})
+			mock_fn.assert_called_once_with(fixture.name, row)
+			with self.set_user(reader), self.assertRaises(frappe.PermissionError):
+				mark_item_out_of_stock(fixture.name, row)
+			self.assertEqual(mock_fn.call_count, 1)
+
+	def test_the_row_list_and_the_poll_need_write_on_the_sales_order(self):
+		fixture = self._sales_order()
+		writer, _role = make_role_user(self, "Noon OOS Rows Writer", {"Sales Order": ["read", "write"]})
+		reader, _role = make_role_user(self, "Noon OOS Rows Reader", {"Sales Order": ["read"]})
+		with (
+			patch(
+				"marketplace_integrations.api.noon_fulfillment.fulfillment.out_of_stock_rows", return_value=["row-1"]
+			),
+			patch(
+				"marketplace_integrations.api.noon_fulfillment.fulfillment.out_of_stock_result",
+				return_value={"state": "pending", "message": ""},
+			),
+		):
+			with self.set_user(writer):
+				self.assertEqual(get_out_of_stock_rows(fixture.name), ["row-1"])
+				self.assertEqual(check_mark_out_of_stock(fixture.name, "r1")["state"], "pending")
+			with self.set_user(reader):
+				with self.assertRaises(frappe.PermissionError):
+					get_out_of_stock_rows(fixture.name)
+				with self.assertRaises(frappe.PermissionError):
+					check_mark_out_of_stock(fixture.name, "r1")
+
+	def test_the_order_invoice_endpoints_need_write_on_the_sales_order_only(self):
+		"""A Sales Order writer without any Marketplace Order right can upload, retry and read the state; a
+		reader cannot. The Marketplace Order is derived from the Sales Order and passed with the Sales Order."""
+		fixture = self._sales_order()
+		order = fixture.marketplace_order.name
+		writer, _role = make_role_user(self, "Noon Invoice Sales Writer", {"Sales Order": ["read", "write"]})
+		reader, _role = make_role_user(self, "Noon Invoice Sales Reader", {"Sales Order": ["read"]})
+		base = "marketplace_integrations.api.noon_fulfillment.fulfillment"
+		with (
+			patch(f"{base}.upload_order_invoice", return_value={"queued": True, "idempotency_key": "k"}) as upload,
+			patch(f"{base}.retry_order_invoice", return_value={"queued": True, "idempotency_key": "k"}) as retry,
+			patch(f"{base}.order_invoice_state", return_value={"can_upload": True}) as state,
+		):
+			with self.set_user(writer):
+				self.assertFalse(frappe.has_permission("Marketplace Order", "read"))
+				upload_order_invoice(fixture.name, "/private/files/invoice.pdf", "INV-1", "2026-10-01")
+				retry_order_invoice(fixture.name)
+				self.assertEqual(get_order_invoice_state(fixture.name), {"can_upload": True})
+			upload.assert_called_once_with(
+				order, "/private/files/invoice.pdf", "INV-1", "2026-10-01", sales_order=fixture.name
+			)
+			retry.assert_called_once_with(order, sales_order=fixture.name)
+			self.assertEqual(state.call_count, 1)
+			with self.set_user(reader):
+				for call in (
+					lambda: upload_order_invoice(fixture.name, "/private/files/invoice.pdf", "INV-1", "2026-10-01"),
+					lambda: retry_order_invoice(fixture.name),
+					lambda: get_order_invoice_state(fixture.name),
+				):
+					with self.assertRaises(frappe.PermissionError):
+						call()
+			self.assertEqual((upload.call_count, retry.call_count, state.call_count), (1, 1, 1))
+
+	def test_the_order_invoice_endpoints_refuse_a_sales_order_that_is_not_a_noon_order(self):
+		fixture = self._sales_order()
+		frappe.db.set_value("Marketplace Order", fixture.marketplace_order.name, "platform", "Talabat")
 		with self.assertRaises(frappe.ValidationError):
-			mark_handed_over(self.order.name, "ORD-1")
-		create_fn.assert_not_called()
-		mark_fn.assert_not_called()
+			upload_order_invoice(fixture.name, "/private/files/invoice.pdf", "INV-1", "2026-10-01")
 
-	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.cancel_shipment")
-	def test_cancel_shipment_delegates(self, mock_fn):
-		mock_fn.return_value = {"queued": True}
-		result = cancel_shipment(self.order.name, "ORD-1")
-		mock_fn.assert_called_once_with(self.order.name, "ORD-1")
-		self.assertEqual(result, {"queued": True})
-
-	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.add_awb")
-	def test_add_awb_delegates(self, mock_fn):
-		mock_fn.return_value = {"queued": True}
-		result = add_awb(self.order.name, "ORD-1", "noon", "AWB-1")
-		mock_fn.assert_called_once_with(self.order.name, "ORD-1", "noon", "AWB-1")
-		self.assertEqual(result, {"queued": True})
-
-	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.mark_out_of_stock")
-	def test_mark_out_of_stock_delegates_and_parses_json_list(self, mock_fn):
-		mock_fn.return_value = {"queued": True}
-		result = mark_out_of_stock(self.order.name, '["1"]')
-		mock_fn.assert_called_once_with(self.order.name, ["1"])
-		self.assertEqual(result, {"queued": True})
-
-	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.upload_invoice")
-	def test_upload_invoice_delegates(self, mock_fn):
-		mock_fn.return_value = {"queued": True}
-		result = upload_invoice(self.order.name, "ORD-1", "/files/invoice.pdf", "INV-1", "2026-10-01")
-		mock_fn.assert_called_once_with(self.order.name, "ORD-1", "/files/invoice.pdf", "INV-1", "2026-10-01")
-		self.assertEqual(result, {"queued": True})
-
-	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.upload_order_invoice")
-	def test_upload_order_invoice_delegates(self, mock_fn):
-		mock_fn.return_value = {"queued": True}
-		result = upload_order_invoice(self.order.name, "/files/invoice.pdf", "INV-1", "2026-10-01")
-		mock_fn.assert_called_once_with(self.order.name, "/files/invoice.pdf", "INV-1", "2026-10-01")
-		self.assertEqual(result, {"queued": True})
-
-	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.retry_order_invoice")
-	def test_retry_order_invoice_delegates(self, mock_fn):
-		mock_fn.return_value = {"queued": True}
-		result = retry_order_invoice(self.order.name)
-		mock_fn.assert_called_once_with(self.order.name)
-		self.assertEqual(result, {"queued": True})
-
-	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.retry")
-	def test_retry_delegates(self, mock_fn):
-		mock_fn.return_value = {"queued": True}
-		result = retry(self.order.name, "ORD-1")
-		mock_fn.assert_called_once_with(self.order.name, "ORD-1")
-		self.assertEqual(result, {"queued": True})
-
-	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.discard_shipment")
-	def test_discard_shipment_delegates(self, mock_fn):
-		mock_fn.return_value = {"discarded": True}
-		result = discard_shipment(self.order.name, "ORD-1")
-		mock_fn.assert_called_once_with(self.order.name, "ORD-1")
-		self.assertEqual(result, {"discarded": True})
+	def test_the_invoice_poll_needs_write_on_the_document_and_a_known_type(self):
+		fixture = self._sales_order()
+		writer, _role = make_role_user(self, "Noon Poll Writer", {"Sales Order": ["read", "write"]})
+		reader, _role = make_role_user(self, "Noon Poll Reader", {"Sales Order": ["read"]})
+		with patch(
+			"marketplace_integrations.api.noon_fulfillment.fulfillment.invoice_result",
+			return_value={"state": "done", "message": ""},
+		):
+			with self.set_user(writer):
+				self.assertEqual(check_invoice_upload("Sales Order", fixture.name, "k")["state"], "done")
+			with self.set_user(reader), self.assertRaises(frappe.PermissionError):
+				check_invoice_upload("Sales Order", fixture.name, "k")
+			with self.assertRaises(frappe.ValidationError):
+				check_invoice_upload("User", "Administrator", "k")
 
 	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.release_stuck_oos_reservation")
 	def test_release_stuck_oos_reservation_delegates(self, mock_fn):
@@ -260,36 +247,3 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 		result = release_stuck_oos_reservation(self.order.name)
 		mock_fn.assert_called_once_with(self.order.name)
 		self.assertEqual(result, {"released": ["1"]})
-
-
-_ENQUEUE = "marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue"
-
-
-class IntegrationTestNoonTypedAwbEndpoint(IntegrationTestCase):
-	"""#385: the Desk-facing create_shipment endpoint with a typed AWB (permission boundary)."""
-
-	def setUp(self):
-		suffix = frappe.generate_hash(length=8)
-		self.account = _make_noon_account(f"Typed AWB Endpoint {suffix}")
-		self.order = _make_fulfillment_order(self.account, f"ORD-AWB-API-{suffix}", [_confirmed_acknowledged(1)])
-
-	def tearDown(self):
-		_delete_noon_account_fixtures(self.account)
-
-	def test_noon_user_with_write_is_refused_and_nothing_is_recorded(self):
-		"""#391: the typed AWB now travels as the Delivery Note's lr_no (test_delivery_note_shipment.py)."""
-		email, _role = make_role_user(self, "Noon Typed AWB Writer", {"Marketplace Order": ["read", "write"]})
-		frappe.get_doc("User", email).add_roles("Noon User")
-		with self.set_user(email), patch(_ENQUEUE) as enqueue, self.assertRaises(frappe.ValidationError):
-			create_shipment(self.order.name, '["1"]', "Noon", "NOON-API-1")
-		enqueue.assert_not_called()
-		self.assertEqual(frappe.db.count("Noon AWB", {"marketplace_account": self.account.name}), 0)
-
-	def test_user_without_write_is_refused_before_the_awb_is_validated(self):
-		email, _role = make_role_user(self, "Noon Typed AWB Reader", {"Marketplace Order": ["read"]})
-		with self.set_user(email), patch(_ENQUEUE) as enqueue, self.assertRaises(frappe.PermissionError):
-			create_shipment(self.order.name, '["1"]', "Noon", "A" * 141)
-		enqueue.assert_not_called()
-		self.assertEqual(frappe.db.count("Noon AWB", {"marketplace_account": self.account.name}), 0)
-		self.assertEqual(frappe.db.count("Marketplace Order Shipment", {"parent": self.order.name}), 0)
-

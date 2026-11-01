@@ -21,10 +21,12 @@ not part of that definition.
 import frappe
 
 from marketplace_integrations.services.marketplace_attention import (
-	BOSTA_PLATFORM,
 	get_attention_counts,
 	get_attention_items,
 )
+
+#: The Bosta carrier row's platform value: the ``CARRIERS`` key (Needs Attention filters carriers by it).
+BOSTA_PLATFORM = "Bosta"
 
 EMPTY_COUNTS = {
 	"orders_needing_attention": 0,
@@ -117,10 +119,10 @@ def get_channel_status():
 
 def _bosta_rows():
 	"""One carrier row for Bosta (not a Marketplace Account): shown when it is enabled or
-	has shipments whose Delivery Note action failed. ``orders_needing_attention`` counts
-	those shipments. Only for users who may read Bosta Shipment (#323): a platform user
+	has Delivery Notes with a Bosta problem. ``orders_needing_attention`` counts
+	those notes. Only for users who may read Delivery Note (#323): a platform user
 	without it gets no carrier row, not even the enabled flag."""
-	if not frappe.has_permission("Bosta Shipment", "read"):
+	if not frappe.has_permission("Delivery Note", "read"):
 		return []
 	enabled = frappe.db.get_single_value("Bosta Settings", "enabled")
 	failed = {item["reference_name"] for item in get_attention_items({"platform": BOSTA_PLATFORM})}

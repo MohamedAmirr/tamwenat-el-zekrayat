@@ -25,8 +25,8 @@ Noon Marketplace Order and that order is not being synced right now.  So these s
   Marketplace Order in ``frappe.flags.marketplace_syncing_orders`` for the whole run, and the
   reconciliation planner (``sales_order_reconciliation.execute``) only runs inside it.  The same
   marker already lets ``services/sales_order_recheck.py`` ignore the sync's own writes.  Changes
-  made from the Noon Fulfillment buttons on the Sales Order (Mark Out of Stock, Cancel Shipment) reach the Sales Order
-  through that planner, so they pass.
+  made from Mark as Out of Stock on a Sales Order item row reach the Sales Order through that planner, so
+  they pass.
 - Header and custom fields: only the row fields above are compared, and the parent is not
   checked at all.
 """
@@ -73,8 +73,8 @@ def _refuse_if_locked(row):
 	frappe.throw(
 		_(
 			"Items, quantities and rates of a Noon order cannot be changed in ERPNext because Noon "
-			"has no order update. Use the Noon Fulfillment buttons on the Sales Order "
-			"(Mark Out of Stock or Cancel Shipment)."
+			"has no order update. Use Mark as Out of Stock on an item row of the Sales Order, or "
+			"cancel and amend the Delivery Note."
 		),
 		title=_("Noon order items are locked"),
 	)

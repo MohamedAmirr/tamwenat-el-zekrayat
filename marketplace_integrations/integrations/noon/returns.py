@@ -491,29 +491,18 @@ def queue_manual_lookup(account_name, barcode):
 # ---------------------------------------------------------------------------
 
 
-#: #153 review finding #3: an unbounded scan would call ListReturnReferences
-#: for every AWB this account has EVER had. Scope it to active (non-terminal)
-#: shipments within a lookback window, same rationale/shape as
-#: integrations/noon/orders.py's ORDER_IMPORT_LOOKBACK_DAYS (7 days there is
-#: for a different purpose - catching a later status change on an
-#: already-listed order - so that number isn't reused here; 30 days is a
-#: separate, reasonable default for "how long a return can plausibly still
-#: be in flight against an outbound shipment").
-_TERMINAL_SHIPMENT_STATUSES = ("Cancelled", "Discarded")
-
-
 def _account_awb_numbers(account):
-	"""Distinct AWB numbers from this account's existing ``Marketplace Order
-	Shipment AWB`` child rows (#153 scope) - scoped to this account's Noon
-	orders only, never another account's or another platform's AWBs.
+	"""Distinct AWB numbers (``lr_no``) of this account's Noon Delivery Notes (#415; the old shipment child
+	rows are gone) - scoped to this account's Noon orders only, never another account's or another
+	platform's AWBs.
 
-	#153 review finding #3: further scoped to AWBs belonging to a shipment
-	that is both NOT in a terminal status (``Cancelled``/``Discarded`` - a
-	terminal shipment's outbound AWB is no longer an active one a return
-	could plausibly reference going forward) and modified within the last
-	``AWB_SCAN_LOOKBACK_DAYS`` days, so the daily scan stays bounded instead
-	of re-scanning every AWB this account has ever had.
+	#153 review finding #3: further scoped to notes whose shipment is live (Created, Cancellation Pending or
+	Unknown - a cancelled note's outbound AWB is no longer an active one a return could plausibly reference
+	going forward) and modified within the last ``AWB_SCAN_LOOKBACK_DAYS`` days, so the daily scan stays
+	bounded instead of re-scanning every AWB this account has ever had.
 	"""
+	from marketplace_integrations.integrations.noon.delivery_note_shipment import recent_awbs_of_orders
+
 	order_names = frappe.get_all(
 		"Marketplace Order",
 		filters={"marketplace_account": account.name, "platform": "Noon"},
@@ -523,29 +512,7 @@ def _account_awb_numbers(account):
 		return []
 
 	cutoff = now_datetime() - timedelta(days=AWB_SCAN_LOOKBACK_DAYS)
-	active_shipment_nrs = frappe.get_all(
-		"Marketplace Order Shipment",
-		filters={
-			"parenttype": "Marketplace Order",
-			"parent": ["in", order_names],
-			"status": ["not in", list(_TERMINAL_SHIPMENT_STATUSES)],
-			"modified": [">=", cutoff],
-		},
-		pluck="integration_shipment_nr",
-	)
-	if not active_shipment_nrs:
-		return []
-	rows = frappe.get_all(
-		"Marketplace Order Shipment AWB",
-		filters={
-			"parenttype": "Marketplace Order",
-			"parent": ["in", order_names],
-			"integration_shipment_nr": ["in", active_shipment_nrs],
-		},
-		fields=["awb_nr"],
-		distinct=True,
-	)
-	return sorted({cstr(row.awb_nr).strip() for row in rows if cstr(row.awb_nr).strip()})
+	return recent_awbs_of_orders(order_names, cutoff)
 
 
 def _item_has_matching_awb_reference(item, awb_nr):
@@ -595,7 +562,7 @@ def run_awb_scan(account_name):
 					continue
 				upsert_return_item(account, item, "AWB Scan")
 		except Exception:
-			frappe.log_error(title="Noon AWB return scan: lookup failed", message=frappe.get_traceback())
+			frappe.log_error(title="Noon return scan by AWB: lookup failed", message=frappe.get_traceback())
 			continue
 
 

@@ -5,9 +5,7 @@
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, flt
-
-from marketplace_integrations.integrations.bosta.deliveries import get_sales_order_shipment
+from frappe.utils import cint, cstr, flt
 
 MAX_ITEMS = 10
 
@@ -16,8 +14,7 @@ MAX_ITEMS = 10
 def get_sales_order_card(sales_order: str):
 	"""Everything the Sales Order list hover card shows, for one order.
 
-	The caller must be able to read this Sales Order. The Marketplace Order, Sync Log and
-	Bosta Shipment parts are included only when the caller can read those doctypes; without
+	The caller must be able to read this Sales Order. The Marketplace Order and Sync Log parts are included only when the caller can read those doctypes; without
 	that permission the key is None and nothing from it is returned. All of it is on the
 	Sales Order form and the linked documents too: the card never holds the only copy.
 	"""
@@ -108,11 +105,13 @@ def _last_sync(marketplace_order):
 
 
 def _bosta_part(sales_order):
-	"""Bosta status and tracking number, or None. Reuses the form's permission-aware summary."""
-	shipment = get_sales_order_shipment(sales_order)
-	if not shipment:
+	"""The order's Bosta delivery counts ``{state: count}`` (the stored Sales Order summary), or None.
+	It lives on the Sales Order the caller can already read, so it needs no other permission."""
+	value = frappe.db.get_value("Sales Order", sales_order, "custom_shipping_status_summary")
+	try:
+		counts = frappe.parse_json(value) if value else None
+	except Exception:
 		return None
-	return {
-		"status": shipment["bosta_state"] or shipment["status"],
-		"tracking_number": shipment["tracking_number"],
-	}
+	if not isinstance(counts, dict) or not counts:
+		return None
+	return {"summary": {cstr(k): cint(v) for k, v in counts.items()}}

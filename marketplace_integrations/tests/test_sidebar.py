@@ -134,6 +134,9 @@ class UnitTestSidebar(UnitTestCase):
 			for item in (i for i in sidebar["items"] if i["type"] == "Link"):
 				with self.subTest(shell=name, label=item["label"]):
 					self.assertIn(item["link_type"], existing)
+					# Bosta Delivery Notes opens ERPNext's own Delivery Note list (filtered), which this app does not ship.
+					if (item["link_type"], item["link_to"]) == ("DocType", "Delivery Note"):
+						continue
 					self.assertIn(item["link_to"], existing[item["link_type"]])
 
 	def test_every_icon_exists_in_the_frappe_sprites(self):
@@ -184,5 +187,5 @@ class UnitTestSidebar(UnitTestCase):
 	def test_settings_are_only_in_the_bosta_shell(self):
 		links = {n: {i.get("link_to") for i in s["items"]} for n, s in self.shells.items()}
 		self.assertIn("Bosta Settings", links["Bosta"])
-		self.assertIn("Bosta Shipment", links["Bosta"])
-		self.assertFalse({"Bosta Settings", "Bosta Shipment"} & links["Marketplaces"])
+		self.assertIn("Delivery Note", links["Bosta"])
+		self.assertFalse({"Bosta Settings", "Delivery Note"} & links["Marketplaces"])

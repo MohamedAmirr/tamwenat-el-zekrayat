@@ -12,14 +12,12 @@ There is no read-only platform user by design: every platform role is granted fu
 doctypes it sees, so tests that need a user lacking one ptype cannot use a platform role.
 """
 
-import json
 from contextlib import contextmanager
 
 import frappe
 from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations import permissions
-from marketplace_integrations.integrations.bosta.deliveries import CREATOR_ROLES
 from marketplace_integrations.tests.utils import make_role_user
 
 # Same structural stand-in connection used by the other tests (no platform Connection is needed
@@ -160,7 +158,7 @@ class IntegrationTestPlatformPermissions(IntegrationTestCase):
 	# -- tests ------------------------------------------------------------------------------------
 
 	def test_roles_exist_with_desk_access(self):
-		for role in ("Talabat User", "Noon User", "Shopify User", "Bosta User"):
+		for role in ("Talabat User", "Noon User", "Shopify User"):
 			with self.subTest(role=role):
 				self.assertEqual(frappe.db.get_value("Role", role, "desk_access"), 1)
 
@@ -308,7 +306,7 @@ class IntegrationTestPlatformPermissions(IntegrationTestCase):
 	def test_noon_user_reaches_noon_doctypes_and_talabat_user_does_not(self):
 		noon = self.make_user("Noon Staff", "Noon User")
 		talabat = self.make_user("Talabat Staff", "Talabat User")
-		for doctype in ("Noon AWB", "Noon Return"):
+		for doctype in ("Noon Return",):
 			for ptype in ("read", "create"):
 				with self.subTest(doctype=doctype, ptype=ptype):
 					self.assertTrue(frappe.has_permission(doctype, ptype, user=noon))
@@ -321,56 +319,15 @@ class IntegrationTestPlatformPermissions(IntegrationTestCase):
 		self.assertFalse(frappe.has_permission("Shopify Webhook Delivery", "read", user=noon))
 
 	def test_platform_users_cannot_touch_connection_and_settings_doctypes(self):
-		user = self.make_user("All Platforms", "Talabat User", "Noon User", "Shopify User", "Bosta User")
+		user = self.make_user("All Platforms", "Talabat User", "Noon User", "Shopify User")
 		for doctype in ("Talabat Connection", "Noon Connection", "Shopify Connection", "Bosta Settings"):
 			for ptype in ("read", "write", "create"):
 				with self.subTest(doctype=doctype, ptype=ptype):
 					self.assertFalse(frappe.has_permission(doctype, ptype, user=user))
 
-	def test_bosta_user_can_create_shipments_and_existing_roles_are_unchanged(self):
-		user = self.make_user("Bosta Staff", "Bosta User")
-		self.assertTrue(frappe.has_permission("Bosta Shipment", "create", user=user))
-		self.assertTrue(frappe.has_permission("Bosta Shipment", "delete", user=user))
-		self.assertIn("Bosta User", CREATOR_ROLES)
-		for role in ("Sales Manager", "Stock User", "System Manager"):
-			self.assertIn(role, CREATOR_ROLES)
-
-		path = frappe.get_app_path(
-			"marketplace_integrations",
-			"marketplace_integrations",
-			"doctype",
-			"bosta_shipment",
-			"bosta_shipment.json",
-		)
-		with open(path) as handle:
-			rows = {row["role"]: row for row in json.load(handle)["permissions"]}
-		self.assertEqual(
-			rows["Sales Manager"],
-			{
-				"create": 1,
-				"email": 1,
-				"export": 1,
-				"print": 1,
-				"read": 1,
-				"report": 1,
-				"role": "Sales Manager",
-				"write": 1,
-			},
-		)
-		self.assertEqual(
-			rows["Stock User"],
-			{
-				"create": 1,
-				"email": 1,
-				"export": 1,
-				"print": 1,
-				"read": 1,
-				"report": 1,
-				"role": "Stock User",
-				"write": 1,
-			},
-		)
-		self.assertEqual(rows["Sales User"], {"print": 1, "read": 1, "report": 1, "role": "Sales User"})
+	def test_bosta_user_role_is_retired(self):
+		# Bosta uses native Delivery Note permissions (epic #413); the role no longer exists.
+		self.assertFalse(frappe.db.exists("Role", "Bosta User"))
 
 	def test_ordinary_staff_without_a_platform_role_gets_no_access(self):
 		user = self.make_user("Ordinary Staff", "Sales User")

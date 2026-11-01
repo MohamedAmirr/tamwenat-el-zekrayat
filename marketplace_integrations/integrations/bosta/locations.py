@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-"""Bosta's cities for the Create / Edit Bosta Shipment dialogs (#245) and their city codes (#318).
+"""Bosta's cities for the Delivery Note city picker (#245, epic #413) and their city codes (#318).
 
 The city list comes from Bosta's public ``GET /cities`` (``data.list[]`` of ``{_id, name,
 nameAr, ...}``, per docs/bosta-integration/docs.yaml) and the city codes from

@@ -1,8 +1,12 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-"""Permission-checked Desk boundary for Noon FBPI shipment fulfillment
-(#146, decision 20).
+"""Permission-checked Desk boundary for the Noon FBPI order-level actions (#146, decision 20):
+Mark as Out of Stock (a Sales Order item row, #416: right is write on the Sales Order), the order invoice and
+the stuck-reservation recovery.
+
+Shipments are created, cancelled and refreshed from the Delivery Note
+(``api/carrier_shipments.py``, #415), so no shipment endpoint lives here.
 
 Thin by design, matching ``api/noon_orders.py``: every endpoint here checks
 write permission on the Marketplace Order and that it is actually a Noon
@@ -13,8 +17,7 @@ queue. No Noon HTTP call ever happens inside a Desk request.
 
 import frappe
 
-from marketplace_integrations.integrations.noon import delivery_note_shipment, fulfillment, handover_state
-from marketplace_integrations.services import carrier_shipments
+from marketplace_integrations.integrations.noon import delivery_note_shipment, fulfillment
 
 
 def _get_noon_order(marketplace_order):
@@ -38,87 +41,16 @@ def _get_noon_order(marketplace_order):
 	return doc
 
 
-def _refuse_when_on_delivery_note(order, integration_shipment_nr):
-	"""#393: for a shipment with a Delivery Note, Add AWB, the shipment invoice and their Retry are done
-	on that note."""
-	shipment = fulfillment._find_shipment_row(order, integration_shipment_nr)
-	if shipment and fulfillment.shipment_has_note(shipment):
-		frappe.throw(frappe._("This shipment has a Delivery Note. Do this from the Delivery Note instead."))
-
-
-def _refuse_retired_action():
-	frappe.throw(
-		frappe._(
-			"Noon shipments are now created from a Delivery Note. Open the Sales Order and use Create > Delivery Note."
-		)
-	)
-
-
-@frappe.whitelist(methods=["POST"])
-def get_shippable_units(marketplace_order: str):
-	order = _get_noon_order(marketplace_order)
-	return fulfillment.get_shippable_units(order)
-
-
 @frappe.whitelist(methods=["POST"])
 def get_available_actions(marketplace_order: str):
-	"""Read-only convenience for the Sales Order form: which Noon Fulfillment buttons to show,
-	plus a compact copy of the shipments for its dialogs and read-only summary. No lock needed
-	(nothing is written), so this loads directly and only needs read permission; every action
-	still validates server side."""
+	"""Read-only convenience for the Sales Order form: which Noon Fulfillment buttons to show. No
+	lock needed (nothing is written), so this loads directly and only needs read permission; every
+	action still validates server side."""
 	doc = frappe.get_doc("Marketplace Order", marketplace_order)
 	doc.check_permission("read")
 	if doc.platform != "Noon":
 		frappe.throw(frappe._("Marketplace Order {0} is not a Noon order.").format(doc.name))
-	return {**fulfillment.get_available_actions(doc), "shipments": _shipment_summaries(doc)}
-
-
-def _shipment_summaries(doc):
-	"""Display values of each shipment: status, units grouped by SKU (``Item name (SKU)`` x qty), AWBs, Delivery Note and the units that could not
-	be put on a Delivery Note (as text)."""
-	awbs = {}
-	for awb in doc.noon_shipment_awbs or []:
-		awbs.setdefault(awb.integration_shipment_nr, []).append({"courier": awb.courier, "awb_nr": awb.awb_nr})
-	items = fulfillment.shipment_items(doc)
-	return [
-		{
-			"integration_shipment_nr": row.integration_shipment_nr,
-			"status": row.status,
-			"items": items.get(row.integration_shipment_nr, []),
-			"awbs": awbs.get(row.integration_shipment_nr, []),
-			"delivery_note": row.delivery_note or "",
-			"delivery_notes": handover_state.shipment_notes(row),
-			"handed_over": fulfillment._handed_over(row),
-			"unresolved": [handover_state.entry_text(entry) for entry in handover_state.load_entries(row)],
-		}
-		for row in doc.noon_shipments or []
-	]
-
-
-@frappe.whitelist(methods=["POST"])
-def create_shipment(marketplace_order: str, mp_item_nrs, awb_source: str = "Noon", awb_nr: str | None = None):
-	"""Retired by #391 (Delivery Note-first): refuses. The old path is removed in sub-issue 3 of #392."""
-	_get_noon_order(marketplace_order)
-	_refuse_retired_action()
-
-
-@frappe.whitelist(methods=["POST"])
-def cancel_shipment(marketplace_order: str, integration_shipment_nr: str):
-	_get_noon_order(marketplace_order)
-	return fulfillment.cancel_shipment(marketplace_order, integration_shipment_nr)
-
-
-@frappe.whitelist(methods=["POST"])
-def mark_handed_over(marketplace_order: str, integration_shipment_nr: str):
-	"""Retired by #391 (Delivery Note-first): refuses. The Delivery Note now comes first."""
-	_get_noon_order(marketplace_order)
-	_refuse_retired_action()
-
-
-@frappe.whitelist(methods=["POST"])
-def discard_shipment(marketplace_order: str, integration_shipment_nr: str):
-	_get_noon_order(marketplace_order)
-	return fulfillment.discard_shipment(marketplace_order, integration_shipment_nr)
+	return fulfillment.get_available_actions(doc)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -128,106 +60,80 @@ def release_stuck_oos_reservation(marketplace_order: str):
 
 
 @frappe.whitelist(methods=["POST"])
-def add_awb(marketplace_order: str, integration_shipment_nr: str, courier: str, awb_nr: str):
-	_refuse_when_on_delivery_note(_get_noon_order(marketplace_order), integration_shipment_nr)
-	return fulfillment.add_awb(marketplace_order, integration_shipment_nr, courier, awb_nr)
+def get_out_of_stock_rows(sales_order: str):
+	"""Names of the Sales Order Item rows that offer Mark as Out of Stock. Right: write on the Sales Order
+	(the order row is read as the system: the user needs no Marketplace Order permission)."""
+	frappe.has_permission("Sales Order", "write", doc=sales_order, throw=True)
+	return fulfillment.out_of_stock_rows(sales_order)
 
 
 @frappe.whitelist(methods=["POST"])
-def mark_out_of_stock(marketplace_order: str, mp_item_nrs):
-	_get_noon_order(marketplace_order)
-	if isinstance(mp_item_nrs, str):
-		mp_item_nrs = frappe.parse_json(mp_item_nrs)
-	return fulfillment.mark_out_of_stock(marketplace_order, mp_item_nrs)
+def mark_item_out_of_stock(sales_order: str, sales_order_item: str):
+	"""Mark as Out of Stock for one Sales Order Item row: authorizes, then delegates (the service refuses a
+	row in a Delivery Note, a non-FBPI warehouse and anything not eligible). Queues the Noon call."""
+	frappe.has_permission("Sales Order", "write", doc=sales_order, throw=True)
+	return fulfillment.mark_row_out_of_stock(sales_order, sales_order_item)
 
 
 @frappe.whitelist(methods=["POST"])
-def upload_invoice(
-	marketplace_order: str, integration_shipment_nr: str, file_url: str, invoice_nr: str, issued_at: str
+def check_mark_out_of_stock(sales_order: str, request_id: str):
+	"""Poll of the wait dialog: ``{"state": pending|done|failed|unknown|local_failed, "message"}``."""
+	frappe.has_permission("Sales Order", "write", doc=sales_order, throw=True)
+	return fulfillment.out_of_stock_result(sales_order, request_id)
+
+
+def _noon_order_of_sales_order(sales_order):
+	"""The Marketplace Order of a submitted Noon Sales Order, after the right of the invoice actions: write on
+	the Sales Order (the order row is then read and written as the system: no Marketplace Order right needed)."""
+	frappe.has_permission("Sales Order", "write", doc=sales_order, throw=True)
+	values = frappe.db.get_value("Sales Order", sales_order, ["docstatus", "custom_marketplace_order"], as_dict=True)
+	if not values or values.docstatus != 1 or not values.custom_marketplace_order:
+		frappe.throw(frappe._("Sales Order {0} is not a submitted Noon order.").format(sales_order))
+	if frappe.db.get_value("Marketplace Order", values.custom_marketplace_order, "platform") != "Noon":
+		frappe.throw(frappe._("Sales Order {0} is not a submitted Noon order.").format(sales_order))
+	return values.custom_marketplace_order
+
+
+@frappe.whitelist(methods=["POST"])
+def get_order_invoice_state(sales_order: str):
+	"""``{"can_upload", "can_retry", "uploaded"}`` for the order-invoice buttons (write on the Sales Order)."""
+	marketplace_order = _noon_order_of_sales_order(sales_order)
+	return fulfillment.order_invoice_state(frappe.get_doc("Marketplace Order", marketplace_order))
+
+
+@frappe.whitelist(methods=["POST"])
+def upload_order_invoice(sales_order: str, file_url: str, invoice_nr: str, issued_at: str):
+	"""Upload Order Invoice from the Sales Order: authorizes, then delegates (the PDF is attached to the Sales
+	Order). Queues the Noon call; returns ``{"queued", "idempotency_key"}``."""
+	marketplace_order = _noon_order_of_sales_order(sales_order)
+	return fulfillment.upload_order_invoice(
+		marketplace_order, file_url, invoice_nr, issued_at, sales_order=sales_order
+	)
+
+
+@frappe.whitelist(methods=["POST"])
+def retry_order_invoice(sales_order: str):
+	marketplace_order = _noon_order_of_sales_order(sales_order)
+	return fulfillment.retry_order_invoice(marketplace_order, sales_order=sales_order)
+
+
+@frappe.whitelist(methods=["POST"])
+def upload_delivery_note_invoice(
+	delivery_note: str, file_url: str, invoice_nr: str, issued_at: str, idempotency_key: str | None = None
 ):
-	_refuse_when_on_delivery_note(_get_noon_order(marketplace_order), integration_shipment_nr)
-	return fulfillment.upload_invoice(marketplace_order, integration_shipment_nr, file_url, invoice_nr, issued_at)
-
-
-@frappe.whitelist(methods=["POST"])
-def upload_order_invoice(marketplace_order: str, file_url: str, invoice_nr: str, issued_at: str):
-	_get_noon_order(marketplace_order)
-	return fulfillment.upload_order_invoice(marketplace_order, file_url, invoice_nr, issued_at)
-
-
-@frappe.whitelist(methods=["POST"])
-def retry_order_invoice(marketplace_order: str):
-	_get_noon_order(marketplace_order)
-	return fulfillment.retry_order_invoice(marketplace_order)
-
-
-@frappe.whitelist(methods=["POST"])
-def retry(marketplace_order: str, integration_shipment_nr: str):
-	order = _get_noon_order(marketplace_order)
-	shipment = fulfillment._find_shipment_row(order, integration_shipment_nr)
-	# A Created shipment's Add AWB / invoice retry moves to the note; Pending/Error/Cancel Pending
-	# retries stay (fulfillment.retry routes a note's create retry through the note).
-	if shipment and shipment.status == "Created":
-		_refuse_when_on_delivery_note(order, integration_shipment_nr)
-	return fulfillment.retry(marketplace_order, integration_shipment_nr)
-
-
-@frappe.whitelist(methods=["POST"])
-def retry_delivery_note_shipment(delivery_note: str):
-	"""Retry button of the Delivery Note form (#391): re-queue the Noon shipment of a draft note
-	whose carrier status is Error. Needs write permission on that Delivery Note (the Stock User's
-	own right); the worker writes the Noon records as the system user."""
+	"""Upload Shipment Invoice from a Delivery Note (right: write on that note). ``idempotency_key`` is given
+	only by Retry (the key of the press that failed)."""
 	frappe.has_permission("Delivery Note", "write", doc=delivery_note, throw=True)
-	return carrier_shipments.retry_shipment(delivery_note)
-
-
-# ---------------------------------------------------------------------------
-# Delivery Note entry points (#393): document-level permission on the note, work done as the system
-# ---------------------------------------------------------------------------
+	return delivery_note_shipment.upload_invoice_for_note(
+		delivery_note, file_url, invoice_nr, issued_at, idempotency_key
+	)
 
 
 @frappe.whitelist(methods=["POST"])
-def cancel_delivery_note_shipment(delivery_note: str):
-	"""Start cancelling the live Noon shipment of a Delivery Note before its own cancel (submitted) or
-	delete (draft). Needs that permission on the note. Poll ``get_delivery_note_cancel_state``."""
-	docstatus = frappe.db.get_value("Delivery Note", delivery_note, "docstatus")
-	frappe.has_permission("Delivery Note", "cancel" if docstatus == 1 else "delete", doc=delivery_note, throw=True)
-	return delivery_note_shipment.cancel_for_note(delivery_note)
-
-
-@frappe.whitelist(methods=["POST"])
-def get_delivery_note_cancel_state(delivery_note: str):
-	frappe.has_permission("Delivery Note", "read", doc=delivery_note, throw=True)
-	return delivery_note_shipment.cancel_state(delivery_note)
-
-
-@frappe.whitelist(methods=["POST"])
-def get_delivery_note_shipment(delivery_note: str):
-	"""The note's Noon shipment (status, AWBs, invoice) for its form buttons, or null."""
-	frappe.has_permission("Delivery Note", "read", doc=delivery_note, throw=True)
-	return delivery_note_shipment.shipment_summary(delivery_note)
-
-
-@frappe.whitelist(methods=["POST"])
-def add_delivery_note_awb(delivery_note: str, awb_nr: str):
-	frappe.has_permission("Delivery Note", "write", doc=delivery_note, throw=True)
-	return delivery_note_shipment.add_awb_for_note(delivery_note, awb_nr)
-
-
-@frappe.whitelist(methods=["POST"])
-def upload_delivery_note_invoice(delivery_note: str, file_url: str, invoice_nr: str, issued_at: str):
-	frappe.has_permission("Delivery Note", "write", doc=delivery_note, throw=True)
-	return delivery_note_shipment.upload_invoice_for_note(delivery_note, file_url, invoice_nr, issued_at)
-
-
-@frappe.whitelist(methods=["POST"])
-def retry_delivery_note_awb_or_invoice(delivery_note: str):
-	frappe.has_permission("Delivery Note", "write", doc=delivery_note, throw=True)
-	return delivery_note_shipment.retry_awb_or_invoice_for_note(delivery_note)
-
-
-@frappe.whitelist(methods=["POST"])
-def discard_delivery_note_shipment(delivery_note: str):
-	"""Discard the draft note's failed Noon shipment (no Noon call). Document-level write on the note."""
-	frappe.has_permission("Delivery Note", "write", doc=delivery_note, throw=True)
-	return delivery_note_shipment.discard_for_note(delivery_note)
+def check_invoice_upload(document_type: str, document_name: str, idempotency_key: str):
+	"""Poll of the invoice dialog: ``{"state": pending|done|failed, "message"}`` (write on the document the
+	button was used on, a Sales Order or a Delivery Note)."""
+	if document_type not in ("Sales Order", "Delivery Note"):
+		frappe.throw(frappe._("Invalid document type."))
+	frappe.has_permission(document_type, "write", doc=document_name, throw=True)
+	return fulfillment.invoice_result(idempotency_key, document_type, document_name)

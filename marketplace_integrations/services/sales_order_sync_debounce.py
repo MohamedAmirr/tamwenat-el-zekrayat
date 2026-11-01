@@ -151,7 +151,7 @@ def order_evidence_fingerprint(order):
 	Covers line ids/SKUs/quantities/amounts/statuses and Shopify fulfillment
 	quantities, successful SALE/CAPTURE transaction ids, whether the order is
 	cancelled (the timestamp itself is not hashed), refund ids, Talabat/Shopify
-	order statuses, and Noon shipment/unit membership.
+	order statuses, and (Noon) the units its Delivery Notes started.
 	Also the snapshot's transaction/delivery date sources (``processed_on``,
 	``received_on``, ``promised_for``, as dates), ``presentment_currency`` and the
 	per-line ``*_missing`` flags, since the snapshot builder reads all of them.
@@ -182,15 +182,18 @@ def order_evidence_fingerprint(order):
 		"refund_ids": sorted(refund_ids(order)),
 		"successful_payment_transactions": _successful_shopify_payment_details(order),
 		"items": sorted(items),
-		"shipments": sorted(
-			[cstr(row.integration_shipment_nr), cstr(row.status)] for row in order.get("noon_shipments") or []
-		),
-		"shipment_units": sorted(
-			[cstr(row.integration_shipment_nr), cstr(row.mp_item_nr)]
-			for row in order.get("noon_shipment_units") or []
-		),
+		"started_units": _noon_started_units(order) if is_noon else [],
 	}
 	return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def _noon_started_units(order):
+	"""Sorted units of the live Noon Delivery Notes of the order (the old shipment child tables are gone)."""
+	if not order.get("name"):
+		return []
+	from marketplace_integrations.integrations.noon.delivery_note_shipment import started_units_of_order
+
+	return sorted(started_units_of_order(order.name))
 
 
 def _successful_shopify_payment_details(order):

@@ -193,29 +193,25 @@ class UnitTestNavigationPerRole(UnitTestCase):
 		self.assertEqual(shells["Marketplaces"].items[0].get("link_to"), HOME_WORKSPACE)
 
 	def test_bosta_only_user_sees_bosta_without_settings(self):
-		shells = self._shells(self._user("Nav Bosta Reader", {"Bosta Shipment": ["read"]}))
+		shells = self._shells(self._user("Nav Bosta Reader", {"Delivery Note": ["read"]}))
 		self.assertEqual(set(shells), {"Bosta"})
-		self.assertEqual(self._targets(shells["Bosta"]), {"Bosta Shipment"})
-
-	def test_real_bosta_user_role_sees_bosta_only_without_settings(self):
-		shells = self._shells(self._user("Nav Real Bosta", {"User": ["read"]}, roles=("Bosta User",)))
-		self.assertEqual(set(shells), {"Bosta"})
-		self.assertEqual(self._targets(shells["Bosta"]), {"Bosta Shipment"})
+		self.assertEqual(self._targets(shells["Bosta"]), {"Delivery Note"})
 
 	def test_sales_user_sees_bosta_only(self):
-		# Not a navigation setting: Bosta Shipment already grants read to Sales User.
+		# Not a navigation setting: Delivery Note already grants read to Sales User.
 		shells = self._shells(self._user("Nav Sales", {"User": ["read"]}, roles=("Sales User",)))
 		self.assertEqual(set(shells), {"Bosta"})
 
-	def test_accounts_user_sees_neither(self):
-		self.assertEqual(
-			self._shells(self._user("Nav Accounts", {"User": ["read"]}, roles=("Accounts User",))), {}
-		)
+	def test_accounts_user_sees_bosta_only(self):
+		# Not a navigation setting: ERPNext's standard Delivery Note permissions grant Accounts User read.
+		shells = self._shells(self._user("Nav Accounts", {"User": ["read"]}, roles=("Accounts User",)))
+		self.assertEqual(set(shells), {"Bosta"})
 
 	def test_system_manager_sees_both_with_settings(self):
 		shells = self._shells(self._user("Nav Manager", {"User": ["read"]}, roles=("System Manager",)))
 		self.assertEqual(set(shells), {"Marketplaces", "Bosta"})
-		self.assertTrue({"Bosta Shipment", "Bosta Settings"} <= self._targets(shells["Bosta"]))
+		# System Manager has no Delivery Note read of its own, so only the settings item shows.
+		self.assertIn("Bosta Settings", self._targets(shells["Bosta"]))
 		self.assertIn("Marketplace Order", self._targets(shells["Marketplaces"]))
 
 
@@ -250,7 +246,7 @@ class UnitTestNavigationRouting(UnitTestCase):
 
 	def test_bosta_doctypes_resolve_to_the_bosta_shell(self):
 		index = self._index()
-		for doctype in ("Bosta Shipment", "Bosta Settings"):
+		for doctype in ("Bosta Settings",):
 			module = frappe.db.get_value("DocType", doctype, "module")
 			self.assertEqual(index.resolve("DocType", doctype, module), "Bosta")
 		self.assertEqual(

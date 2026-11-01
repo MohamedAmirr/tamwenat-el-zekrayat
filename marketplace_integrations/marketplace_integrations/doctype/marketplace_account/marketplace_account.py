@@ -313,6 +313,14 @@ class MarketplaceAccount(Document):
 			if self.noon_country_code not in COUNTRY_CURRENCY:
 				frappe.throw(_("Noon Country Code must be ae, sa, or eg."))
 
+		if not self.is_new() and (
+			self.has_value_changed("connection") or self.has_value_changed("noon_warehouse_code")
+		):
+			# The stored Check Noon Warehouse answer belongs to the old warehouse: the user checks again.
+			self.noon_fulfillment_system_code = None
+			self.noon_warehouse_active = 0
+			self.noon_warehouse_checked_on = None
+
 		if self.noon_warehouse_code and (
 			self.is_new()
 			or self.has_value_changed("connection")

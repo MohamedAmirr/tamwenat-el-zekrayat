@@ -5,7 +5,11 @@
 
 import frappe
 
-from marketplace_integrations.integrations.noon.catalog import get_account, list_unmapped_order_skus
+from marketplace_integrations.integrations.noon.catalog import (
+	check_account_warehouse,
+	get_account,
+	list_unmapped_order_skus,
+)
 from marketplace_integrations.integrations.noon.catalog import list_warehouses as discover_warehouses
 from marketplace_integrations.integrations.noon.catalog import upsert_mapping as upsert_noon_mapping
 from marketplace_integrations.integrations.noon.inventory import push_stock
@@ -23,6 +27,14 @@ def list_warehouses(connection: str):
 	# outbound call uses this Connection's credentials, so the caller must be able to read it.
 	frappe.has_permission("Noon Connection", "read", doc=connection, throw=True)
 	return discover_warehouses(connection)
+
+
+@frappe.whitelist(methods=["POST"])
+def check_noon_warehouse(account: str):
+	"""Desk "Check Noon Warehouse" (#416): store the account warehouse's fulfillment system code and active
+	flag from Noon (ListWarehouses). Needs write permission on the account (checked on the document before
+	anything else is read or sent)."""
+	return check_account_warehouse(account)
 
 
 @frappe.whitelist(methods=["POST"])
