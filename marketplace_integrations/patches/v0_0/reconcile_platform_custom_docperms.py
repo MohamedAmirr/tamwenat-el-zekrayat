@@ -35,7 +35,6 @@ RECONCILED_ROLES = (
 	"Talabat User",
 	"Noon User",
 	"Shopify User",
-	"Bosta User",
 	"Stock Manager",
 	"System Manager",
 )

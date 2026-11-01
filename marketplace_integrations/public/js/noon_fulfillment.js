@@ -4,38 +4,30 @@
 // Noon fulfillment client code for the Sales Order form (#146 decision 22, moved from the
 // Marketplace Order form). sales_order.js loads this asset with frappe.require, only for a
 // submitted Sales Order linked to a Noon Marketplace Order, so the dialogs live in exactly one
-// place. Every action calls the whitelisted api.noon_fulfillment endpoints with the linked
-// Marketplace Order name; those endpoints still check write on that document, and Mark Handed
-// Over still needs create on Delivery Note. The buttons are only a convenience: they are hidden
-// without those permissions and the server remains the real gate.
+// place. Shipments are created, cancelled and refreshed from the Delivery Note (#415); what is
+// left here is Mark as Out of Stock (a button on the Sales Order item row form, #416, which needs
+// write on the Sales Order only), the order invoice and the stuck-reservation recovery. The
+// invoice and recovery actions call the whitelisted api.noon_fulfillment endpoints with the linked
+// Marketplace Order name; those endpoints still check write on that document. The buttons are
+// only a convenience: they are hidden without that permission and the server remains the real gate.
 //
 // Which actions show is decided server-side by api.noon_fulfillment.get_available_actions (the
-// same eligibility rules the actions enforce). That call also returns the shipments, so the
-// dialogs and the read-only summary work from one "context" built per refresh:
-//   { marketplace_order, sales_order, shipments, reload }
+// same eligibility rules the actions enforce). The dialogs work from one "context" built per
+// refresh: { marketplace_order, sales_order, reload }
 //
-// Every value sourced from the server (mp_item_nr, partner_sku, shipment numbers, AWBs, skipped
-// unit text) is Noon-sourced text and is escaped at the interpolation point, per
-// docs/frappe-conventions.md.
+// Every value sourced from the server (mp_item_nr, partner_sku) is Noon-sourced text and is
+// escaped at the interpolation point, per docs/frappe-conventions.md.
 //
 // Wrapped in a function: every doctype_js file shares one scope with ERPNext's own Sales Order
 // script, and this asset is loaded into that same page scope.
 (function () {
 	const API = "marketplace_integrations.api.noon_fulfillment.";
-	// Noon is the only courier; the value Noon documents for its own AWBs.
-	const NOON_COURIER = "noon";
-
-	// #391: shipments are created from a draft Delivery Note (Create > Delivery Note), so the
-	// old Create Shipment and Mark Handed Over buttons are no longer shown (the endpoints refuse).
-	// The dialogs below stay until the old code is removed (sub-issue 3 of #392).
-	const RETIRED_ACTIONS = ["create_shipment", "mark_handed_over"];
 
 	// A context is rebuilt on every form refresh from the get_available_actions result.
-	function build_context(frm, state) {
+	function build_context(frm) {
 		return {
 			marketplace_order: frm.doc.custom_marketplace_order,
 			sales_order: frm.doc.name,
-			shipments: (state && state.shipments) || [],
 			reload: () => frm.reload_doc(),
 		};
 	}
@@ -47,60 +39,28 @@
 		return buttons.filter((button) => available_actions.includes(button.action));
 	}
 
-	// Mark Handed Over drafts a Delivery Note, so it also needs create permission on that doctype.
-	function can_use_noon_fulfillment(action) {
-		if (!frappe.model.can_write("Marketplace Order")) return false;
-		if (action === "mark_handed_over") return Boolean(frappe.model.can_create("Delivery Note"));
-		return true;
+	function can_use_noon_fulfillment() {
+		return Boolean(frappe.model.can_write("Marketplace Order"));
 	}
+
+	// The order-invoice buttons need write on the Sales Order only (no Marketplace Order right); the
+	// stuck-reservation recovery still needs write on the Marketplace Order.
+	const INVOICE_ACTIONS = ["upload_order_invoice", "retry_order_invoice"];
 
 	function noon_fulfillment_buttons(ctx) {
 		return [
-			{
-				action: "create_shipment",
-				label: __("Create Shipment"),
-				click: () => show_noon_create_shipment_dialog(ctx),
-			},
-			{
-				action: "mark_out_of_stock",
-				label: __("Mark Out of Stock"),
-				click: () => show_noon_mark_out_of_stock_dialog(ctx),
-			},
-			{
-				action: "cancel_shipment",
-				label: __("Cancel Shipment"),
-				click: () => show_noon_cancel_shipment_dialog(ctx),
-			},
-			{ action: "add_awb", label: __("Add AWB"), click: () => show_noon_add_awb_dialog(ctx) },
-			{
-				action: "mark_handed_over",
-				label: __("Mark Handed Over"),
-				click: () => show_noon_mark_handed_over_dialog(ctx),
-			},
-			{
-				action: "upload_invoice",
-				label: __("Upload Invoice"),
-				click: () => show_noon_upload_invoice_dialog(ctx),
-			},
 			{
 				action: "upload_order_invoice",
 				label: __("Upload Order Invoice"),
 				click: () => show_noon_upload_order_invoice_dialog(ctx),
 			},
-			{ action: "retry", label: __("Retry"), click: () => show_noon_retry_dialog(ctx) },
 			{
 				action: "retry_order_invoice",
 				label: __("Retry Order Invoice"),
 				click: () => run_noon_retry_order_invoice(ctx),
 			},
-			// #146 review finding #2: recovery actions for a shipment stuck in Error or Cancel
-			// Pending with no other way out, and for an order-level Out of Stock reservation
+			// #146 review finding #2: recovery action for an order-level Out of Stock reservation
 			// orphaned by a hard-killed worker.
-			{
-				action: "discard_shipment",
-				label: __("Discard Shipment"),
-				click: () => show_noon_discard_shipment_dialog(ctx),
-			},
 			{
 				action: "release_stuck_oos_reservation",
 				label: __("Release Stuck Out of Stock Reservation"),
@@ -111,18 +71,47 @@
 
 	function render_noon_fulfillment_buttons(frm, ctx, available_actions) {
 		const group = __("Noon Fulfillment");
-		const buttons = noon_fulfillment_buttons(ctx).filter(
-			(button) => !RETIRED_ACTIONS.includes(button.action) && can_use_noon_fulfillment(button.action)
+		const buttons = noon_fulfillment_buttons(ctx).filter((button) =>
+			INVOICE_ACTIONS.includes(button.action)
+				? frappe.model.can_write("Sales Order")
+				: can_use_noon_fulfillment()
 		);
 		select_noon_fulfillment_buttons(buttons, available_actions).forEach((button) =>
 			frm.add_custom_button(button.label, button.click, group)
 		);
 	}
 
+	// Asks the server which order-invoice buttons apply (write on the Sales Order only) and adds them.
+	// Resolves with the state ({can_upload, can_retry, uploaded}) or null.
+	function add_noon_invoice_actions(frm) {
+		if (!frm.doc || frm.doc.docstatus !== 1 || !frappe.model.can_write("Sales Order")) {
+			return Promise.resolve(null);
+		}
+		const sales_order = frm.doc.name;
+		return frappe
+			.call({ method: API + "get_order_invoice_state", type: "POST", args: { sales_order }, silent: true })
+			.then(
+				(r) => {
+					if (frm.doc.name !== sales_order) return null;
+					const state = r.message || {};
+					const ctx = Object.assign(build_context(frm), { order_invoice_uploaded: Boolean(state.uploaded) });
+					const actions = [];
+					if (state.can_upload) actions.push("upload_order_invoice");
+					if (state.can_retry) actions.push("retry_order_invoice");
+					render_noon_fulfillment_buttons(frm, ctx, actions);
+					return state;
+				},
+				() => null
+			);
+	}
+
 	// Loads the fulfillment state of the linked Noon order and adds the "Noon Fulfillment" button
-	// group. Resolves with the state ({actions, cancelled_on_noon, shipments, ...}) or null (no
-	// permission, a failed call, or the form moved on); nothing is shown in those cases.
+	// group. Resolves with the state ({actions, cancelled_on_noon}) or null (no permission, a
+	// failed call, or the form moved on); nothing is shown in those cases.
 	function add_noon_fulfillment_actions(frm) {
+		// the row action needs only write on the Sales Order: it runs before the Marketplace Order gate
+		add_noon_out_of_stock_rows(frm);
+		add_noon_invoice_actions(frm);
 		const sales_order = frm.doc.name;
 		const marketplace_order = frm.doc.custom_marketplace_order;
 		if (!frappe.model.can_read("Marketplace Order")) return Promise.resolve(null);
@@ -138,7 +127,7 @@
 				(r) => {
 					if (request !== frm.__mi_noon_request || frm.doc.name !== sales_order) return null;
 					const state = r.message || {};
-					render_noon_fulfillment_buttons(frm, build_context(frm, state), state.actions || []);
+					render_noon_fulfillment_buttons(frm, build_context(frm), state.actions || []);
 					if (state.cancelled_on_noon && frm.dashboard && frm.dashboard.set_headline) {
 						frm.dashboard.set_headline(
 							__("Cancelled on Noon; no fulfillment actions available"),
@@ -151,667 +140,243 @@
 			);
 	}
 
-	// Compact read-only list of the shipments for the Marketplace Order tab. Empty string when
-	// there is nothing to show.
-	function noon_shipments_html(shipments) {
-		if (!Array.isArray(shipments) || !shipments.length) return "";
-		const escape = frappe.utils.escape_html;
-		const rows = shipments
-			.map((shipment) => {
-				const awbs = (shipment.awbs || [])
-					.map((awb) =>
-						escape(
-							[awb.courier === "noon" ? "Noon" : awb.courier, awb.awb_nr].filter(Boolean).join(" ")
-						)
-					)
-					.join(", ");
-				const items = (shipment.items || [])
-					.map((item) => escape(`${item.label} x${item.qty}`))
-					.join(", ");
-				// Every Delivery Note created for the shipment (the first one alone for older data).
-				const notes = (shipment.delivery_notes || []).length
-					? shipment.delivery_notes
-					: shipment.delivery_note
-					? [shipment.delivery_note]
-					: [];
-				const delivery_note = notes
-					.map(
-						(name) =>
-							`<a href="/app/delivery-note/${encodeURIComponent(name)}">${escape(name)}</a>`
-					)
-					.join(", ");
-				const unresolved = (shipment.unresolved || []).map((text) => escape(text)).join("; ");
-				return `<tr><td title="${escape(shipment.integration_shipment_nr || "")}">${escape(
-					noon_shipment_label(shipment.integration_shipment_nr)
-				)}</td><td>${items}</td><td>${escape(
-					__(shipment.status || "")
-				)}</td><td>${awbs}</td><td>${delivery_note}</td><td>${unresolved}</td></tr>`;
-			})
-			.join("");
-		return (
-			`<h5>${escape(__("Noon Shipments"))}</h5>` +
-			`<table class="table table-bordered"><thead><tr><th>${escape(__("Shipment"))}</th><th>${escape(__("Items"))}</th><th>${escape(
-				__("Status")
-			)}</th><th>${escape(__("AWB"))}</th><th>${escape(__("Delivery Note"))}</th><th>${escape(
-				__("Not added")
-			)}</th></tr></thead><tbody>${rows}</tbody></table>`
+	// ---- Mark as Out of Stock: one Sales Order item row (#416) -------------------------------------
+	//
+	// The action is the "Mark as Out of Stock" Button field of the Sales Order Item row form
+	// (Custom Field, hidden until shown here). The server decides which rows offer it
+	// (get_out_of_stock_rows) and refuses the rest. Flow: confirm (final at Noon), then the
+	// "Sending to Noon..." dialog that polls check_mark_out_of_stock until the job wrote an outcome.
+	// Every text that came from Noon is escaped where shown.
+	const timing = { poll_ms: 2000, max_wait_ms: 60000 };
+	const OOS_BUTTON = "custom_noon_mark_out_of_stock";
+
+	// The message of a rejected frappe.call(): `_server_messages` is a JSON array of JSON strings (see
+	// docs/frappe-conventions.md). Parsed in an inert document; the plain text is escaped where shown.
+	function server_message(error) {
+		try {
+			const messages = JSON.parse(error.responseJSON._server_messages || "[]");
+			const texts = messages
+				.map((entry) =>
+					new DOMParser().parseFromString(JSON.parse(entry).message || "", "text/html").body.textContent.trim()
+				)
+				.filter(Boolean);
+			if (texts.length) return texts.join(" ");
+		} catch (e) {
+			// fall through to the generic text
+		}
+		return "";
+	}
+
+	function confirm_noon_out_of_stock(frm, row_name) {
+		frappe.confirm(
+			frappe.utils.escape_html(
+				__(
+					"This marks the Item Out of Stock on the whole order: every row of this Item is removed, not only this row. It is final at Noon: it cannot be fulfilled later even if it is restocked, and Noon may charge cancellation fees. Continue?"
+				)
+			),
+			() => send_noon_out_of_stock(frm, row_name)
 		);
 	}
 
-	// {queued: bool} is the shape every api.noon_fulfillment endpoint that enqueues returns (a
-	// deduplicated job_id), so the "already queued" toast applies to all of them. reload() picks
-	// up the Pending shipment/unit/AWB row(s) each request path writes and commits before
-	// enqueuing the worker, even though the worker itself hasn't run yet.
-	function show_noon_queue_toast(r, ctx) {
-		const queued = (r.message || {}).queued;
-		frappe.show_alert({
-			message: queued
-				? __("Noon fulfillment action queued. Refresh this document to see the results.")
-				: __("A Noon fulfillment action for this shipment is already queued or running."),
-			indicator: "blue",
+	// Shows the result dialog of a press that ended without success. `retry_label` runs the same press
+	// again: the server asks Noon first when the earlier press may have reached it.
+	function show_noon_out_of_stock_problem(frm, row_name, html, retry_label) {
+		frappe.msgprint({
+			title: __("Mark as Out of Stock"),
+			message: html,
+			indicator: "red",
+			primary_action: {
+				label: retry_label,
+				action: () => {
+					if (frappe.hide_msgprint) frappe.hide_msgprint();
+					send_noon_out_of_stock(frm, row_name);
+				},
+			},
 		});
-		ctx.reload();
 	}
 
-	function fetch_noon_shippable_units(ctx) {
+	function send_noon_out_of_stock(frm, row_name) {
+		const sales_order = frm.doc.name;
+		const escape = frappe.utils.escape_html;
+		let dialog = null;
+		let timer = null;
+		let settled = false;
+		const finish = (state, message, keep_sending) => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			if (dialog) dialog.hide();
+			if (keep_sending) {
+				frappe.show_alert({
+					message: escape(__("Still sending to Noon. Open the Sales Order later to see the result.")),
+					indicator: "blue",
+				});
+			} else if (state === "done") {
+				frappe.show_alert({
+					message: escape(__("The item was marked Out of Stock at Noon and removed from the order.")),
+					indicator: "green",
+				});
+				frm.reload_doc();
+			} else if (state === "unknown") {
+				show_noon_out_of_stock_problem(
+					frm,
+					row_name,
+					`<p>${escape(__("It is not known whether Noon marked the item Out of Stock."))}</p><p>${escape(message || "")}</p><p class="text-muted">${escape(__("Check Noon asks Noon first and never sends the request twice."))}</p>`,
+					__("Check Noon")
+				);
+			} else if (state === "local_failed") {
+				show_noon_out_of_stock_problem(
+					frm,
+					row_name,
+					`<p>${escape(__("Noon marked the item Out of Stock, but the Sales Order was not updated."))}</p><p>${escape(message || "")}</p><p class="text-muted">${escape(__("Retry only repeats the update here; Noon is not asked to do it again."))}</p>`,
+					__("Retry")
+				);
+			} else {
+				show_noon_out_of_stock_problem(
+					frm,
+					row_name,
+					`<p>${escape(message || __("The request could not be completed."))}</p><p class="text-muted">${escape(__("The item stays in the order."))}</p>`,
+					__("Retry")
+				);
+			}
+		};
+		dialog = new frappe.ui.Dialog({
+			title: __("Sending to Noon..."),
+			fields: [{ fieldtype: "HTML", fieldname: "body" }],
+			primary_action_label: __("Close, keep sending"),
+			primary_action: () => finish("pending", "", true),
+			// closing the dialog ends the wait only: the job keeps running on the server
+			on_hide: () => finish("pending", "", true),
+		});
+		dialog.show();
+		dialog.fields_dict.body.$wrapper.html(`<p>${escape(__("Please wait. The item is removed from the order once Noon confirms."))}</p>`);
+
+		const started = Date.now();
+		const poll = (request_id) =>
+			frappe
+				.call({
+					method: API + "check_mark_out_of_stock",
+					type: "POST",
+					args: { sales_order, request_id },
+					silent: true,
+				})
+				.then(
+					(r) => {
+						const result = (r && r.message) || {};
+						if (result.state && result.state !== "pending") return finish(result.state, result.message);
+						if (Date.now() - started >= timing.max_wait_ms) return finish("pending", "", true);
+						timer = setTimeout(() => poll(request_id), timing.poll_ms);
+					},
+					() => finish("pending", "", true)
+				);
 		return frappe
 			.call({
-				method: API + "get_shippable_units",
-				args: { marketplace_order: ctx.marketplace_order },
+				method: API + "mark_item_out_of_stock",
+				type: "POST",
+				args: { sales_order, sales_order_item: row_name },
+				// the refusal is shown below (parsed and escaped), not by frappe.call
+				silent: true,
 			})
-			.then((r) => r.message || []);
-	}
-
-	// mp_item_nr/partner_sku are untrusted Noon-sourced text (#146 decision 9's ignore_xss_filter
-	// fields) - escaped here before being used as a MultiCheck option label, which (like other
-	// Frappe controls outside the Data/Text escape whitelist, see docs/frappe-conventions.md)
-	// does not escape labels itself.
-	//
-	// The option `value` is this unit's own array index (a string Frappe itself generates, never
-	// Noon-sourced text): multicheck.js interpolates a control's `value` unescaped into a
-	// `data-unit="..."` HTML attribute, so a raw mp_item_nr could break out and run script.
-	// mp_item_nrs_from_unit_indices() maps the selected indices back to the real `mp_item_nr`s.
-	//
-	// The visible label is "Item name (SKU)" (just the SKU for an unmapped SKU); a SKU shared by
-	// several units gets a "(1 of 3)" counter so the lines can be told apart. The raw mp_item_nr
-	// is only in the tooltip (title attribute), never visible text.
-	function noon_unit_checklist_options(units) {
-		const escape = frappe.utils.escape_html;
-		const totals = {};
-		units.forEach((unit) => {
-			totals[unit.partner_sku || ""] = (totals[unit.partner_sku || ""] || 0) + 1;
-		});
-		const seen = {};
-		return units.map((unit, index) => {
-			const sku = unit.partner_sku || "";
-			seen[sku] = (seen[sku] || 0) + 1;
-			let text = unit.item_name && sku ? `${unit.item_name} (${sku})` : unit.item_name || sku;
-			if (totals[sku] > 1) text += ` (${__("{0} of {1}", [seen[sku], totals[sku]])})`;
-			return {
-				label: `<span title="${escape(unit.mp_item_nr || "")}">${escape(text)}</span>`,
-				value: String(index),
-			};
-		});
-	}
-
-	// Maps a MultiCheck's selected index-string values back to the real `mp_item_nr`s the Noon
-	// fulfillment API endpoints expect, using the exact same `units` array the dialog's options
-	// were built from.
-	function mp_item_nrs_from_unit_indices(units, selected_indices) {
-		return (selected_indices || [])
-			.map((index) => (units[Number(index)] || {}).mp_item_nr)
-			.filter((mp_item_nr) => mp_item_nr);
-	}
-
-	// "Shipment 2" for "<order nr>-2"; the full number stays in tooltips and as the dropdown
-	// value (it is the key the API takes).
-	function noon_shipment_label(shipment_nr) {
-		const nr = String(shipment_nr || "");
-		return __("Shipment {0}", [nr.slice(nr.lastIndexOf("-") + 1)]);
-	}
-
-	function shipment_option(shipment) {
-		return {
-			label: frappe.utils.escape_html(
-				`${noon_shipment_label(shipment.integration_shipment_nr)} - ${__(shipment.status || "")}`
-			),
-			value: shipment.integration_shipment_nr,
-		};
-	}
-
-	function noon_created_shipment_options(ctx) {
-		return (ctx.shipments || [])
-			.filter((shipment) => shipment.status === "Created")
-			.map(shipment_option);
-	}
-
-	// Marking Out of Stock or Cancelling a shipment after the Sales Order exists is a divergence
-	// risk, so warn and require confirmation before proceeding. On the Sales Order form the Sales
-	// Order is always there (#131: it is submitted immediately on sync).
-	function noon_confirm_if_submitted_sales_order(ctx, proceed) {
-		if (!ctx.sales_order) {
-			proceed();
-			return;
-		}
-		frappe.confirm(
-			__(
-				"ERPNext Sales Order {0} is linked to this order and may be updated or cancelled (or its undelivered remainder closed) when ERPNext and the marketplace stage allow it; otherwise the order is flagged in Needs Attention. Continue?",
-				[frappe.utils.escape_html(ctx.sales_order)]
-			),
-			proceed
-		);
-	}
-
-	function show_noon_create_shipment_dialog(ctx) {
-		fetch_noon_shippable_units(ctx).then((units) => {
-			if (!units.length) {
-				frappe.msgprint({
-					message: __("No units are currently shippable for this order."),
-					indicator: "orange",
-				});
-				return;
-			}
-			const dialog = new frappe.ui.Dialog({
-				title: __("Create Noon Shipment"),
-				fields: [
-					{
-						fieldname: "units",
-						fieldtype: "MultiCheck",
-						label: __("Units"),
-						options: noon_unit_checklist_options(units),
-						columns: 1,
-						reqd: 1,
-					},
-					{
-						fieldname: "awb_nr",
-						fieldtype: "Data",
-						label: __("AWB Nr"),
-						description: __(
-							"Type or scan the AWB on the Noon sticker. Leave empty to use a Noon AWB."
-						),
-					},
-				],
-				primary_action_label: __("Create"),
-				primary_action(values) {
-					if (!values.units || !values.units.length) {
-						frappe.msgprint({
-							message: __("At least one unit must be selected."),
-							indicator: "red",
+			.then(
+				(r) => {
+					const result = (r && r.message) || {};
+					if (!result.queued) {
+						settled = true;
+						if (dialog) dialog.hide();
+						frappe.show_alert({
+							message: escape(__("A Noon fulfillment action for this order is already queued or running.")),
+							indicator: "blue",
 						});
 						return;
 					}
-					const args = {
-						marketplace_order: ctx.marketplace_order,
-						mp_item_nrs: mp_item_nrs_from_unit_indices(units, values.units),
-					};
-					const awb_nr = (values.awb_nr || "").trim();
-					if (awb_nr) args.awb_nr = awb_nr;
-					dialog.hide();
-					frappe
-						.call({
-							method: API + "create_shipment",
-							args,
-							freeze: true,
-							freeze_message: __("Queuing shipment creation..."),
-						})
-						.then((r) => show_noon_queue_toast(r, ctx));
+					return poll(result.request_id);
 				},
-			});
-			dialog.show();
-		});
-	}
-
-	function show_noon_mark_out_of_stock_dialog(ctx) {
-		fetch_noon_shippable_units(ctx).then((units) => {
-			if (!units.length) {
-				frappe.msgprint({
-					message: __("No units are currently eligible to mark Out of Stock."),
-					indicator: "orange",
-				});
-				return;
-			}
-			const dialog = new frappe.ui.Dialog({
-				title: __("Mark Units Out of Stock"),
-				fields: [
-					{
-						fieldname: "units",
-						fieldtype: "MultiCheck",
-						label: __("Units"),
-						options: noon_unit_checklist_options(units),
-						columns: 1,
-						reqd: 1,
-					},
-				],
-				primary_action_label: __("Mark Out of Stock"),
-				primary_action(values) {
-					if (!values.units || !values.units.length) {
-						frappe.msgprint({
-							message: __("At least one unit must be selected."),
-							indicator: "red",
-						});
-						return;
-					}
-					dialog.hide();
-					noon_confirm_if_submitted_sales_order(ctx, () => {
-						frappe
-							.call({
-								method: API + "mark_out_of_stock",
-								args: {
-									marketplace_order: ctx.marketplace_order,
-									mp_item_nrs: mp_item_nrs_from_unit_indices(units, values.units),
-								},
-								freeze: true,
-								freeze_message: __("Queuing Out of Stock update..."),
-							})
-							.then((r) => show_noon_queue_toast(r, ctx));
+				(error) => {
+					if (settled) return;
+					settled = true;
+					if (dialog) dialog.hide();
+					frappe.msgprint({
+						title: __("Mark as Out of Stock"),
+						message: escape(server_message(error) || __("The request could not be sent.")),
+						indicator: "red",
 					});
-				},
-			});
-			dialog.show();
-		});
+				}
+			);
 	}
 
-	function show_noon_cancel_shipment_dialog(ctx) {
-		const options = noon_created_shipment_options(ctx);
-		if (!options.length) {
-			frappe.msgprint({
-				message: __("No cancellable (Created) shipments on this order."),
-				indicator: "orange",
-			});
-			return;
+	// Asks the server which item rows offer the action and keeps the answer on the form for the row form.
+	// Needs write on the Sales Order only (no Marketplace Order permission). Resolves with the row names.
+	function add_noon_out_of_stock_rows(frm) {
+		frm.__mi_noon_oos_rows = [];
+		if (!frappe.model.can_write("Sales Order") || !frm.doc || frm.doc.docstatus !== 1) {
+			return Promise.resolve([]);
 		}
-		const dialog = new frappe.ui.Dialog({
-			title: __("Cancel Noon Shipment"),
-			fields: [
-				{
-					fieldname: "integration_shipment_nr",
-					fieldtype: "Select",
-					label: __("Shipment"),
-					options,
-					reqd: 1,
+		const sales_order = frm.doc.name;
+		return frappe
+			.call({ method: API + "get_out_of_stock_rows", type: "POST", args: { sales_order }, silent: true })
+			.then(
+				(r) => {
+					if (frm.doc.name !== sales_order) return [];
+					frm.__mi_noon_oos_rows = Array.isArray(r.message) ? r.message : [];
+					return frm.__mi_noon_oos_rows;
 				},
-			],
-			primary_action_label: __("Cancel Shipment"),
-			primary_action(values) {
-				dialog.hide();
-				noon_confirm_if_submitted_sales_order(ctx, () => {
-					frappe
-						.call({
-							method: API + "cancel_shipment",
-							args: {
-								marketplace_order: ctx.marketplace_order,
-								integration_shipment_nr: values.integration_shipment_nr,
+				() => []
+			);
+	}
+
+	// form_render of a Sales Order Item row: show the button only for a row the server offered.
+	function on_noon_row_render(frm, cdt, cdn) {
+		const grid_row = frm.fields_dict.items && frm.fields_dict.items.grid.grid_rows_by_docname[cdn];
+		if (!grid_row) return;
+		grid_row.toggle_display(OOS_BUTTON, (frm.__mi_noon_oos_rows || []).includes(cdn));
+	}
+
+	function on_noon_row_button(frm, cdt, cdn) {
+		if ((frm.__mi_noon_oos_rows || []).includes(cdn)) confirm_noon_out_of_stock(frm, cdn);
+	}
+
+	// The order invoice uses the dialog shared with the shipment invoice (noon_invoice.js): a new press has
+	// no key, a Retry passes one (any value: the server reuses the key saved on the Marketplace Order).
+	function order_invoice_options(ctx) {
+		return {
+			doctype: "Sales Order",
+			name: ctx.sales_order,
+			title: __("Upload Noon Order Invoice"),
+			uploaded: ctx.order_invoice_uploaded,
+			send: (values, key) =>
+				frappe.call({
+					method: API + (key ? "retry_order_invoice" : "upload_order_invoice"),
+					type: "POST",
+					args: key
+						? { sales_order: ctx.sales_order }
+						: {
+								sales_order: ctx.sales_order,
+								file_url: values.invoice_file,
+								invoice_nr: values.invoice_nr,
+								issued_at: values.issued_at,
 							},
-							freeze: true,
-							freeze_message: __("Queuing shipment cancellation..."),
-						})
-						.then((r) => show_noon_queue_toast(r, ctx));
-				});
-			},
-		});
-		dialog.show();
-	}
-
-	// #368: Created shipments not handed over yet (no live Delivery Note, no recorded handover), or with
-	// unresolved handover units.
-	function noon_handover_shipment_options(ctx) {
-		return (ctx.shipments || [])
-			.filter(
-				(shipment) =>
-					shipment.status === "Created" &&
-					(!shipment.handed_over || (shipment.unresolved || []).length)
-			)
-			.map(shipment_option);
-	}
-
-	// Pure step for testing: the alert shown for the mark_handed_over result
-	// ({delivery_note, created, unresolved[{text, reason}]}). Nothing here is submitted and no
-	// Noon call is made. Units that could not be drafted stay on the shipment and keep the order
-	// in Needs Action (or Syncing while a Sales Order sync is pending).
-	function noon_handover_alert(result) {
-		result = result || {};
-		const unresolved = result.unresolved || [];
-		// entry.text carries Noon-sourced SKUs: escaped here, the alert renders HTML.
-		const escape = frappe.utils.escape_html;
-		let skipped = unresolved.length
-			? " " +
-			  __("Not added: {0}", [unresolved.map((entry) => escape(entry.text)).join("; ")])
-			: "";
-		if (unresolved.some((entry) => entry.reason === "excess" || entry.reason === "not_on_order")) {
-			skipped +=
-				" " +
-				__(
-					"The Sales Order is behind the platform order: a sync was queued and these units are retried afterwards."
-				);
-		}
-		if (!result.delivery_note) {
-			return {
-				message: __("No Delivery Note was created.") + skipped,
-				indicator: "orange",
-			};
-		}
-		return {
-			message:
-				(result.created
-					? __("Draft Delivery Note {0} created. Review and submit it.", [escape(result.delivery_note)])
-					: result.added_to_existing
-					? __("Units added to the draft Delivery Note {0}. Review and submit it.", [
-							escape(result.delivery_note),
-					  ])
-					: __("Delivery Note {0} already exists for this shipment.", [escape(result.delivery_note)])) +
-				skipped,
-			indicator: skipped ? "orange" : "green",
+					// the refusal is shown by the shared dialog (parsed and escaped), not by frappe.call
+					silent: true,
+				}),
+			reload: ctx.reload,
 		};
-	}
-
-	function show_noon_mark_handed_over_dialog(ctx) {
-		const options = noon_handover_shipment_options(ctx);
-		if (!options.length) {
-			frappe.msgprint({
-				message: __("No Created shipments on this order are waiting to be marked handed over."),
-				indicator: "orange",
-			});
-			return;
-		}
-		const dialog = new frappe.ui.Dialog({
-			title: __("Mark Noon Shipment Handed Over"),
-			fields: [
-				{
-					fieldname: "note",
-					fieldtype: "HTML",
-					options: `<p class="text-muted">${frappe.utils.escape_html(
-						__(
-							"This creates one draft Delivery Note for the shipment's units. Nothing is sent to Noon and the Delivery Note is not submitted."
-						)
-					)}</p>`,
-				},
-				{
-					fieldname: "integration_shipment_nr",
-					fieldtype: "Select",
-					label: __("Shipment"),
-					options,
-					reqd: 1,
-				},
-			],
-			primary_action_label: __("Mark Handed Over"),
-			primary_action(values) {
-				dialog.hide();
-				frappe
-					.call({
-						method: API + "mark_handed_over",
-						args: {
-							marketplace_order: ctx.marketplace_order,
-							integration_shipment_nr: values.integration_shipment_nr,
-						},
-						freeze: true,
-						freeze_message: __("Creating the draft Delivery Note..."),
-					})
-					.then((r) => {
-						frappe.show_alert(noon_handover_alert(r.message));
-						ctx.reload();
-					});
-			},
-		});
-		dialog.show();
-	}
-
-	function show_noon_add_awb_dialog(ctx) {
-		const options = noon_created_shipment_options(ctx);
-		if (!options.length) {
-			frappe.msgprint({
-				message: __("No Created shipments on this order to add an AWB to."),
-				indicator: "orange",
-			});
-			return;
-		}
-		const dialog = new frappe.ui.Dialog({
-			title: __("Add Noon Shipment AWB"),
-			fields: [
-				{
-					fieldname: "integration_shipment_nr",
-					fieldtype: "Select",
-					label: __("Shipment"),
-					options,
-					reqd: 1,
-				},
-				{
-					// Noon is the only courier; the stored/sent value is Noon's documented lowercase "noon".
-					fieldname: "courier",
-					fieldtype: "Select",
-					label: __("Courier"),
-					options: [{ label: __("Noon"), value: NOON_COURIER }],
-					default: NOON_COURIER,
-					reqd: 1,
-				},
-				{ fieldname: "awb_nr", fieldtype: "Data", label: __("AWB Nr"), reqd: 1 },
-			],
-			primary_action_label: __("Add AWB"),
-			primary_action(values) {
-				dialog.hide();
-				frappe
-					.call({
-						method: API + "add_awb",
-						args: {
-							marketplace_order: ctx.marketplace_order,
-							integration_shipment_nr: values.integration_shipment_nr,
-							courier: values.courier,
-							awb_nr: values.awb_nr,
-						},
-						freeze: true,
-						freeze_message: __("Queuing AWB addition..."),
-					})
-					.then((r) => show_noon_queue_toast(r, ctx));
-			},
-		});
-		dialog.show();
-	}
-
-	function show_noon_upload_invoice_dialog(ctx) {
-		const options = noon_created_shipment_options(ctx);
-		if (!options.length) {
-			frappe.msgprint({
-				message: __("No Created shipments on this order to upload an invoice for."),
-				indicator: "orange",
-			});
-			return;
-		}
-		const dialog = new frappe.ui.Dialog({
-			title: __("Upload Noon Shipment Invoice"),
-			fields: [
-				{
-					fieldname: "integration_shipment_nr",
-					fieldtype: "Select",
-					label: __("Shipment"),
-					options,
-					reqd: 1,
-				},
-				{
-					fieldname: "invoice_file",
-					fieldtype: "Attach",
-					label: __("Invoice PDF"),
-					reqd: 1,
-					// #146 review finding #9: upload_invoice() rejects a non-private File
-					// server-side (the authoritative check - frappe.ui.Dialog's Attach control
-					// has no supported way to hide or force the uploader's own Private
-					// checkbox), but tell the user up front so a public upload is a deliberate,
-					// informed exception rather than a surprise rejection after the dialog closes.
-					description: __("Must be uploaded as Private - a public file is rejected."),
-				},
-				{ fieldname: "invoice_nr", fieldtype: "Data", label: __("Invoice Nr"), reqd: 1 },
-				{ fieldname: "issued_at", fieldtype: "Date", label: __("Issued At"), reqd: 1 },
-			],
-			primary_action_label: __("Upload"),
-			primary_action(values) {
-				dialog.hide();
-				frappe
-					.call({
-						method: API + "upload_invoice",
-						args: {
-							marketplace_order: ctx.marketplace_order,
-							integration_shipment_nr: values.integration_shipment_nr,
-							file_url: values.invoice_file,
-							invoice_nr: values.invoice_nr,
-							issued_at: values.issued_at,
-						},
-						freeze: true,
-						freeze_message: __("Queuing invoice upload..."),
-					})
-					.then((r) => show_noon_queue_toast(r, ctx));
-			},
-		});
-		dialog.show();
 	}
 
 	function show_noon_upload_order_invoice_dialog(ctx) {
-		const dialog = new frappe.ui.Dialog({
-			title: __("Upload Noon Order Invoice"),
-			fields: [
-				{
-					fieldname: "invoice_file",
-					fieldtype: "Attach",
-					label: __("Invoice PDF"),
-					reqd: 1,
-					// Same as the shipment invoice dialog: the server rejects a non-private File;
-					// this just tells the user up front.
-					description: __("Must be uploaded as Private - a public file is rejected."),
-				},
-				{ fieldname: "invoice_nr", fieldtype: "Data", label: __("Invoice Nr"), reqd: 1 },
-				{ fieldname: "issued_at", fieldtype: "Date", label: __("Issued At"), reqd: 1 },
-			],
-			primary_action_label: __("Upload"),
-			primary_action(values) {
-				dialog.hide();
-				frappe
-					.call({
-						method: API + "upload_order_invoice",
-						args: {
-							marketplace_order: ctx.marketplace_order,
-							file_url: values.invoice_file,
-							invoice_nr: values.invoice_nr,
-							issued_at: values.issued_at,
-						},
-						freeze: true,
-						freeze_message: __("Queuing invoice upload..."),
-					})
-					.then((r) => show_noon_queue_toast(r, ctx));
-			},
-		});
-		dialog.show();
+		const invoice = frappe.marketplace_integrations && frappe.marketplace_integrations.noon_invoice;
+		if (invoice) invoice.start(order_invoice_options(ctx));
 	}
 
 	function run_noon_retry_order_invoice(ctx) {
-		frappe
-			.call({
-				method: API + "retry_order_invoice",
-				args: { marketplace_order: ctx.marketplace_order },
-				freeze: true,
-				freeze_message: __("Queuing retry..."),
-			})
-			.then((r) => show_noon_queue_toast(r, ctx));
+		const invoice = frappe.marketplace_integrations && frappe.marketplace_integrations.noon_invoice;
+		if (invoice) invoice.send(order_invoice_options(ctx), {}, "retry");
 	}
 
-	function show_noon_retry_dialog(ctx) {
-		const options = (ctx.shipments || []).map(shipment_option);
-		if (!options.length) {
-			frappe.msgprint({ message: __("No shipments on this order."), indicator: "orange" });
-			return;
-		}
-		const dialog = new frappe.ui.Dialog({
-			title: __("Retry Noon Shipment Action"),
-			fields: [
-				{
-					fieldname: "integration_shipment_nr",
-					fieldtype: "Select",
-					label: __("Shipment"),
-					options,
-					reqd: 1,
-				},
-			],
-			primary_action_label: __("Retry"),
-			primary_action(values) {
-				dialog.hide();
-				frappe
-					.call({
-						method: API + "retry",
-						args: {
-							marketplace_order: ctx.marketplace_order,
-							integration_shipment_nr: values.integration_shipment_nr,
-						},
-						freeze: true,
-						freeze_message: __("Queuing retry..."),
-					})
-					.then((r) => show_noon_queue_toast(r, ctx));
-			},
-		});
-		dialog.show();
-	}
-
-	// #146 review finding #2: discard_shipment()/release_stuck_oos_reservation() run
-	// synchronously (no Noon HTTP call, so nothing to enqueue) - unlike every other Noon
-	// Fulfillment action above, these do not follow the queued/already-queued toast pattern.
-	function noon_discardable_shipment_options(ctx) {
-		return (ctx.shipments || [])
-			.filter((shipment) => ["Error", "Cancel Pending"].includes(shipment.status))
-			.map(shipment_option);
-	}
-
-	function show_noon_discard_shipment_dialog(ctx) {
-		const options = noon_discardable_shipment_options(ctx);
-		if (!options.length) {
-			frappe.msgprint({
-				message: __("No shipments on this order are in Error or Cancel Pending."),
-				indicator: "orange",
-			});
-			return;
-		}
-		const dialog = new frappe.ui.Dialog({
-			title: __("Discard Noon Shipment"),
-			fields: [
-				{
-					fieldname: "integration_shipment_nr",
-					fieldtype: "Select",
-					label: __("Shipment"),
-					options,
-					reqd: 1,
-				},
-			],
-			primary_action_label: __("Discard"),
-			primary_action(values) {
-				dialog.hide();
-				frappe.confirm(
-					__(
-						"Shipment {0} will be marked Discarded and its units released for a new shipment. This never calls Noon - continue?",
-						[frappe.utils.escape_html(values.integration_shipment_nr)]
-					),
-					() => {
-						frappe
-							.call({
-								method: API + "discard_shipment",
-								args: {
-									marketplace_order: ctx.marketplace_order,
-									integration_shipment_nr: values.integration_shipment_nr,
-								},
-								freeze: true,
-								freeze_message: __("Discarding shipment..."),
-							})
-							.then(() => {
-								frappe.show_alert({
-									message: __("Shipment discarded."),
-									indicator: "green",
-								});
-								ctx.reload();
-							});
-					}
-				);
-			},
-		});
-		dialog.show();
-	}
-
+	// The server queues a job that asks Noon first: units Noon already shows Out of Stock stay reserved.
 	function run_noon_release_stuck_oos_reservation(ctx) {
 		frappe.confirm(
 			__(
-				"This clears any pending Noon Out of Stock reservation on this order, in case a worker died before releasing it. Continue?"
+				"This asks Noon which reserved units are already Out of Stock and frees the rest, in case a worker died before releasing them. It runs in the background. Continue?"
 			),
 			() => {
 				frappe
@@ -819,14 +384,16 @@
 						method: API + "release_stuck_oos_reservation",
 						args: { marketplace_order: ctx.marketplace_order },
 						freeze: true,
-						freeze_message: __("Releasing reservation..."),
+						freeze_message: __("Queueing..."),
 					})
-					.then(() => {
+					.then((r) => {
+							const queued = Boolean(r && r.message && r.message.queued);
 						frappe.show_alert({
-							message: __("Reservation released."),
-							indicator: "green",
+							message: queued
+									? __("Release queued. Reload the order in a moment.")
+									: __("A Noon fulfillment action for this order is already queued or running."),
+							indicator: queued ? "green" : "blue",
 						});
-						ctx.reload();
 					});
 			}
 		);
@@ -834,26 +401,36 @@
 
 	const exported = {
 		add_noon_fulfillment_actions,
+		add_noon_invoice_actions,
+		run_noon_retry_order_invoice,
 		build_context,
 		can_use_noon_fulfillment,
 		noon_fulfillment_buttons,
-		noon_shipments_html,
-		noon_unit_checklist_options,
-		mp_item_nrs_from_unit_indices,
-		noon_created_shipment_options,
-		noon_discardable_shipment_options,
-		noon_handover_shipment_options,
-		noon_handover_alert,
 		select_noon_fulfillment_buttons,
-		show_noon_create_shipment_dialog,
-		show_noon_mark_handed_over_dialog,
-		show_noon_cancel_shipment_dialog,
+		show_noon_upload_order_invoice_dialog,
 		run_noon_release_stuck_oos_reservation,
+		add_noon_out_of_stock_rows,
+		confirm_noon_out_of_stock,
+		send_noon_out_of_stock,
+		on_noon_row_render,
+		on_noon_row_button,
+		server_message,
+		timing,
 	};
 
 	if (typeof frappe !== "undefined") {
 		frappe.marketplace_integrations = frappe.marketplace_integrations || {};
 		frappe.marketplace_integrations.noon_fulfillment = exported;
+		// The row form handlers register once, even if this asset is loaded twice.
+		if (frappe.ui && frappe.ui.form && !frappe.ui.form.__mi_noon_row_hooks) {
+			frappe.ui.form.__mi_noon_row_hooks = true;
+			frappe.ui.form.on("Sales Order Item", {
+				form_render: (frm, cdt, cdn) =>
+					frappe.marketplace_integrations.noon_fulfillment.on_noon_row_render(frm, cdt, cdn),
+				[OOS_BUTTON]: (frm, cdt, cdn) =>
+					frappe.marketplace_integrations.noon_fulfillment.on_noon_row_button(frm, cdt, cdn),
+			});
+		}
 	}
 
 	if (typeof module !== "undefined") {

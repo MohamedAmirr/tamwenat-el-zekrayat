@@ -4,8 +4,9 @@
 """Noon FBPI order polling and persistence (#145).
 
 Triggered by the hourly poll, a manual Desk action, and the
-``FBPI::ORDER_SYNC`` webhook (``api/noon_webhooks.py``, #163), which queues
-this same deduplicated import without reading the event payload.
+``FBPI::ORDER_SYNC`` webhook (``api/noon_webhooks.py``, #163, #400), which queues
+this same deduplicated import, or - when the event's ``order_nr`` names an order
+already imported - the per-order refresh (``enqueue_order_refresh()`` below).
 ``poll_all_accounts()`` is the hourly ``hooks.py``
 scheduler entry; ``queue_order_import()``/``run_order_import()`` are the
 manual Desk-triggered equivalent, both funnelled through the same
@@ -19,10 +20,10 @@ manual Desk-triggered equivalent, both funnelled through the same
 shape GetFbpiOrder would return (docs/noon-integration/noon_api_full.md), so
 re-fetching each listed order individually would only add an unnecessary
 HTTP call per order on every poll, with no additional data. A later,
-separate manual per-order action (``get_order()``/``refresh_order()``/
-``queue_order_refresh()``/``run_order_refresh()`` below) does call
-``GetFbpiOrder`` directly - for troubleshooting one specific order on
-demand, not as part of any bulk run. ``GetFbpiOrderCustomerData`` is the one
+separate per-order refresh (``get_order()``/``refresh_order()``/
+``queue_order_refresh()``/``run_order_refresh()`` below, from the Desk action or
+the #400 webhook) does call ``GetFbpiOrder`` directly - for one specific order,
+not as part of any bulk run. ``GetFbpiOrderCustomerData`` is the one
 other order-scoped GET this module calls, and only for an order whose
 stored customer name is still blank (see ``_maybe_fetch_customer_data()``
 below).
@@ -35,7 +36,6 @@ import frappe
 from frappe import _
 from frappe.utils import cstr, flt
 
-from marketplace_integrations.services.sync_status import CANCELLED
 from marketplace_integrations.integrations.noon.catalog import get_account, validate_connection_enabled
 from marketplace_integrations.integrations.noon.client import NoonClient
 from marketplace_integrations.integrations.noon.constants import (
@@ -61,6 +61,7 @@ from marketplace_integrations.services.marketplace_orders import (
 	JSON_ITEM_FIELDS,
 	upsert_marketplace_order,
 )
+from marketplace_integrations.services.sync_status import CANCELLED
 
 _CUSTOMER_FIELDS = (
 	"customer_first_name",
@@ -127,6 +128,10 @@ def list_orders(account, created_after=None, created_before=None):
 		seen_tokens.add(next_token)
 
 
+class NoonOrderNotFound(frappe.ValidationError):
+	"""``GetFbpiOrder`` answered 404: Noon no longer returns this order, or is transiently unavailable (#400)."""
+
+
 def get_order(account, fbpi_order_nr):
 	"""Fetch one Noon FBPI order's current full detail via ``GetFbpiOrder``.
 
@@ -145,7 +150,7 @@ def get_order(account, fbpi_order_nr):
 	path = GET_ORDER_PATH.format(fbpi_order_nr=quote(fbpi_order_nr, safe=""))
 	response = client.request("GET", path)
 	if response.status_code == 404:
-		frappe.throw(_("Noon order {0} was not found.").format(fbpi_order_nr))
+		frappe.throw(_("Noon order {0} was not found.").format(fbpi_order_nr), NoonOrderNotFound)
 	if response.status_code != 200:
 		frappe.throw(client.error_message(response))
 	try:
@@ -162,7 +167,7 @@ def import_order(account, raw_order, bump_trigger_source="Noon Order Import", ec
 
 	``bump_trigger_source`` is the sync-debounce trigger source recorded if this import
 	bumps (#178): the poller keeps "Noon Order Import"; a self-initiated re-import (our
-	own create-shipment / mark-out-of-stock actions, ``refresh_order()``) passes "Manual"
+	own mark-out-of-stock action, ``refresh_order()``) passes "Manual"
 	so its Sales Order sync is not mislabelled as a poll. Still bumps either way - the
 	planner must see the change those actions made.
 
@@ -185,20 +190,21 @@ def import_order(account, raw_order, bump_trigger_source="Noon Order Import", ec
 	whose ``name`` is not in the parent's current in-memory list for that
 	exact ``parentfield``). A poll run that loaded this order's row under
 	ordinary REPEATABLE READ semantics could therefore silently delete a
-	``Marketplace Order Shipment``/``...Unit``/``...AWB`` row committed by a
-	concurrent fulfillment action (``integrations/noon/fulfillment.py``)
-	between this poll's own read and its own save - that concurrent write is
-	invisible to a plain snapshot read, but ``update_children()`` does not
-	know or care that it only ever touches ``items`` here; it iterates every
-	Table field on the doctype.
+	child row committed by a concurrent fulfillment action
+	(``integrations/noon/fulfillment.py``; the shipment child tables that
+	motivated this are gone since #415, the lock stays for every other write to
+	the order row) between this poll's own read and its own save - that
+	concurrent write is invisible to a plain snapshot read, but
+	``update_children()`` does not know or care that it only ever touches
+	``items`` here; it iterates every Table field on the doctype.
 
 	The fix is a **locking** read, not a plain one: ``frappe.db.sql(...,
 	FOR UPDATE)`` is an InnoDB locking read, which (unlike an ordinary
 	consistent/snapshot read under REPEATABLE READ) always reads the latest
 	COMMITTED row version and takes an exclusive row lock, blocking until any
 	other transaction holding that same lock (e.g. a concurrent fulfillment
-	write, which acquires the identical lock before it modifies a shipment
-	table - see ``integrations/noon/fulfillment.py``) releases it.
+	write, which acquires the identical lock before it modifies the order -
+	see ``integrations/noon/fulfillment.py``) releases it.
 
 	Round-3 review (#146 review finding #1) found the ordering half of this
 	fix was still wrong: this function used to call ``normalize_order()``
@@ -314,8 +320,8 @@ def import_order(account, raw_order, bump_trigger_source="Noon Order Import", ec
 
 	# #146 decision 7 bumped ONLY on the first transition into eligibility and never
 	# once a Sales Order was linked.  #178 part 3 reverses the linked half: a poll
-	# that changes a LINKED order (units cancelled/out of stock/shipped, shipment
-	# membership, ...) now bumps too, so the reconciliation planner sees it
+	# that changes a LINKED order (units cancelled/out of stock/shipped, units its
+	# Delivery Notes started, ...) now bumps too, so the reconciliation planner sees it
 	# (``bump_if_linked_order_changed()``: only when the evidence fingerprint
 	# changed, so a poll that merely re-confirms an order never re-bumps).  The
 	# first-eligibility bump for a not-yet-linked order is unchanged.
@@ -760,13 +766,13 @@ def run_order_import(account_name, trigger_source="Manual", catch_up_unlinked=Fa
 		raise
 
 
-def refresh_order(marketplace_order_name):
+def refresh_order(marketplace_order_name, trigger_source="Manual"):
 	"""Re-fetch one existing Marketplace Order's current Noon FBPI state via
 	``GetFbpiOrder`` and reconcile it against the stored record.
 
-	Manual troubleshooting/recovery action for one specific order - not the
-	normal polling path (mirrors Talabat's/Shopify's own ``refresh_order()``
-	shape), routed through the same ``import_order()``
+	Per-order recovery/refresh for one specific order, run from the Desk action or queued by
+	the ``FBPI::ORDER_SYNC`` webhook (#400) - not the bulk polling path (mirrors
+	Talabat's/Shopify's own ``refresh_order()`` shape), routed through the same ``import_order()``
 	(``normalize_order()`` + ``upsert_marketplace_order()``) path #145's
 	poller already uses, under the same per-order DB-savepoint isolation and
 	``Marketplace Sync Log`` failure-logging pattern
@@ -786,6 +792,16 @@ def refresh_order(marketplace_order_name):
 	re-raised (unlike a bulk run's per-order isolation, which swallows the
 	failure into an ``errors`` list) so the enqueued worker's own failure is
 	visible via the normal RQ job-failure/Error Log path.
+
+	``trigger_source`` labels the sync log rows, the sync-debounce bump and the unmapped-SKU log;
+	the Desk action keeps "Manual", the webhook (#400) passes "Noon Webhook". Only a
+	"Noon Webhook" refresh that gets a 404 from ``GetFbpiOrder`` logs it and falls back, once, to
+	the deduplicated account import instead of raising; the import never calls back into a
+	refresh, so this cannot loop. The refresh only runs for an order we already imported, so a
+	404 means Noon no longer returns it (or is transiently unavailable), not that Noon lacks it
+	yet. The fallback import re-lists only the last ``ORDER_IMPORT_LOOKBACK_DAYS`` (7) days, so
+	for an older order it only writes the Error row. Bounded per delivery. A "Manual" 404 still
+	raises.
 	"""
 	doc = frappe.get_doc("Marketplace Order", marketplace_order_name)
 	account = get_account(doc.marketplace_account)
@@ -822,8 +838,14 @@ def refresh_order(marketplace_order_name):
 					"External Order ID {2}."
 				).format(returned_order_nr, doc.name, fbpi_order_nr)
 			)
+	except NoonOrderNotFound as exc:
+		_log_order_import_failure(account, fbpi_order_nr, str(exc), trigger_source)
+		if trigger_source != "Noon Webhook":
+			raise
+		enqueue_order_import(account.name, trigger_source=trigger_source)
+		return {"name": doc.name, "fallback": "import"}
 	except Exception as exc:
-		_log_order_import_failure(account, fbpi_order_nr, str(exc), "Manual")
+		_log_order_import_failure(account, fbpi_order_nr, str(exc), trigger_source)
 		raise
 
 	frappe.db.commit()
@@ -831,16 +853,21 @@ def refresh_order(marketplace_order_name):
 	savepoint = "noon_order_refresh_" + frappe.generate_hash(length=10)
 	frappe.db.savepoint(savepoint)
 	try:
-		order, unmapped_skus = import_order(account, raw_order, bump_trigger_source="Manual")
+		order, unmapped_skus = import_order(account, raw_order, bump_trigger_source=trigger_source)
 	except Exception as exc:
 		frappe.db.rollback(save_point=savepoint)
-		_log_order_import_failure(account, fbpi_order_nr, str(exc), "Manual")
+		_log_order_import_failure(account, fbpi_order_nr, str(exc), trigger_source)
 		raise
 	else:
 		frappe.db.release_savepoint(savepoint)
 		frappe.db.commit()  # #146 decision 10: same per-order commit as above
 		if unmapped_skus:
-			_log_unmapped_skus(account, order, unmapped_skus, "Manual")
+			_log_unmapped_skus(account, order, unmapped_skus, trigger_source)
+		# The order's submitted Noon Delivery Notes re-read their shipment (deduplicated, queued after the
+		# commit above; draft notes are ignored). Imported here: the adapter imports this module.
+		from marketplace_integrations.integrations.noon.delivery_note_shipment import enqueue_note_refreshes
+
+		enqueue_note_refreshes(order.name)
 		return {"name": order.name}
 
 
@@ -852,26 +879,34 @@ def queue_order_refresh(marketplace_order_name):
 	"""
 	doc = frappe.get_doc("Marketplace Order", marketplace_order_name)
 	doc.check_permission("write")
-	job = frappe.enqueue(
+	return {"queued": enqueue_order_refresh(doc.name) is not None}
+
+
+def enqueue_order_refresh(marketplace_order_name, trigger_source="Manual"):
+	"""Queue the deduplicated ``run_order_refresh`` job with no permission check. Only for a
+	caller that has already authenticated its request: the Noon webhook (#400, passing
+	"Noon Webhook"). Desk callers go through ``queue_order_refresh()``. Returns the job, or
+	``None`` when an identical job is already queued or running."""
+	return frappe.enqueue(
 		run_order_refresh,
 		queue="long",
 		timeout=3600,
-		job_id=f"{_ORDER_REFRESH_RQ_JOB_PREFIX}-{doc.name}",
+		job_id=f"{_ORDER_REFRESH_RQ_JOB_PREFIX}-{marketplace_order_name}",
 		deduplicate=True,
-		marketplace_order_name=doc.name,
+		marketplace_order_name=marketplace_order_name,
+		trigger_source=trigger_source,
 	)
-	return {"queued": job is not None}
 
 
-def run_order_refresh(marketplace_order_name):
-	"""The enqueued worker target for a manual single-order refresh.
+def run_order_refresh(marketplace_order_name, trigger_source="Manual"):
+	"""The enqueued worker target for a single-order refresh (Desk "Manual" or webhook).
 
 	Switches to Administrator (same rationale as ``run_order_import()``
 	above) since this runs detached from whatever Desk session originally
 	queued it.
 	"""
 	frappe.set_user("Administrator")
-	return refresh_order(marketplace_order_name)
+	return refresh_order(marketplace_order_name, trigger_source=trigger_source)
 
 
 def poll_all_accounts():

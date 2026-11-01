@@ -16,6 +16,10 @@
   "noon_warehouse_section",
   "noon_warehouse_code",
   "noon_country_code",
+  "noon_fulfillment_system_code",
+  "noon_warehouse_active",
+  "noon_warehouse_checked_on",
+  "noon_fbpi_code",
   "noon_inventory_push_enabled",
   "noon_price_push_enabled",
   "shopify_location_section",
@@ -112,6 +116,38 @@
    "fieldtype": "Select",
    "label": "Noon Country Code",
    "options": "\nae\nsa\neg"
+  },
+  {
+   "depends_on": "eval:doc.platform==\"Noon\"",
+   "description": "Stored by Check Noon Warehouse. Noon does not document which value means FBPI.",
+   "fieldname": "noon_fulfillment_system_code",
+   "fieldtype": "Data",
+   "label": "Noon Fulfillment System Code",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.platform==\"Noon\"",
+   "fieldname": "noon_warehouse_active",
+   "fieldtype": "Check",
+   "label": "Noon Warehouse Active",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.platform==\"Noon\"",
+   "fieldname": "noon_warehouse_checked_on",
+   "fieldtype": "Datetime",
+   "label": "Noon Warehouse Checked On",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.platform==\"Noon\"",
+   "description": "Type the Fulfillment System Code that means FBPI, once, after looking at the stored code above. Shipments, Out of Stock and invoices are refused unless it equals the stored code and the warehouse is active.",
+   "fieldname": "noon_fbpi_code",
+   "fieldtype": "Data",
+   "label": "FBPI Code"
   },
   {
    "default": "1",
@@ -268,7 +304,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-10-22 20:00:00.000000",
+ "modified": "2026-11-01 19:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Marketplace Account",

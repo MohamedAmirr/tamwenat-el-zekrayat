@@ -10,7 +10,6 @@ import frappe
 from frappe import _
 from frappe.utils import add_to_date, cstr, escape_html, get_datetime, now_datetime
 
-from marketplace_integrations.services.sync_status import CANCELLED, NEEDS_ACTION
 from marketplace_integrations.integrations.shopify.client import ShopifyClient
 from marketplace_integrations.integrations.shopify.constants import (
 	SHOPIFY_ORDER_LINE_ITEMS_PAGE_SIZE,
@@ -31,6 +30,7 @@ from marketplace_integrations.services.sales_order_sync_debounce import (
 	bump_sync_debounce,
 	linked_order_fingerprint,
 )
+from marketplace_integrations.services.sync_status import CANCELLED, NEEDS_ACTION
 
 ORDER_IMPORT_RESULT_TTL = 60 * 60
 MAX_ORDER_IMPORT_DAYS = 60

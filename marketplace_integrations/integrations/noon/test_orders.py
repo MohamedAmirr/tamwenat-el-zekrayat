@@ -22,11 +22,14 @@ from marketplace_integrations.integrations.noon.expected_change import (
 from marketplace_integrations.integrations.noon.order_mapper import normalize_order
 from marketplace_integrations.integrations.noon.orders import (
 	_ORDER_IMPORT_RQ_JOB_PREFIX,
+	enqueue_order_refresh,
 	import_order,
 	import_orders_created_between,
 	list_orders,
 	poll_all_accounts,
+	queue_order_refresh,
 	refresh_order,
+	run_order_refresh,
 )
 from marketplace_integrations.services.linked_sales_order_fixture import LinkedSalesOrderFixture
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
@@ -1041,21 +1044,20 @@ class IntegrationTestNoonOrderImport(IntegrationTestCase):
 
 
 class IntegrationTestNoonOrderImportConcurrency(IntegrationTestCase):
-	"""#146 decision 10's single most important test: a ``Marketplace Order
-	Shipment`` row committed by a concurrent fulfillment write mid-poll must
+	"""#146 decision 10's single most important test: a value committed by a
+	concurrent fulfillment write mid-poll (here ``noon_pending_oos_units``;
+	the shipment child tables that first motivated it are gone, #415) must
 	survive that poll's own later save of the same Marketplace Order.
 
-	``Document.save()`` -> ``update_children()`` re-syncs EVERY ``Table``
-	field on a parent doc on every save, deleting any child-table row of
-	that parent whose ``name`` is absent from the in-memory copy currently
-	being saved (confirmed directly against the installed
-	``frappe/model/document.py``). Before the #146 fix, a poll that read the
-	order's row BEFORE a concurrent fulfillment write committed would carry
-	a stale in-memory ``noon_shipments`` list for the rest of its own
-	transaction, and its own later ``doc.save()`` would silently delete the
-	fulfillment write's just-committed row - the fulfillment write and the
-	poll would never otherwise conflict or error, so this would fail
-	silently. The fix is ``frappe.db.get_value(..., for_update=True)`` as
+	``Document.save()`` writes the whole in-memory row and, through
+	``update_children()``, re-syncs EVERY ``Table`` field on a parent doc
+	(confirmed directly against the installed ``frappe/model/document.py``).
+	Before the #146 fix, a poll that read the order's row BEFORE a concurrent
+	fulfillment write committed would carry a stale in-memory copy for the
+	rest of its own transaction, and its own later ``doc.save()`` would
+	silently overwrite the fulfillment write's just-committed values - the
+	fulfillment write and the poll would never otherwise conflict or error,
+	so this would fail silently. The fix is ``frappe.db.get_value(..., for_update=True)`` as
 	the very FIRST read ``import_order()`` performs against this order row
 	(before even the ``existing_name``/``had_sales_order_before`` checks),
 	matched by the identical locking read at the top of every
@@ -1139,10 +1141,7 @@ class IntegrationTestNoonOrderImportConcurrency(IntegrationTestCase):
 				if not poll_about_to_read.wait(timeout=5):
 					errors.append(("writer", "poll thread never signalled poll_about_to_read"))
 				time.sleep(0.2)
-				order.append(
-					"noon_shipments",
-					{"integration_shipment_nr": "CONC-SHIP-1", "status": "Pending", "awb_source": "Noon"},
-				)
+				order.noon_pending_oos_units = frappe.as_json(["1"])
 				order.save()
 				frappe.db.commit()
 			except Exception:
@@ -1190,16 +1189,11 @@ class IntegrationTestNoonOrderImportConcurrency(IntegrationTestCase):
 
 		self.assertFalse(errors, f"Concurrency test thread(s) raised: {errors}")
 
-		shipment_rows = frappe.get_all(
-			"Marketplace Order Shipment",
-			filters={"parenttype": "Marketplace Order", "parent": order_name},
-			fields=["integration_shipment_nr"],
-		)
 		self.assertEqual(
-			[row.integration_shipment_nr for row in shipment_rows],
-			["CONC-SHIP-1"],
-			"The concurrently committed shipment row must survive the poll's own save of the same order "
-			"(#146 decision 10). An empty result here means Document.save() -> update_children() deleted "
+			frappe.parse_json(frappe.db.get_value("Marketplace Order", order_name, "noon_pending_oos_units")),
+			["1"],
+			"The concurrently committed value must survive the poll's own save of the same order "
+			"(#146 decision 10). A different value here means the poll saved a stale in-memory copy over "
 			"it, i.e. the row lock did not actually serialize the two writers.",
 		)
 
@@ -1761,6 +1755,121 @@ class IntegrationTestNoonOrderRefresh(IntegrationTestCase):
 		)
 		self.assertEqual(len(logs), 1)
 		self.assertIn("Remote API error", logs[0].traceback)
+
+	def _fresh_payload(self):
+		return _order_payload(
+			fbpi_order_nr="ORD-REFRESH",
+			items=[
+				{
+					"mp_item_nr": 1,
+					"partner_sku": "SKU-TEST",
+					"mp_status": "MP_ITEM_STATUS_CONFIRMED",
+					"integration_status": "INTEGRATION_ITEM_STATUS_SHIPPED",
+					"delivered_invoice_price": 100.0,
+				}
+			],
+		)
+
+	def test_refresh_order_bumps_and_logs_with_the_given_trigger_source(self):
+		"""Default is "Manual" (Desk); the webhook passes "Noon Webhook" through to the bump."""
+		for trigger_source, expected in ((None, "Manual"), ("Noon Webhook", "Noon Webhook")):
+			with self.subTest(trigger_source=trigger_source):
+				kwargs = {} if trigger_source is None else {"trigger_source": trigger_source}
+				with (
+					patch(
+						"marketplace_integrations.integrations.noon.orders.get_order",
+						return_value=self._fresh_payload(),
+					),
+					patch(
+						"marketplace_integrations.integrations.noon.orders.import_order",
+						return_value=(self.order, []),
+					) as imported,
+				):
+					refresh_order(self.order.name, **kwargs)
+				self.assertEqual(imported.call_args.kwargs["bump_trigger_source"], expected)
+
+	def test_refresh_order_failure_logs_the_given_trigger_source(self):
+		with patch(
+			"marketplace_integrations.integrations.noon.orders.get_order",
+			side_effect=frappe.ValidationError("Remote API error"),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				refresh_order(self.order.name, trigger_source="Noon Webhook")
+		self.assertEqual(
+			frappe.db.count(
+				"Marketplace Sync Log",
+				{
+					"marketplace_account": self.account.name,
+					"status": "Error",
+					"trigger_source": "Noon Webhook",
+				},
+			),
+			1,
+		)
+
+	def test_webhook_refresh_404_logs_and_falls_back_once_to_account_import(self):
+		"""GetFbpiOrder 404 (mocked client): the webhook-driven refresh logs it and queues the
+		deduplicated account import exactly once instead of raising; nothing else is retried."""
+		response = MagicMock(status_code=404)
+		client = MagicMock()
+		client.request.return_value = response
+		with (
+			patch("marketplace_integrations.integrations.noon.orders.NoonClient", return_value=client),
+			patch("marketplace_integrations.integrations.noon.orders.enqueue_order_import") as fallback,
+		):
+			result = refresh_order(self.order.name, trigger_source="Noon Webhook")
+
+		self.assertEqual(client.request.call_count, 1)
+		fallback.assert_called_once_with(self.account.name, trigger_source="Noon Webhook")
+		self.assertEqual(result["fallback"], "import")
+		logs = frappe.get_all(
+			"Marketplace Sync Log",
+			filters={"marketplace_account": self.account.name, "status": "Error"},
+			fields=["trigger_source", "traceback"],
+		)
+		self.assertEqual(len(logs), 1)
+		self.assertEqual(logs[0].trigger_source, "Noon Webhook")
+		self.assertIn("was not found", logs[0].traceback)
+
+	def test_manual_refresh_404_still_raises_without_fallback(self):
+		response = MagicMock(status_code=404)
+		client = MagicMock()
+		client.request.return_value = response
+		with (
+			patch("marketplace_integrations.integrations.noon.orders.NoonClient", return_value=client),
+			patch("marketplace_integrations.integrations.noon.orders.enqueue_order_import") as fallback,
+		):
+			with self.assertRaises(frappe.ValidationError):
+				refresh_order(self.order.name)
+		fallback.assert_not_called()
+
+	def test_run_order_refresh_passes_trigger_source_through(self):
+		with patch("marketplace_integrations.integrations.noon.orders.refresh_order") as refreshed:
+			run_order_refresh(self.order.name, trigger_source="Noon Webhook")
+			run_order_refresh(self.order.name)
+		self.assertEqual(
+			[call.kwargs["trigger_source"] for call in refreshed.call_args_list], ["Noon Webhook", "Manual"]
+		)
+
+	def test_enqueue_order_refresh_has_no_permission_check_and_dedups_per_order(self):
+		with (
+			self.set_user("Guest"),
+			patch("marketplace_integrations.integrations.noon.orders.frappe.enqueue") as enq,
+		):
+			enqueue_order_refresh(self.order.name, trigger_source="Noon Webhook")
+		enq.assert_called_once()
+		self.assertEqual(enq.call_args.kwargs["job_id"], f"marketplace-noon-order-refresh-{self.order.name}")
+		self.assertTrue(enq.call_args.kwargs["deduplicate"])
+		self.assertEqual(enq.call_args.kwargs["trigger_source"], "Noon Webhook")
+
+	def test_queue_order_refresh_still_checks_write_permission(self):
+		with patch("marketplace_integrations.integrations.noon.orders.frappe.enqueue") as enq:
+			with self.set_user("Guest"):
+				with self.assertRaises(frappe.PermissionError):
+					queue_order_refresh(self.order.name)
+			enq.assert_not_called()
+			self.assertEqual(queue_order_refresh(self.order.name), {"queued": True})
+		self.assertEqual(enq.call_args.kwargs["trigger_source"], "Manual")
 
 
 class IntegrationTestNoonPoll(IntegrationTestCase):

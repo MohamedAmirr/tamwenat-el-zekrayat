@@ -8,7 +8,13 @@ from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api import noon_webhooks
 from marketplace_integrations.integrations.noon import orders, returns
-from marketplace_integrations.integrations.noon.orders import _ORDER_IMPORT_RQ_JOB_PREFIX, run_order_import
+from marketplace_integrations.integrations.noon.orders import (
+	_ORDER_IMPORT_RQ_JOB_PREFIX,
+	_ORDER_REFRESH_RQ_JOB_PREFIX,
+	run_order_import,
+	run_order_refresh,
+)
+from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 
 _PRIVATE_KEY = (
 	"-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0Z3VS5JJcds1xfn8fH9gFKvKHxsXNpKZDqz5Fng0Z5HqL8H7"
@@ -51,7 +57,7 @@ def _make_account(account_name, connection, **kwargs):
 
 def _envelope(connection, event_type="FBPI::ORDER_SYNC", message_id="msg-001", payload=None, **overrides):
 	envelope = {
-		"event_schema_version": "1.0",
+		"event_schema_version": 1,
 		"event_type": event_type,
 		"metadata": {
 			"message_id": message_id,
@@ -59,7 +65,7 @@ def _envelope(connection, event_type="FBPI::ORDER_SYNC", message_id="msg-001", p
 			"published_at": "2026-10-03T00:00:00Z",
 			"project_code": connection.project_code,
 		},
-		"payload": payload if payload is not None else {"sentinel": _SENTINEL_PAYLOAD_VALUE},
+		"payload": payload if payload is not None else {"order_nr": "NOT-IMPORTED-1"},
 	}
 	envelope.update(overrides)
 	return envelope
@@ -90,7 +96,11 @@ class IntegrationTestNoonWebhookReceiver(IntegrationTestCase):
 		for account_name in (self.account.name, self._second_account):
 			if not account_name:
 				continue
-			frappe.db.delete("Marketplace Order", filters={"marketplace_account": account_name})
+			# delete_doc (not frappe.db.delete) so child rows go too - this teardown commits.
+			for order_name in frappe.get_all(
+				"Marketplace Order", filters={"marketplace_account": account_name}, pluck="name"
+			):
+				frappe.delete_doc("Marketplace Order", order_name, ignore_permissions=True, force=True)
 			frappe.db.delete("Marketplace Sync Log", filters={"marketplace_account": account_name})
 			frappe.delete_doc("Marketplace Account", account_name, ignore_permissions=True, force=True)
 		for connection_name in (self.connection.name, self._other_connection):
@@ -129,6 +139,7 @@ class IntegrationTestNoonWebhookReceiver(IntegrationTestCase):
 			deduplicate=True,
 			account_name=self.account.name,
 			trigger_source="Noon Webhook",
+			catch_up_unlinked=False,
 		)
 
 	@patch.object(orders.frappe, "enqueue")
@@ -208,10 +219,9 @@ class IntegrationTestNoonWebhookReceiver(IntegrationTestCase):
 	@patch.object(orders.frappe, "enqueue")
 	def test_missing_required_envelope_field_is_rejected_before_enqueue(self, enqueue):
 		for mutate in (
-			lambda e: e.pop("event_type"),
+			lambda e: e.pop("metadata"),
 			lambda e: e["metadata"].pop("message_id"),
 			lambda e: e["metadata"].pop("project_code"),
-			lambda e: e.update(payload="not-an-object"),
 		):
 			envelope = _envelope(self.connection)
 			mutate(envelope)
@@ -248,8 +258,13 @@ class IntegrationTestNoonWebhookReceiver(IntegrationTestCase):
 		self.assertEqual(job_ids, {f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{self.account.name}"})
 
 	@patch.object(orders.frappe, "enqueue")
-	def test_payload_contents_are_never_read_stored_or_logged(self, enqueue):
-		envelope = _envelope(self.connection, message_id=f"payload-check-{frappe.generate_hash(length=8)}")
+	def test_order_nr_and_payload_contents_are_never_stored_or_logged_on_accept(self, enqueue):
+		order_nr = f"SECRET-ORDER-{frappe.generate_hash(length=8)}"
+		envelope = _envelope(
+			self.connection,
+			message_id=f"payload-check-{frappe.generate_hash(length=8)}",
+			payload={"order_nr": order_nr, "sentinel": _SENTINEL_PAYLOAD_VALUE},
+		)
 
 		self._call_webhook(envelope, "test-webhook-secret")
 
@@ -257,8 +272,9 @@ class IntegrationTestNoonWebhookReceiver(IntegrationTestCase):
 			"Marketplace Sync Log",
 			filters={"marketplace_account": self.account.name, "trigger_source": "Noon Webhook"},
 		)
-		self.assertNotIn(_SENTINEL_PAYLOAD_VALUE, log.request_data or "")
-		self.assertNotIn(_SENTINEL_PAYLOAD_VALUE, frappe.as_json(log.as_dict()))
+		for text in (log.request_data or "", frappe.as_json(log.as_dict())):
+			self.assertNotIn(_SENTINEL_PAYLOAD_VALUE, text)
+			self.assertNotIn(order_nr, text)
 		self.assertEqual(
 			frappe.parse_json(log.request_data),
 			{
@@ -508,3 +524,170 @@ class IntegrationTestNoonWebhookReceiver(IntegrationTestCase):
 
 		listed.assert_called_once_with(self.account, "RMS-1", trigger_source="Noon Webhook")
 		upsert.assert_called_once_with(self.account, item, "Webhook")
+
+	# --- #400: FBPI::ORDER_SYNC refreshes the named order ---
+
+	def _make_order(self, order_nr):
+		order = upsert_marketplace_order(
+			self.account.name,
+			{
+				"external_order_id": order_nr,
+				"platform_order_reference": f"MP-{order_nr}",
+				"order_code": f"MP-{order_nr}",
+				"presentment_currency": "AED",
+				"items": [
+					{
+						"external_item_id": "sku:SKU-X:MP_ITEM_STATUS_CONFIRMED:INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+						"external_sku": "SKU-X",
+						"pricing_type": "UNIT",
+						"original_quantity": 1,
+						"fulfilled_quantity": 1,
+						"current_quantity": 1,
+						"transaction_amount": 100.0,
+						"external_status": "CONFIRMED",
+						"integration_status": "ACKNOWLEDGED",
+					}
+				],
+				"latest_payload": {"fbpi_order_nr": order_nr},
+			},
+		)
+		return order
+
+	def _webhook_logs(self):
+		return frappe.get_all(
+			"Marketplace Sync Log",
+			filters={"marketplace_account": self.account.name, "trigger_source": "Noon Webhook"},
+			fields=["name", "status", "request_data"],
+			order_by="creation asc",
+		)
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_known_order_queues_exactly_one_refresh_and_no_import(self, enqueue):
+		order = self._make_order("ORD-KNOWN-1")
+		envelope = _envelope(self.connection, payload={"order_nr": "  ORD-KNOWN-1 "})
+
+		with patch("marketplace_integrations.integrations.noon.client.NoonClient.request") as http:
+			result = self._call_webhook(envelope, "test-webhook-secret")
+
+		self.assertEqual(result, {"accepted": True})
+		http.assert_not_called()
+		enqueue.assert_called_once_with(
+			run_order_refresh,
+			queue="long",
+			timeout=3600,
+			job_id=f"{_ORDER_REFRESH_RQ_JOB_PREFIX}-{order.name}",
+			deduplicate=True,
+			marketplace_order_name=order.name,
+			trigger_source="Noon Webhook",
+		)
+		logged = frappe.parse_json(self._webhook_logs()[-1].request_data)
+		self.assertEqual(
+			logged,
+			{
+				"message_id": "msg-001",
+				"event_type": "FBPI::ORDER_SYNC",
+				"import_queued": False,
+				"refresh_queued": True,
+			},
+		)
+		self.assertNotIn("ORD-KNOWN-1", self._webhook_logs()[-1].request_data)
+
+	@patch.object(orders.frappe, "enqueue", return_value=None)
+	def test_redelivery_while_refresh_queued_queues_nothing_and_logs_false(self, enqueue):
+		self._make_order("ORD-KNOWN-2")
+		envelope = _envelope(self.connection, payload={"order_nr": "ORD-KNOWN-2"})
+
+		result = self._call_webhook(envelope, "test-webhook-secret")
+
+		self.assertEqual(result, {"accepted": True})
+		self.assertEqual(enqueue.call_count, 1)  # the dedup attempt; RQ returned None
+		self.assertFalse(frappe.parse_json(self._webhook_logs()[-1].request_data)["refresh_queued"])
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_unknown_order_falls_back_to_account_import(self, enqueue):
+		envelope = _envelope(self.connection, payload={"order_nr": "ORD-NEVER-IMPORTED"})
+
+		self._call_webhook(envelope, "test-webhook-secret")
+
+		enqueue.assert_called_once_with(
+			run_order_import,
+			queue="long",
+			timeout=3600,
+			job_id=f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{self.account.name}",
+			deduplicate=True,
+			account_name=self.account.name,
+			trigger_source="Noon Webhook",
+			catch_up_unlinked=False,
+		)
+		logged = frappe.parse_json(self._webhook_logs()[-1].request_data)
+		self.assertTrue(logged["import_queued"])
+		self.assertNotIn("refresh_queued", logged)
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_schema_version_accepts_integer_and_string_one(self, enqueue):
+		for version in (1, "1"):
+			with self.subTest(version=version):
+				enqueue.reset_mock()
+				envelope = _envelope(self.connection, event_schema_version=version)
+				self._call_webhook(envelope, "test-webhook-secret")
+				enqueue.assert_called_once()
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_bad_envelope_content_returns_200_and_logs_capped_payload(self, enqueue):
+		big = {"order_nr": "", "padding": "y" * 10000}
+		cases = {
+			"wrong schema version": _envelope(self.connection, event_schema_version=2),
+			"string 1.0": _envelope(self.connection, event_schema_version="1.0"),
+			"boolean true": _envelope(self.connection, event_schema_version=True),
+			"missing schema version": _envelope(self.connection, event_schema_version=None),
+			"missing order_nr": _envelope(self.connection, payload={"other": 1}),
+			"empty order_nr": _envelope(self.connection, payload={"order_nr": "   "}),
+			"non-string order_nr": _envelope(self.connection, payload={"order_nr": 5}),
+			"missing event_type": _envelope(self.connection, event_type=None),
+			"non-object payload": _envelope(self.connection, payload="not-an-object"),
+			"oversized payload": _envelope(self.connection, payload=big),
+		}
+		for label, envelope in cases.items():
+			with self.subTest(label):
+				if label == "missing schema version":
+					envelope.pop("event_schema_version")
+				before = len(self._webhook_logs())
+				result = self._call_webhook(envelope, "test-webhook-secret")
+				self.assertEqual(result, {"accepted": True})
+				logs = self._webhook_logs()
+				self.assertEqual(len(logs), before + 1)
+				self.assertEqual(logs[-1].status, "Invalid")
+				logged = frappe.parse_json(logs[-1].request_data)
+				self.assertIn("reason", logged)
+				self.assertIn("payload", logged)
+		enqueue.assert_not_called()
+		oversized = frappe.parse_json(self._webhook_logs()[-1].request_data)["payload"]
+		self.assertEqual(list(oversized), ["truncated_payload"])
+		self.assertLessEqual(len(oversized["truncated_payload"]), 4096)
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_invalid_event_caps_message_id_and_event_type(self, enqueue):
+		long_id = "m" * 10000
+		envelope = _envelope(self.connection, message_id=long_id, payload="not-an-object")
+		envelope["event_type"] = "T" * 10000
+		self._call_webhook(envelope, "test-webhook-secret")
+
+		logged = frappe.parse_json(self._webhook_logs()[-1].request_data)
+		self.assertEqual(len(logged["message_id"]), 4096)
+		self.assertEqual(len(logged["event_type"]), 4096)
+
+		envelope = _envelope(self.connection, event_type=["x" * 10000])
+		self._call_webhook(envelope, "test-webhook-secret")
+		logged = frappe.parse_json(self._webhook_logs()[-1].request_data)
+		self.assertLessEqual(len(logged["event_type"]), 4096)
+		enqueue.assert_not_called()
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_bad_envelope_content_with_wrong_key_is_still_403_and_not_stored(self, enqueue):
+		envelope = _envelope(self.connection, event_schema_version=2)
+		with self.assertRaises(frappe.PermissionError):
+			self._call_webhook(envelope, "wrong-secret")
+		with self.assertRaises(frappe.PermissionError):
+			self._call_webhook(envelope, "")
+		self.assertEqual(self._webhook_logs(), [])
+		enqueue.assert_not_called()

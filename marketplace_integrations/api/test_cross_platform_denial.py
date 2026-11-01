@@ -77,11 +77,8 @@ SHOPIFY_AND_NOON_CASES = (
 	),
 	(f"{API}.noon_pricing.queue_pricing_push", {"account": "NOON_ACCOUNT"}),
 	(f"{API}.noon_inventory.queue_stock_push", {"account": "NOON_ACCOUNT"}),
-	(f"{API}.noon_awbs.generate_awbs", {"account": "NOON_ACCOUNT", "qty": 1}),
-	(f"{API}.noon_awbs.get_available_count", {"account": "NOON_ACCOUNT"}),
 	(f"{API}.noon_fulfillment.get_available_actions", {"marketplace_order": "NOON_ORDER"}),
 	(f"{API}.noon_fulfillment.release_stuck_oos_reservation", {"marketplace_order": "NOON_ORDER"}),
-	(f"{API}.noon_fulfillment.retry_order_invoice", {"marketplace_order": "NOON_ORDER"}),
 )
 
 TALABAT_CASES = (
@@ -371,4 +368,3 @@ class IntegrationTestCrossPlatformDenial(IntegrationTestCase):
 	def test_noon_user_is_authorized_on_own_platform(self):
 		user = self.make_user("Own Noon", "Noon User")
 		self.call_allowed(user, f"{API}.noon_catalog.get_unmapped_order_skus", account="NOON_ACCOUNT")
-		self.assertEqual(self.call_allowed(user, f"{API}.noon_awbs.get_available_count", account="NOON_ACCOUNT"), 0)

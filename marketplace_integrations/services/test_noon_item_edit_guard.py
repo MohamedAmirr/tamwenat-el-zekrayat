@@ -58,13 +58,18 @@ class IntegrationTestNoonItemEditGuard(IntegrationTestNoonFulfillmentBase):
 		self.assertIn(f"{GUARD}.block_row_change", events["before_update_after_submit"])
 		self.assertIn(f"{GUARD}.block_row_add", events["before_insert"])
 		self.assertIn(f"{GUARD}.block_row_remove", events["on_trash"])
-		self.assertNotIn("before_update_after_submit", frappe.get_hooks("doc_events", app_name="marketplace_integrations")["Sales Order"])
+		# The Noon guard is not on the parent; the only parent hook is the Bosta summary restore (#413).
+		parent = frappe.get_hooks("doc_events", app_name="marketplace_integrations")["Sales Order"]
+		self.assertEqual(
+			parent["before_update_after_submit"],
+			["marketplace_integrations.integrations.bosta.statuses.keep_stored_summary"],
+		)
 
-	def test_noon_quantity_change_is_refused_with_a_message_pointing_to_the_fulfillment_tab(self):
+	def test_noon_quantity_change_is_refused_with_a_message_pointing_to_the_supported_actions(self):
 		a = self.fx.items["A"].name
 		with self.assertRaises(frappe.ValidationError) as caught:
 			self._update(self._trans_items(**{a: {"qty": 1}}))
-		self.assertIn("Noon Fulfillment", str(caught.exception))
+		self.assertIn("Mark as Out of Stock", str(caught.exception))
 		self.assertEqual(self._qty("A"), 3)
 
 	def test_noon_rate_change_is_refused(self):
@@ -80,7 +85,7 @@ class IntegrationTestNoonItemEditGuard(IntegrationTestNoonFulfillmentBase):
 				row.set(field, value)
 				with self.assertRaises(frappe.ValidationError) as caught:
 					row.save()
-				self.assertIn("Noon Fulfillment", str(caught.exception))
+				self.assertIn("Mark as Out of Stock", str(caught.exception))
 
 	def test_noon_row_removal_is_refused(self):
 		payload = [entry for entry in self._trans_items() if entry["item_code"] != self.fx.items["B"].name]

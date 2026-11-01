@@ -33,28 +33,25 @@ Problem sources (``problem_type``):
   AND was last updated (last_platform_update_on, else modified) after the
   failed attempt - a failed update of an already-imported order stays visible.
 - Fulfillment Error: Marketplace Sync Log (Fulfillment, Error), keyed by
-  (order, action, integration_shipment_nr); hidden once a later Success row
-  exists for the same key, a later DiscardShipment Success for that shipment,
-  or (GetShipment errors) a later CreateShipment Success recovered via
-  GetShipment for that shipment.
+  (order, action); hidden once a later Success row exists for the same key.
+  Rows of the retired shipment actions (RETIRED_FULFILLMENT_ACTIONS) are never listed.
 - Webhook Retries Exhausted: Shopify Webhook Delivery, same condition as
   shopify_reconciliation.get_webhook_delivery_exhausted_retry_count(). Listed
   in the report only: an exhausted delivery can never clear (the retry cap
   blocks any further attempt), so it is NOT counted by get_attention_counts()
   and never drives the account level.
-- Noon Fulfillment: ONE rollup row per Noon order (shipment Error / Cancel
-  Pending / invoice upload Error, or units pending Out of Stock), plus (#164)
-  shipments stuck in Pending longer than NOON_PENDING_SHIPMENT_STUCK_HOURS, Created shipments
-  nobody marked handed over for NOON_HANDOVER_REMINDER_HOURS (#368),
-  measured from the shipment row's creation. The Error / Cancel Pending /
-  invoice error / Out of Stock parts have no age threshold.
+- Noon Fulfillment: ONE row per Noon order with units pending Out of Stock (no age threshold).
+  Shipment problems are Delivery Note rows (the carrier items below).
 - Noon Return Unlinked (#164): one row per Noon Return with no Marketplace
   Order (no exact order_nr match, see integrations/noon/returns.py).
-- Bosta Delivery Note: one row per Bosta Shipment whose ERPNext Delivery Note
-  create or cancel action failed (``delivery_note_error`` set; cleared when a
-  later attempt succeeds). Bosta is a carrier, not a Marketplace Account, so
-  these rows have platform "Bosta" and no account; they appear when no account
-  filter is set and the platform filter is blank or "Bosta".
+- Carrier Return Review (#411, #415): one row per draft Sales Return a returned carrier shipment created,
+  with ``role`` "Stock User" (informational); it clears when the return is submitted or cancelled.
+- Carrier Creation Problem / Cancelled / Exception / Return / Status Stale: one row per carrier Delivery
+  Note (epic #413) whose create failed or has an unknown result, that the carrier cancelled, that is in an
+  exception or returned state (the adapter's ``problem_states``), or that the carrier has not updated for
+  CARRIER_STALE_DAYS. The message names the carrier (the adapter's ``SERVICE_NAME``). A carrier is not a
+  Marketplace Account, so these rows have the carrier name as platform and no account; they appear when no
+  account filter is set and the platform filter is blank or a carrier in ``CARRIERS``.
 - Payment Error: Shopify Payment Sync Log Error/Invalid rows keyed by order and
   transaction, hidden by a later Success for the same pair.
 - Payment Excess: submitted mirrored Payment Entries with a positive
@@ -68,17 +65,14 @@ from datetime import datetime
 
 import frappe
 from frappe import _
-from frappe.utils import add_to_date, cstr, flt, get_datetime, now_datetime
+from frappe.utils import add_to_date, cint, cstr, flt, get_datetime, now_datetime
 
-from marketplace_integrations.integrations.noon import handover_state
-from marketplace_integrations.integrations.noon.constants import (
-	NOON_HANDOVER_REMINDER_HOURS,
-	NOON_PENDING_SHIPMENT_STUCK_HOURS,
-)
 from marketplace_integrations.integrations.shopify.webhooks import MAX_WEBHOOK_DELIVERY_ATTEMPTS
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_product_mapping.marketplace_product_mapping import (
 	compute_mapping_identity_key,
 )
+from marketplace_integrations.services import carrier_log
+from marketplace_integrations.services.carrier_shipments import CARRIERS
 from marketplace_integrations.services.sales_order_sync import (
 	FINAL_ITEM_STATUSES,
 	NOON_ELIGIBLE_EXTERNAL_STATUS,
@@ -92,21 +86,23 @@ FULFILLMENT_ERROR = "Fulfillment Error"
 WEBHOOK_RETRIES_EXHAUSTED = "Webhook Retries Exhausted"
 NOON_FULFILLMENT = "Noon Fulfillment"
 NOON_RETURN_UNLINKED = "Noon Return Unlinked"
-BOSTA_DELIVERY_NOTE = "Bosta Delivery Note"
-BOSTA_CARRIER_EXCEPTION = "Bosta Carrier Exception"
-BOSTA_RETURN = "Bosta Return"
-BOSTA_STATUS_STALE = "Bosta Status Stale"
-BOSTA_DELIVERED_WITHOUT_DELIVERY_NOTE = "Bosta Delivered Without Delivery Note"
+CARRIER_CREATION_PROBLEM = "Carrier Creation Problem"
+CARRIER_EXCEPTION = "Carrier Exception"
+CARRIER_RETURN = "Carrier Return"
+CARRIER_STATUS_STALE = "Carrier Status Stale"
+CARRIER_CANCELLED = "Carrier Cancelled"
+CARRIER_RETURN_REVIEW = "Carrier Return Review"
+#: The role that checks the goods of a draft return a returned shipment created (informational: the
+#: list itself is scoped by Delivery Note read permission).
+CARRIER_RETURN_REVIEW_ROLE = "Stock User"
 PAYMENT_ERROR = "Payment Error"
 PAYMENT_EXCESS = "Payment Excess"
 PAYMENT_ENTRY_CANCELLED = "Payment Entry Cancelled"
-BOSTA_PLATFORM = "Bosta"
-# #344: carrier exceptions. 48 and 49 are not listed (49 is a cancellation, which the poll
-# records as a Canceled shipment).
-BOSTA_PROBLEM_STATE_CODES = (47, 100, 101, 102, 103, 105)
-BOSTA_RETURN_STATE_CODES = (46, 60)
-BOSTA_STALE_DAYS = 5
-BOSTA_MAX_AGE_DAYS = 60
+CARRIER_STALE_DAYS = 5
+CARRIER_MAX_AGE_DAYS = 60
+#: A "Carrier Cancelled" item clears after this many days (or at once when the Delivery Note is
+#: cancelled in ERPNext: the list reads docstatus < 2 only).
+CARRIER_CANCELLED_DAYS = 14
 
 PROBLEM_TYPES = [
 	SYNC_ERROR,
@@ -117,11 +113,12 @@ PROBLEM_TYPES = [
 	WEBHOOK_RETRIES_EXHAUSTED,
 	NOON_FULFILLMENT,
 	NOON_RETURN_UNLINKED,
-	BOSTA_DELIVERY_NOTE,
-	BOSTA_CARRIER_EXCEPTION,
-	BOSTA_RETURN,
-	BOSTA_STATUS_STALE,
-	BOSTA_DELIVERED_WITHOUT_DELIVERY_NOTE,
+	CARRIER_CREATION_PROBLEM,
+	CARRIER_EXCEPTION,
+	CARRIER_RETURN,
+	CARRIER_STATUS_STALE,
+	CARRIER_CANCELLED,
+	CARRIER_RETURN_REVIEW,
 	PAYMENT_ERROR,
 	PAYMENT_EXCESS,
 	PAYMENT_ENTRY_CANCELLED,
@@ -146,8 +143,6 @@ SYNC_MESSAGE_MAX_LENGTH = 500
 CHUNK_SIZE = 500
 MAX_LISTED_SKUS = 5
 
-NOON_SHIPMENT_ATTENTION_STATUSES = ["Error", "Cancel Pending"]
-
 
 def get_attention_items(filters=None):
 	"""One dict per problem, newest first. ``filters`` may carry ``platform``,
@@ -159,20 +154,23 @@ def get_attention_items(filters=None):
 	"""
 	filters = frappe._dict(filters or {})
 	items = []
-	bosta_types = {
-		BOSTA_DELIVERY_NOTE,
-		BOSTA_CARRIER_EXCEPTION,
-		BOSTA_RETURN,
-		BOSTA_STATUS_STALE,
-		BOSTA_DELIVERED_WITHOUT_DELIVERY_NOTE,
+	carrier_types = {
+		CARRIER_CREATION_PROBLEM,
+		CARRIER_EXCEPTION,
+		CARRIER_RETURN,
+		CARRIER_STATUS_STALE,
+		CARRIER_CANCELLED,
+		CARRIER_RETURN_REVIEW,
 	}
 	if (
 		not filters.account
-		and filters.platform in (None, "", BOSTA_PLATFORM)
-		and filters.problem_type in (None, "", *bosta_types)
+		and filters.platform in (None, "", *CARRIERS)
+		and filters.problem_type in (None, "", *carrier_types)
 	):
-		items.extend(_collect_bosta_items(filters.problem_type))
-	accounts = {} if filters.platform == BOSTA_PLATFORM else _get_accounts(filters)
+		items.extend(_collect_carrier_items(filters.problem_type))
+	# Noon is both a carrier and a marketplace: its account rollups (pending Out of Stock, outdated invoices)
+	# must stay for the platform filter "Noon". A carrier with no account (Bosta) simply finds none.
+	accounts = _get_accounts(filters)
 	if not accounts and not items:
 		return []
 
@@ -268,6 +266,7 @@ def _item(
 		"action_state": extra.get("action_state"),
 		"linked_doctype": extra.get("linked_doctype"),
 		"linked_document": extra.get("linked_document"),
+		"role": extra.get("role"),
 	}
 
 
@@ -300,20 +299,6 @@ def _get_orders(accounts, filters, fields, or_filters=None):
 		fields=fields,
 		limit_page_length=0,
 	)
-
-
-def _get_orders_by_name(names, fields):
-	rows = []
-	for chunk in _chunks(names):
-		rows.extend(
-			frappe.get_list(
-				"Marketplace Order",
-				filters={"name": ["in", chunk]},
-				fields=fields,
-				limit_page_length=0,
-			)
-		)
-	return rows
 
 
 def _collect_order_status_items(accounts):
@@ -491,176 +476,284 @@ def _collect_unmapped_items(accounts):
 	return items
 
 
-def _collect_bosta_items(problem_type=None):
-	if not frappe.has_permission("Bosta Shipment", "read"):
+def _collect_carrier_items(problem_type=None):
+	"""Carrier problems read from the Delivery Notes of every carrier in ``CARRIERS`` (epic #413, #415): a
+	create that failed or has an unknown result, a delivery the carrier cancelled, an exception state, a
+	return nobody recorded and a status the carrier has not updated. The carrier of a note is the adapter
+	whose ``applies_to`` accepts its transporter; the adapter's ``problem_states`` names its exception and
+	return statuses. Read with the caller's permissions (``get_list``)."""
+	if not frappe.has_permission("Delivery Note", "read"):
 		return []
-	carrier = frappe._dict(name="", platform=BOSTA_PLATFORM)
 	fields = [
 		"name",
-		"status",
-		"tracking_number",
-		"bosta_state_code",
-		"bosta_state_value",
-		"bosta_delivery_type",
-		"bosta_exception_reason",
-		"delivery_note",
-		"delivery_note_error",
-		"delivery_note_error_at",
-		"last_bosta_status_on",
+		"docstatus",
+		"transporter",
+		"is_return",
+		"custom_return_source",
+		"custom_integration_status",
+		"custom_shipping_status",
+		"custom_last_integration_error",
+		"custom_last_sync_at",
+		"lr_no",
 		"creation",
 		"modified",
 	]
-	# One narrow query per wanted type instead of reading every shipment; the checks in the
-	# loop below stay the authoritative rule (these only keep unrelated rows out of memory).
-	stale_cutoff = add_to_date(now_datetime(), days=-BOSTA_STALE_DAYS)
-	queries = []
-	if problem_type in (None, BOSTA_DELIVERY_NOTE):
-		queries.append(({"delivery_note_error": ["is", "set"]}, None))
-	if problem_type in (None, BOSTA_CARRIER_EXCEPTION):
-		queries.append(({"status": ["!=", "Canceled"], "bosta_state_code": ["in", BOSTA_PROBLEM_STATE_CODES]}, None))
-	if problem_type in (None, BOSTA_RETURN):
-		queries.append(({"bosta_state_code": ["in", BOSTA_RETURN_STATE_CODES]}, None))
-	if problem_type in (None, BOSTA_DELIVERED_WITHOUT_DELIVERY_NOTE):
-		queries.append(
-			({"status": ["!=", "Canceled"], "bosta_delivery_type": "SEND", "bosta_state_code": 45}, None)
-		)
-	if problem_type in (None, BOSTA_STATUS_STALE):
-		queries.append(
-			(
-				{
-					"status": ["!=", "Canceled"],
-					"tracking_number": ["is", "set"],
-					"bosta_state_code": ["not in", (45, 49)],
-					"creation": [">=", add_to_date(now_datetime(), days=-BOSTA_MAX_AGE_DAYS)],
-				},
-				[["last_bosta_status_on", "<=", stale_cutoff], ["last_bosta_status_on", "is", "not set"]],
-			)
-		)
-	rows_by_name = {}
-	for filters, or_filters in queries:
+	states = {name: adapter.problem_states() for name, adapter in CARRIERS.items()}
+	stale_cutoff = add_to_date(now_datetime(), days=-CARRIER_STALE_DAYS)
+	recent = add_to_date(now_datetime(), days=-CARRIER_MAX_AGE_DAYS)
+	cancelled_cutoff = add_to_date(now_datetime(), days=-CARRIER_CANCELLED_DAYS)
+	by_name = {}
+
+	def collect(filters, **kw):
 		for row in frappe.get_list(
-			"Bosta Shipment",
-			filters=filters,
-			or_filters=or_filters,
-			fields=fields,
-			limit_page_length=0,
+			"Delivery Note", filters={"docstatus": ["<", 2], **filters}, fields=fields, limit_page_length=0, **kw
 		):
-			rows_by_name.setdefault(row.name, row)
-	rows = list(rows_by_name.values())
-	linked_delivery_notes = {row.delivery_note for row in rows if row.delivery_note}
-	submitted_delivery_notes = set()
-	if linked_delivery_notes:
-		# The Bosta Shipment read check above authorizes this derived boolean only. Keep
-		# Delivery Note names and return contents out of the response; platform roles do
-		# not necessarily have Delivery Note read, but attention must not report false absence.
-		submitted_delivery_notes = {
-			row.name
+			by_name.setdefault(row.name, row)
+
+	def statuses_of(kind):
+		return sorted({status for found in states.values() for status in found.get(kind, [])})
+
+	# A started shipment, whatever the carrier calls its id (some have none): judged by the Integration Status.
+	shipped = {
+		"custom_integration_status": [
+			"in",
+			[carrier_log.CREATED, carrier_log.CANCELLATION_PENDING, carrier_log.CANCELLATION_UNKNOWN, carrier_log.CANCELLED],
+		]
+	}
+	not_started = ["", carrier_log.NOT_CREATED]
+	if problem_type in (None, CARRIER_CREATION_PROBLEM):
+		collect({"custom_integration_status": ["in", [carrier_log.FAILED, carrier_log.UNKNOWN]], "docstatus": 0})
+		# A draft that was never started but carries an error: the carrier's nightly check found a shipment
+		# the draft does not know about (the adapter wrote the error).
+		collect(
+			{
+				"custom_integration_status": ["in", not_started],
+				"custom_last_integration_error": ["is", "set"],
+				"docstatus": 0,
+			}
+		)
+	if problem_type in (None, CARRIER_CANCELLED):
+		collect({**shipped, "custom_integration_status": carrier_log.CANCELLED})
+	for kind in (CARRIER_EXCEPTION, CARRIER_RETURN):
+		if problem_type in (None, kind) and statuses_of(kind):
+			collect({**shipped, "custom_shipping_status": ["in", statuses_of(kind)]})
+	if problem_type in (None, CARRIER_EXCEPTION):
+		# A live shipment whose last refresh/call left an error (the carrier's answer could not be applied):
+		# an exception whatever its status says.
+		collect({"custom_integration_status": carrier_log.CREATED, "custom_last_integration_error": ["is", "set"]})
+		# A submitted note the carrier cancelled whose automatic native cancel was blocked (the reason is the error).
+		collect(
+			{
+					"custom_integration_status": carrier_log.CANCELLED,
+					"docstatus": 1,
+					"custom_last_integration_error": ["is", "set"],
+				}
+		)
+	if problem_type in (None, CARRIER_STATUS_STALE):
+		collect(
+			{**shipped, "custom_integration_status": carrier_log.CREATED, "creation": [">=", recent]},
+			or_filters=[["custom_last_sync_at", "<=", stale_cutoff], ["custom_last_sync_at", "is", "not set"]],
+		)
+	rows = list(by_name.values())
+	items = _collect_carrier_return_reviews() if problem_type in (None, CARRIER_RETURN_REVIEW) else []
+	adapters = {}
+
+	def adapter_of(row):
+		# A return note belongs to a carrier only when the carrier owns it (the adapter decides in applies_to).
+		key = (row.transporter, cint(row.is_return), row.custom_return_source if row.is_return else "")
+		if key not in adapters:
+			adapters[key] = next(
+				(
+					(name, adapter)
+					for name, adapter in CARRIERS.items()
+					if adapter.applies_to(
+						{
+							"is_return": row.is_return,
+							"transporter": row.transporter,
+							"custom_return_source": row.custom_return_source,
+						}
+					)
+				),
+				None,
+			)
+		return adapters[key]
+
+	returned = set()
+	if rows:
+		# The Delivery Note read check above authorizes this derived set only.
+		returned = {
+			row.return_against
 			for row in frappe.get_all(
 				"Delivery Note",
-				filters={"name": ["in", list(linked_delivery_notes)], "docstatus": 1},
-				fields=["name"],
+				filters={"return_against": ["in", [r.name for r in rows]], "docstatus": 1},
+				fields=["return_against"],
 				limit_page_length=0,
 			)
 		}
-	return_notes = {}
-	if linked_delivery_notes:
+	# A cancel this app sent to the carrier and the carrier accepted (#410) was started by a person: not "the
+	# carrier cancelled this delivery". Read from the Cancel log rows (a derived set, after the Delivery Note
+	# read check above).
+	cancelled_here = set()
+	cancelled_names = [row.name for row in rows if row.custom_integration_status == carrier_log.CANCELLED]
+	if cancelled_names:
+		cancelled_here = {
+			row.reference_docname
+			for row in frappe.get_all(
+				"Integration Request",
+				filters={
+					"integration_request_service": ["in", [a.SERVICE_NAME for a in CARRIERS.values()]],
+					"custom_operation_type": "Cancel",
+					"custom_result": "Success",
+					"reference_doctype": "Delivery Note",
+					"reference_docname": ["in", cancelled_names],
+				},
+				fields=["reference_docname"],
+			)
+		}
+
+	def add(kind, carrier, row, explanation, when, **extra):
+		items.append(
+			_item(
+				kind,
+				frappe._dict(name="", platform=carrier),
+				"Delivery Note",
+				row.name,
+				explanation,
+				when,
+				NEXT_OPEN_SHIPMENT,
+				**extra,
+			)
+		)
+
+	for row in rows:
+		found = adapter_of(row)
+		if not found:
+			continue
+		carrier, adapter = found
+		name = adapter.SERVICE_NAME
+		status = row.custom_integration_status
+		shipping_status = row.custom_shipping_status
+		seen = row.custom_last_sync_at or row.modified
+		error = row.custom_last_integration_error
+		if (
+			(
+				status in (carrier_log.FAILED, carrier_log.UNKNOWN)
+				or (status in (*not_started, None) and error)
+			)
+			and row.docstatus == 0
+			and problem_type in (None, CARRIER_CREATION_PROBLEM)
+		):
+			add(CARRIER_CREATION_PROBLEM, carrier, row, f"{name}: {error}" if error else _(status), row.modified)
+		if status == carrier_log.CANCELLED and row.docstatus == 1 and error:
+			# The automatic native cancel after the carrier's cancel was blocked (or failed): the reason is
+			# in the error and a person must cancel the note by hand.
+			if problem_type in (None, CARRIER_EXCEPTION):
+				add(CARRIER_EXCEPTION, carrier, row, f"{name}: {error}", seen)
+		elif status == carrier_log.CANCELLED and row.docstatus == 1 and problem_type in (None, CARRIER_CANCELLED):
+			# Cancelled at the carrier but still submitted here (the local cancel failed): stays until it is
+			# cancelled in ERPNext, however the carrier was told.
+			add(
+				CARRIER_CANCELLED,
+				carrier,
+				row,
+				_("{0} shipment is cancelled but this Delivery Note is still submitted. Press Cancel.").format(name),
+				seen,
+			)
+		elif (
+			status == carrier_log.CANCELLED
+			and row.name not in cancelled_here
+			and seen >= cancelled_cutoff
+			and problem_type in (None, CARRIER_CANCELLED)
+		):
+			add(CARRIER_CANCELLED, carrier, row, _("{0} cancelled this delivery.").format(name), seen)
+		if (
+			(
+				(shipping_status in states[carrier].get(CARRIER_EXCEPTION, []) and status != carrier_log.CANCELLED)
+				or (status == carrier_log.CREATED and error)
+			)
+			and problem_type in (None, CARRIER_EXCEPTION)
+		):
+			error = row.custom_last_integration_error or shipping_status
+			add(CARRIER_EXCEPTION, carrier, row, f"{name}: {error}", seen)
+		if (
+			shipping_status in states[carrier].get(CARRIER_RETURN, [])
+			and not row.is_return  # a pickup return's returned state is its success, not a problem
+			and row.name not in returned
+			and problem_type in (None, CARRIER_RETURN)
+		):
+			add(
+				CARRIER_RETURN,
+				carrier,
+				row,
+				_("{0} reports this shipment was returned. Submit a return Delivery Note against it.").format(name),
+				seen,
+			)
+		if (
+			status == carrier_log.CREATED
+			and shipping_status not in adapter.terminal_states(bool(row.is_return))
+			and row.creation >= recent
+			and seen <= stale_cutoff
+			and problem_type in (None, CARRIER_STATUS_STALE)
+		):
+			add(
+				CARRIER_STATUS_STALE,
+				carrier,
+				row,
+				_("{0} has not updated this shipment for 5 days.").format(name),
+				seen,
+			)
+	return items
+
+
+def _collect_carrier_return_reviews():
+	"""One row per draft Sales Return that a returned shipment created (#411), for the Stock User who checks
+	the goods and submits it. It clears once the return is submitted or cancelled. The carrier is the one of
+	the delivery the return is against. Read with the caller's permissions (``get_list``)."""
+	sources = [a.RETURNED_SOURCE for a in CARRIERS.values() if getattr(a, "RETURNED_SOURCE", None)]
+	if not sources:
+		return []
+	rows = frappe.get_list(
+		"Delivery Note",
+		filters={"is_return": 1, "docstatus": 0, "custom_return_source": ["in", sources]},
+		fields=["name", "return_against", "creation"],
+		limit_page_length=0,
+	)
+	# The Delivery Note read check of the caller authorizes this derived lookup of the original notes.
+	transporters = {
+		row.name: row.transporter
 		for row in frappe.get_all(
 			"Delivery Note",
-			filters={"return_against": ["in", list(linked_delivery_notes)], "docstatus": 1},
-			fields=["name", "return_against"],
+			filters={"name": ["in", [r.return_against for r in rows]]},
+			fields=["name", "transporter"],
 			limit_page_length=0,
-		):
-			return_notes.setdefault(row.return_against, []).append(row.name)
+		)
+	}
 	items = []
 	for row in rows:
-		code = row.bosta_state_code or 0
-		if row.delivery_note_error and problem_type in (None, BOSTA_DELIVERY_NOTE):
-			items.append(
-				_item(
-					BOSTA_DELIVERY_NOTE,
-					carrier,
-					"Bosta Shipment",
-					row.name,
-					row.delivery_note_error,
-					row.delivery_note_error_at or row.modified,
-					NEXT_OPEN_SHIPMENT,
-				)
+		found = next(
+			(
+				(name, adapter)
+				for name, adapter in CARRIERS.items()
+				if adapter.applies_to({"is_return": 0, "transporter": transporters.get(row.return_against)})
+			),
+			None,
+		)
+		if not found:
+			continue
+		items.append(
+			_item(
+				CARRIER_RETURN_REVIEW,
+				frappe._dict(name="", platform=found[0]),
+				"Delivery Note",
+				row.name,
+				_("{0} returned shipment {1}. Check the returned goods and submit this draft return.").format(
+					found[1].SERVICE_NAME, row.return_against
+				),
+				row.creation,
+				NEXT_OPEN_RETURN,
+				role=CARRIER_RETURN_REVIEW_ROLE,
 			)
-		if (
-			row.status != "Canceled"
-			and code in BOSTA_PROBLEM_STATE_CODES
-			and problem_type in (None, BOSTA_CARRIER_EXCEPTION)
-		):
-			items.append(
-				_item(
-					BOSTA_CARRIER_EXCEPTION,
-					carrier,
-					"Bosta Shipment",
-					row.name,
-					row.bosta_exception_reason or row.bosta_state_value,
-					row.last_bosta_status_on or row.modified,
-					NEXT_OPEN_SHIPMENT,
-				)
-			)
-		return_resolved = False
-		if code in BOSTA_RETURN_STATE_CODES and problem_type in (None, BOSTA_RETURN):
-			linked = row.delivery_note
-			# A returned shipment is resolved only by a submitted return against its linked Delivery Note.
-			return_resolved = bool(linked and linked in submitted_delivery_notes and return_notes.get(linked))
-			if not return_resolved:
-				items.append(
-					_item(
-						BOSTA_RETURN,
-						carrier,
-						"Bosta Shipment",
-						row.name,
-						_(
-							"Bosta reports this shipment was returned. Submit a return Delivery Note against the linked Delivery Note."
-						),
-						row.last_bosta_status_on or row.modified,
-						NEXT_OPEN_SHIPMENT,
-					)
-				)
-		if (
-			row.status != "Canceled"
-			and row.bosta_delivery_type == "SEND"
-			and code == 45
-			and row.delivery_note not in submitted_delivery_notes
-			and problem_type in (None, BOSTA_DELIVERED_WITHOUT_DELIVERY_NOTE)
-		):
-			items.append(
-				_item(
-					BOSTA_DELIVERED_WITHOUT_DELIVERY_NOTE,
-					carrier,
-					"Bosta Shipment",
-					row.name,
-					_(
-						"Bosta reports this SEND delivery as delivered, but it has no submitted Delivery Note."
-					),
-					row.last_bosta_status_on or row.modified,
-					NEXT_OPEN_SHIPMENT,
-				)
-			)
-		if (
-			row.status != "Canceled"
-			and row.tracking_number
-			and code not in (45, 49)
-			and row.creation >= add_to_date(now_datetime(), days=-BOSTA_MAX_AGE_DAYS)
-			and (row.last_bosta_status_on or row.creation)
-			<= add_to_date(now_datetime(), days=-BOSTA_STALE_DAYS)
-			and problem_type in (None, BOSTA_STATUS_STALE)
-		):
-			items.append(
-				_item(
-					BOSTA_STATUS_STALE,
-					carrier,
-					"Bosta Shipment",
-					row.name,
-					_("Bosta has not updated this shipment for 5 days."),
-					row.last_bosta_status_on or row.creation,
-					NEXT_OPEN_SHIPMENT,
-				)
-			)
+		)
 	return items
 
 
@@ -947,7 +1040,16 @@ def _collect_cancelled_payment_entries(accounts, order_accounts):
 	]
 
 
-RECOVERED_VIA_GET_SHIPMENT_NOTE = "found via GetShipment retry"
+#: Sync Log actions of the old Marketplace Order shipment flow (removed in #415): old Error rows of these are
+#: stale, there is nothing left to retry or discard, so they are never listed.
+RETIRED_FULFILLMENT_ACTIONS = (
+	"CreateShipment",
+	"GetShipment",
+	"CancelShipment",
+	"DiscardShipment",
+	"AddShipmentCourierAwbs",
+	"UploadShipmentInvoice",
+)
 
 
 def _fulfillment_message(log):
@@ -966,13 +1068,7 @@ def _fulfillment_message(log):
 def _fulfillment_action_label(action):
 	"""Plain verb for a Noon fulfillment action code; an unknown code is shown as stored."""
 	labels = {
-		"CreateShipment": _("Create shipment"),
-		"GetShipment": _("Check shipment on Noon"),
-		"CancelShipment": _("Cancel shipment"),
-		"DiscardShipment": _("Discard shipment"),
-		"AddShipmentCourierAwbs": _("Add AWB"),
 		"UpdateOrder": _("Mark units Out of Stock"),
-		"UploadShipmentInvoice": _("Upload shipment invoice"),
 		"UploadOrderInvoice": _("Upload order invoice"),
 		"ReleaseStuckOosReservation": _("Release Out of Stock reservation"),
 	}
@@ -1000,24 +1096,18 @@ def _collect_fulfillment_errors(accounts):
 	if not errors:
 		return []
 
-	def parts_of(log):
-		data = _parse_request_data(log.request_data)
-		return cstr(data.get("action")), cstr(data.get("integration_shipment_nr")).strip(), data
+	def action_of(log):
+		return cstr(_parse_request_data(log.request_data).get("action"))
 
 	def stamp_of(log):
 		return get_datetime(log.attempted_at or log.creation)
 
+	errors = [log for log in errors if action_of(log) not in RETIRED_FULFILLMENT_ACTIONS]
+	if not errors:
+		return []
 	order_names = {log.marketplace_order for log in errors if log.marketplace_order}
-	# Latest resolving stamp per (order, action, shipment); discards and
-	# GetShipment recoveries are keyed per (order, shipment).
+	# Latest resolving stamp per (order, action).
 	last_success = {}
-	last_discard = {}
-	last_recovery = {}
-
-	def remember(store, key, stamp):
-		if key not in store or stamp > store[key]:
-			store[key] = stamp
-
 	for chunk in _chunks(order_names):
 		for log in frappe.get_list(
 			"Marketplace Sync Log",
@@ -1025,17 +1115,10 @@ def _collect_fulfillment_errors(accounts):
 			fields=fields,
 			limit_page_length=0,
 		):
-			action, shipment, data = parts_of(log)
+			key = (log.marketplace_order, action_of(log))
 			stamp = stamp_of(log)
-			remember(last_success, (log.marketplace_order, action, shipment), stamp)
-			if shipment and action == "DiscardShipment":
-				remember(last_discard, (log.marketplace_order, shipment), stamp)
-			if (
-				shipment
-				and action == "CreateShipment"
-				and data.get("note") == RECOVERED_VIA_GET_SHIPMENT_NOTE
-			):
-				remember(last_recovery, (log.marketplace_order, shipment), stamp)
+			if key not in last_success or stamp > last_success[key]:
+				last_success[key] = stamp
 
 	# One lookup for the customer-facing order numbers shown instead of the MKTORD names.
 	references = {}
@@ -1048,49 +1131,21 @@ def _collect_fulfillment_errors(accounts):
 		):
 			references[order.name] = order.platform_order_reference
 
-	# #391: Delivery Notes named by refusals logged before any shipment existed; one lookup for all.
-	logged_notes = {
-		cstr(parts_of(log)[2].get("delivery_note")).strip() for log in errors
-	} - {""}
-	open_notes = set()
-	for chunk in _chunks(logged_notes):
-		open_notes.update(
-			frappe.get_all(
-				"Delivery Note",
-				filters={"name": ["in", chunk], "docstatus": 0, "custom_carrier_status": "Error"},
-				pluck="name",
-			)
-		)
-
 	items = []
 	seen = set()
 	for log in errors:
-		action, shipment, data = parts_of(log)
-		key = (log.marketplace_order, action, shipment)
-		# #391: a refusal before any shipment exists is logged against the Delivery Note
-		# it came from; it is open only while that draft note still shows the error.
-		note = cstr(data.get("delivery_note")).strip()
-		if note and note not in open_notes:
+		action = action_of(log)
+		key = (log.marketplace_order, action)
+		if key in seen:
 			continue
-		if (key, note) in seen:
-			continue
-		seen.add((key, note))
-		stamp = stamp_of(log)
-		resolved_by = [last_success.get(key)]
-		if shipment:
-			resolved_by.append(last_discard.get((log.marketplace_order, shipment)))
-			if action == "GetShipment":
-				resolved_by.append(last_recovery.get((log.marketplace_order, shipment)))
-		if any(later and later > stamp for later in resolved_by):
+		seen.add(key)
+		later = last_success.get(key)
+		if later and later > stamp_of(log):
 			continue
 		label = _fulfillment_action_label(action)
 		message = _fulfillment_message(log) or _("{0} failed - open the order.").format(label)
 		order_reference = references.get(log.marketplace_order) or log.marketplace_order or ""
-		explanation = (
-			_("{0} failed on order {1} (Delivery Note {2}): {3}").format(label, order_reference, note, message)
-			if note
-			else _("{0} failed on order {1}: {2}").format(label, order_reference, message)
-		)
+		explanation = _("{0} failed on order {1}: {2}").format(label, order_reference, message)
 		items.append(
 			_item(
 				FULFILLMENT_ERROR,
@@ -1164,128 +1219,25 @@ def _collect_noon_rollups(accounts):
 	if not noon_accounts:
 		return []
 
-	rollups = {}
-
-	def rollup(order):
-		return rollups.setdefault(
-			order,
-			{
-				"shipments": 0,
-				"worst": None,
-				"invoice_errors": 0,
-				"pending_oos": 0,
-				"stuck_pending": 0,
-				"not_handed_over": 0,
-				"notes": [],
-			},
-		)
-
+	# Shipment problems are Delivery Note rows now (the carrier collector); one rollup row per order
+	# remains for units reserved for a queued Out of Stock call.
 	pending = _get_orders(
 		noon_accounts,
 		{"platform": "Noon", "noon_pending_oos_units": ["not in", ["", "[]"]]},
-		["name", "noon_pending_oos_units"],
+		["name", "marketplace_account", "platform", "modified", "noon_pending_oos_units"],
 	)
+	items = []
 	for order in pending:
 		count = _pending_oos_count(order.noon_pending_oos_units)
-		if count:
-			rollup(order.name)["pending_oos"] = count
-
-	# Child rows can't be filtered by the parent's account/platform in one
-	# query, so fetch the problem shipments and resolve their parents in bulk.
-	shipments = frappe.get_list(
-		"Marketplace Order Shipment",
-		parent_doctype="Marketplace Order",
-		# Cancelled / Discarded shipments are closed: an old invoice error on one
-		# must not keep the order flagged.
-		filters={"status": ["not in", ["Cancelled", "Discarded"]]},
-		or_filters={"status": ["in", NOON_SHIPMENT_ATTENTION_STATUSES], "invoice_status": "Error"},
-		fields=["parent", "status", "invoice_status", "delivery_note"],
-		limit_page_length=0,
-	)
-	for shipment in shipments:
-		entry = rollup(shipment.parent)
-		entry["shipments"] += 1
-		# #391: name the Delivery Note a problem shipment was created from.
-		if shipment.delivery_note and shipment.delivery_note not in entry["notes"]:
-			entry["notes"].append(shipment.delivery_note)
-		if shipment.status in NOON_SHIPMENT_ATTENTION_STATUSES:
-			if entry["worst"] != "Error":
-				entry["worst"] = shipment.status
-		if shipment.invoice_status == "Error":
-			entry["invoice_errors"] += 1
-
-	# #164: Pending shipments older than the threshold (Created / Cancelled /
-	# Discarded / Error / Cancel Pending are not Pending, so they never match).
-	stuck = frappe.get_list(
-		"Marketplace Order Shipment",
-		parent_doctype="Marketplace Order",
-		filters={
-			"status": "Pending",
-			"creation": ["<=", add_to_date(now_datetime(), hours=-NOON_PENDING_SHIPMENT_STUCK_HOURS)],
-		},
-		fields=["parent"],
-		limit_page_length=0,
-	)
-	for shipment in stuck:
-		rollup(shipment.parent)["stuck_pending"] += 1
-
-	# #368: Created shipments nobody marked handed over (no handed_over_on) for longer than the
-	# reminder threshold and with no live Delivery Note. Cancelled / Discarded are not Created, and
-	# setting handed_over_on (Mark Handed Over) or cancelling/discarding the shipment clears it.
-	unhanded = frappe.get_list(
-		"Marketplace Order Shipment",
-		parent_doctype="Marketplace Order",
-		filters={
-			"status": "Created",
-			"handed_over_on": ["is", "not set"],
-			"creation": ["<=", add_to_date(now_datetime(), hours=-NOON_HANDOVER_REMINDER_HOURS)],
-		},
-		fields=["parent", "delivery_note", "delivery_notes"],
-		limit_page_length=0,
-	)
-	for shipment in unhanded:
-		if not handover_state.live_notes(shipment):
-			rollup(shipment.parent)["not_handed_over"] += 1
-
-	if not rollups:
-		return []
-	orders = _get_orders_by_name(list(rollups), ["name", "marketplace_account", "platform", "modified"])
-	items = []
-	for order in orders:
-		if order.platform != "Noon" or order.marketplace_account not in noon_accounts:
+		if not count:
 			continue
-		entry = rollups[order.name]
-		parts = []
-		if entry["shipments"]:
-			text = _("{0} shipment(s) need attention").format(entry["shipments"])
-			if entry["worst"]:
-				text += _(" (worst: {0})").format(_(entry["worst"]))
-			if entry["notes"]:
-				text += _(" (Delivery Note: {0})").format(", ".join(entry["notes"]))
-			parts.append(text)
-		if entry["invoice_errors"]:
-			parts.append(_("{0} invoice upload(s) failed").format(entry["invoice_errors"]))
-		if entry["stuck_pending"]:
-			parts.append(
-				_("{0} shipment(s) stuck in Pending for over {1} hour(s)").format(
-					entry["stuck_pending"], NOON_PENDING_SHIPMENT_STUCK_HOURS
-				)
-			)
-		if entry["not_handed_over"]:
-			parts.append(
-				_("{0} shipment(s) created but not marked handed over for over {1} hour(s)").format(
-					entry["not_handed_over"], NOON_HANDOVER_REMINDER_HOURS
-				)
-			)
-		if entry["pending_oos"]:
-			parts.append(_("{0} unit(s) pending Out of Stock").format(entry["pending_oos"]))
 		items.append(
 			_item(
 				NOON_FULFILLMENT,
 				noon_accounts[order.marketplace_account],
 				"Marketplace Order",
 				order.name,
-				"; ".join(parts),
+				_("{0} unit(s) pending Out of Stock").format(count),
 				order.modified,
 				NEXT_OPEN_ORDER,
 			)

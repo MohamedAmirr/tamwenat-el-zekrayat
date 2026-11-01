@@ -4,7 +4,7 @@
 """#323: Channel Status and Needs Attention for platform users.
 
 Ordinary users built with ``make_role_user`` plus the real platform roles. A platform user sees
-only their platform's rows, the Bosta carrier row needs Bosta Shipment read, and a Bosta-only
+only their platform's rows, the Bosta carrier row needs Delivery Note read, and a Bosta-only
 user (no Marketplace Account read) gets no access. The class deletes what it creates in
 ``tearDown`` because ``make_role_user`` commits.
 """
@@ -15,7 +15,8 @@ from unittest.mock import patch
 import frappe
 from frappe.tests import IntegrationTestCase
 
-from marketplace_integrations.services.marketplace_attention import BOSTA_PLATFORM, get_attention_items
+from marketplace_integrations.services.marketplace_attention import get_attention_items
+from marketplace_integrations.services.marketplace_channels import BOSTA_PLATFORM
 from marketplace_integrations.services.marketplace_channels import get_channel_status
 from marketplace_integrations.services.sync_status import NEEDS_ACTION
 from marketplace_integrations.tests.utils import make_role_user
@@ -121,12 +122,12 @@ class IntegrationTestPlatformAccess(IntegrationTestCase):
 		accounts = {row["account"] for row in rows}
 		self.assertIn(self.accounts["Talabat"], accounts)
 		self.assertNotIn(self.accounts["Shopify"], accounts)
-		# No Bosta Shipment read: no carrier row either.
+		# No Delivery Note read: no carrier row either.
 		self.assertNotIn(BOSTA_PLATFORM, {row["platform"] for row in rows})
 
-	def test_bosta_row_needs_bosta_shipment_read(self):
+	def test_bosta_row_needs_delivery_note_read(self):
 		plain = self.make_user("Carrier Plain", "Talabat User")
-		with_bosta = self.make_user("Carrier Bosta", "Talabat User", "Bosta User")
+		with_bosta = self.make_user("Carrier Bosta", "Talabat User", "Stock User")
 		# Patch only the Bosta Settings read so the test does not have to flip the shared single
 		# doctype's `enabled` flag on the site.
 		real_get_single_value = frappe.db.get_single_value
@@ -141,12 +142,12 @@ class IntegrationTestPlatformAccess(IntegrationTestCase):
 				self.assertNotIn(BOSTA_PLATFORM, {row["platform"] for row in get_channel_status()})
 			with as_user(with_bosta):
 				self.assertIn(BOSTA_PLATFORM, {row["platform"] for row in get_channel_status()})
-			manager = self.make_user("Carrier Manager", "System Manager")
+			manager = self.make_user("Carrier Manager", "System Manager", "Sales User")
 			with as_user(manager):
 				self.assertIn(BOSTA_PLATFORM, {row["platform"] for row in get_channel_status()})
 
 	def test_bosta_only_user_gets_no_channel_status_or_attention_report(self):
-		user = self.make_user("Bosta Only", "Bosta User")
+		user = self.make_user("Bosta Only", "Stock User")
 		with as_user(user):
 			with self.assertRaises(frappe.PermissionError):
 				get_channel_status()

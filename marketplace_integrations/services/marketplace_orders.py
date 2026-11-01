@@ -12,10 +12,10 @@ import frappe
 from frappe import _
 from frappe.utils import cint, cstr, flt
 
-from marketplace_integrations.services.sync_status import CANCELLED
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_order.marketplace_order import (
 	compute_order_identity_key,
 )
+from marketplace_integrations.services.sync_status import CANCELLED
 
 ORDER_FIELDS = (
 	"platform_order_reference",
