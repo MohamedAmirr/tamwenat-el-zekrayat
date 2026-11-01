@@ -21,7 +21,8 @@ app_logo_url = "/assets/marketplace_integrations/icons/desktop_icons/solid/tamwe
 # ------------------
 
 # include js, css files in header of desk.html
-app_include_css = "/assets/marketplace_integrations/css/bosta_state.css"
+# boot: the carriers whose Delivery Note shows the Shipping section (services/carrier_shipments.py)
+boot_session = "marketplace_integrations.services.carrier_shipments.boot_session"
 # app_include_js = "/assets/marketplace_integrations/js/marketplace_integrations.js"
 
 # include js, css files in header of web template
@@ -41,8 +42,7 @@ app_include_css = "/assets/marketplace_integrations/css/bosta_state.css"
 # include js in doctype views
 doctype_js = {
 	"Sales Order": "public/js/sales_order.js",
-	"Delivery Note": "public/js/delivery_note.js",
-	"Bosta Shipment": "public/js/bosta_shipment.js",
+	"Delivery Note": ["public/js/delivery_note.js", "public/js/delivery_note_shipping.js", "public/js/delivery_note_bosta.js"],
 }
 doctype_list_js = {"Sales Order": "public/js/sales_order_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
@@ -239,15 +239,13 @@ scheduler_events = {
 	"cron": {
 		"59 23 * * *": [
 			"marketplace_integrations.services.marketplace_order_reconciliation.enqueue_nightly_order_reconciliation",
+			"marketplace_integrations.integrations.bosta.statuses.reconcile_open_notes",
 		],
 		SHOPIFY_INVENTORY_SWEEP_CRON: [
 			"marketplace_integrations.integrations.shopify.inventory_sync.sweep_changed_bins",
 		],
 		"* * * * *": [
 			"marketplace_integrations.services.sales_order_sync_debounce.sweep_due_sales_order_syncs",
-		],
-		"*/30 * * * *": [
-			"marketplace_integrations.integrations.bosta.statuses.poll_incomplete_shipments",
 		],
 	},
 	"daily": [
@@ -339,7 +337,7 @@ fixtures = [
 	# use them ship in each doctype's JSON.
 	{
 		"dt": "Role",
-		"filters": [["name", "in", ["Talabat User", "Noon User", "Shopify User", "Bosta User"]]],
+		"filters": [["name", "in", ["Talabat User", "Noon User", "Shopify User"]]],
 	},
 	{
 		"dt": "Property Setter",
@@ -368,7 +366,7 @@ fixtures = [
 	},
 	{
 		"dt": "Notification",
-		"filters": [["name", "in", ["Refund Detected on Marketplace Order", "Bosta Awaiting Your Action"]]],
+		"filters": [["name", "in", ["Refund Detected on Marketplace Order"]]],
 	},
 	{
 		"dt": "Custom Field",
@@ -382,14 +380,38 @@ fixtures = [
 					"Sales Order-custom_marketplace_external_order_id",
 					"Sales Order-custom_marketplace_order_tab",
 					"Sales Order-custom_marketplace_order_html",
-					"Sales Order-custom_bosta_delivery_tab",
-					"Sales Order-custom_bosta_delivery_html",
-					"Sales Order-custom_bosta_delivery_status",
+					"Sales Order-custom_shipping_status_summary",
 					"Payment Entry-custom_marketplace_order",
 					"Payment Entry-custom_marketplace_transaction_id",
 					"Delivery Note-custom_carrier_status",
 					"Delivery Note-custom_carrier_error",
 					"Delivery Note-custom_more_section",
+					"Delivery Note-custom_shipping_section",
+					"Delivery Note-custom_integration_status",
+					"Delivery Note-custom_shipping_status",
+					"Delivery Note-custom_carrier_delivery_id",
+					"Delivery Note-custom_carrier_reference",
+					"Delivery Note-custom_shipping_column",
+					"Delivery Note-custom_cod_amount",
+					"Delivery Note-custom_cod_confirmed",
+					"Delivery Note-custom_bosta_city",
+					"Delivery Note-custom_bosta_city_name",
+					"Delivery Note-custom_shipping_label",
+					"Delivery Note-custom_last_sync_at",
+					"Delivery Note-custom_bosta_last_event_at",
+					"Delivery Note-custom_actual_shipping_cost",
+					"Delivery Note-custom_last_integration_error",
+					"Delivery Note-custom_carrier_request_snapshot",
+					"Integration Request-custom_operation_type",
+					"Integration Request-custom_result",
+					"Integration Request-custom_external_reference",
+					"Integration Request-custom_delivery_id",
+					"Integration Request-custom_attempt_no",
+					"Integration Request-custom_completed_at",
+					"Integration Request-custom_http_status",
+					"Integration Request-custom_error_code",
+					"Integration Request-custom_correlation_id",
+					"Integration Request-custom_dedupe_key",
 				],
 			]
 		],

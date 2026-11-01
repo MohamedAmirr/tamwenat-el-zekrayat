@@ -15,18 +15,21 @@ from frappe.utils.file_manager import save_file
 from marketplace_integrations.integrations.bosta.client import BostaClient, is_success_response
 
 
-def create_a4_arabic_label(shipment_name):
-	"""Fetch one shipment's A4/Arabic AWB and attach it privately.
+def create_a4_arabic_label(delivery_note):
+	"""Fetch the A4/Arabic AWB of a Bosta Delivery Note and attach it privately to the note.
 
 	Live ``POST /deliveries/mass-awb`` answers ``{"success": true, "data": "<base64 PDF>"}``
 	(verified 2026-10-16); ``_decode_base64_pdf`` accepts that and a bare base64 body, and
 	rejects any other shape. A non-success reply (including ``success: false`` on HTTP 200)
-	is shown as Bosta's escaped error message."""
-	shipment = frappe.get_doc("Bosta Shipment", shipment_name)
-	shipment.check_permission("read")
-	tracking_number = str(shipment.tracking_number or "").strip()
+	is shown as Bosta's escaped error message. The caller checked access to the note."""
+	values = frappe.db.get_value(
+		"Delivery Note", delivery_note, ["lr_no", "custom_shipping_label"], as_dict=True
+	)
+	if values and values.custom_shipping_label:
+		return {"file_url": values.custom_shipping_label, "file_name": ""}
+	tracking_number = str((values and values.lr_no) or "").strip()
 	if not tracking_number:
-		frappe.throw(_("Bosta Shipment {0} has no tracking number yet.").format(shipment.name))
+		frappe.throw(_("Delivery Note {0} has no Bosta tracking number yet.").format(delivery_note))
 
 	client = BostaClient()
 	response = client.get_a4_arabic_awb([tracking_number])
@@ -37,9 +40,14 @@ def create_a4_arabic_label(shipment_name):
 	file_doc = save_file(
 		_label_filename(tracking_number),
 		pdf_content,
-		"Bosta Shipment",
-		shipment.name,
+		"Delivery Note",
+		delivery_note,
 		is_private=1,
+	)
+	# Not a change the person made: bumping ``modified`` here would make the native submit that follows
+	# a Created shipment fail with "modified after you opened it" (the label job runs right after Created).
+	frappe.db.set_value(
+		"Delivery Note", delivery_note, "custom_shipping_label", file_doc.file_url, update_modified=False
 	)
 	return {"file_url": file_doc.file_url, "file_name": file_doc.file_name}
 

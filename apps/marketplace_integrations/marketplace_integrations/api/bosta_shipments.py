@@ -1,134 +1,70 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-"""Desk boundary for manual Bosta carrier delivery creation."""
+"""Desk boundary for the Bosta shipment of a Delivery Note (epic #413). Each endpoint only authorizes,
+validates and delegates to ``integrations/bosta/delivery_note_shipment.py``."""
 
 import frappe
-from frappe.utils import cint
+from frappe import _
 
-from marketplace_integrations.integrations.bosta import bulk, locations
-from marketplace_integrations.integrations.bosta.deliveries import (
-	CREATOR_ROLES,
-	get_sales_order_defaults,
-)
-from marketplace_integrations.integrations.bosta.deliveries import (
-	check_bosta_shipment as _check_bosta_shipment,
-)
-from marketplace_integrations.integrations.bosta.deliveries import (
-	confirm_physical_handover as _confirm_physical_handover,
-)
-from marketplace_integrations.integrations.bosta.deliveries import (
-	create_bosta_shipment as _create_bosta_shipment,
-)
-from marketplace_integrations.integrations.bosta.deliveries import (
-	get_sales_order_shipment as _get_sales_order_shipment,
-)
-from marketplace_integrations.integrations.bosta.editing import (
-	edit_bosta_shipment as _edit_bosta_shipment,
-)
-from marketplace_integrations.integrations.bosta.labels import create_a4_arabic_label
-from marketplace_integrations.integrations.bosta.statuses import (
-	cancel_bosta_shipment as _cancel_bosta_shipment,
-)
-from marketplace_integrations.integrations.bosta.statuses import (
-	refresh_shipment_state as _refresh_shipment_state,
-)
+from marketplace_integrations.integrations.bosta import delivery_note_shipment as shipment
+from marketplace_integrations.integrations.bosta import locations, statuses
+
+
+def _bosta_note(delivery_note, ptype):
+	"""The Delivery Note, after the caller's own permission check and a check that it is a Bosta note."""
+	doc = frappe.get_doc("Delivery Note", delivery_note)
+	frappe.has_permission("Delivery Note", ptype, doc=doc, throw=True)
+	if not shipment.applies_to(doc):
+		frappe.throw(_("This Delivery Note is not a Bosta shipment."))
+	return doc
 
 
 @frappe.whitelist(methods=["POST"])
-def get_create_defaults(sales_order: str):
-	return get_sales_order_defaults(sales_order)
+def request_shipment(delivery_note: str, modified: str | None = None):
+	"""Start the Bosta create of a draft Delivery Note (needs submit permission on it)."""
+	_bosta_note(delivery_note, "submit")
+	return shipment.request_create(delivery_note, modified)
 
 
 @frappe.whitelist(methods=["POST"])
-def get_sales_order_shipment(sales_order: str):
-	"""The order's current Bosta shipment summary for the Sales Order form (#246)."""
-	return _get_sales_order_shipment(sales_order)
+def check_with_bosta(delivery_note: str):
+	"""Look the note's delivery up at Bosta (never creates; needs write permission)."""
+	_bosta_note(delivery_note, "write")
+	return shipment.check_with_bosta(delivery_note)
 
 
 @frappe.whitelist(methods=["POST"])
-def get_cities(refresh: int = 0):
-	"""Bosta's cities for the create dialog (cached 24h); ``refresh`` refetches them."""
-	frappe.only_for(CREATOR_ROLES)
-	return locations.get_cities(refresh=bool(cint(refresh)))
+def refresh_from_bosta(delivery_note: str):
+	"""Read the note's delivery state from Bosta and apply it (needs write permission)."""
+	doc = _bosta_note(delivery_note, "write")
+	if shipment.status_of(doc) not in (shipment.CREATED, "Cancellation Pending", "Cancellation Unknown", shipment.CANCELLED):
+		frappe.throw(_("Only a note with a created Bosta shipment can be refreshed."))
+	try:
+		return {"shipping_status": statuses.refresh_note(delivery_note)}
+	except statuses.RateLimited:
+		frappe.throw(_("Bosta is busy. Try again in a few minutes."))
 
 
 @frappe.whitelist(methods=["POST"])
-def create_shipment(
-	sales_order: str,
-	receiver_name: str,
-	receiver_phone: str,
-	city_id: str,
-	address_first_line: str = "",
-	expected_cod: float | None = None,
-	cod_amount: float | None = None,
-):
-	return _create_bosta_shipment(
-		sales_order,
-		receiver_name,
-		receiver_phone,
-		city_id,
-		address_first_line,
-		expected_cod,
-		cod_amount,
-	)
+def fetch_label(delivery_note: str):
+	"""Fetch and attach the Bosta label of a Created note (needs write permission)."""
+	doc = _bosta_note(delivery_note, "write")
+	if shipment.status_of(doc) != shipment.CREATED:
+		frappe.throw(_("The label can be fetched once the Bosta shipment is Created."))
+	return shipment.fetch_label(delivery_note, raise_on_error=True)
 
 
 @frappe.whitelist(methods=["POST"])
-def get_bulk_create_plan(sales_orders):
-	"""Sort the selected Sales Orders into skipped / ready / needs review, without calling
-	Bosta (creator roles only, at most 50 orders)."""
-	return bulk.get_bulk_create_plan(sales_orders)
+def get_cities(delivery_note: str):
+	"""Bosta's cities (cached 24h) and the city matching the note's address."""
+	_bosta_note(delivery_note, "write")
+	return shipment.get_city_options(delivery_note)
 
 
 @frappe.whitelist(methods=["POST"])
-def queue_bulk_create(orders, skipped=None):
-	"""Queue the background job that creates the given orders' Bosta shipments."""
-	return bulk.queue_bulk_create(orders, skipped)
-
-
-@frappe.whitelist()
-def get_bulk_create_status(job_id: str):
-	"""Poll a bulk create job. Only the user who queued it can read it."""
-	return bulk.get_bulk_create_status(job_id)
-
-
-@frappe.whitelist(methods=["POST"])
-def check_shipment(shipment: str):
-	"""Resolve a stuck Bosta Shipment by searching Bosta for its business reference."""
-	return _check_bosta_shipment(shipment)
-
-
-@frappe.whitelist(methods=["POST"])
-def confirm_physical_handover(shipment: str):
-	"""Record authorized physical handover and post the reserved Delivery Note."""
-	return _confirm_physical_handover(shipment)
-
-
-@frappe.whitelist(methods=["POST"])
-def refresh_shipment(shipment: str):
-	"""Read the shipment's current state from Bosta and apply it (creator roles only)."""
-	return _refresh_shipment_state(shipment)
-
-
-@frappe.whitelist(methods=["POST"])
-def cancel_shipment(shipment: str):
-	"""Terminate the delivery in Bosta and cancel its Delivery Note (creator roles only)."""
-	return _cancel_bosta_shipment(shipment)
-
-
-@frappe.whitelist(methods=["POST"])
-def edit_shipment(
-	shipment: str,
-	receiver_phone: str,
-	city_id: str,
-	address_first_line: str,
-):
-	"""Update the delivery's receiver phone and drop-off address in Bosta and ERPNext."""
-	return _edit_bosta_shipment(shipment, receiver_phone, city_id, address_first_line)
-
-
-@frappe.whitelist(methods=["POST"])
-def print_a4_arabic_label(shipment: str):
-	"""Return a private A4 Arabic Bosta label File for an authorized reader."""
-	return create_a4_arabic_label(shipment)
+def resolve_city(city_id: str):
+	"""The city code Bosta is sent and the name shown, for a chosen city id."""
+	frappe.has_permission("Delivery Note", "write", throw=True)
+	city = locations.get_city(city_id)
+	return {"code": city["code"], "name": city["name"]}

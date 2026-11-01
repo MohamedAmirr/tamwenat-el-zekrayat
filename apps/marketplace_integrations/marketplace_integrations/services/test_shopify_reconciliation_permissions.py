@@ -120,7 +120,7 @@ class IntegrationTestShopifyReconciliationPermissions(IntegrationTestCase):
 		for label, roles in (
 			("Recon Talabat", ("Talabat User",)),
 			("Recon Noon", ("Noon User",)),
-			("Recon Bosta", ("Bosta User",)),
+			("Recon Stock", ("Stock User",)),
 			("Recon Plain", ()),
 		):
 			user = self.make_user(label, *roles)

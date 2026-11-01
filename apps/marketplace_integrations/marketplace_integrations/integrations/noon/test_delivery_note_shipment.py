@@ -426,8 +426,10 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		self.assertEqual(len(order.noon_shipments), 0)
 		self.assertEqual(fx.delivery_notes(), [])
 
-	def test_the_carrier_seam_is_a_plain_dict_holding_only_noon(self):
-		self.assertEqual(carrier_shipments.CARRIERS, {"Noon": dn_shipment})
+	def test_the_carrier_seam_is_a_plain_dict_holding_noon(self):
+		# Bosta joined the seam in epic #413; Noon's own adapter is unchanged.
+		self.assertIs(carrier_shipments.CARRIERS["Noon"], dn_shipment)
+		self.assertEqual(list(carrier_shipments.CARRIERS), ["Noon", "Bosta"])
 		self.assertIs(type(carrier_shipments.CARRIERS), dict)
 
 	def test_the_queue_handler_really_reaches_queue_and_never_raises(self):

@@ -9,8 +9,7 @@ invisible to platform users (a Sync Log without an account is System Manager onl
 
 System Manager and Administrator are never filtered. A user with none of the platform roles
 and not a System Manager gets nothing here; DocPerm already denies them, the condition is
-a second layer. ``Bosta User`` is not a platform role in this sense (Bosta has no
-Marketplace Account).
+a second layer. Bosta is a carrier with no Marketplace Account and no role of its own.
 
 ``permission_query_conditions`` filters lists/reports; ``has_permission`` filters direct
 document access (open by name). Both are registered in ``hooks.py``.
