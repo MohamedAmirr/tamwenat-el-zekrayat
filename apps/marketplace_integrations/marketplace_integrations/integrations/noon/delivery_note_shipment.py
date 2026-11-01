@@ -45,7 +45,7 @@ import re
 import frappe
 from frappe import _
 from frappe.query_builder.functions import Lower
-from frappe.utils import cint, cstr, flt, getdate, now_datetime, strip_html
+from frappe.utils import add_days, cint, cstr, flt, getdate, now_datetime, strip_html
 
 from marketplace_integrations.integrations.noon import catalog, fulfillment
 from marketplace_integrations.integrations.noon.client import SERVICE_NAME
@@ -95,7 +95,11 @@ _INTEGRATION_STATUS_NAMES = {
 	"INTEGRATION_ITEM_STATUS_OUT_OF_STOCK": SHIPPING_OUT_OF_STOCK,
 }
 _REFRESH_JOB = "noon-refresh|{}"
+_REFRESH_AGAIN = "noon-refresh-again|{}"
+_REFRESH_PASSES = 3
 RECONCILE_JOB = "noon-reconcile"
+#: The nightly reconcile reads a Created note only for this long after its creation.
+REFRESH_MAX_AGE_DAYS = 60
 
 #: Written by the app only (workers and APIs); a person's save never changes them.
 SYSTEM_FIELDS = (
@@ -425,6 +429,19 @@ def started_units_of_order(marketplace_order_name):
 def has_created_note(marketplace_order_name):
 	"""Does a Delivery Note of this Marketplace Order (not cancelled) hold a Created Noon shipment? The order
 	invoice upload needs one."""
+	return _has_note_in(marketplace_order_name, CREATED)
+
+
+def has_unresolved_create(marketplace_order_name):
+	"""Does a Delivery Note of this Marketplace Order (not cancelled) have a create in flight (Creating) or with
+	an unknown result (Creation Unknown)? Its units are not in a snapshot yet, but Noon may already hold the
+	shipment: Mark Out of Stock is refused and order reconciliation treats the order as started."""
+	return _has_note_in(marketplace_order_name, [CREATING, UNKNOWN])
+
+
+def _has_note_in(marketplace_order_name, statuses):
+	"""Is there a not-cancelled Delivery Note of this Marketplace Order whose Integration Status is (in) ``statuses``?"""
+	statuses = [statuses] if isinstance(statuses, str) else list(statuses)
 	sales_orders = frappe.get_all(
 		"Sales Order", filters={"custom_marketplace_order": marketplace_order_name}, pluck="name"
 	)
@@ -440,7 +457,7 @@ def has_created_note(marketplace_order_name):
 	return bool(parents) and bool(
 		frappe.get_all(
 			"Delivery Note",
-			filters={"name": ["in", parents], "docstatus": ["<", 2], "custom_integration_status": CREATED},
+			filters={"name": ["in", parents], "docstatus": ["<", 2], "custom_integration_status": ["in", statuses]},
 			limit=1,
 			pluck="name",
 		)
@@ -485,6 +502,16 @@ def _snapshot_units(snapshot):
 		return []
 	units = data.get("mp_item_nrs") if isinstance(data, dict) else None
 	return [cstr(unit).strip() for unit in units or [] if cstr(unit).strip()]
+
+
+def _snapshot_data(snapshot):
+	"""The whole ``custom_carrier_request_snapshot`` as a dict (``mp_item_nrs`` and, once a refresh wrote an
+	error, ``refresh_error``); empty when unreadable."""
+	try:
+		data = frappe.parse_json(snapshot) if snapshot else {}
+	except Exception:
+		return {}
+	return dict(data) if isinstance(data, dict) else {}
 
 
 def _pick_units(doc):
@@ -629,6 +656,19 @@ def find_remote(doc):
 		body = _json(response)
 		if not isinstance(body, dict) or not isinstance(body.get("items"), list) or not isinstance(body.get("awbs"), list):
 			raise Unknown(_("Noon returned a shipment in an unrecognised format. Check the shipment in Noon."), 200)
+		# The note name is not unique across sites on one Noon account: a shipment of another order (or of a
+		# unit this order does not have) is not ours and is never adopted.
+		order = _order_values(doc)
+		units = {cstr(item.get("mp_item_nr")).strip() for item in body["items"] if isinstance(item, dict)}
+		on_order = {
+			cstr(item.get("mp_item_nr")).strip()
+			for item in fulfillment._latest_payload_items(order)
+			if isinstance(item, dict)
+		}
+		if cstr(body.get("fbpi_order_nr")).strip() != cstr(order.external_order_id).strip() or not units <= on_order:
+			raise Unknown(
+				_("Noon has a shipment with this number that belongs to another order. Check the shipment in Noon."), 200
+			)
 		return {
 			"awbs": [awb for awb in body["awbs"] if isinstance(awb, dict)],
 			"items": [item for item in body["items"] if isinstance(item, dict)],
@@ -1048,29 +1088,71 @@ def refresh(delivery_note):
 				custom_integration_status=CANCELLED, custom_shipping_status=SHIPPING_CANCELLED, custom_last_integration_error=None
 			)
 		note.db_set(values, update_modified=False, notify=True, commit=True)
-		return note.get("custom_shipping_status")
+		if values.get("custom_integration_status") == CANCELLED:
+			_cancel_note_natively(delivery_note)
+		return frappe.db.get_value("Delivery Note", delivery_note, "custom_shipping_status")
+	snapshot = _snapshot_data(note.get("custom_carrier_request_snapshot"))
 	if shipment is None:
-		values["custom_last_integration_error"] = _("Noon has no shipment with number {0}.").format(_reference(note))
+		found_error = _("Noon has no shipment with number {0}.").format(_reference(note))
+		derived = None
 	else:
 		derived = derive_status(note, shipment, raw_order, marketplace_account)
-		values["custom_last_integration_error"] = derived.error
+		found_error = derived.error
+	# The error field also holds other writers' text (a refused cancel): a clean refresh clears only the
+	# text this refresh wrote itself (remembered in the snapshot).
+	owned = cstr(snapshot.get("refresh_error"))
+	if found_error:
+		values["custom_last_integration_error"] = found_error
+		snapshot["refresh_error"] = found_error
+	elif not cstr(note.get("custom_last_integration_error")) or cstr(note.get("custom_last_integration_error")) == owned:
+		values["custom_last_integration_error"] = None
+		snapshot.pop("refresh_error", None)
+	if snapshot != _snapshot_data(note.get("custom_carrier_request_snapshot")):
+		values["custom_carrier_request_snapshot"] = json.dumps(snapshot)
+	if derived is not None:
 		if derived.shipping_status:
 			values["custom_shipping_status"] = derived.shipping_status
+		if derived.shipping_status == SHIPPING_CANCELLED and note.docstatus == 1:
+			# Every unit of the shipment is cancelled at Noon (the proof ``cancel_remote`` accepts): the
+			# shipment is Cancelled, so the native cancel of the note is allowed and done below.
+			values.update(custom_integration_status=CANCELLED, custom_last_integration_error=None)
+			snapshot.pop("refresh_error", None)
+			if snapshot != _snapshot_data(note.get("custom_carrier_request_snapshot")):
+				values["custom_carrier_request_snapshot"] = json.dumps(snapshot)
 		for row in note.get("items") or []:
 			if derived.rows.get(row.name):
 				row.db_set("custom_noon_item_status", derived.rows[row.name], update_modified=False)
 	note.db_set(values, update_modified=False, notify=True, commit=True)
-	return note.get("custom_shipping_status")
+	if values.get("custom_integration_status") == CANCELLED:
+		_cancel_note_natively(delivery_note)
+	return frappe.db.get_value("Delivery Note", delivery_note, "custom_shipping_status")
+
+
+def _cancel_note_natively(delivery_note):
+	"""Noon cancelled the shipment: the neutral automatic native cancel (no Noon call, never raises)."""
+	from marketplace_integrations.services import carrier_shipments
+
+	carrier_shipments.cancel_after_carrier_cancelled(delivery_note)
 
 
 def run_refresh(delivery_note):
-	"""Background job of a webhook refresh (one per submitted Noon note, ``enqueue_note_refreshes``)."""
+	"""Background job of a webhook refresh (one per submitted Noon note, ``enqueue_note_refreshes``).
+
+	A webhook that arrives while this job runs is dropped by the queue's deduplication, but it leaves a
+	"again" flag: the job clears the flag before each read and reads once more when it was set again meanwhile
+	(at most ``_REFRESH_PASSES`` reads)."""
 	frappe.set_user("Administrator")
-	try:
-		refresh(delivery_note)
-	except Exception:
-		frappe.db.rollback()
-		frappe.log_error(title="Noon shipment refresh failed", message=frappe.get_traceback())
+	key = _REFRESH_AGAIN.format(delivery_note)
+	for _pass in range(_REFRESH_PASSES):
+		frappe.cache().delete_value(key)
+		try:
+			refresh(delivery_note)
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(title="Noon shipment refresh failed", message=frappe.get_traceback())
+			return
+		if not frappe.cache().get_value(key):
+			return
 
 
 def enqueue_note_refreshes(marketplace_order_name):
@@ -1102,6 +1184,8 @@ def enqueue_note_refreshes(marketplace_order_name):
 		pluck="name",
 	) if parents else []
 	for note in notes:
+		# Set before queueing: if the queue drops this job because one is running, that job reads again.
+		frappe.cache().set_value(_REFRESH_AGAIN.format(note), 1, expires_in_sec=3600)
 		frappe.enqueue(
 			"marketplace_integrations.integrations.noon.delivery_note_shipment.run_refresh",
 			queue="short",
@@ -1153,9 +1237,25 @@ def run_reconcile():
 			"docstatus": ["<", 2],
 			"custom_integration_status": ["in", [CREATING, UNKNOWN, CANCELLATION_UNKNOWN, CREATED, NOT_CREATED, FAILED]],
 		},
-		fields=["name", "docstatus", "custom_integration_status", "custom_carrier_reference"],
+		fields=[
+			"name",
+			"docstatus",
+			"custom_integration_status",
+			"custom_carrier_reference",
+			"custom_shipping_status",
+			"creation",
+		],
 		limit_page_length=0,
 	)
+	cutoff = add_days(now_datetime(), -REFRESH_MAX_AGE_DAYS)
+	# A Created note stops being read once Noon shows it Shipped or Cancelled, or after 60 days (two calls per
+	# note per night are not spent forever); the webhook and the Refresh button still work on it.
+	notes = [
+		note
+		for note in notes
+		if cstr(note.custom_integration_status) != CREATED
+		or (cstr(note.custom_shipping_status) not in (SHIPPING_SHIPPED, SHIPPING_CANCELLED) and note.creation >= cutoff)
+	]
 	for note in notes:
 		try:
 			_reconcile_note(note, carrier_shipments)

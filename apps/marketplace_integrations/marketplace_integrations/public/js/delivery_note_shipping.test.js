@@ -396,3 +396,72 @@ test("the shell runs the carrier's refresh hook on every form refresh", () => {
 	handlers.refresh(frm);
 	assert.equal(frm.carrier_refreshed, true);
 });
+
+function hold_calls() {
+	const held = [];
+	global.frappe.call = (opts) => {
+		held.push(opts);
+		return new Promise((resolve, reject) => (opts.release = { resolve, reject }));
+	};
+	return held;
+}
+
+test("a double click on Check sends one request; the button works again once it is over", async () => {
+	const { handlers } = load();
+	const frm = make_form({ custom_integration_status: "Creation Unknown" });
+	handlers.refresh(frm);
+	const held = hold_calls();
+	const first = frm.buttons[0].action();
+	await frm.buttons[0].action();
+	assert.equal(held.length, 1);
+	held[0].release.resolve({ message: {} });
+	await first;
+	assert.equal(frm.reloads, 1);
+	const again = frm.buttons[0].action();
+	assert.equal(held.length, 2);
+	held[1].release.resolve({ message: {} });
+	await again;
+});
+
+test("a failed request releases the button", async () => {
+	const { handlers } = load();
+	const frm = make_form({ custom_integration_status: "Created" });
+	handlers.refresh(frm);
+	const held = hold_calls();
+	const first = frm.buttons[0].action();
+	held[0].release.reject(new Error("boom"));
+	await assert.rejects(first);
+	const again = frm.buttons[0].action();
+	assert.equal(held.length, 2);
+	held[1].release.resolve({ message: {} });
+	await again;
+});
+
+test("Refresh and Check share one lock per note, other notes are not blocked", async () => {
+	const { shipping } = load();
+	const a = make_form({});
+	const b = make_form({ name: "MAT-DN-2" });
+	let ran = 0;
+	let release;
+	const first = shipping.exclusive(a, () => new Promise((resolve) => (release = resolve)));
+	assert.equal(shipping.is_busy(a), true);
+	let busy_called = 0;
+	await shipping.exclusive(a, () => ran++, () => busy_called++);
+	await shipping.exclusive(b, () => ran++);
+	assert.deepEqual([ran, busy_called], [1, 1]);
+	release();
+	await first;
+	assert.equal(shipping.is_busy(a), false);
+});
+
+test("a second submit while a request is in flight does not start another and stops the submit", async () => {
+	const { handlers, calls } = load({ statuses: [{ custom_integration_status: "Created" }] });
+	const frm = make_form({ custom_integration_status: "Not Created" });
+	const first = handlers.before_submit(frm);
+	frappe.validated = true;
+	await handlers.before_submit(frm);
+	assert.equal(frappe.validated, false);
+	assert.equal(calls.length, 1);
+	await first;
+	assert.equal(global.frappe.marketplace_integrations.shipping.is_busy(frm), false);
+});

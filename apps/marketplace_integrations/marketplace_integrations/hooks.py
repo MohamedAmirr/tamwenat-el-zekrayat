@@ -177,6 +177,7 @@ _CARRIER_GUARD = "marketplace_integrations.services.carrier_shipments.guard_canc
 doc_events = {
 	"Delivery Note": {
 		**_RECHECK_EVENTS,
+		"on_submit": [_RECHECK_HANDLER, "marketplace_integrations.services.carrier_shipments.after_submit"],
 		# The guard comes first: it refuses a delete while the shipment is live.
 		"on_trash": [_CARRIER_GUARD, _RECHECK_HANDLER],
 		"before_cancel": _CARRIER_GUARD,

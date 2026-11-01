@@ -34,7 +34,10 @@ An adapter is a module exposing (the contract; a contract test checks every adap
 - ``cancel_remote(doc)``: ``_dict(outcome="cancelled"|"refused", message, values, http_status)`` or raises
   ``carrier_log.Unknown``. ``values`` are extra fields written with the result.
 - ``after_cancelled(delivery_note)``: work after the Cancelled write.
-- ``refresh(delivery_note)``: read the carrier's state and apply it; returns the shipping status.
+- ``refresh(delivery_note)``: read the carrier's state and apply it; returns the shipping status. Once it
+  wrote the Integration Status Cancelled it calls ``cancel_after_carrier_cancelled`` (every path that reads
+  the carrier does: webhook, nightly job, Refresh).
+- ``after_submit(doc)``: optional; work queued after the note is submitted (``on_submit``). Must not raise.
 - ``reconcile()``: the nightly job of this carrier.
 - ``refuse_sales_order_cancel(order)``: Sales Order ``before_cancel``.
 - ``problem_states()``: ``{problem_type: [shipping statuses]}`` for Needs Attention (the exception and return
@@ -42,9 +45,11 @@ An adapter is a module exposing (the contract; a contract test checks every adap
 - ``terminal_states()``: the shipping statuses that never change again (not a stale status).
 """
 
+import json
+
 import frappe
 from frappe import _
-from frappe.utils import add_to_date, cstr, get_datetime, now_datetime
+from frappe.utils import add_to_date, cstr, get_datetime, now_datetime, strip_html_tags
 from frappe.utils.background_jobs import is_job_enqueued
 
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as bosta_shipment
@@ -150,6 +155,14 @@ def require_shipment_created(doc, method=None):
 			),
 			title=_("{0} shipment").format(adapter.SERVICE_NAME),
 		)
+
+
+def after_submit(doc, method=None):
+	"""``on_submit``: the optional adapter hook ``after_submit(doc)`` (Bosta queues its label here, never
+	while the note is a draft being submitted). Must not raise."""
+	hook = getattr(adapter_for(doc), "after_submit", None)
+	if hook:
+		hook(doc)
 
 
 def guard_cancel_or_delete(doc, method=None):
@@ -450,6 +463,10 @@ def cancel(delivery_note):
 	doc = frappe.get_doc("Delivery Note", delivery_note)
 	try:
 		adapter.validate_ready(doc, "cancel")
+		if doc.docstatus == 1:
+			# The carrier cancel cannot be undone: refuse it while a linked document (a submitted Sales
+			# Invoice, a Sales Return) would make the native cancel of the note fail afterwards.
+			_check_native_cancel_not_blocked(doc)
 	except Exception:
 		frappe.db.commit()
 		raise
@@ -467,7 +484,7 @@ def cancel(delivery_note):
 	except Unknown as unknown:
 		outcome, message, http_status, extra = "unknown", cstr(unknown), unknown.http_status, {}
 	else:
-		outcome, message, http_status, extra = result.outcome, result.message, result.http_status, result.values or {}
+		outcome, message, http_status, extra = result.outcome, result.message, result.http_status, result.get("values") or {}
 
 	if outcome == "cancelled":
 		values = {"custom_last_integration_error": None, "custom_last_sync_at": now_datetime(), **extra}
@@ -495,8 +512,135 @@ def cancel(delivery_note):
 
 
 # ---------------------------------------------------------------------------
+# Automatic native cancel after the carrier cancelled
+# ---------------------------------------------------------------------------
+
+
+def cancel_after_carrier_cancelled(delivery_note):
+	"""Called by an adapter right after its refresh, webhook or nightly read wrote the Integration Status
+	Cancelled (the carrier itself confirmed the cancel; never on Unknown or Pending). A submitted note is
+	then cancelled natively (``doc.cancel()``) with no call to the carrier, as the system. Idempotent (a
+	cancelled or draft note is left alone) and never raises: the caller's own work (a log row, the next
+	note of a nightly run) must not fail because of it.
+
+	Blocked (a linked submitted document) or failing: the note stays submitted, its
+	``custom_last_integration_error`` holds the reason (Needs Attention "Carrier Exception") and the people
+	in ``_notify_recipients`` are told a manual step is needed, once per distinct reason."""
+	try:
+		_auto_cancel(delivery_note)
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(title="Automatic cancel of a carrier-cancelled Delivery Note failed", message=f"{delivery_note}\n{frappe.get_traceback()}")
+
+
+def _auto_cancel(delivery_note):
+	# Commit, then lock as the very next statement (MariaDB snapshot isolation). The lock is held until the
+	# cancel commits, so a concurrent webhook and the nightly job cancel the note once.
+	frappe.db.commit()
+	locked = frappe.db.get_value(
+		"Delivery Note",
+		delivery_note,
+		["custom_integration_status", "docstatus", "custom_last_integration_error"],
+		as_dict=True,
+		for_update=True,
+	)
+	if not locked or locked.docstatus != 1 or cstr(locked.custom_integration_status) != CANCELLED:
+		frappe.db.commit()
+		return
+	# Read after the lock: the document is current, so the cancel meets no "modified after you opened it".
+	doc = frappe.get_doc("Delivery Note", delivery_note)
+	adapter = adapter_for(doc)
+	if not adapter:
+		frappe.db.commit()
+		return
+	service = adapter.SERVICE_NAME
+	try:
+		_check_native_cancel_not_blocked(doc)
+		doc.flags.ignore_permissions = True
+		doc.cancel()
+	except Exception as exc:
+		frappe.db.rollback()
+		if not isinstance(exc, frappe.ValidationError):
+			frappe.log_error(title="Automatic cancel of a Delivery Note failed", message=f"{delivery_note}\n{frappe.get_traceback()}")
+		frappe.clear_messages()
+		reason = strip_html_tags(cstr(exc)).strip()[:300] or exc.__class__.__name__
+		message = _("{0} cancelled the shipment, but this Delivery Note could not be cancelled automatically: {1}").format(service, reason)
+		if cstr(locked.custom_last_integration_error) != message:
+			frappe.db.set_value("Delivery Note", delivery_note, "custom_last_integration_error", message, update_modified=False)
+			frappe.db.commit()
+			_notify(
+				doc,
+				_("Delivery Note {0}: {1} cancelled the shipment but the note must be cancelled by hand. {2}").format(
+					delivery_note, service, reason
+				),
+			)
+		else:
+			frappe.db.commit()
+		return
+	frappe.db.commit()
+	adapter.after_cancelled(delivery_note)
+	_notify(
+		doc,
+		_("Delivery Note {0} was cancelled automatically because {1} cancelled the shipment.").format(delivery_note, service),
+	)
+
+
+def _submitter(doc):
+	"""Who submitted the note: ``modified_by`` is whoever wrote it last (often the system), so the Version
+	row that changed ``docstatus`` to 1 is read; the creator when there is none."""
+	for version in frappe.get_all(
+		"Version",
+		filters={"ref_doctype": "Delivery Note", "docname": doc.name},
+		fields=["owner", "data"],
+		order_by="creation desc",
+		limit_page_length=20,
+	):
+		try:
+			changed = json.loads(version.data or "{}").get("changed") or []
+		except ValueError:
+			continue
+		if any(len(row) >= 3 and row[0] == "docstatus" and row[2] == 1 for row in changed):
+			return version.owner
+	return doc.owner
+
+
+def _notify_recipients(doc):
+	"""The submitter plus every enabled user with the Stock Manager role, each once."""
+	candidates = set(frappe.get_all("Has Role", filters={"role": "Stock Manager", "parenttype": "User"}, pluck="parent"))
+	candidates.add(_submitter(doc))
+	candidates.discard("Guest")
+	candidates.discard(None)
+	if not candidates:
+		return []
+	return frappe.get_all("User", filters={"name": ["in", list(candidates)], "enabled": 1}, pluck="name")
+
+
+def _notify(doc, subject):
+	"""One native Notification Log per recipient, linked to the Delivery Note. Must not raise."""
+	from frappe.desk.doctype.notification_log.notification_log import enqueue_create_notification
+
+	try:
+		users = _notify_recipients(doc)
+		if users:
+			enqueue_create_notification(
+				users, {"type": "Alert", "subject": subject, "document_type": "Delivery Note", "document_name": doc.name}
+			)
+	except Exception:
+		frappe.log_error(title="Delivery Note auto-cancel notification failed", message=f"{doc.name}\n{frappe.get_traceback()}")
+
+
+# ---------------------------------------------------------------------------
 # Nightly
 # ---------------------------------------------------------------------------
+
+
+def _check_native_cancel_not_blocked(doc):
+	"""Raise the same link error the native cancel of a submitted note raises (the checks ``Document.cancel``
+	runs), before anything is cancelled at the carrier."""
+	from frappe.model.delete_doc import check_if_doc_is_dynamically_linked, check_if_doc_is_linked
+
+	check_if_doc_is_linked(doc, method="Cancel")
+	check_if_doc_is_dynamically_linked(doc, method="Cancel")
 
 
 def reconcile_open_notes():

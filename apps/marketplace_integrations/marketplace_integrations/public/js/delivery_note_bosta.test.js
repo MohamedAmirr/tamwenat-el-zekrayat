@@ -198,7 +198,8 @@ test("a Bosta refusal stops the cancel and shows Bosta's text escaped", async ()
 	assert.equal(global.frappe.validated, false);
 	assert.match(msgprints[0].message, /Bosta refused: &lt;img src=x onerror=1&gt; not cancellable/);
 	assert.doesNotMatch(msgprints[0].message, /<img/);
-	assert.equal(frm.reloads, 0);
+	// the server wrote the note while asking Bosta: the form is loaded again so the next action is not stale
+	assert.equal(frm.reloads, 1);
 });
 
 test("an unknown result opens a dialog with Retry and Check with Bosta; closing it stops the cancel", async () => {
@@ -219,6 +220,7 @@ test("an unknown result opens a dialog with Retry and Check with Bosta; closing 
 	dialog.hide();
 	await finished;
 	assert.equal(global.frappe.validated, false);
+	assert.equal(frm.reloads, 1);
 });
 
 test("Retry asks Bosta again and continues the cancel when Bosta confirms", async () => {
@@ -484,4 +486,48 @@ test("an unsaved return asks to save first and sends nothing", async () => {
 	await mod.request_pickup(return_form({}, { dirty: true }));
 	assert.deepEqual(sent, []);
 	assert.equal(msgprints[0].message, "Save the Delivery Note first, then request the pickup.");
+});
+
+function use_lock() {
+	const busy = new Set();
+	global.frappe.marketplace_integrations.shipping.exclusive = (frm, fn, on_busy) => {
+		if (busy.has(frm.doc.name)) return Promise.resolve(on_busy && on_busy());
+		busy.add(frm.doc.name);
+		return Promise.resolve(fn()).finally(() => busy.delete(frm.doc.name));
+	};
+	return busy;
+}
+
+test("a double click on Fetch Bosta Label sends one request and the lock is released", async () => {
+	const { mod, calls } = load();
+	const busy = use_lock();
+	const frm = make_form({ custom_integration_status: "Created" });
+	const first = mod.fetch_label(frm);
+	await mod.fetch_label(frm);
+	assert.equal(calls.length, 1);
+	await first;
+	assert.equal(frm.reloads, 1);
+	assert.equal(busy.size, 0);
+});
+
+test("the lock is released when the request fails", async () => {
+	const { mod, calls } = load({ responses: { fetch_label: new Error("down") } });
+	const busy = use_lock();
+	const frm = make_form({ custom_integration_status: "Created" });
+	await assert.rejects(mod.fetch_label(frm));
+	assert.equal(busy.size, 0);
+	await assert.rejects(mod.fetch_label(frm));
+	assert.equal(calls.length, 2);
+});
+
+test("a cancel while another request is in flight sends nothing and stops the native cancel", async () => {
+	const { mod, calls } = load({ responses: { cancel_shipment: { status: "Cancelled", outcome: "cancelled", message: "" } } });
+	use_lock();
+	const frm = make_form({ custom_integration_status: "Created", transporter_name: "Bosta" });
+	const first = mod.before_cancel(frm);
+	global.frappe.validated = true;
+	await mod.before_cancel(frm);
+	assert.equal(global.frappe.validated, false);
+	assert.equal(calls.length, 1);
+	await first;
 });

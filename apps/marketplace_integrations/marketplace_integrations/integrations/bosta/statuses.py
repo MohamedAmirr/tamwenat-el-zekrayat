@@ -276,10 +276,11 @@ def _write_state(note, code, timestamp=None, fee=None, event=False):
 	current = frappe.db.get_value(
 		"Delivery Note",
 		note,
-		["custom_integration_status", "custom_bosta_last_event_at", "docstatus"],
+		["custom_integration_status", "custom_bosta_last_event_at", "docstatus", "custom_shipping_status"],
 		as_dict=True,
 		for_update=True,
 	)
+	previous_state = cstr(current.custom_shipping_status)
 	status = cstr(current.custom_integration_status)
 	stored = _as_documented_integer(current.custom_bosta_last_event_at)
 	if event:
@@ -323,12 +324,18 @@ def _write_state(note, code, timestamp=None, fee=None, event=False):
 	frappe.get_doc("Delivery Note", note).db_set(
 		values, update_modified=current.docstatus != 0, notify=True, commit=True
 	)
-	if code in RETURNED_STATE_CODES and current.docstatus == 1:
+	# Only the CHANGE into a returned state queues the draft: states 46/60 are polled nightly, and a
+	# repeated read must not bring back a draft that staff cancelled.
+	if code in RETURNED_STATE_CODES and current.docstatus == 1 and previous_state != BOSTA_STATE_NAMES[code]:
 		from marketplace_integrations.integrations.bosta import returns
 
 		returns.queue_returned_draft(note)
 		frappe.db.commit()
 	update_sales_order_summary_of(note)
+	if code in CANCELLED_STATE_CODES:
+		# Bosta confirmed the cancel: a submitted note is cancelled natively, with no further Bosta call
+		# (also retries a note whose earlier automatic cancel was blocked). Never raises.
+		carrier_shipments.cancel_after_carrier_cancelled(note)
 	return "applied"
 
 
@@ -349,6 +356,15 @@ def refresh_note(delivery_note):
 	if response.status_code == 429:
 		raise RateLimited()
 	log = carrier_log.open_log(SERVICE_NAME, delivery_note, "Refresh")
+	if shipment.is_terminated_answer(response) and shipment.status_of(delivery_note) in (
+		shipment.CANCELLATION_PENDING,
+		shipment.CANCELLATION_UNKNOWN,
+	):
+		# A terminated delivery reads back "Delivery not found" (HTTP 400, errorCode 1066): the cancel took effect.
+		_write_state(delivery_note, shipment.TERMINATED_STATE_CODE)
+		carrier_log.close_log(log, "Success", http_status=response.status_code)
+		frappe.db.commit()
+		return BOSTA_STATE_NAMES[shipment.TERMINATED_STATE_CODE]
 	if not is_success_response(response):
 		message = client.error_message(response)
 		carrier_log.close_log(log, "Failed", error=message, http_status=response.status_code)

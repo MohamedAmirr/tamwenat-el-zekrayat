@@ -12,6 +12,7 @@ import frappe
 from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
 
 from marketplace_integrations.integrations.noon import delivery_note_shipment as noon
+from marketplace_integrations.integrations.noon import fulfillment
 from marketplace_integrations.integrations.noon.test_fulfillment import (
 	IntegrationTestNoonFulfillmentBase,
 	_confirmed_acknowledged,
@@ -109,6 +110,17 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 	def _note(self, name):
 		return frappe.get_doc("Delivery Note", name)
 
+	def _found(self, fixture, awbs=None, units=("1",), order_nr=None):
+		"""A GetShipment 200 for ``fixture``'s order (``fbpi_order_nr`` is part of the answer)."""
+		return _response(
+			200,
+			{
+				"fbpi_order_nr": order_nr or fixture.marketplace_order.external_order_id,
+				"awbs": awbs or [],
+				"items": [{"mp_item_nr": unit} for unit in units],
+			},
+		)
+
 	def _creating(self, note):
 		frappe.db.set_value(
 			"Delivery Note",
@@ -162,7 +174,9 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		self.assertTrue(noon.applies_to({"is_return": 0, "transporter": noon.transporter_name()}))
 		self.assertFalse(noon.applies_to({"is_return": 1, "transporter": noon.transporter_name()}))
 		self.assertFalse(noon.applies_to({"is_return": 0, "transporter": None}))
-		self.assertEqual(noon.problem_states(), {})
+		self.assertEqual(
+			noon.problem_states(), {"Carrier Exception": [noon.SHIPPING_MIXED, noon.SHIPPING_CANCELLED]}
+		)
 		self.assertEqual(noon.terminal_states(), ["Cancelled"])
 
 	def test_the_first_save_sets_the_carrier_and_not_created(self):
@@ -252,7 +266,7 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		fx = self._order([("SKU-A", 1)], ["SKU-A"])
 		note = self._draft_note(fx, lr_no="STICKER-1")
 		self._creating(note)
-		found = _response(200, {"awbs": [{"courier": "noon", "awb_nr": "STICKER-1"}], "items": [{"mp_item_nr": "1"}]})
+		found = self._found(fx, [{"courier": "noon", "awb_nr": "STICKER-1"}])
 		client = self._run(note, found)
 		self.assertEqual(_paths(client), ["get"])
 		self.assertEqual(self._note(note.name).custom_integration_status, "Created")
@@ -354,7 +368,7 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 			result = carrier_shipments.check(note.name)
 			self.assertFalse(result["found"])
 			self.assertEqual(_paths(client), ["get"])
-			client.request.side_effect = [_response(200, {"awbs": [], "items": [{"mp_item_nr": "1"}]})]
+			client.request.side_effect = [self._found(fx)]
 			self.assertTrue(carrier_shipments.check(note.name)["found"])
 		self.assertEqual(self._note(note.name).custom_integration_status, "Created")
 
@@ -568,7 +582,7 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		fx = self._order([("SKU-A", 1)], ["SKU-A"])
 		note = self._created_note(fx)
 		rows_before = [(r.item_code, r.qty) for r in self._note(note.name).items]
-		shipment = _response(200, {"awbs": [], "items": [{"mp_item_nr": "1"}]})
+		shipment = self._found(fx)
 		result, client, get_order = self._refresh(note, shipment, [self._unit("1")])
 		self.assertEqual(result, "Shipped")
 		self.assertEqual(_paths(client), ["get"])  # GetShipment, then the order (mocked) once
@@ -583,7 +597,7 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 	def test_refresh_shows_mixed_and_an_item_difference_sets_the_error(self):
 		fx = self._order([("SKU-A", 2)], ["SKU-A", "SKU-A"])
 		note = self._created_note(fx, units=("1", "2"))
-		shipment = _response(200, {"awbs": [], "items": [{"mp_item_nr": "1"}]})
+		shipment = self._found(fx)
 		self._refresh(note, shipment, [self._unit("1"), self._unit("2", "ACKNOWLEDGED")])
 		stored = self._note(note.name)
 		self.assertEqual(stored.custom_shipping_status, "Mixed")
@@ -650,6 +664,97 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		self.assertIn(one.name, seen)
 		self.assertIn(two.name, seen)
 
+	def test_the_nightly_reconcile_stops_at_shipped_or_cancelled_and_after_60_days(self):
+		notes = {}
+		for key in ("acknowledged", "shipped", "cancelled", "old"):
+			notes[key] = self._created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
+		for key, status in (("acknowledged", "Acknowledged"), ("shipped", "Shipped"), ("cancelled", "Cancelled"), ("old", "Acknowledged")):
+			frappe.db.set_value("Delivery Note", notes[key].name, "custom_shipping_status", status, update_modified=False)
+		frappe.db.set_value(
+			"Delivery Note", notes["old"].name, "creation", frappe.utils.add_days(frappe.utils.now_datetime(), -61), update_modified=False
+		)
+		frappe.db.commit()
+		seen = []
+
+		with patch.object(noon, "_reconcile_note", side_effect=lambda note, _service: seen.append(note.name)):
+			noon.run_reconcile()
+
+		self.assertIn(notes["acknowledged"].name, seen)
+		for key in ("shipped", "cancelled", "old"):
+			self.assertNotIn(notes[key].name, seen)
+
+	def test_a_shipment_of_another_order_or_with_a_foreign_unit_is_never_adopted(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._draft_note(fx, lr_no="STICKER-1")
+		self._creating(note)
+		doc = self._note(note.name)
+		for shipment in (self._found(fx, order_nr="SOME-OTHER-ORDER"), self._found(fx, units=("1", "99"))):
+			with patch(_CLIENT) as client_class:
+				client_class.return_value.request.side_effect = [shipment]
+				with self.assertRaises(noon.Unknown):
+					noon.find_remote(doc)
+
+	def test_needs_attention_lists_an_error_a_refresh_wrote_on_a_shipped_note(self):
+		from marketplace_integrations.services import marketplace_attention as attention
+
+		note = self._created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{"custom_shipping_status": "Shipped", "custom_last_integration_error": "The items of the Noon shipment differ"},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		found = [i for i in attention._collect_carrier_items(attention.CARRIER_EXCEPTION) if i["reference_name"] == note.name]
+		self.assertEqual(len(found), 1)
+
+	def test_a_clean_refresh_clears_only_the_error_a_refresh_wrote(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		# a refusal written by the cancel stays through a clean refresh
+		frappe.db.set_value("Delivery Note", note.name, "custom_last_integration_error", "Noon refused the cancel", update_modified=False)
+		frappe.db.commit()
+		self._refresh(note, self._found(fx), [self._unit("1")])
+		self.assertEqual(self._note(note.name).custom_last_integration_error, "Noon refused the cancel")
+		# the refresh's own error is written, then cleared by the next clean refresh
+		self._refresh(note, self._found(fx, units=("1", "9")), [self._unit("1")])
+		self.assertIn("differ", self._note(note.name).custom_last_integration_error)
+		self._refresh(note, self._found(fx), [self._unit("1")])
+		self.assertFalse(self._note(note.name).custom_last_integration_error)
+
+	def test_a_webhook_during_a_running_refresh_makes_the_job_read_again(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		calls = []
+
+		def refresh(name):
+			calls.append(name)
+			if len(calls) == 1:  # the webhook arrives while the first read runs (its job is dropped by the queue)
+				frappe.cache().set_value(noon._REFRESH_AGAIN.format(name), 1)
+
+		with patch.object(noon, "refresh", side_effect=refresh):
+			noon.run_refresh(note.name)
+		self.assertEqual(calls, [note.name, note.name])
+
+	def test_mark_out_of_stock_and_reconciliation_treat_an_unresolved_create_as_started(self):
+		from marketplace_integrations.integrations.noon import order_reconciliation
+
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		order = frappe.get_doc("Marketplace Order", fx.marketplace_order.name)
+		self.assertTrue(order_reconciliation.build_evidence(order)["lifecycle_permits_change"])
+
+		note = self._draft_note(fx, lr_no="TYPED-1")
+		for status in ("Creating", "Creation Unknown"):
+			frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", status, update_modified=False)
+			frappe.db.commit()
+			self.assertTrue(noon.has_unresolved_create(order.name))
+			evidence = order_reconciliation.build_evidence(order)
+			self.assertEqual(evidence["fulfillment_started"], {"sku:SKU-A": True})
+			self.assertFalse(evidence["lifecycle_permits_change"])
+			row = frappe.db.get_value("Sales Order Item", {"parent": fx.name}, "name")
+			with self.assertRaises(frappe.ValidationError):
+				fulfillment.mark_row_out_of_stock(fx.name, row)
+
 	def test_the_nightly_reconcile_resolves_an_unknown_create_by_lookup_only(self):
 		fx = self._order([("SKU-A", 1)], ["SKU-A"])
 		note = self._draft_note(fx, lr_no="AWB-N1")
@@ -660,7 +765,7 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 			update_modified=False,
 		)
 		frappe.db.commit()
-		shipment = _response(200, {"awbs": [{"awb_nr": "AWB-N1"}], "items": [{"mp_item_nr": "1"}]})
+		shipment = self._found(fx, [{"awb_nr": "AWB-N1"}])
 		with patch(_CLIENT) as client_class:
 			client = client_class.return_value
 			client.request.side_effect = [shipment]
@@ -674,7 +779,7 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		note = self._draft_note(fx, lr_no="AWB-N2")
 		frappe.db.set_value("Delivery Note", note.name, "custom_carrier_reference", note.name, update_modified=False)
 		frappe.db.commit()
-		shipment = _response(200, {"awbs": [], "items": [{"mp_item_nr": "1"}]})
+		shipment = self._found(fx)
 		with patch(_CLIENT) as client_class:
 			client = client_class.return_value
 			client.request.side_effect = [shipment]

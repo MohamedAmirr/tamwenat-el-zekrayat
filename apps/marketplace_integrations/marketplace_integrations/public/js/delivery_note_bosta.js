@@ -65,12 +65,19 @@
 		});
 	}
 
-	function fetch_label(frm) {
-		return frappe
-			.call({ method: API + "fetch_label", type: "POST", args: { delivery_note: frm.doc.name }, freeze: true, freeze_message: __("Fetching the label...") })
-			.then(() => frm.reload_doc());
+	// One carrier request per Delivery Note at a time (the shell holds the lock); runs `fn` directly without it.
+	function exclusive(frm, fn, on_busy) {
+		const shipping = frappe.marketplace_integrations && frappe.marketplace_integrations.shipping;
+		return shipping && shipping.exclusive ? shipping.exclusive(frm, fn, on_busy) : Promise.resolve(fn());
 	}
 
+	function fetch_label(frm) {
+		return exclusive(frm, () =>
+			frappe
+				.call({ method: API + "fetch_label", type: "POST", args: { delivery_note: frm.doc.name }, freeze: true, freeze_message: __("Fetching the label...") })
+				.then(() => frm.reload_doc())
+		);
+	}
 
 	function escape(text) {
 		return frappe.utils.escape_html(text || "");
@@ -154,32 +161,42 @@
 	// `stop` when the cancel must not go on (a refusal, an unknown result or an error: a dialog says why).
 	function cancel_at_bosta(frm, { done, stop }) {
 		const retry = () => cancel_at_bosta(frm, { done, stop });
-		return frappe
-			.call({
-				method: CARRIER_API + "cancel_shipment",
-				type: "POST",
-				args: { delivery_note: frm.doc.name },
-				freeze: true,
-				freeze_message: __("Cancelling at Bosta..."),
-				// the server's refusal is shown below (parsed and escaped), not by frappe.call
-				silent: true,
-			})
-			.then(
-				(r) => {
-					const result = r.message || {};
-					if (result.outcome === "cancelled") return done(result);
-					if (result.outcome === "refused") return show_refused(result.message, stop);
-					return show_unknown(frm, result.message, { done, stop, retry });
-				},
-				(error) => {
-					frappe.msgprint({
-						message: escape(message_of(error) || __("The shipment could not be cancelled at Bosta.")),
-						indicator: "red",
-						title: __("Bosta shipment"),
-					});
-					return stop();
-				}
-			);
+		// The server wrote the note (Pending / Unknown / Created again) even when the cancel stops here: load it,
+		// so the next Save or Cancel does not fail with "modified after you opened it".
+		const original_stop = stop;
+		stop = () => Promise.resolve(frm.reload_doc()).then(() => original_stop());
+		// another carrier request is in flight: nothing is sent and the cancel does not go on
+		return exclusive(
+			frm,
+			() =>
+				frappe
+					.call({
+						method: CARRIER_API + "cancel_shipment",
+						type: "POST",
+						args: { delivery_note: frm.doc.name },
+						freeze: true,
+						freeze_message: __("Cancelling at Bosta..."),
+						// the server's refusal is shown below (parsed and escaped), not by frappe.call
+						silent: true,
+					})
+					.then(
+						(r) => {
+							const result = r.message || {};
+							if (result.outcome === "cancelled") return done(result);
+							if (result.outcome === "refused") return show_refused(result.message, stop);
+							return show_unknown(frm, result.message, { done, stop, retry });
+						},
+						(error) => {
+							frappe.msgprint({
+								message: escape(message_of(error) || __("The shipment could not be cancelled at Bosta.")),
+								indicator: "red",
+								title: __("Bosta shipment"),
+							});
+							return stop();
+						}
+					),
+			original_stop
+		);
 	}
 
 	function show_refused(message, stop) {
@@ -198,19 +215,24 @@
 	function show_unknown(frm, message, { done, stop, retry }) {
 		let acted = false;
 		const check = () =>
-			frappe
-				.call({
-					method: CARRIER_API + "refresh_shipment",
-					type: "POST",
-					args: { delivery_note: frm.doc.name },
-					freeze: true,
-					freeze_message: __("Checking with Bosta..."),
-					silent: true,
-				})
-				.then(
-					() => Promise.resolve(frm.reload_doc()).then(() => (frm.doc.custom_integration_status === "Cancelled" ? done({}) : show_unknown(frm, __("Bosta still shows the shipment as not cancelled."), { done, stop, retry }))),
-					(error) => show_unknown(frm, message_of(error), { done, stop, retry })
-				);
+			exclusive(
+				frm,
+				() =>
+					frappe
+						.call({
+							method: CARRIER_API + "refresh_shipment",
+							type: "POST",
+							args: { delivery_note: frm.doc.name },
+							freeze: true,
+							freeze_message: __("Checking with Bosta..."),
+							silent: true,
+						})
+						.then(
+							() => Promise.resolve(frm.reload_doc()).then(() => (frm.doc.custom_integration_status === "Cancelled" ? done({}) : show_unknown(frm, __("Bosta still shows the shipment as not cancelled."), { done, stop, retry }))),
+							(error) => show_unknown(frm, message_of(error), { done, stop, retry })
+						),
+				stop
+			);
 		const dialog = new frappe.ui.Dialog({
 			title: __("Bosta shipment"),
 			fields: [{ fieldtype: "HTML", fieldname: "body" }],
@@ -324,32 +346,38 @@
 						frappe.msgprint({ message: escape(error), indicator: "orange" });
 						return;
 					}
-					// one call at a time: the button stays off until the answer is back
+					// one call at a time: the button stays off until the answer is back (and the note is locked
+					// against any other carrier request)
 					dialog.get_primary_btn().prop("disabled", true);
-					return frappe
-						.call({
-							method: API + "edit_shipment",
-							type: "POST",
-							args: { delivery_note: frm.doc.name, receiver_phone: values.phone, city_id: values.city, address_first_line: values.first_line },
-							freeze: true,
-							freeze_message: __("Sending to Bosta..."),
-							silent: true,
-						})
-						.then(
-							() => {
-								dialog.hide();
-								frappe.show_alert({ message: __("Bosta updated the delivery."), indicator: "green" });
-								return frm.reload_doc();
-							},
-							(failure) => {
-								dialog.get_primary_btn().prop("disabled", false);
-								frappe.msgprint({
-									message: escape(message_of(failure) || __("The delivery could not be updated at Bosta.")),
-									indicator: "red",
-									title: __("Bosta shipment"),
-								});
-							}
-						);
+					return exclusive(
+						frm,
+						() =>
+							frappe
+								.call({
+									method: API + "edit_shipment",
+									type: "POST",
+									args: { delivery_note: frm.doc.name, receiver_phone: values.phone, city_id: values.city, address_first_line: values.first_line },
+									freeze: true,
+									freeze_message: __("Sending to Bosta..."),
+									silent: true,
+								})
+								.then(
+									() => {
+										dialog.hide();
+										frappe.show_alert({ message: __("Bosta updated the delivery."), indicator: "green" });
+										return frm.reload_doc();
+									},
+									(failure) => {
+										dialog.get_primary_btn().prop("disabled", false);
+										frappe.msgprint({
+											message: escape(message_of(failure) || __("The delivery could not be updated at Bosta.")),
+											indicator: "red",
+											title: __("Bosta shipment"),
+										});
+									}
+								),
+						() => dialog.get_primary_btn().prop("disabled", false)
+					);
 				},
 			});
 			dialog.show();

@@ -112,13 +112,36 @@
 		);
 	}
 
+	// One carrier request per Delivery Note at a time: a second click (or another carrier button) while one
+	// is in flight does nothing. The lock is held until the request and the form reload are over, success or
+	// failure. `on_busy` runs instead of `fn` when the note is busy (a flow that waits to be told how it ended).
+	const busy = new Set();
+	function is_busy(frm) {
+		return busy.has(frm.doc.name);
+	}
+	function exclusive(frm, fn, on_busy) {
+		if (is_busy(frm)) return Promise.resolve(on_busy ? on_busy() : undefined);
+		const key = frm.doc.name;
+		busy.add(key);
+		let result;
+		try {
+			result = Promise.resolve(fn());
+		} catch (error) {
+			busy.delete(key);
+			return Promise.reject(error);
+		}
+		return result.finally(() => busy.delete(key));
+	}
+
 	function call_and_reload(frm, method, freeze_message, on_result) {
-		return frappe
-			.call({ method, type: "POST", args: { delivery_note: frm.doc.name }, freeze: true, freeze_message })
-			.then((r) => {
-				if (on_result) on_result(r.message || {});
-				return frm.reload_doc();
-			});
+		return exclusive(frm, () =>
+			frappe
+				.call({ method, type: "POST", args: { delivery_note: frm.doc.name }, freeze: true, freeze_message })
+				.then((r) => {
+					if (on_result) on_result(r.message || {});
+					return frm.reload_doc();
+				})
+		);
 	}
 
 	// Asks the carrier whether it has the shipment (never creates), then reloads the form. The carrier's
@@ -207,6 +230,13 @@
 	// dialog. Resolves once the note is Created (form reloaded); otherwise sets frappe.validated = false and
 	// shows why. `submitting` is true when it is the native Submit that waits.
 	function send_and_wait(frm, carrier, submitting) {
+		// a request already in flight: this click starts nothing and the submit must not go on
+		return exclusive(frm, () => send_and_wait_locked(frm, carrier, submitting), () => {
+			frappe.validated = false;
+		});
+	}
+
+	function send_and_wait_locked(frm, carrier, submitting) {
 		const hooks = carriers[carrier];
 		return new Promise((resolve) => {
 			let dialog = null;
@@ -349,6 +379,8 @@
 		carrier_name,
 		failure_html,
 		send_and_wait,
+		exclusive,
+		is_busy,
 		server_message,
 		is_editable,
 	};

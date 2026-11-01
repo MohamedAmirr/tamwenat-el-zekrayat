@@ -16,10 +16,11 @@ status-grouped Marketplace Order Item id):
 - a unit is Sales-Order-eligible exactly as the snapshot builder decides
   (``NOON_ELIGIBLE_EXTERNAL_STATUS``, not ``NOON_INELIGIBLE_INTEGRATION_STATUS``);
 - a line has started fulfillment when ANY of its units is ``SHIPPED`` OR sits in a
-  shipment whose status is in ``_STARTED_SHIPMENT_STATUSES``; either source is
-  enough (conservative: it blocks a change rather than letting one through).  Only a
-  ``Created`` note exists at Noon; Creating, Creation Failed and Creation Unknown notes
-  never counted as left, so they do not count.  OPEN QUESTION: Noon documents no
+  live Noon Delivery Note (``started_units_of_order``: Created, Cancellation Pending or
+  Unknown); either source is enough (conservative: it blocks a change rather than
+  letting one through).  A note that is Creating or Creation Unknown has no unit list
+  yet but Noon may hold its shipment, so every line counts as started while one exists
+  (``has_unresolved_create``); Creation Failed notes do not count.  OPEN QUESTION: Noon documents no
   outcome for a cancellation in flight (Cancellation Pending or Unknown on a note that
   was ``Created``); it is counted as started until the cancellation is confirmed;
 - full cancellation = no eligible unit remains;
@@ -55,6 +56,12 @@ def _started_shipment_mp_item_nrs(order):
 	from marketplace_integrations.integrations.noon.delivery_note_shipment import started_units_of_order
 
 	return started_units_of_order(order.name) if getattr(order, "name", None) else set()
+
+
+def _has_unresolved_create(order):
+	from marketplace_integrations.integrations.noon.delivery_note_shipment import has_unresolved_create
+
+	return has_unresolved_create(order.name) if getattr(order, "name", None) else False
 
 
 def _has_noon_return(order):
@@ -103,6 +110,9 @@ def build_evidence(order):
 		return evidence
 
 	in_started_shipment = _started_shipment_mp_item_nrs(order)
+	# A Creating / Creation Unknown note has no snapshot yet but Noon may hold its shipment: which units it
+	# has is unknown, so every unit counts as started (a change is blocked rather than let through).
+	unresolved_create = _has_unresolved_create(order)
 	started = {}
 	has_eligible = False
 	has_unknown = False
@@ -120,7 +130,9 @@ def build_evidence(order):
 		):
 			has_eligible = True
 		unit_started = (
-			integration_status == _SHIPPED or cstr(unit.get("mp_item_nr")).strip() in in_started_shipment
+			unresolved_create
+			or integration_status == _SHIPPED
+			or cstr(unit.get("mp_item_nr")).strip() in in_started_shipment
 		)
 		any_started = any_started or unit_started
 		line_key = f"sku:{cstr(unit.get('partner_sku')).strip()}"

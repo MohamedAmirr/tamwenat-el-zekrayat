@@ -15,6 +15,7 @@ confirmation and the staff Notification.
 """
 
 import frappe
+from frappe.utils import flt
 
 RETURNED_BY_BOSTA = "Returned by Bosta"
 _JOB = "bosta-returned-draft|{}"
@@ -48,9 +49,11 @@ def create_returned_draft(delivery_note):
 	if not original or original.docstatus != 1 or original.is_return:
 		frappe.db.commit()
 		return None
-	if frappe.db.exists(
-		"Delivery Note",
-		{"return_against": delivery_note, "custom_return_source": RETURNED_BY_BOSTA, "docstatus": ["<", 2]},
+	# Any return against the note, from any source or docstatus (a cancelled draft, a staff-made return), or
+	# goods already returned, means staff dealt with it: no new draft.
+	if (
+		frappe.db.exists("Delivery Note", {"return_against": delivery_note})
+		or flt(frappe.db.get_value("Delivery Note", delivery_note, "per_returned")) > 0
 	):
 		frappe.db.commit()
 		return None

@@ -286,3 +286,21 @@ test("the draft Cancel Noon Shipment button confirms, cancels and reloads", asyn
 	assert.equal(frm.reloads, 1);
 	assert.equal(alerts[0].indicator, "green");
 });
+
+test("a second cancel while one is in flight sends nothing and stops; the lock is released afterwards", async () => {
+	const { mod, calls } = load({ responses: { cancel_shipment: { status: "Cancelled", outcome: "cancelled", message: "" } } });
+	const busy = new Set();
+	global.frappe.marketplace_integrations.shipping.exclusive = (frm, fn, on_busy) => {
+		if (busy.has(frm.doc.name)) return Promise.resolve(on_busy && on_busy());
+		busy.add(frm.doc.name);
+		return Promise.resolve(fn()).finally(() => busy.delete(frm.doc.name));
+	};
+	const frm = make_form({ custom_integration_status: "Created" });
+	const first = mod.before_cancel(frm);
+	frappe.validated = true;
+	await mod.before_cancel(frm);
+	assert.equal(frappe.validated, false);
+	assert.equal(calls.length, 1);
+	await first;
+	assert.equal(busy.size, 0);
+});

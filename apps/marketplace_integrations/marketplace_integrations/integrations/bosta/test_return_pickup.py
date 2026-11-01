@@ -63,6 +63,12 @@ class IntegrationTestBostaReturnPickup(BostaFixtureMixin, IntegrationTestCase):
 		self.assertFalse(shipment.applies_to(by_bosta))
 		self.assertTrue(shipment.applies_to(self._submitted()))
 
+	def test_applies_to_accepts_a_plain_dict_with_a_real_transporter(self):
+		"""Needs Attention judges notes by ``{"is_return", "transporter"}`` dicts, not documents."""
+		self.assertTrue(shipment.applies_to({"is_return": 0, "transporter": self.supplier}))
+		self.assertFalse(shipment.applies_to({"is_return": 1, "transporter": self.supplier}))
+		self.assertFalse(shipment.applies_to({"is_return": 0, "transporter": None}))
+
 	# -- payload -----------------------------------------------------------------------------
 
 	def test_the_request_is_type_25_with_a_negative_cod_and_the_normal_addresses(self):

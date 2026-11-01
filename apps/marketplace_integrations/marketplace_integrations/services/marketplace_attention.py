@@ -167,7 +167,9 @@ def get_attention_items(filters=None):
 		and filters.problem_type in (None, "", *carrier_types)
 	):
 		items.extend(_collect_carrier_items(filters.problem_type))
-	accounts = {} if filters.platform in CARRIERS else _get_accounts(filters)
+	# Noon is both a carrier and a marketplace: its account rollups (pending Out of Stock, outdated invoices)
+	# must stay for the platform filter "Noon". A carrier with no account (Bosta) simply finds none.
+	accounts = _get_accounts(filters)
 	if not accounts and not items:
 		return []
 
@@ -529,6 +531,14 @@ def _collect_carrier_items(problem_type=None):
 	for kind in (CARRIER_EXCEPTION, CARRIER_RETURN):
 		if problem_type in (None, kind) and statuses_of(kind):
 			collect({**shipped, "custom_shipping_status": ["in", statuses_of(kind)]})
+	if problem_type in (None, CARRIER_EXCEPTION):
+		# A live shipment whose last refresh/call left an error (the carrier's answer could not be applied):
+		# an exception whatever its status says.
+		collect({"custom_integration_status": "Created", "custom_last_integration_error": ["is", "set"]})
+		# A submitted note the carrier cancelled whose automatic native cancel was blocked (the reason is the error).
+		collect(
+			{"custom_integration_status": "Cancelled", "docstatus": 1, "custom_last_integration_error": ["is", "set"]}
+		)
 	if problem_type in (None, CARRIER_STATUS_STALE):
 		collect(
 			{**shipped, "custom_integration_status": "Created", "creation": [">=", recent]},
@@ -613,7 +623,12 @@ def _collect_carrier_items(problem_type=None):
 			and problem_type in (None, CARRIER_CREATION_PROBLEM)
 		):
 			add(CARRIER_CREATION_PROBLEM, carrier, row, f"{name}: {error}" if error else _(status), row.modified)
-		if status == "Cancelled" and row.docstatus == 1 and problem_type in (None, CARRIER_CANCELLED):
+		if status == "Cancelled" and row.docstatus == 1 and error:
+			# The automatic native cancel after the carrier's cancel was blocked (or failed): the reason is
+			# in the error and a person must cancel the note by hand.
+			if problem_type in (None, CARRIER_EXCEPTION):
+				add(CARRIER_EXCEPTION, carrier, row, f"{name}: {error}", seen)
+		elif status == "Cancelled" and row.docstatus == 1 and problem_type in (None, CARRIER_CANCELLED):
 			# Cancelled at the carrier but still submitted here (the local cancel failed): stays until it is
 			# cancelled in ERPNext, however the carrier was told.
 			add(
@@ -631,8 +646,10 @@ def _collect_carrier_items(problem_type=None):
 		):
 			add(CARRIER_CANCELLED, carrier, row, _("{0} cancelled this delivery.").format(name), seen)
 		if (
-			shipping_status in states[carrier].get(CARRIER_EXCEPTION, [])
-			and status != "Cancelled"
+			(
+				(shipping_status in states[carrier].get(CARRIER_EXCEPTION, []) and status != "Cancelled")
+				or (status == "Created" and error)
+			)
 			and problem_type in (None, CARRIER_EXCEPTION)
 		):
 			error = row.custom_last_integration_error or shipping_status

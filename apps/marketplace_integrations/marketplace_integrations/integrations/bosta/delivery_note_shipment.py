@@ -129,7 +129,7 @@ def applies_to(doc):
 		return False
 	if doc.get("is_return") and doc.get("custom_return_source") != RETURN_PICKUP:
 		return False
-	return frappe.db.get_value("Supplier", doc.transporter, "supplier_name") == SUPPLIER_NAME
+	return frappe.db.get_value("Supplier", doc.get("transporter"), "supplier_name") == SUPPLIER_NAME
 
 
 def status_of(doc_or_name):
@@ -246,7 +246,10 @@ def clear_inherited(doc):
 
 
 def guard_changes(doc):
-	"""``validate``: set up a new note; keep app-written fields and a started shipment untouched."""
+	"""``validate``: set up a new note; keep app-written fields and a started shipment untouched. A cancel
+	changes none of them and must never be blocked by this guard."""
+	if doc.docstatus == 2 or doc.get("_action") == "cancel":
+		return
 	ours = applies_to(doc)
 	platform = excluded_platform(sales_order_of(doc)) if ours else None
 	if platform:
@@ -660,8 +663,10 @@ def log_data(values):
 
 
 def after_created(delivery_note, data):
-	"""Once a note is Created: the Sales Order summary, the label job, and the webhook events that arrived
-	before the note could take them."""
+	"""Once a note is Created: the Sales Order summary and the webhook events that arrived before the note
+	could take them. The label job is NOT queued here: the note is still a draft that the person's form is
+	about to submit, and a label job writing to it at that moment raced the submit (MySQL 1020 "Record has
+	changed since last read", a stale ``modified``), leaving the note Draft. ``after_submit`` queues it."""
 	from marketplace_integrations.integrations.bosta import statuses
 
 	if frappe.db.get_value("Delivery Note", delivery_note, "is_return"):
@@ -669,15 +674,6 @@ def after_created(delivery_note, data):
 		return
 	delivery_id = _delivery_id(data)
 	_update_summary(delivery_note)
-	frappe.enqueue(
-		"marketplace_integrations.integrations.bosta.delivery_note_shipment.run_fetch_label",
-		queue="short",
-		timeout=120,
-		job_id=_LABEL_JOB.format(delivery_note),
-		deduplicate=True,
-		enqueue_after_commit=True,
-		delivery_note=delivery_note,
-	)
 	frappe.db.commit()
 	try:
 		statuses.replay_pending_events(delivery_id)
@@ -686,6 +682,23 @@ def after_created(delivery_note, data):
 		# pending events stay Queued and the nightly reconciliation retries them.
 		frappe.db.rollback()
 		frappe.log_error(title="Bosta: pending events could not be replayed", message=frappe.get_traceback())
+
+
+def after_submit(doc):
+	"""Optional contract hook (``carrier_shipments.after_submit``, the Delivery Note ``on_submit``): queue the
+	label job once the note is submitted, so it never writes to a draft that is being submitted. Runs after
+	the submit commits (``enqueue_after_commit``)."""
+	if doc.get("is_return") or status_of(doc) != CREATED or doc.get("custom_shipping_label"):
+		return
+	frappe.enqueue(
+		"marketplace_integrations.integrations.bosta.delivery_note_shipment.run_fetch_label",
+		queue="short",
+		timeout=120,
+		job_id=_LABEL_JOB.format(doc.name),
+		deduplicate=True,
+		enqueue_after_commit=True,
+		delivery_note=doc.name,
+	)
 
 
 def refresh(delivery_note):
@@ -747,13 +760,34 @@ def _terminate_outcome(client, response):
 	return "unknown", message
 
 
+#: Bosta answers a read of a terminated delivery with HTTP 400 ``{"message": "Delivery not found.",
+#: "errorCode": 1066}`` (seen on a real terminated delivery, 2026-11-01).
+DELIVERY_NOT_FOUND_ERROR_CODE = "1066"
+#: The Bosta state a terminated delivery reads back as (``statuses.BOSTA_STATE_NAMES[48]``).
+TERMINATED_STATE_CODE = 48
+
+
+def is_terminated_answer(response):
+	"""Is this GET answer Bosta's "Delivery not found" (HTTP 400, errorCode 1066) for a terminated delivery."""
+	return (
+		response.status_code == 400
+		and cstr(response_body(response).get("errorCode")) == DELIVERY_NOT_FOUND_ERROR_CODE
+	)
+
+
 def _read_state(client, tracking):
-	"""One GET of the delivery: ``("found", {"code", "name"})`` for a recognised state, ``("missing", None)``
-	for a 404, else ``("failed", None)`` (any error, timeout or unrecognised answer)."""
+	"""One GET of the delivery: ``("found", {"code", "name"})`` for a recognised state (a terminated delivery's
+	"Delivery not found" answer reads as Terminated, 48), ``("missing", None)`` for a 404, else
+	``("failed", None)`` (any error, timeout or unrecognised answer)."""
 	from marketplace_integrations.integrations.bosta import statuses
 
 	try:
 		response = client.get_delivery(tracking)
+		if is_terminated_answer(response):
+			return "found", {
+				"code": TERMINATED_STATE_CODE,
+				"name": statuses.BOSTA_STATE_NAMES[TERMINATED_STATE_CODE],
+			}
 		if response.status_code == 404:
 			return "missing", None
 		if not is_success_response(response):

@@ -203,14 +203,24 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 	def test_an_empty_city_is_filled_from_the_address_before_the_job_is_queued(self):
 		note = self.make_note(city="")
 		frappe.db.set_value("Delivery Note", note.name, "custom_bosta_city_name", "")
-		modified = stored(note, "modified").modified
 
 		result = carrier_shipments.request_create(note.name)
 
 		self.assertEqual(result, {"status": "Creating", "queued": True})
-		values = stored(note, "custom_bosta_city", "custom_bosta_city_name", "modified")
+		values = stored(note, "custom_bosta_city", "custom_bosta_city_name")
 		self.assertEqual((values.custom_bosta_city, values.custom_bosta_city_name), ("EG-01", "Cairo"))
-		# the form that was open stays submittable
+
+	def test_the_city_autofill_alone_does_not_bump_modified(self):
+		# The Creating write of request_create bumps ``modified`` on purpose; the autofill must not, so a
+		# form opened before it still submits.
+		note = self.make_note(city="")
+		frappe.db.set_value("Delivery Note", note.name, "custom_bosta_city_name", "")
+		modified = stored(note, "modified").modified
+
+		self.assertTrue(shipment.autofill_city(frappe.get_doc("Delivery Note", note.name)))
+
+		values = stored(note, "custom_bosta_city", "modified")
+		self.assertEqual(values.custom_bosta_city, "EG-01")
 		self.assertEqual(values.modified, modified)
 
 	def test_a_city_that_is_already_set_is_never_replaced_by_the_address_city(self):

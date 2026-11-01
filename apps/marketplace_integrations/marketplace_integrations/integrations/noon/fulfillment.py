@@ -361,6 +361,12 @@ def _is_out_of_stock(raw_order, mp_item_nr):
 	return False
 
 
+def _unresolved_create_message():
+	return _(
+		"A Delivery Note of this order is still being sent to Noon, or Noon's answer is unknown. Wait for it, or check the shipment, before marking Out of Stock."
+	)
+
+
 def _live_notes_by_item(sales_order):
 	"""``{item_code: [Delivery Note names]}`` of the Draft or submitted Delivery Notes holding the Sales
 	Order's items (Noon accepts Out of Stock only before a shipment exists)."""
@@ -454,6 +460,10 @@ def mark_row_out_of_stock(sales_order_name, row_name):
 	)
 	if not item_code:
 		frappe.throw(_("Row {0} is not an item of Sales Order {1}.").format(cstr(row_name), sales_order_name))
+	from marketplace_integrations.integrations.noon.delivery_note_shipment import has_unresolved_create
+
+	if has_unresolved_create(order.name):
+		frappe.throw(_unresolved_create_message())
 	notes = _live_notes_by_item(sales_order_name).get(item_code)
 	if notes:
 		frappe.throw(
@@ -629,6 +639,13 @@ def run_mark_out_of_stock(marketplace_order_name, mp_item_nrs, sales_order, requ
 				frappe.db.commit()
 				keep_reservation = False
 				_set_result(sales_order, request_id, "failed", _("Units are no longer eligible to mark Out of Stock."))
+				return
+			from marketplace_integrations.integrations.noon.delivery_note_shipment import has_unresolved_create
+
+			if has_unresolved_create(order.name):
+				frappe.db.commit()
+				keep_reservation = False
+				_set_result(sales_order, request_id, "failed", _unresolved_create_message())
 				return
 			frappe.db.commit()
 			keep_reservation = True  # from the send on, Noon may have acted

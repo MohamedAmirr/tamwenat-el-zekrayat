@@ -194,6 +194,182 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 		statuses.refresh_note(note.name)
 		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Cancelled")
 
+	def _submit(self, note):
+		doc = frappe.get_doc("Delivery Note", note.name)
+		doc.submit()
+		frappe.db.commit()
+		return doc
+
+	def test_a_submitted_note_is_cancelled_after_the_carrier_cancel_and_the_guard_does_not_block_it(self):
+		note = self._live()
+		self._submit(note)
+		self.http.queue["terminate"].append(OK)
+
+		carrier_shipments.cancel(note.name)
+		doc = frappe.get_doc("Delivery Note", note.name)
+		doc.cancel()
+
+		values = stored(note, "docstatus", "custom_integration_status")
+		self.assertEqual((values.docstatus, values.custom_integration_status), (2, "Cancelled"))
+
+	def test_a_submitted_note_resolved_by_delivery_not_found_is_cancelled_automatically(self):
+		note = self._live(custom_integration_status="Cancellation Unknown")
+		self._submit_unknown(note)
+		self.http.queue["get"].append(FakeResponse(400, {"message": "Delivery not found.", "errorCode": 1066}))
+
+		statuses.refresh_note(note.name)
+
+		self.assertEqual(stored(note, "docstatus").docstatus, 2)
+		self.assertEqual(self._sent_kinds(), ["get"])
+
+	# -- automatic native cancel after the carrier cancelled -----------------------------------
+
+	_NOTIFY = "frappe.desk.doctype.notification_log.notification_log.enqueue_create_notification"
+
+	def test_a_carrier_cancel_found_by_a_refresh_cancels_the_submitted_note_and_notifies_once(self):
+		from unittest.mock import patch
+
+		note = self._live()
+		self._submit(note)
+		manager = self.make_user("Stock Manager")
+		self.http.queue["get"].append(delivery(48))
+
+		with patch(self._NOTIFY) as notify:
+			statuses.refresh_note(note.name)
+			statuses.refresh_note(note.name)  # idempotent: a cancelled note is left alone
+
+		values = stored(note, "docstatus", "custom_integration_status")
+		self.assertEqual((values.docstatus, values.custom_integration_status), (2, "Cancelled"))
+		self.assertEqual(self._sent_kinds(), ["get"], "the carrier is never called to cancel")
+		self.assertEqual(notify.call_count, 1)
+		users, info = notify.call_args.args
+		self.assertEqual((info["document_type"], info["document_name"]), ("Delivery Note", note.name))
+		self.assertEqual(len(users), len(set(users)))
+		self.assertIn(manager, users)
+		self.assertIn("Administrator", users)  # the creator submitted it
+
+	def test_a_blocked_cancel_keeps_the_note_submitted_records_the_reason_and_notifies_once(self):
+		from unittest.mock import patch
+
+		note = self._live()
+		self._submit(note)
+
+		with (
+			patch.object(
+				carrier_shipments, "_check_native_cancel_not_blocked", side_effect=frappe.ValidationError("Linked <b>SINV-1</b>")
+			),
+			patch(self._NOTIFY) as notify,
+		):
+			frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Cancelled")
+			carrier_shipments.cancel_after_carrier_cancelled(note.name)
+			carrier_shipments.cancel_after_carrier_cancelled(note.name)  # the same reason: no second notification
+
+		values = stored(note, "docstatus", "custom_integration_status", "custom_last_integration_error")
+		self.assertEqual((values.docstatus, values.custom_integration_status), (1, "Cancelled"))
+		self.assertIn("SINV-1", values.custom_last_integration_error)
+		self.assertNotIn("<b>", values.custom_last_integration_error)
+		self.assertEqual(notify.call_count, 1)
+		self.assertIn("by hand", notify.call_args.args[1]["subject"])
+		rows = attention._collect_carrier_items(attention.CARRIER_EXCEPTION)
+		self.assertIn(note.name, [row.get("reference_name") or row.get("name") for row in rows])
+
+	def test_only_a_confirmed_cancelled_note_is_cancelled(self):
+		from unittest.mock import patch
+
+		for status in ("Created", "Cancellation Pending", "Cancellation Unknown", "Creation Unknown"):
+			with self.subTest(status):
+				note = self._live()
+				self._submit(note)
+				frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", status)
+				with patch(self._NOTIFY) as notify:
+					carrier_shipments.cancel_after_carrier_cancelled(note.name)
+				self.assertEqual(stored(note, "docstatus").docstatus, 1)
+				notify.assert_not_called()
+
+	def test_a_draft_note_is_not_cancelled_by_the_carrier_cancel(self):
+		note = self._live(custom_integration_status="Cancelled")
+		carrier_shipments.cancel_after_carrier_cancelled(note.name)
+		self.assertEqual(stored(note, "docstatus").docstatus, 0)
+
+	def test_the_recipients_are_the_submitter_and_enabled_stock_managers_once_each(self):
+		note = self._live()
+		doc = self._submit(note)
+		manager = self.make_user("Stock Manager")
+		disabled = self.make_user("Stock Manager", "Sales User")
+		frappe.db.set_value("User", disabled, "enabled", 0)
+
+		users = carrier_shipments._notify_recipients(doc)
+
+		self.assertIn(manager, users)
+		self.assertNotIn(disabled, users)
+		self.assertIn("Administrator", users)
+		self.assertEqual(len(users), len(set(users)))
+
+	def _submit_unknown(self, note):
+		"""Submit needs Created: submit first, then put the cancel state back."""
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Created")
+		doc = self._submit(note)
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Cancellation Unknown")
+		return doc
+
+	def test_a_linked_document_refuses_the_carrier_cancel_before_anything_is_sent(self):
+		from unittest.mock import patch
+
+		note = self._live()
+		self._submit(note)
+
+		with patch.object(
+			carrier_shipments, "_check_native_cancel_not_blocked", side_effect=frappe.ValidationError("linked")
+		):
+			with self.assertRaises(frappe.ValidationError):
+				carrier_shipments.cancel(note.name)
+
+		self.assertEqual(self._sent_kinds(), [])
+		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Created")
+
+	def test_the_label_is_queued_by_the_submit_not_by_the_create(self):
+		from unittest.mock import patch
+
+		note = self._live()
+		with patch.object(frappe, "enqueue") as enqueue, patch.object(statuses, "replay_pending_events"):
+			shipment.after_created(note.name, {"_id": "DELIVERY-1"})
+		self.assertFalse([c for c in enqueue.call_args_list if "run_fetch_label" in str(c)])
+
+		with patch.object(frappe, "enqueue") as enqueue:
+			self._submit(note)
+		self.assertEqual(len([c for c in enqueue.call_args_list if "run_fetch_label" in str(c)]), 1)
+
+	def test_a_terminated_delivery_reading_not_found_resolves_the_note_to_cancelled(self):
+		"""Real Bosta: a terminated delivery reads back HTTP 400, errorCode 1066 "Delivery not found."."""
+		not_found = FakeResponse(400, {"message": "Delivery not found.", "errorCode": 1066})
+		for status in ("Cancellation Pending", "Cancellation Unknown"):
+			with self.subTest(status):
+				note = self._live(custom_integration_status=status)
+				self.http.queue["get"].append(not_found)
+
+				statuses.refresh_note(note.name)
+
+				values = stored(note, "custom_integration_status", "custom_shipping_status")
+				self.assertEqual(values.custom_integration_status, "Cancelled")
+				self.assertEqual(values.custom_shipping_status, "Terminated")
+
+		# A live (Created) note is not cancelled by the same answer: the read stays a failure.
+		live = self._live()
+		self.http.queue["get"].append(not_found)
+		with self.assertRaises(frappe.ValidationError):
+			statuses.refresh_note(live.name)
+		self.assertEqual(stored(live, "custom_integration_status").custom_integration_status, "Created")
+
+	def test_a_cancel_whose_read_shows_delivery_not_found_is_cancelled(self):
+		note = self._live()
+		self.http.queue["terminate"].append(FakeResponse(400, {"success": False, "errorCode": 1066}))
+		self.http.queue["get"].append(FakeResponse(400, {"message": "Delivery not found.", "errorCode": 1066}))
+
+		result = carrier_shipments.cancel(note.name)
+
+		self.assertEqual(result["outcome"], "cancelled")
+		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Cancelled")
+
 	def test_an_already_cancelled_note_makes_no_bosta_call(self):
 		note = self._live(custom_integration_status="Cancelled")
 
@@ -385,6 +561,47 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 		items = attention._collect_carrier_items(attention.CARRIER_RETURN_REVIEW)
 		self.assertEqual([i for i in items if i["reference_name"] == draft], [])
 		frappe.db.set_value("Delivery Note", draft, "docstatus", 0)
+
+	def test_a_cancelled_draft_return_is_not_made_again(self):
+		note = self._submitted()
+		draft = returns.create_returned_draft(note.name)
+		frappe.db.set_value("Delivery Note", draft, "docstatus", 2)
+		try:
+			self.assertIsNone(returns.create_returned_draft(note.name))
+		finally:
+			frappe.db.set_value("Delivery Note", draft, "docstatus", 0)
+
+	def test_a_manual_return_of_any_source_stops_the_draft(self):
+		from erpnext.stock.doctype.delivery_note.delivery_note import make_sales_return
+
+		note = self._submitted()
+		manual = make_sales_return(note.name)
+		manual.insert(ignore_permissions=True)
+		frappe.db.commit()
+
+		self.assertIsNone(returns.create_returned_draft(note.name))
+		self.assertFalse(
+			frappe.db.exists("Delivery Note", {"return_against": note.name, "custom_return_source": "Returned by Bosta"})
+		)
+
+	def test_goods_already_returned_stop_the_draft(self):
+		note = self._submitted()
+		frappe.db.set_value("Delivery Note", note.name, "per_returned", 50)
+		self.assertIsNone(returns.create_returned_draft(note.name))
+
+	def test_a_repeated_returned_read_queues_the_draft_only_on_the_change(self):
+		note = self._submitted()
+		queued = lambda: [  # noqa: E731
+			c for c in self.enqueue.call_args_list if c.kwargs.get("job_id") == f"bosta-returned-draft|{note.name}"
+		]
+
+		self.http.queue["get"].append(delivery(46))
+		statuses.refresh_note(note.name)
+		self.assertEqual(len(queued()), 1)
+
+		self.http.queue["get"].append(delivery(46))
+		statuses.refresh_note(note.name)
+		self.assertEqual(len(queued()), 1)
 
 	def test_a_draft_note_gets_no_return(self):
 		note = self.make_note()

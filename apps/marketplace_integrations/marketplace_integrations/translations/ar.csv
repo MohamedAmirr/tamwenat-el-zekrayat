@@ -1794,6 +1794,8 @@ The units of this shipment have different statuses at Noon.,وحدات هذه ا
 The items of the Noon shipment differ from the units sent. Items are never changed here: cancel the shipment and amend the Delivery Note.,أصناف شحنة Noon تختلف عن الوحدات المرسلة. لا تُغيَّر الأصناف هنا: ألغِ الشحنة وعدّل مذكرة التسليم.
 Noon did not answer the order lookup ({0}).,لم ترد Noon على الاستعلام عن الطلب ({0}).
 Noon has no shipment with number {0}.,ليس لدى Noon شحنة بالرقم {0}.
+Noon has a shipment with this number that belongs to another order. Check the shipment in Noon.,لدى Noon شحنة بهذا الرقم تخص طلبًا آخر. افحص الشحنة في Noon.
+"A Delivery Note of this order is still being sent to Noon, or Noon's answer is unknown. Wait for it, or check the shipment, before marking Out of Stock.","مذكرة تسليم لهذا الطلب ما زالت قيد الإرسال إلى Noon، أو رد Noon غير معروف. انتظرها، أو افحص الشحنة، قبل التعليم كنفدت من المخزون."
 This draft holds a Noon shipment ({0}). Check it in Noon before sending or deleting the draft.,هذه المسودة تحمل شحنة Noon ({0}). افحصها في Noon قبل إرسال المسودة أو حذفها.
 {0} shipment is cancelled but this Delivery Note is still submitted. Press Cancel.,شحنة {0} ملغاة لكن مذكرة التسليم هذه ما زالت معتمدة. اضغط إلغاء.
 Noon Fulfillment System Code,رمز نظام التنفيذ في Noon
@@ -1870,3 +1872,6 @@ It is not known whether {0} created the request.,من غير المعروف ما
 {0} did not create the request: {1},لم تنشئ {0} الطلب: {1}
 {0} is taking longer than expected.,{0} تستغرق وقتًا أطول من المتوقع.
 Open the Delivery Note later and check its Integration Status.,افتح مذكرة التسليم لاحقًا وتحقق من حالة التكامل.
+"{0} cancelled the shipment, but this Delivery Note could not be cancelled automatically: {1}","ألغت {0} الشحنة، لكن تعذّر إلغاء مذكرة التسليم هذه تلقائيًا: {1}"
+Delivery Note {0}: {1} cancelled the shipment but the note must be cancelled by hand. {2},مذكرة التسليم {0}: ألغت {1} الشحنة لكن يجب إلغاء المذكرة يدويًا. {2}
+Delivery Note {0} was cancelled automatically because {1} cancelled the shipment.,أُلغيت مذكرة التسليم {0} تلقائيًا لأن {1} ألغت الشحنة.

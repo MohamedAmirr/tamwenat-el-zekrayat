@@ -27,6 +27,12 @@
 		return (shipping && shipping.server_message && shipping.server_message(error)) || "";
 	}
 
+	// One carrier request per Delivery Note at a time (the shell holds the lock); runs `fn` directly without it.
+	function exclusive(frm, fn, on_busy) {
+		const shipping = frappe.marketplace_integrations && frappe.marketplace_integrations.shipping;
+		return shipping && shipping.exclusive ? shipping.exclusive(frm, fn, on_busy) : Promise.resolve(fn());
+	}
+
 	function is_editable(frm) {
 		return Boolean(frm.doc && frm.doc.docstatus === 0 && EDITABLE.includes(frm.doc.custom_integration_status || ""));
 	}
@@ -73,32 +79,38 @@
 	// `stop` when the cancel must not go on (a refusal, an unknown result or an error: a dialog says why).
 	function cancel_at_noon(frm, { done, stop }) {
 		const retry = () => cancel_at_noon(frm, { done, stop });
-		return frappe
-			.call({
-				method: CARRIER_API + "cancel_shipment",
-				type: "POST",
-				args: { delivery_note: frm.doc.name },
-				freeze: true,
-				freeze_message: __("Cancelling at Noon..."),
-				// the server's refusal is shown below (parsed and escaped), not by frappe.call
-				silent: true,
-			})
-			.then(
-				(r) => {
-					const result = r.message || {};
-					if (result.outcome === "cancelled") return done(result);
-					if (result.outcome === "refused") return show_refused(result.message, stop);
-					return show_unknown(frm, result.message, { done, stop, retry });
-				},
-				(error) => {
-					frappe.msgprint({
-						message: escape(message_of(error) || __("The shipment could not be cancelled at Noon.")),
-						indicator: "red",
-						title: __("Noon shipment"),
-					});
-					return stop();
-				}
-			);
+		// another carrier request is in flight: nothing is sent and the cancel does not go on
+		return exclusive(
+			frm,
+			() =>
+				frappe
+					.call({
+						method: CARRIER_API + "cancel_shipment",
+						type: "POST",
+						args: { delivery_note: frm.doc.name },
+						freeze: true,
+						freeze_message: __("Cancelling at Noon..."),
+						// the server's refusal is shown below (parsed and escaped), not by frappe.call
+						silent: true,
+					})
+					.then(
+						(r) => {
+							const result = r.message || {};
+							if (result.outcome === "cancelled") return done(result);
+							if (result.outcome === "refused") return show_refused(result.message, stop);
+							return show_unknown(frm, result.message, { done, stop, retry });
+						},
+						(error) => {
+							frappe.msgprint({
+								message: escape(message_of(error) || __("The shipment could not be cancelled at Noon.")),
+								indicator: "red",
+								title: __("Noon shipment"),
+							});
+							return stop();
+						}
+					),
+			stop
+		);
 	}
 
 	function show_refused(message, stop) {
@@ -117,24 +129,29 @@
 	function show_unknown(frm, message, { done, stop, retry }) {
 		let acted = false;
 		const check = () =>
-			frappe
-				.call({
-					method: CARRIER_API + "refresh_shipment",
-					type: "POST",
-					args: { delivery_note: frm.doc.name },
-					freeze: true,
-					freeze_message: __("Checking with Noon..."),
-					silent: true,
-				})
-				.then(
-					() =>
-						Promise.resolve(frm.reload_doc()).then(() =>
-							frm.doc.custom_integration_status === "Cancelled"
-								? done({})
-								: show_unknown(frm, __("Noon still shows the shipment as not cancelled."), { done, stop, retry })
+			exclusive(
+				frm,
+				() =>
+					frappe
+						.call({
+							method: CARRIER_API + "refresh_shipment",
+							type: "POST",
+							args: { delivery_note: frm.doc.name },
+							freeze: true,
+							freeze_message: __("Checking with Noon..."),
+							silent: true,
+						})
+						.then(
+							() =>
+								Promise.resolve(frm.reload_doc()).then(() =>
+									frm.doc.custom_integration_status === "Cancelled"
+										? done({})
+										: show_unknown(frm, __("Noon still shows the shipment as not cancelled."), { done, stop, retry })
+								),
+							(error) => show_unknown(frm, message_of(error), { done, stop, retry })
 						),
-					(error) => show_unknown(frm, message_of(error), { done, stop, retry })
-				);
+				stop
+			);
 		const dialog = new frappe.ui.Dialog({
 			title: __("Noon shipment"),
 			fields: [{ fieldtype: "HTML", fieldname: "body" }],

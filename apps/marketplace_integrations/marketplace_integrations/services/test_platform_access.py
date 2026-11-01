@@ -15,7 +15,8 @@ from unittest.mock import patch
 import frappe
 from frappe.tests import IntegrationTestCase
 
-from marketplace_integrations.services.marketplace_attention import BOSTA_PLATFORM, get_attention_items
+from marketplace_integrations.services.marketplace_attention import get_attention_items
+from marketplace_integrations.services.marketplace_channels import BOSTA_PLATFORM
 from marketplace_integrations.services.marketplace_channels import get_channel_status
 from marketplace_integrations.services.sync_status import NEEDS_ACTION
 from marketplace_integrations.tests.utils import make_role_user
