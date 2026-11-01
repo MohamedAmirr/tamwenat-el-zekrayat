@@ -9,18 +9,22 @@
 Sales Order ``before_cancel`` (``refuse_sales_order_cancel``). Each looks for the adapter whose carrier
 owns the note and delegates; a note no adapter claims is left alone.
 
-``CARRIERS`` is a plain ``{carrier: adapter}`` dict. It holds only Noon on purpose: no base class
+``CARRIERS`` is a plain ``{carrier: adapter}`` dict. It holds Noon and Bosta on purpose: no base class
 and no registry until a second real carrier needs one. An adapter is a module exposing
-``applies_to(doc)``, ``saved_state(doc)``, ``guard_changes(doc)``, ``require_created(doc)``,
+``applies_to(doc)``, ``guard_changes(doc)``, ``require_created(doc)``,
 ``guard_cancel_or_delete(doc)``, ``refuse_sales_order_cancel(doc)``, ``queue(doc)`` and
 ``retry(delivery_note)``.
 """
 
 import frappe
 
+from marketplace_integrations.integrations.bosta import delivery_note_shipment as bosta_shipment
 from marketplace_integrations.integrations.noon import delivery_note_shipment
 
-CARRIERS = {"Noon": delivery_note_shipment}
+#: Noon first, then Bosta. Bosta claims only a note whose transporter is the Bosta Supplier (and refuses
+#: a Noon or Talabat order), so a Noon note is never taken by it. To add a carrier: one adapter module,
+#: one row here, a Supplier, and its carrier-specific fields (docs/bosta-integration/README.md).
+CARRIERS = {"Noon": delivery_note_shipment, "Bosta": bosta_shipment}
 
 
 SKIP_FLAG = "skip_carrier_shipment"
@@ -33,6 +37,11 @@ def _adapter_for(doc):
 	if doc.flags.get(SKIP_FLAG):
 		return None
 	return next((adapter for adapter in CARRIERS.values() if adapter.applies_to(doc)), None)
+
+
+def saved_state(doc):
+	"""The note as stored (ownership of an existing note is judged by it), else ``doc`` itself."""
+	return doc if doc.is_new() else (doc.get_doc_before_save() or doc)
 
 
 def queue_shipment(doc, method=None):
@@ -50,12 +59,20 @@ def queue_shipment(doc, method=None):
 
 def validate_delivery_note(doc, method=None):
 	"""``validate``: refuse changes the started shipment depends on (a deliberate refusal)."""
-	# An existing note is judged by what is stored, not by rows just added in the form.
+	# An existing note is judged by what is stored (rows just added in the form must not take it out of
+	# the guard) and by the new copy (a person who just chose a carrier on an editable note).
 	if doc.flags.get(SKIP_FLAG):
 		return
-	adapter = _adapter_for(delivery_note_shipment.saved_state(doc))
-	if adapter:
+	adapters = []
+	for adapter in (_adapter_for(saved_state(doc)), _adapter_for(doc)):
+		if adapter and adapter not in adapters:
+			adapters.append(adapter)
+	for adapter in adapters:
 		adapter.guard_changes(doc)
+	if doc.is_new() and doc.get("amended_from") and not bosta_shipment.applies_to(doc):
+		source = frappe.db.get_value("Delivery Note", doc.amended_from, ["is_return", "transporter"], as_dict=True)
+		if source and bosta_shipment.applies_to(source):
+			bosta_shipment.clear_inherited(doc)
 
 
 def require_shipment_created(doc, method=None):
@@ -85,3 +102,11 @@ def retry_shipment(delivery_note):
 	if not adapter:
 		frappe.throw(frappe._("This Delivery Note has no carrier shipment to retry."))
 	return adapter.retry(delivery_note)
+
+
+def boot_session(bootinfo):
+	"""Boot data: the carriers whose Delivery Note shows the generic Shipping section (an adapter with
+	``SHIPPING_CARRIER``). The section's ``depends_on`` reads it, so no carrier name is hard-coded."""
+	bootinfo.marketplace_shipping_carriers = [
+		adapter.SHIPPING_CARRIER for adapter in CARRIERS.values() if getattr(adapter, "SHIPPING_CARRIER", None)
+	]

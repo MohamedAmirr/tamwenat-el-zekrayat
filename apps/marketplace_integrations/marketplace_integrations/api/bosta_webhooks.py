@@ -26,8 +26,8 @@ def delivery_event():
 	):
 		frappe.throw(_("Invalid Bosta webhook."), frappe.PermissionError)
 	payload = _webhook_payload()
-	# Guest request: process as the system user (as the Shopify webhooks do), so the
-	# Delivery Note cancel is not refused for lack of permission; restore afterwards.
+	# Guest request: recording the event inserts an Integration Request, which only System Manager may
+	# create, so process as the system user (as the Shopify webhooks do); restore afterwards.
 	previous_user = frappe.session.user
 	frappe.set_user("Administrator")
 	try:

@@ -23,39 +23,16 @@ Noon Return,مرتجع Noon
 Shopify Reconciliation Summary,ملخص تسوية Shopify
 Shopify Order Import Failures,أخطاء استيراد طلبات Shopify
 Bosta Settings,إعدادات Bosta
-Bosta Shipments,شحنات Bosta
-Bosta Shipment,شحنة Bosta
 Company,الشركة
-Company {0} does not match Sales Order {1}.,الشركة {0} لا تطابق أمر البيع {1}.
-Bosta Shipment Item,عنصر شحنة Bosta
-Fulfillment Key,مفتاح التنفيذ
-Reservation Status,حالة الحجز
-Physical Handover,التسليم الفعلي
-Handover Confirmed By,تأكيد التسليم بواسطة
-Handover Confirmed On,تاريخ تأكيد التسليم
-Stock Posting,ترحيل المخزون
-Awaiting Handover,بانتظار التسليم
 Confirmed,مؤكد
-Review Required,يتطلب المراجعة
-Not Posted,لم يتم الترحيل
-Posted,تم الترحيل
 Failed,فشل
-Reserved,محجوز
 Released,محرر
 Fulfilled,تم تنفيذه
-Shipment Items,عناصر الشحنة
 Sales Order Item,عنصر أمر البيع
 Item Code,رمز الصنف
 Warehouse,المخزن
-Warehouse {0} does not belong to Company {1}.,المخزن {0} لا يتبع الشركة {1}.
 UOM,وحدة القياس
-Conversion Factor,معامل التحويل
-Quantity in Stock UOM,الكمية بوحدة قياس المخزون
-Batch No,رقم الدفعة
-Serial No,الرقم التسلسلي
 Delivery Note Item,عنصر إذن التسليم
-External Delivery Identity Key,مفتاح هوية التوصيل الخارجي
-Legacy field retained for historical records; reservations are tracked by shipment items.,حقل قديم محفوظ للسجلات التاريخية؛ تُتتبّع الحجوزات من خلال عناصر الشحنة.
 Marketplace Order,طلب السوق
 Talabat Catalog Mapping,ربط كتالوج Talabat
 Shopify Catalog Mapping,ربط كتالوج Shopify
@@ -316,22 +293,8 @@ Noon Destination,وجهة Noon
 Shopify Payment Gateway Mapping,ربط بوابة دفع Shopify
 Business Location ID,معرّف موقع العمل في Bosta
 Receiver,المستلم
-Receiver Name,اسم المستلم
-Receiver Phone,هاتف المستلم
 Delivery Address,عنوان التسليم
-District ID,معرّف المنطقة
-Bosta City ID,معرّف مدينة Bosta
-District Name,اسم المنطقة
-Address First Line,السطر الأول من العنوان
-Bosta Delivery ID,معرّف التوصيل في Bosta
-Tracking Number,رقم التتبع
-Unique Business Reference,المرجع التجاري الفريد
 Bosta Status,حالة Bosta
-Bosta State Code,رمز حالة Bosta
-Bosta State,حالة Bosta
-Bosta Delivery Fee,رسوم توصيل Bosta
-Bosta Delivery Status,حالة توصيل Bosta
-Bosta delivery progress,مسار توصيل Bosta
 Picked up,تم الاستلام
 In transit,قيد النقل
 Out for delivery,خرج للتوصيل
@@ -355,31 +318,12 @@ Investigation,قيد التحقيق
 Awaiting your action,بانتظار الإجراء المطلوب منك
 Archived,مؤرشف
 On hold,معلّق
-Review this shipment in Bosta.,راجع هذه الشحنة في Bosta.
-Record and submit a return Delivery Note against the linked Delivery Note.,سجّل واعتمد إشعار مرتجع مرتبط بإشعار التسليم المحدد.
-Bosta is awaiting an action for shipment {{ doc.tracking_number or doc.name }}.,تنتظر Bosta إجراءً على الشحنة {{ doc.tracking_number or doc.name }}.
-Bosta is awaiting your action,تنتظر Bosta الإجراء المطلوب منك
-Review shipment,راجع الشحنة
 Bosta Carrier Exception,استثناء من شركة شحن Bosta
 Bosta Return,مرتجع Bosta
 Bosta Status Stale,حالة شحنة Bosta قديمة
-Bosta Delivered Without Delivery Note,شحنة Bosta مسلّمة دون إشعار تسليم
-Bosta reports this shipment was returned. Submit a return Delivery Note against the linked Delivery Note.,تفيد Bosta بإرجاع هذه الشحنة. اعتمد إشعار مرتجع مرتبط بإشعار التسليم المحدد.
-"Bosta reports this SEND delivery as delivered, but it has no submitted Delivery Note.",تفيد Bosta بتسليم شحنة SEND، لكن لا يوجد إشعار تسليم معتمد لها.
 Bosta has not updated this shipment for 5 days.,لم تحدّث Bosta هذه الشحنة منذ ٥ أيام.
-Carrier Attention,تنبيه شركة الشحن
-Last Bosta Event Timestamp,آخر توقيت حدث من Bosta
-Bosta Exception Reason,سبب الاستثناء من Bosta
-Bosta Exception Code,رمز الاستثناء من Bosta
-Bosta Status Snapshot,لقطة حالة Bosta
-Last Bosta Status Check,آخر فحص لحالة Bosta
 Last Error,آخر خطأ
-Delivery Note Error,خطأ مذكرة التسليم
-Active Sales Order,أمر البيع النشط
-Delivery Note Error Since,خطأ مذكرة التسليم منذ
-Bosta Requested On,تاريخ طلب Bosta
 COD Amount,مبلغ الدفع عند التسليم (COD)
-Bosta Terminated On,تاريخ إنهاء Bosta
 External Account ID,معرّف الحساب الخارجي
 Account Identity Key,مفتاح هوية الحساب
 Connection DocType,نوع مستند الاتصال
@@ -585,7 +529,6 @@ Catalog Webhook,Webhook الكتالوج
 Catalog Webhook Secret,سر Webhook الكتالوج
 Catalog Webhook URL,رابط Webhook الكتالوج
 Legacy Migration Source,مصدر الترحيل القديم
-"#146 decision 13: -, n = 1 + every shipment ever created on this order (including cancelled ones) - never reused.",قرار #146 رقم 13: -، n = 1 + كل شحنة أُنشئت على هذا الطلب (بما في ذلك الملغاة) - لا يُعاد استخدامه أبدًا.
 #146 review 'new problem': kept separate from the shipment-level last_error so an invoice failure and a shipment (create/cancel) failure never overwrite each other on the same field.,مشكلة جديدة من مراجعة #146: يُحفظ منفصلًا عن last_error الخاص بالشحنة حتى لا يكتب فشل الفاتورة وفشل الشحنة (إنشاء/إلغاء) أحدهما فوق الآخر في نفس الحقل.
 "#146 review finding #2: Discarded is a local-only recovery state (no Noon call), available from Error or Cancel Pending, that releases the shipment's claimed units.","ملاحظة المراجعة #2 لـ #146: ""متجاهَل"" حالة استرداد محلية فقط (دون استدعاء Noon)، متاحة من ""خطأ"" أو ""إلغاء معلّق""، وتحرّر الوحدات المحجوزة للشحنة."
 #146: rows are written only by integrations/noon/fulfillment.py - never hand-edited.,#146: تُكتب الصفوف فقط بواسطة integrations/noon/fulfillment.py - ولا تُعدّل يدويًا أبدًا.
@@ -607,7 +550,6 @@ A Shopify Marketplace Account must use a Shopify Connection.,يجب أن يست�
 A Shopify order import is already running for Marketplace Account {0}.,يوجد استيراد طلبات Shopify قيد التشغيل بالفعل لحساب السوق {0}.
 "A Shopify transaction has no id, so it cannot be mirrored.",معاملة Shopify ليس لها معرّف، لذا لا يمكن نسخها.
 A barcode is required.,الباركود مطلوب.
-A canceled Bosta Shipment cannot be edited.,لا يمكن تعديل شحنة Bosta ملغاة.
 A catalog price or quantity is not numeric.,سعر أو كمية في الكتالوج ليست رقمية.
 A catalog push is already running for this Marketplace Account.,يوجد إرسال للكتالوج قيد التشغيل بالفعل لحساب السوق هذا.
 A catalog sweep is already running for Marketplace Account {0}.,يوجد مسح للكتالوج قيد التشغيل بالفعل لحساب السوق {0}.
@@ -627,8 +569,6 @@ Active Location,الموقع النشط
 Add AWB,إضافة بوليصة شحن (AWB)
 Add Noon Shipment AWB,إضافة بوليصة شحن (AWB) لشحنة Noon
 Add Replacement or Item,إضافة بديل أو عنصر
-Address First Line must be at most {0} characters.,يجب ألا يزيد السطر الأول من العنوان عن {0} حرفًا.
-Address First Line must be more than 5 characters.,يجب أن يزيد السطر الأول من العنوان عن 5 أحرف.
 All Shopify webhook subscriptions are registered.,جميع اشتراكات Webhook في Shopify مسجّلة.
 Also cancel this order on {0}? This cannot be undone.,هل تريد أيضًا إلغاء هذا الطلب على {0}؟ لا يمكن التراجع عن ذلك.
 Also send the current webhook key,إرسال مفتاح Webhook الحالي أيضًا
@@ -647,92 +587,29 @@ Background job queued...,تمت إضافة مهمة في الخلفية إلى �
 Background job: {0}% complete.,مهمة الخلفية: اكتمل {0}%.
 Bank or Cash account of the account's Company that receives the payment.,حساب البنك أو النقدية لشركة الحساب الذي يستلم الدفعة.
 Bosta,Bosta
-Bosta A4 Label,ملصق Bosta بحجم A4
 Bosta Cancel,إلغاء Bosta
-Bosta Created,تم الإنشاء في Bosta
 Bosta Delivery,توصيل Bosta
-Bosta Failed,فشل في Bosta
 Bosta Locations,مواقع Bosta
 Bosta Settings has no API key.,لا يوجد مفتاح API في إعدادات Bosta.
 Bosta Settings is disabled.,إعدادات Bosta معطّلة.
-Bosta Shipment can only be created from a submitted Sales Order.,لا يمكن إنشاء شحنة Bosta إلا من أمر بيع معتمد.
-Bosta Shipment {0} already exists for this Sales Order.,شحنة Bosta {0} موجودة بالفعل لأمر البيع هذا.
-Bosta Shipment {0} does not exist.,شحنة Bosta {0} غير موجودة.
-Bosta Shipment {0} does not need checking.,شحنة Bosta {0} لا تحتاج إلى فحص.
-Bosta Shipment {0} has no tracking number yet.,شحنة Bosta {0} ليس لها رقم تتبع بعد.
-"Bosta Shipment {0} is still pending. If it is stuck, use Check Bosta on it.","شحنة Bosta {0} لا تزال معلّقة. إذا كانت عالقة، استخدم ""فحص Bosta"" عليها."
-Bosta Shipment {0} was canceled by Bosta.,ألغت Bosta شحنة Bosta {0}.
-Confirm Physical Handover,تأكيد التسليم الفعلي
 Handover,التسليم الفعلي
-Track Bosta Shipment,تتبّع شحنة Bosta
-Retry Bosta Shipment,إعادة محاولة شحنة Bosta
-"Bosta shipments: {0}","شحنات Bosta: {0}"
-"Carrier Status","حالة شركة الشحن"
-"Shipment ID","معرّف الشحنة"
-"Reserved allocations","الكميات المحجوزة"
-"No tracking number","لا يوجد رقم تتبع"
-"Warehouse allocations","توزيعات المستودع"
-"Confirm that this Bosta shipment has physically left the warehouse? This posts its reserved stock once and creates a Delivery Note.","هل تؤكد أن شحنة Bosta غادرت المستودع فعليًا؟ سيُرحّل المخزون المحجوز مرة واحدة وتُنشأ مذكرة تسليم."
-"Posting the reserved stock...","جارٍ ترحيل المخزون المحجوز..."
-"Physical handover recorded","تم تسجيل التسليم الفعلي"
-"Handover was confirmed by {0} at {1}. Carrier status: {2}. Stock posting status: {3}. Delivery Note: {4}.","تم تأكيد التسليم بواسطة {0} في {1}. حالة شركة الشحن: {2}. حالة ترحيل المخزون: {3}. مذكرة التسليم: {4}."
-"Retry Stock Posting","إعادة محاولة ترحيل المخزون"
-"Cancel Bosta delivery {0}? Bosta will terminate the carrier delivery. A submitted Delivery Note and posted stock will remain unchanged. This cannot be undone.","هل تريد إنهاء توصيل Bosta {0}؟ ستُنهي Bosta توصيل شركة الشحن. ستبقى مذكرة التسليم المعتمدة والمخزون المُرحّل دون تغيير. لا يمكن التراجع عن ذلك."
-"Bosta delivery terminated. Posted stock remains unchanged.","تم إنهاء توصيل Bosta. يبقى المخزون المُرحّل دون تغيير."
-"Bosta termination was confirmed, but the local shipment status needs review. No posted stock was reversed.","تم تأكيد إنهاء Bosta، لكن حالة الشحنة المحلية تحتاج إلى مراجعة. لم يتم عكس المخزون المُرحّل."
-"Bosta terminated the delivery, but the local carrier status could not be recorded: {0}","أنهت Bosta التوصيل، لكن تعذّر تسجيل حالة شركة الشحن المحلية: {0}"
-"Bosta terminated the delivery, but ERPNext could not finish recording the status. The carrier status will be retried automatically.","أنهت Bosta التوصيل، لكن تعذّر على ERPNext إكمال تسجيل الحالة. ستُعاد محاولة تسجيل حالة شركة الشحن تلقائيًا."
-"Bosta delivery linked. Stock awaits physical handover.","تم ربط توصيل Bosta. ينتظر المخزون التسليم الفعلي."
-"Bosta shipment {0} created. Stock is reserved until physical handover.","تم إنشاء شحنة Bosta {0}. يظل المخزون محجوزًا حتى التسليم الفعلي."
-"Bosta accepted the delivery (tracking number {0}); stock remains reserved until physical handover.","قبلت Bosta التوصيل (رقم التتبع {0})؛ يظل المخزون محجوزًا حتى التسليم الفعلي."
-Bosta Delivery Type,نوع توصيل Bosta
-"Bosta accepted the delivery (tracking number {0}) but the Delivery Note could not be created. Retry handover posting after resolving the issue.","قبلت Bosta التوصيل (رقم التتبع {0}) لكن تعذّر إنشاء مذكرة التسليم. أعد محاولة ترحيل المخزون بعد معالجة المشكلة."
-Confirm that this shipment was physically handed to Bosta? Stock will be posted.,هل تؤكد تسليم هذه الشحنة فعليًا إلى Bosta؟ سيتم ترحيل المخزون.
-A canceled Bosta Shipment cannot be handed over.,لا يمكن تسليم شحنة Bosta ملغاة.
-Confirm Bosta delivery details before recording physical handover.,أكد تفاصيل توصيل Bosta قبل تسجيل التسليم الفعلي.
-This shipment requires review before stock can be posted.,تتطلب هذه الشحنة المراجعة قبل ترحيل المخزون.
-"Bosta accepted the change, but ERPNext could not record it. Nothing was changed in ERPNext; enter the same receiver phone and address again or fix it by hand. See Error Log.",قبلت Bosta التغيير، لكن تعذّر على ERPNext تسجيله. لم يتغير شيء في ERPNext؛ أدخل هاتف المستلم والعنوان نفسيهما مرة أخرى أو صحّحهما يدويًا. راجع سجل الأخطاء.
-"Bosta accepted the change, but this shipment was canceled in the meantime, so ERPNext did not record it.",قبلت Bosta التغيير، لكن هذه الشحنة أُلغيت في هذه الأثناء، لذا لم يسجّله ERPNext.
-Bosta accepted the request without a delivery ID and tracking number.,قبلت Bosta الطلب دون معرّف توصيل ورقم تتبع.
-"Bosta cancelled this shipment, but ERPNext could not cancel Delivery Note {0}. See Error Log.",ألغت Bosta هذه الشحنة، لكن تعذّر على ERPNext إلغاء مذكرة التسليم {0}. راجع سجل الأخطاء.
-Bosta delivery cancelled.,تم إلغاء توصيل Bosta.
-Bosta delivery linked.,تم ربط توصيل Bosta.
+Carrier Status,حالة شركة الشحن
 Bosta delivery payload must be an object.,يجب أن تكون بيانات توصيل Bosta كائنًا.
 Bosta delivery update payload must be an object.,يجب أن تكون بيانات تحديث توصيل Bosta كائنًا.
-Bosta delivery updated.,تم تحديث توصيل Bosta.
-Bosta does not allow editing a delivery in state {0} ({1}).,لا تسمح Bosta بتعديل توصيل في الحالة {0} ({1}).
-Bosta has no delivery with reference {0}. A retry is allowed.,لا يوجد لدى Bosta توصيل بالمرجع {0}. يُسمح بإعادة المحاولة.
-Bosta has no such delivery. A retry is allowed.,لا يوجد لدى Bosta هذا التوصيل. يُسمح بإعادة المحاولة.
 Bosta label printing supports at most {0} tracking numbers at a time.,تدعم طباعة ملصقات Bosta {0} رقم تتبع كحد أقصى في المرة الواحدة.
-Bosta reports this delivery as Delivered; it cannot be cancelled.,تُظهر Bosta هذا التوصيل على أنه تم تسليمه؛ لا يمكن إلغاؤه.
 Bosta request failed (HTTP {0}): {1},فشل طلب Bosta (HTTP {0}): {1}
 Bosta returned a label that is not a PDF.,أعادت Bosta ملصقًا ليس بصيغة PDF.
 Bosta returned a label that is not a valid base64 PDF.,أعادت Bosta ملصقًا ليس PDF صالحًا بترميز base64.
 Bosta returned a list in an unrecognised format.,أعادت Bosta قائمة بتنسيق غير معروف.
-Bosta returned a search result in an unrecognised format (keys seen: {0}). The Bosta search response shape is unverified; check the delivery in Bosta.,أعادت Bosta نتيجة بحث بتنسيق غير معروف (المفاتيح الظاهرة: {0}). شكل استجابة البحث في Bosta غير مُتحقق منه؛ راجع التوصيل في Bosta.
-Bosta returned a state this app does not recognise. Nothing was changed.,أعادت Bosta حالة لا يتعرّف عليها هذا التطبيق. لم يتغير شيء.
 Bosta returned an ambiguous search result. Check the delivery in Bosta.,أعادت Bosta نتيجة بحث غير واضحة. راجع التوصيل في Bosta.
 Bosta returned an invalid label response.,أعادت Bosta استجابة ملصق غير صالحة.
 Bosta returned no pickup locations. The saved location is unchanged.,لم تُعِد Bosta أي مواقع استلام. الموقع المحفوظ لم يتغير.
-Bosta returned no readable state for this delivery.,لم تُعِد Bosta حالة مقروءة لهذا التوصيل.
 Bosta returned no usable cities.,لم تُعِد Bosta مدنًا صالحة للاستخدام.
 Bosta returned the city list in an unrecognised format.,أعادت Bosta قائمة المدن بتنسيق غير معروف.
 Bosta returned the pickup locations in an unrecognised format.,أعادت Bosta مواقع الاستلام بتنسيق غير معروف.
-Bosta state refreshed.,تم تحديث حالة Bosta.
-"Bosta terminated the delivery, but ERPNext could not cancel the Delivery Note. The shipment stays active and is listed in Needs Attention; the cancellation is retried automatically.","أنهت Bosta التوصيل، لكن تعذّر على ERPNext إلغاء مذكرة التسليم. تبقى الشحنة نشطة وتظهر في ""يحتاج إلى انتباه""؛ وستُعاد محاولة الإلغاء تلقائيًا."
-"Bosta terminated the delivery, but ERPNext could not finish the cancellation. The Delivery Note cancel will be retried automatically.",أنهت Bosta التوصيل، لكن تعذّر على ERPNext إكمال الإلغاء. ستُعاد محاولة إلغاء مذكرة التسليم تلقائيًا.
-"Bosta terminated the delivery, but the cancellation could not be finished here: {0}",أنهت Bosta التوصيل، لكن تعذّر إكمال الإلغاء هنا: {0}
-Bosta webhook timeStamp in milliseconds since the Unix epoch.,قيمة timeStamp في Webhook الخاص بـ Bosta بالمللي ثانية منذ بداية توقيت Unix.
-COD Sent,تم إرسال مبلغ الدفع عند الاستلام
-"COD is the Sales Order total minus advance payments recorded on the Sales Order. Payments made against a Sales Invoice are not seen, and a partly delivered order still uses the whole-order amount.",مبلغ الدفع عند الاستلام هو إجمالي أمر البيع مطروحًا منه الدفعات المقدمة المسجّلة على أمر البيع. لا تُحتسب الدفعات المسجّلة على فاتورة مبيعات، ويستخدم الطلب المسلَّم جزئيًا مبلغ الطلب كاملًا.
-COD to be sent to Bosta,مبلغ الدفع عند الاستلام المُرسل إلى Bosta
 COD Amount,مبلغ الدفع عند الاستلام
-"Enter an amount from 0 to {0} in the company currency.",أدخل مبلغًا من 0 إلى {0} بعملة الشركة.
-"Enter a valid COD amount in the company currency.",أدخل مبلغًا صالحًا للدفع عند الاستلام بعملة الشركة.
 COD cannot be negative.,لا يمكن أن يكون مبلغ الدفع عند الاستلام سالبًا.
 CONFIRMED,تم التأكيد
-Cancel Bosta Shipment,إلغاء شحنة Bosta
-Cancel Bosta delivery {0}? Bosta will terminate it and Delivery Note {1} will be cancelled. This cannot be undone.,هل تريد إلغاء توصيل Bosta {0}؟ ستنهيه Bosta وسيتم إلغاء مذكرة التسليم {1}. لا يمكن التراجع عن ذلك.
 Cancel Noon Shipment,إلغاء شحنة Noon
 Cancel Order,إلغاء الطلب
 Cancel Shipment,إلغاء الشحنة
@@ -750,7 +627,6 @@ Cancelled Shopify orders cannot be synchronized.,لا يمكن مزامنة طل
 Cancelled Talabat orders cannot be synchronized.,لا يمكن مزامنة طلبات Talabat الملغاة.
 Cancelled on Noon; no fulfillment actions available,أُلغي على Noon؛ لا توجد إجراءات تنفيذ متاحة
 Cancelling on the platform...,جارٍ الإلغاء على المنصة...
-Cancelling the Bosta delivery...,جارٍ إلغاء توصيل Bosta...
 Catalog Price Unavailable,سعر الكتالوج غير متاح
 Catalog push job not found.,لم يتم العثور على مهمة إرسال الكتالوج.
 Catalog sweep job not found.,لم يتم العثور على مهمة مسح الكتالوج.
@@ -760,11 +636,6 @@ Catalog webhook URL refreshed. Update it in Talabat's portal.,تم تحديث ر
 Catalog webhook secret copied.,تم نسخ سر Webhook الكتالوج.
 Changed,تم التغيير
 Changing the Noon destination's active state,تغيير حالة تفعيل وجهة Noon
-Check Bosta,فحص Bosta
-Retry Delivery Note,إعادة محاولة إنشاء مذكرة التسليم
-Creating the Delivery Note...,جارٍ إنشاء مذكرة التسليم...
-Delivery Note created.,تم إنشاء مذكرة التسليم.
-Checking Bosta...,جارٍ فحص Bosta...
 Clearing Account {0} does not belong to Company {1}.,حساب التسوية {0} لا ينتمي إلى الشركة {1}.
 Clearing Account {0} does not exist.,حساب التسوية {0} غير موجود.
 Clearing Account {0} is a group account; choose a leaf account.,حساب التسوية {0} حساب مجموعة؛ اختر حسابًا فرعيًا.
@@ -789,12 +660,8 @@ Copy Order Webhook URL,نسخ رابط Webhook الطلبات
 Copy Webhook Key,نسخ مفتاح Webhook
 Copy Webhook Secret,نسخ سر Webhook
 Copy Webhook URL,نسخ رابط Webhook
-Could not confirm that Bosta terminated the delivery. Nothing was changed here. Check the delivery in Bosta before trying again.,تعذّر التأكد من أن Bosta أنهت التوصيل. لم يتغير شيء هنا. راجع التوصيل في Bosta قبل المحاولة مرة أخرى.
-Could not confirm that Bosta updated the delivery. {0},تعذّر التأكد من أن Bosta حدّثت التوصيل. {0}
 Could not determine the Shopify shop's currency for Connection {0}.,تعذّر تحديد عملة متجر Shopify للاتصال {0}.
 Could not load the Bosta pickup locations.,تعذّر تحميل مواقع الاستلام في Bosta.
-Could not load the Bosta shipment.,تعذّر تحميل شحنة Bosta.
-Could not load the Bosta {0}. Check Bosta Settings and try again.,تعذّر تحميل {0} من Bosta. راجع إعدادات Bosta وحاول مرة أخرى.
 Could not match the delivery row on {0}.,تعذّرت مطابقة صف التوصيل على {0}.
 Could not match the invoice row on {0}.,تعذّرت مطابقة صف الفاتورة على {0}.
 Could not reach Noon.,تعذّر الوصول إلى Noon.
@@ -806,7 +673,6 @@ Could not retrieve the order import status.,تعذّر جلب حالة استي�
 Could not start the background job.,تعذّر بدء مهمة الخلفية.
 Could not verify Shopify Connection {0}'s own shop - no shop id was returned.,تعذّر التحقق من متجر اتصال Shopify {0} - لم يُرجَع معرّف المتجر.
 Courier and AWB Nr are required.,شركة الشحن ورقم بوليصة الشحن (AWB) مطلوبان.
-Create Bosta Shipment,إنشاء شحنة Bosta
 Create Credit Note,إنشاء إشعار دائن
 Create Noon Shipment,إنشاء شحنة Noon
 Create Sales Return,إنشاء مرتجع مبيعات
@@ -814,7 +680,6 @@ Create Shipment,إنشاء شحنة
 Create a Bosta Read/Write API key and paste it here.,أنشئ مفتاح API للقراءة/الكتابة في Bosta والصقه هنا.
 Create a Noon destination for {0} that sends the {1} header (the key is not shown) and subscribe it to FBPI::ORDER_SYNC?,هل تريد إنشاء وجهة Noon لـ {0} ترسل الترويسة {1} (المفتاح غير معروض) والاشتراك بها في FBPI::ORDER_SYNC؟
 Create a draft Credit Note (return Sales Invoice) for one unit of this returned item?,هل تريد إنشاء إشعار دائن مسودة (فاتورة مبيعات مرتجعة) لوحدة واحدة من هذا العنصر المرتجع؟
-Creating Bosta shipment...,جارٍ إنشاء شحنة Bosta...
 Creating the Noon destination failed: {0},فشل إنشاء وجهة Noon: {0}
 Creating the Payment Entry failed. Review the ERPNext configuration and try again.,فشل إنشاء قيد الدفع. راجع إعدادات ERPNext وحاول مرة أخرى.
 Current ERPNext Catalog Price,سعر الكتالوج الحالي في ERPNext
@@ -826,9 +691,6 @@ Days added to the Shopify order date to set the ERPNext Sales Order Delivery Dat
 Deactivate Destination,إلغاء تفعيل الوجهة
 Deactivate destination {0}? Noon stops sending events to it.,إلغاء تفعيل الوجهة {0}؟ ستتوقف Noon عن إرسال الأحداث إليها.
 Delete Demo Data,حذف البيانات التجريبية
-Delivery Note Failed,فشل مذكرة التسليم
-Delivery Note creation failed. See Error Log for details.,فشل إنشاء مذكرة التسليم. راجع سجل الأخطاء للتفاصيل.
-Delivery Note creation failed: {0},فشل إنشاء مذكرة التسليم: {0}
 Delivery Note {0} could not be cancelled: {1},تعذّر إلغاء مذكرة التسليم {0}: {1}
 Delivery Note {0} is on a submitted Sales Invoice; cancel the invoice first.,مذكرة التسليم {0} مرتبطة بفاتورة مبيعات معتمدة؛ ألغِ الفاتورة أولًا.
 Discard Noon Shipment,تجاهل شحنة Noon
@@ -864,11 +726,7 @@ ERPNext-only confirmation that the return was received. It does not acknowledge 
 ERPNext: {0},ERPNext: {0}
 Each REPLACED item must have exactly one replacement.,يجب أن يكون لكل عنصر مستبدَل (REPLACED) بديل واحد بالضبط.
 Echo guard (#181): when ERPNext successfully asked this platform to cancel the order. Durable marker the reconciliation planner reads so the platform cancellation echo does not reopen a Closed Sales Order. Set only by services/marketplace_outbound.py.,حماية الصدى (#181): وقت نجاح ERPNext في طلب إلغاء الطلب من هذه المنصة. علامة دائمة يقرؤها مخطط التسوية حتى لا يعيد صدى الإلغاء من المنصة فتح أمر بيع مغلق. تُضبط فقط بواسطة services/marketplace_outbound.py.
-Edit Bosta Shipment,تعديل شحنة Bosta
-Enter the address first line.,أدخل السطر الأول من العنوان.
-Enter the receiver phone.,أدخل هاتف المستلم.
 Enter your normal local date and time. Talabat receives the server-converted UTC time.,أدخل التاريخ والوقت المحليين المعتادين. يستلم Talabat الوقت بتوقيت UTC بعد تحويله على الخادم.
-"Equals Sales Order while this shipment is active (not Canceled), otherwise empty. Its unique index allows only one active shipment per Sales Order.",يساوي أمر البيع ما دامت هذه الشحنة نشطة (غير ملغاة)، وإلا يكون فارغًا. فهرسه الفريد يسمح بشحنة نشطة واحدة فقط لكل أمر بيع.
 Every order item must have a valid update status.,يجب أن يكون لكل عنصر في الطلب حالة تحديث صالحة.
 Every order item must include an ID or SKU.,يجب أن يتضمن كل عنصر في الطلب معرّفًا أو رمز منتج (SKU).
 Every order item must include pricing information.,يجب أن يتضمن كل عنصر في الطلب معلومات التسعير.
@@ -948,7 +806,6 @@ Item {0} was modified after this file was exported; re-export and re-apply your 
 KG,كجم
 KG items require a non-negative weight.,عناصر الكيلوجرام تحتاج إلى وزن غير سالب.
 LOGISTICS_DELIVERY,توصيل لوجستي
-Last Bosta Update,آخر تحديث من Bosta
 Load Noon Warehouses,تحميل مستودعات Noon
 Load Shopify Locations,تحميل مواقع Shopify
 Loading Bosta locations...,جارٍ تحميل مواقع Bosta...
@@ -1031,7 +888,6 @@ New Item SKU,رمز منتج (SKU) العنصر الجديد
 New Item Status,حالة العنصر الجديدة
 New Quantity,الكمية الجديدة
 New order items require a SKU and IN_CART or ADDITION status.,عناصر الطلب الجديدة تحتاج إلى رمز منتج (SKU) وحالة IN_CART أو ADDITION.
-No Bosta shipment,لا توجد شحنة Bosta
 No Created shipments on this order to add an AWB to.,لا توجد شحنات منشأة على هذا الطلب لإضافة بوليصة شحن (AWB) إليها.
 No Created shipments on this order to upload an invoice for.,لا توجد شحنات منشأة على هذا الطلب لرفع فاتورة لها.
 No ERPNext Item is mapped to this Talabat listing.,لا يوجد عنصر ERPNext مرتبط بقائمة Talabat هذه.
@@ -1135,17 +991,14 @@ Not permitted to update Marketplace Product Mapping {0}.,غير مسموح بت�
 Nothing to push.,لا يوجد ما يُرسَل.
 Nothing to retrieve.,لا يوجد ما يُجلب.
 Nothing to sync.,لا يوجد ما تتم مزامنته.
-Nothing was changed in ERPNext. Check the delivery in Bosta before trying again.,لم يتغير شيء في ERPNext. راجع التوصيل في Bosta قبل المحاولة مرة أخرى.
 OUT_OF_STOCK,نفد من المخزون
 Open Credit Note,فتح إشعار الدائن
 Open Outlet,فتح المنفذ
 Open Sales Return,فتح مرتجع المبيعات
-Open the label,فتح الملصق
 Order Action,إجراء الطلب
 Order ID is required.,معرّف الطلب مطلوب.
 Order Import,استيراد الطلبات
 Order item pricing values must be numbers.,يجب أن تكون قيم تسعير عناصر الطلب أرقامًا.
-"Order total {0}, less payments already received {1}.",إجمالي الطلب {0}، مطروحًا منه الدفعات المستلمة بالفعل {1}.
 Order update items must be a list.,يجب أن تكون عناصر تحديث الطلب قائمة.
 Order update items must be valid JSON.,يجب أن تكون عناصر تحديث الطلب بصيغة JSON صالحة.
 Order update must be an object.,يجب أن يكون تحديث الطلب كائنًا.
@@ -1159,11 +1012,9 @@ Own Courier,مندوب خاص
 PICKUP,استلام من المتجر
 Payment Entry {0} recorded {1} against {2} {3}.,سجّل قيد الدفع {0} مبلغ {1} مقابل {2} {3}.
 Payment Entry {0} recorded {1}; nothing was allocated because {2} {3} has nothing outstanding.,سجّل قيد الدفع {0} مبلغ {1}؛ لم يُخصَّص شيء لأن {2} {3} ليس عليه مبلغ مستحق.
-Pending Bosta,بانتظار Bosta
 Pending Noon Out of Stock Units is invalid.,"قيمة ""وحدات Noon المعلّقة النافدة من المخزون"" غير صالحة."
 Platform and External Account ID are required to compute the account identity key.,المنصة ومعرّف الحساب الخارجي مطلوبان لحساب مفتاح هوية الحساب.
 Populate during a secret-rotation window - Shopify signs webhook deliveries with the oldest unrevoked secret until rotation completes. Clear once rotation is done.,املأه خلال فترة تدوير السر - يوقّع Shopify إرسالات Webhook بأقدم سر غير ملغى حتى يكتمل التدوير. امسحه بعد انتهاء التدوير.
-Preparing Bosta label...,جارٍ تجهيز ملصق Bosta...
 Preview result,نتيجة المعاينة
 Price List {0} currency {1} does not match Noon country {2} currency {3}.,عملة قائمة الأسعار {0} ({1}) لا تطابق عملة دولة Noon {2} ({3}).
 Price List {0} has no currency configured.,قائمة الأسعار {0} ليس لها عملة مضبوطة.
@@ -1171,8 +1022,6 @@ Price List {0} is disabled.,قائمة الأسعار {0} معطّلة.
 Price List {0} is not a selling price list.,قائمة الأسعار {0} ليست قائمة أسعار بيع.
 Price List {0} must be an enabled selling price list.,يجب أن تكون قائمة الأسعار {0} قائمة أسعار بيع مفعّلة.
 Price List {0}'s currency ({1}) does not match the Shopify shop's currency ({2}).,عملة قائمة الأسعار {0} ({1}) لا تطابق عملة متجر Shopify ({2}).
-Print A4 Label,طباعة ملصق A4
-Print Bosta A4 Label,طباعة ملصق Bosta بحجم A4
 Private PDF attachment uploaded by the user; sent to Noon as raw base64 (#146 decision 19). Never used as evidence of a real ERPNext accounting document.,مرفق PDF خاص رفعه المستخدم؛ يُرسل إلى Noon بترميز base64 الخام (قرار #146 رقم 19). لا يُستخدم أبدًا كدليل على مستند محاسبي حقيقي في ERPNext.
 Processed,تمت المعالجة
 Promotion,العرض
@@ -1204,12 +1053,10 @@ REPLACED,مستبدَل
 "Read-only, always fetched from the linked Marketplace Account - never set directly by a platform adapter.",للقراءة فقط، تُجلب دائمًا من حساب السوق المرتبط - ولا يضبطها محوّل المنصة مباشرة أبدًا.
 "Read-only, platform-sourced financial status (e.g. Shopify's order financial_status). Blank for Talabat, populated by #109 for Shopify. Data, not a closed Select, so an unrecognized future value from any platform persists instead of failing validation.",الحالة المالية للقراءة فقط كما تأتي من المنصة (مثل financial_status لطلب Shopify). فارغة لـ Talabat، وتُملأ بواسطة #109 لـ Shopify. نص وليس قائمة اختيار مغلقة، لذا تُحفظ أي قيمة مستقبلية غير معروفة من أي منصة بدلًا من فشل التحقق.
 "Read-only, platform-sourced fulfillment status (e.g. Shopify's order fulfillment_status). Blank for Talabat, populated by #109 for Shopify. Data, not a closed Select, so an unrecognized future value from any platform persists instead of failing validation.",حالة التنفيذ للقراءة فقط كما تأتي من المنصة (مثل fulfillment_status لطلب Shopify). فارغة لـ Talabat، وتُملأ بواسطة #109 لـ Shopify. نص وليس قائمة اختيار مغلقة، لذا تُحفظ أي قيمة مستقبلية غير معروفة من أي منصة بدلًا من فشل التحقق.
-Reading the delivery from Bosta...,جارٍ قراءة التوصيل من Bosta...
 Ready for Pickup,جاهز للاستلام
 Record,تسجيل
 Record Inspection,تسجيل الفحص
 Record the inspection outcome before creating the Credit Note.,سجّل نتيجة الفحص قبل إنشاء إشعار الدائن.
-Refresh Bosta Lists,تحديث قوائم Bosta
 Refresh Catalog Webhook URL,تحديث رابط Webhook الكتالوج
 Refresh Order Webhook URL,تحديث رابط Webhook الطلبات
 Refresh Status,تحديث الحالة
@@ -1253,23 +1100,11 @@ SHIPPED,تم الشحن
 "Sales Invoice {0} updates stock, so a Credit Note from it would return the stock a second time.",فاتورة المبيعات {0} تُحدّث المخزون، لذا فإن إنشاء إشعار دائن منها سيُرجع المخزون مرة ثانية.
 Sales Order Sync,مزامنة أمر البيع
 Sales Order synchronization,مزامنة أمر البيع
-Sales Order {0} already has an active Bosta Shipment.,أمر البيع {0} لديه بالفعل شحنة Bosta نشطة.
-Fulfillment Key cannot be changed after creation.,لا يمكن تغيير مفتاح التنفيذ بعد الإنشاء.
-Fulfillment Key must be unique.,يجب أن يكون مفتاح التنفيذ فريدًا.
-Bosta Delivery ID cannot be changed after it is recorded.,لا يمكن تغيير معرّف توصيل Bosta بعد تسجيله.
-Bosta Delivery ID {0} is already linked to another shipment.,معرّف توصيل Bosta {0} مرتبط بالفعل بشحنة أخرى.
-Shipment item {0} does not belong to Sales Order {1}.,عنصر الشحنة {0} لا يتبع أمر البيع {1}.
-Shipment item quantities must be greater than zero.,يجب أن تكون كميات عناصر الشحنة أكبر من صفر.
-Shipment items are managed by the system and cannot be edited.,يدير النظام عناصر الشحنة ولا يمكن تعديلها.
-The Sales Order has no available quantity to reserve for Bosta.,لا توجد كمية متاحة في أمر البيع لحجزها لدى Bosta.
-The Sales Order allocation no longer matches the Delivery Note.,لم يعد تخصيص أمر البيع مطابقًا لإذن التسليم.
 Sales Order {0} has more than one submitted Sales Invoice ({1}); allocate the payment manually.,أمر البيع {0} لديه أكثر من فاتورة مبيعات معتمدة ({1})؛ خصّص الدفعة يدويًا.
 Sales Order {0} is cancelled; the payment cannot be recorded.,أمر البيع {0} ملغى؛ لا يمكن تسجيل الدفعة.
 Sales Order {0} is closed; the payment cannot be recorded.,أمر البيع {0} مغلق؛ لا يمكن تسجيل الدفعة.
-Sales Order {0} is in {1}; Bosta COD is only supported in the company currency {2}.,أمر البيع {0} بعملة {1}؛ الدفع عند الاستلام عبر Bosta مدعوم فقط بعملة الشركة {2}.
 Sales Order {0} is not linked to a marketplace order.,أمر البيع {0} غير مرتبط بطلب سوق.
 Sales Order {0} is not submitted; the payment cannot be recorded.,أمر البيع {0} غير معتمد؛ لا يمكن تسجيل الدفعة.
-Sales Order {0} is {1}.,أمر البيع {0} في حالة {1}.
 Sales Order {0} was cancelled,تم إلغاء أمر البيع {0}
 Sales Order {0} was closed,تم إغلاق أمر البيع {0}
 Sales Order {0} was updated,تم تحديث أمر البيع {0}
@@ -1304,7 +1139,6 @@ Set the ERPNext Company before choosing the ERPNext Shipping Income Account.,ا�
 Set when Shopify's priceAfterAllDiscountsBeforeTaxesSet.shopMoney.amount was absent or null before the Float field's database coercion.,يُضبط عندما تكون قيمة priceAfterAllDiscountsBeforeTaxesSet.shopMoney.amount في Shopify غائبة أو null قبل تحويلها في قاعدة البيانات لحقل Float.
 "Set when Talabat's item.pricing.total_price was absent/null in the raw payload. A Float column cannot itself store NULL (it silently coerces to 0.0), so this flag is what actually distinguishes a genuinely missing fulfilled total from a real zero-value line - never derive that distinction from fulfilled_total_price alone.",يُضبط عندما تكون قيمة item.pricing.total_price في Talabat غائبة/null في البيانات الخام. لا يمكن لعمود Float تخزين NULL (يحوّله بصمت إلى 0.0)، لذا فهذه العلامة هي ما يميّز فعلًا الإجمالي المنفّذ المفقود عن بند قيمته صفر حقيقي - ولا يُستنتج هذا التمييز أبدًا من fulfilled_total_price وحده.
 "Set when both Shopify fulfillment quantities were present in the imported payload. Rows imported before #178 (and every non-Shopify row) leave it unset, so their 0 quantities read as unknown, not as fulfilled.",يُضبط عندما تكون كمّيتا التنفيذ في Shopify موجودتين في البيانات المستوردة. الصفوف المستوردة قبل #178 (وكل صف من منصة غير Shopify) تبقى بدونه، لذا تُقرأ كمياتها الصفرية كغير معروفة، لا كمنفّذة.
-Set while a Delivery Note create/cancel action has failed; cleared when a later attempt succeeds. Drives Marketplace Needs Attention.,"يُضبط عند فشل إجراء إنشاء/إلغاء مذكرة التسليم؛ ويُمسح عند نجاح محاولة لاحقة. يغذّي ""يحتاج إلى انتباه"" للأسواق."
 Shipment discarded.,تم تجاهل الشحنة.
 Shipment is no longer Created.,"الشحنة لم تعد في حالة ""منشأة""."
 Shipment status changed from {0} to {1} while the Noon request was in flight.,تغيرت حالة الشحنة من {0} إلى {1} أثناء تنفيذ طلب Noon.
@@ -1436,14 +1270,10 @@ Talabat returned a different order ID.,أرجع Talabat معرّف طلب مخت
 "Talabat's item cart-processing status (NOT_PROCESSED/IN_CART/NOT_FOUND/REPLACED/ADDITION) or, for Noon (#145), the FBPI item's mp_status commercial state (CONFIRMED/CANCELLED - Noon's own MP_ITEM_STATUS_* enum with its verbose prefix stripped - or the documented MP_ITEM_STATUS_UNSPECIFIED value, stored verbatim/unstripped since order_mapper.py's MP_STATUS_MAP deliberately passes unrecognized values through unchanged rather than dropping them). Not a per-platform field: this is the same closed vocabulary every platform's order-commercial-state maps onto.",حالة معالجة السلة للعنصر في Talabat (NOT_PROCESSED/IN_CART/NOT_FOUND/REPLACED/ADDITION) أو، في Noon (#145)، الحالة التجارية mp_status لعنصر FBPI (CONFIRMED/CANCELLED - وهي قيم MP_ITEM_STATUS_* الخاصة بـ Noon بعد إزالة البادئة الطويلة - أو القيمة الموثّقة MP_ITEM_STATUS_UNSPECIFIED المخزّنة كما هي دون إزالة لأن MP_STATUS_MAP في order_mapper.py يمرّر القيم غير المعروفة دون تغيير عمدًا بدل إسقاطها). ليس حقلًا خاصًا بمنصة: هذه هي المفردات المغلقة نفسها التي تُربط بها الحالة التجارية للطلب في كل منصة.
 Talabat: {0},Talabat: {0}
 Test Connection,اختبار الاتصال
-The Bosta request failed ({0}). It may or may not have reached Bosta. Use Check Bosta before retrying.,"فشل طلب Bosta ({0}). ربما وصل إلى Bosta وربما لا. استخدم ""فحص Bosta"" قبل إعادة المحاولة."
-The COD amount changed from {0} to {1} since the dialog was opened. Reopen the dialog and check it.,تغيّر مبلغ الدفع عند الاستلام من {0} إلى {1} منذ فتح النافذة. أعد فتح النافذة وتحقق منه.
 The COD amount {0} exceeds Bosta's limit of {1}.,مبلغ الدفع عند الاستلام {0} يتجاوز حد Bosta البالغ {1}.
-The COD sent to Bosta when the delivery was created.,مبلغ الدفع عند الاستلام المُرسل إلى Bosta عند إنشاء التوصيل.
 The Marketplace Account has no warehouse; returned stock needs one.,حساب السوق ليس له مستودع؛ المخزون المرتجع يحتاج إلى مستودع.
 "The Noon order has no per-unit item data, so it is unknown whether the order can still change.",طلب Noon ليس له بيانات عناصر لكل وحدة، لذا لا يُعرف ما إذا كان الطلب لا يزال قابلًا للتغيير.
 "The Sales Order already has delivered quantity or a billed amount, so it cannot be cancelled.",أمر البيع له بالفعل كمية مسلَّمة أو مبلغ مفوتر، لذا لا يمكن إلغاؤه.
-The Sales Order has no remaining quantity to deliver.,أمر البيع ليس له كمية متبقية للتسليم.
 The Shopify order was cancelled but its linked Sales Order {0} is still a Draft; delete or cancel it in ERPNext.,أُلغي طلب Shopify لكن أمر البيع المرتبط به {0} لا يزال مسودة؛ احذفه أو ألغِه في ERPNext.
 The Shopify order was cancelled or fully refunded before an ERPNext Sales Order was created; no Sales Order is needed.,أُلغي طلب Shopify أو استُرد بالكامل قبل إنشاء أمر بيع في ERPNext؛ لا حاجة لأمر بيع.
 The Shopify transaction has neither a processed nor a created date.,معاملة Shopify ليس لها تاريخ معالجة ولا تاريخ إنشاء.
@@ -1474,12 +1304,7 @@ The uploaded file is empty.,الملف المرفوع فارغ.
 The webhook URL and key are missing. Save the Noon Connection again.,رابط Webhook والمفتاح مفقودان. احفظ اتصال Noon مرة أخرى.
 The workbook upload did not return a file.,لم يُرجع رفع ملف Excel أي ملف.
 There is no pending Out of Stock reservation on this order.,لا يوجد حجز نفاد من المخزون معلّق في Noon على هذا الطلب.
-This Bosta Shipment has no tracking number yet.,شحنة Bosta هذه ليس لها رقم تتبع بعد.
-"This Bosta Shipment has no tracking number, so there is nothing to cancel in Bosta.",شحنة Bosta هذه ليس لها رقم تتبع، لذا لا يوجد ما يُلغى في Bosta.
-"This Bosta Shipment has no tracking number, so there is nothing to edit in Bosta.",شحنة Bosta هذه ليس لها رقم تتبع، لذا لا يوجد ما يُعدّل في Bosta.
-This Bosta Shipment is already canceled.,شحنة Bosta هذه ملغاة بالفعل.
 This Site,هذا الموقع
-This amount is 0. Bosta may reject a delivery without COD.,هذا المبلغ 0. قد ترفض Bosta توصيلًا بدون دفع عند الاستلام.
 "This clears any pending Noon Out of Stock reservation on this order, in case a worker died before releasing it. Continue?",سيؤدي هذا إلى مسح أي حجز نفاد من المخزون معلّق في Noon على هذا الطلب، في حال توقف عامل قبل تحريره. هل تريد المتابعة؟
 This fulfillment update is not valid from the current order status.,تحديث التنفيذ هذا غير صالح من حالة الطلب الحالية.
 "This importer requires Stock Settings > Item Naming By to be set to 'Item Code'. Naming Series-based item codes are not supported, because ERPNext overwrites item_code with the generated series name on save, which would silently break this importer's item_code-based identity.",يتطلب هذا المستورِد ضبط إعدادات المخزون > تسمية العنصر حسب على 'Item Code'. رموز العناصر المعتمدة على سلسلة التسمية غير مدعومة، لأن ERPNext يستبدل item_code باسم السلسلة المُنشأ عند الحفظ، مما سيُفسد بصمت هوية هذا المستورِد المعتمدة على item_code.
@@ -1488,9 +1313,6 @@ This order cannot be updated from its current status.,لا يمكن تحديث �
 "This order is linked to Sales Order {0}. Use the Cancel Order button on the Marketplace Order form to cancel it on Talabat, or call marketplace_integrations.api.marketplace_outbound.request_platform_cancel.","هذا الطلب مرتبط بأمر البيع {0}. استخدم زر ""إلغاء الطلب"" في نموذج طلب السوق لإلغائه على Talabat، أو استدعِ marketplace_integrations.api.marketplace_outbound.request_platform_cancel."
 "This return has no Partner SKU, so its Item cannot be resolved.",هذا المرتجع ليس له رمز منتج الشريك، لذا لا يمكن تحديد العنصر الخاص به.
 This return is not linked to a Marketplace Order.,هذا المرتجع غير مرتبط بطلب سوق.
-This shipment has no Bosta state stored yet. Refresh from Bosta first.,هذه الشحنة ليس لها حالة Bosta مخزّنة بعد. حدّث من Bosta أولًا.
-This shipment may still be in progress. Try again in a few minutes.,قد تكون هذه الشحنة لا تزال قيد التنفيذ. حاول مرة أخرى بعد بضع دقائق.
-This updates Bosta and the Bosta Shipment only. The Sales Order address and Shopify are not changed; update them by hand if needed.,يحدّث هذا Bosta وشحنة Bosta فقط. لا يتغير عنوان أمر البيع ولا Shopify؛ حدّثهما يدويًا إذا لزم الأمر.
 "This will delete any of the 7 tracked webhook topics' subscriptions found registered at a URL other than this site's own callback URL, then re-create whatever is missing at this site's callback URL. If another environment (e.g. a different dev tunnel, or another site) shares this same Shopify app, its subscriptions can be deleted by this action. Continue?",سيحذف هذا أي اشتراكات من مواضيع Webhook السبعة المتتبَّعة مسجّلة على رابط غير رابط الاستدعاء الخاص بهذا الموقع، ثم يعيد إنشاء المفقود منها على رابط الاستدعاء الخاص بهذا الموقع. إذا كانت بيئة أخرى (مثل نفق تطوير مختلف أو موقع آخر) تشارك تطبيق Shopify نفسه، فقد تُحذف اشتراكاتها بهذا الإجراء. هل تريد المتابعة؟
 Tracking,التتبع
 Transaction currency {0} differs from the Company currency {1}.,عملة المعاملة {0} تختلف عن عملة الشركة {1}.
@@ -1511,14 +1333,11 @@ Unmapped,غير مربوط
 Unnamed item,عنصر بلا اسم
 Unsupported Talabat order update status.,حالة تحديث طلب Talabat غير مدعومة.
 Unsupported Talabat outlet status update.,تحديث حالة منفذ Talabat غير مدعوم.
-Update Bosta delivery {0}? {1},هل تريد تحديث توصيل Bosta {0}؟ {1}
 Update Cart,تحديث السلة
 Update Noon Destination,تحديث وجهة Noon
-Update Shipment,تحديث الشحنة
 Update Talabat Cart,تحديث سلة Talabat
 Updating cart on Talabat...,جارٍ تحديث السلة على Talabat...
 Updating order on Talabat...,جارٍ تحديث الطلب على Talabat...
-Updating the Bosta delivery...,جارٍ تحديث توصيل Bosta...
 Updating the Noon destination,جارٍ تحديث وجهة Noon
 Upload Invoice,رفع الفاتورة
 Upload Items workbook,رفع ملف Excel للعناصر
@@ -1539,8 +1358,6 @@ Webhook secret copied.,تم نسخ سر Webhook.
 Webhook status: {0},حالة Webhook: {0}
 Weighted pieces,القطع الموزونة
 Weighted pieces cannot be negative.,لا يمكن أن تكون القطع الموزونة سالبة.
-When Bosta accepted the terminate request from the Sales Order. Lets the poll retry a failed Delivery Note cancellation.,وقت قبول Bosta لطلب الإنهاء من أمر البيع. يسمح للاستطلاع بإعادة محاولة إلغاء مذكرة تسليم فاشل.
-When the current Bosta create request was started; used to tell a stuck Pending shipment from one in flight.,وقت بدء طلب الإنشاء الحالي في Bosta؛ يُستخدم للتمييز بين شحنة معلّقة عالقة وشحنة قيد التنفيذ.
 Whether/how much cash Talabat says should be collected at delivery - not evidence that it was actually collected (Collection) or of what the marketplace ultimately owes the merchant (Settlement).,ما إذا كان Talabat يذكر وجوب تحصيل نقد عند التسليم ومقداره - وليس دليلًا على تحصيله فعلًا (التحصيل) ولا على ما يدين به السوق للتاجر في النهاية (التسوية).
 Will be created.,سيتم إنشاؤه.
 You do not have permission to change the linked Sales Order in ERPNext.,ليس لديك صلاحية لتغيير أمر البيع المرتبط في ERPNext.
@@ -1561,44 +1378,17 @@ unknown status,حالة غير معروفة
 update,تحديث
 worst,الأسوأ
 {0} '{1}' does not exist as a {2}.,{0} '{1}' غير موجود كـ {2}.
-{0} cannot be edited once Bosta has the delivery; use Edit Bosta Shipment on the Sales Order.,"لا يمكن تعديل {0} بعد أن يصبح التوصيل لدى Bosta؛ استخدم ""تعديل شحنة Bosta"" في أمر البيع."
 {0} exceeds the outstanding amount and is left unallocated.,{0} يتجاوز المبلغ المستحق ويُترك دون تخصيص.
 {0} is mandatory.,{0} إلزامي.
 {0} is missing required field {1}.,{0} ينقصه الحقل المطلوب {1}.
 {0} is not a valid Shopify product variant GID.,{0} ليس معرّف متغيّر منتج Shopify (GID) صالحًا.
-{0} is set by the system and cannot be edited.,{0} يضبطه النظام ولا يمكن تعديله.
 {0} rounding difference was written off to {1}.,تم شطب فرق التقريب {0} إلى {1}.
-You can create at most {0} Bosta shipments at once. You selected {1}.,يمكنك إنشاء {0} شحنة Bosta كحد أقصى في المرة الواحدة. لقد حددت {1}.
-Sales Order {0} does not exist.,أمر البيع {0} غير موجود.
-You are not allowed to read this Sales Order.,ليس لديك صلاحية قراءة أمر البيع هذا.
-There are no Sales Orders to send to Bosta.,لا توجد أوامر بيع لإرسالها إلى Bosta.
-Each Sales Order to send needs a name.,يجب أن يكون لكل أمر بيع مُرسَل اسم.
-Bulk Bosta job not found.,لم يتم العثور على مهمة Bosta الجماعية.
-Bosta shipment {0} created and Delivery Note {1} submitted.,تم إنشاء شحنة Bosta {0} وتقديم مذكرة التسليم {1}.
-Bosta accepted the delivery (tracking number {0}) but the Delivery Note could not be created. Retry creates only the Delivery Note.,قبلت Bosta التوصيل (رقم التتبع {0}) لكن تعذّر إنشاء مذكرة التسليم. تُنشئ إعادة المحاولة مذكرة التسليم فقط.
-The shipment could not be created. See Error Log for details.,تعذّر إنشاء الشحنة. راجع سجل الأخطاء للتفاصيل.
 Bosta returned the district directory in an unrecognised format.,أعادت Bosta قائمة المناطق بصيغة غير معروفة.
-Create Bosta Shipments,إنشاء شحنات Bosta
-Checking the selected Sales Orders...,جارٍ فحص أوامر البيع المحددة...
-{0} will be sent without review.,سيتم إرسال {0} دون مراجعة.
-{0} need you to check the details one by one.,يحتاج {0} إلى مراجعة تفاصيلها واحدًا تلو الآخر.
-{0} will be skipped:,سيتم تجاوز {0}:
 Continue,متابعة
-Order {0} of {1},الطلب {0} من {1}
-Skipped by you.,تم التجاوز بواسطتك.
 Skip,تجاوز
-Cancelled. Nothing was sent to Bosta.,تم الإلغاء. لم يُرسل أي شيء إلى Bosta.
-Queuing the Bosta shipments...,جارٍ وضع شحنات Bosta في قائمة الانتظار...
-Retry failed,إعادة محاولة ما فشل
 Created,تم الإنشاء
 Sales Order,أمر البيع
 Details,التفاصيل
-Creating Bosta shipments,جارٍ إنشاء شحنات Bosta
-Nothing to create.,لا يوجد ما يمكن إنشاؤه.
-"Created {0}, failed {1}, skipped {2} so far.",تم إنشاء {0}، وفشل {1}، وتم تجاوز {2} حتى الآن.
-"Created {0}, failed {1}, skipped {2}",تم إنشاء {0}، وفشل {1}، وتم تجاوز {2}
-Bulk create failed: {0},فشل الإنشاء الجماعي: {0}
-Could not retrieve the Bosta bulk create status.,تعذّر استرجاع حالة الإنشاء الجماعي في Bosta.
 Noon AWB,بوليصة شحن Noon
 Noon AWBs,بوالص شحن Noon
 AWB Identity Key,مفتاح هوية بوليصة الشحن
@@ -1647,15 +1437,12 @@ Turn off to keep importing Noon orders while ERPNext stops automatically writing
 Turn off to keep importing Noon orders while ERPNext stops automatically writing prices to this account. Turning it back on does not trigger a full push. Manual syncs from the mapping still run.,أوقفه لمواصلة استيراد طلبات Noon بينما يتوقف ERPNext عن الكتابة التلقائية لـ الأسعار في هذا الحساب. إعادة تشغيله لا تُطلق إرسالًا كاملًا. تظل المزامنة اليدوية من الربط تعمل.
 Price push is paused for this account.,إرسال الأسعار متوقف مؤقتًا لهذا الحساب.
 Bosta City Code,رمز مدينة Bosta
-Sent to Bosta with the address first line; Bosta resolves the district.,يُرسل إلى Bosta مع السطر الأول من العنوان؛ وتحدد Bosta المنطقة.
 Choose a Bosta city.,اختر مدينة Bosta.
 Could not load the Bosta city codes. Try again in a minute.,تعذر تحميل رموز مدن Bosta. حاول مرة أخرى بعد دقيقة.
 Bosta has no city code for {0}. Refresh the Bosta lists and try again.,لا يوجد لدى Bosta رمز مدينة لـ {0}. حدّث قوائم Bosta وحاول مرة أخرى.
-Bosta could not find the district from this address. Add the area name to the address and retry.,لم تتمكن Bosta من تحديد المنطقة من هذا العنوان. أضف اسم المنطقة إلى العنوان وأعد المحاولة.
 Talabat User,مستخدم Talabat
 Noon User,مستخدم Noon
 Shopify User,مستخدم Shopify
-Bosta User,مستخدم Bosta
 Could not load the order details.,تعذّر تحميل تفاصيل الطلب.
 Order details,تفاصيل الطلب
 Details of {0},تفاصيل {0}
@@ -1722,9 +1509,9 @@ Payment Excess,زيادة في الدفعة
 Payment Entry Cancelled,إلغاء قيد الدفع
 Payment Issues,مشكلات الدفع
 Cancelled in Shopify but the payment was not fully refunded; refund it in Shopify,أُلغي الطلب في Shopify لكن لم يُرد المبلغ بالكامل؛ أعد المبلغ في Shopify
-"Cancelled Shopify order has an unrecognized financial status; review it manually.",حالة الدفع الملغاة في Shopify غير معروفة؛ راجع الطلب يدويًا.
+Cancelled Shopify order has an unrecognized financial status; review it manually.,حالة الدفع الملغاة في Shopify غير معروفة؛ راجع الطلب يدويًا.
 Open Payment Entry,فتح قيد الدفع
-"This marketplace change would reduce the Sales Order total below its advance of {0}. Reallocate or cancel the advance before updating the order.",سيؤدي هذا التغيير في السوق إلى خفض إجمالي أمر البيع عن الدفعة المقدمة البالغة {0}. أعد تخصيص الدفعة أو ألغها قبل تحديث الطلب.
+This marketplace change would reduce the Sales Order total below its advance of {0}. Reallocate or cancel the advance before updating the order.,سيؤدي هذا التغيير في السوق إلى خفض إجمالي أمر البيع عن الدفعة المقدمة البالغة {0}. أعد تخصيص الدفعة أو ألغها قبل تحديث الطلب.
 Shopify payment {0} could not be recorded: {1},تعذر تسجيل دفعة Shopify {0}: {1}
 Payment exceeds the order by {0}.,تتجاوز الدفعة قيمة الطلب بمقدار {0}.
 Mirrored payment transaction {0} was cancelled. Review the entry and record the payment manually if needed.,أُلغيت معاملة الدفع المنسوخة {0}. راجع القيد وسجّل الدفعة يدويًا إذا لزم الأمر.
@@ -1779,15 +1566,9 @@ Clear edit marker,مسح علامة التعديل
 Clear the marker of the item edit sent to Shopify? Do this only after you checked in Shopify what happened to that edit.,هل تريد مسح علامة تعديل العناصر المرسل إلى Shopify؟ افعل ذلك فقط بعد التحقق في Shopify مما حدث لهذا التعديل.
 Edit marker cleared.,تم مسح علامة التعديل.
 Marketplace outbound action: failed to write failure log,إجراء صادر للسوق: فشلت كتابة سجل الفشل
-Latest Bosta delivery state. Display only; it does not affect accounting.,أحدث حالة توصيل من Bosta. للعرض فقط ولا تؤثر على المحاسبة.
-"Delivery fee reported by Bosta, in EGP. Display only; it does not affect accounting.",رسوم التوصيل التي أبلغت عنها Bosta بالجنيه المصري. للعرض فقط ولا تؤثر على المحاسبة.
-Bosta exception,استثناء من Bosta
 Returned,مرتجع
 Received On,تاريخ الاستلام
 Invalid,غير صالح
-Bosta Delivery Fee Received On,تاريخ استلام رسوم توصيل Bosta
-"When Bosta first reported a delivery fee. A Currency column cannot tell an unset fee from a real 0, so the fee is shown and polling stops only once this is set.",وقت إبلاغ Bosta لأول مرة برسوم التوصيل. لا يميّز حقل العملة بين رسوم غير محددة وصفر حقيقي، لذلك تُعرض الرسوم ويتوقف الاستعلام عنها فقط بعد تعيين هذا الحقل.
-"This retry sends the COD entered earlier, {0}, not the current outstanding amount, {1}.",ستُرسل إعادة المحاولة هذه مبلغ الدفع عند الاستلام الذي أُدخل سابقًا، {0}، وليس المبلغ المستحق الحالي، {1}.
 Syncing,قيد المزامنة
 Needs Action,يحتاج إلى إجراء
 Waiting for User,بانتظار المستخدم
@@ -1868,8 +1649,8 @@ This form already has a different Project Code or Key ID. Overwrite them with th
 The file could not be read.,تعذرت قراءة الملف.
 stock queued as a manual run.,تمت إضافة المخزون إلى قائمة الانتظار كتشغيل يدوي.
 queued as a manual run.,تمت الإضافة إلى قائمة الانتظار كتشغيل يدوي.
-"Noon {0} sync queued as a manual run (automatic push is off for this account). Refresh this mapping to see the results.",تمت إضافة مزامنة {0} في Noon إلى قائمة الانتظار كتشغيل يدوي (الإرسال التلقائي متوقف لهذا الحساب). حدّث هذا الربط لرؤية النتائج.
-"Noon {0} sync queued as a manual run (automatic push is off for this account). Mapping statuses will update when the jobs finish.",تمت إضافة مزامنة {0} في Noon إلى قائمة الانتظار كتشغيل يدوي (الإرسال التلقائي متوقف لهذا الحساب). ستتحدث حالات الربط عند انتهاء المهام.
+Noon {0} sync queued as a manual run (automatic push is off for this account). Refresh this mapping to see the results.,تمت إضافة مزامنة {0} في Noon إلى قائمة الانتظار كتشغيل يدوي (الإرسال التلقائي متوقف لهذا الحساب). حدّث هذا الربط لرؤية النتائج.
+Noon {0} sync queued as a manual run (automatic push is off for this account). Mapping statuses will update when the jobs finish.,تمت إضافة مزامنة {0} في Noon إلى قائمة الانتظار كتشغيل يدوي (الإرسال التلقائي متوقف لهذا الحساب). ستتحدث حالات الربط عند انتهاء المهام.
 Product Bundle {0} has no component Items.,حزمة المنتجات {0} لا تحتوي على أي عناصر مكوّنة.
 Product Bundle {0}: component Item {1} does not exist.,حزمة المنتجات {0}: العنصر المكوّن {1} غير موجود.
 Product Bundle {0}: component Item {1} is not a stock Item.,حزمة المنتجات {0}: العنصر المكوّن {1} ليس عنصر مخزون.
@@ -1915,8 +1696,6 @@ Delivery Note {0} is not a draft.,مذكرة التسليم {0} ليست مسو�
 Units added to the draft Delivery Note {0}. Review and submit it.,تمت إضافة الوحدات إلى مسودة مذكرة التسليم {0}. راجعها ثم اعتمدها.
 {0} shipment(s) created but not marked handed over for over {1} hour(s),{0} شحنة منشأة لم يوضع عليها علامة تم التسليم منذ أكثر من {1} ساعة
 Bosta shipments cannot be created for {0} orders: {0} fulfils its own orders.,لا يمكن إنشاء شحنات Bosta لطلبات {0}: {0} تتولى تنفيذ طلباتها بنفسها.
-"Bosta is not used for {0} orders, so none of the selected Sales Orders can be sent to Bosta.",لا تُستخدم Bosta لطلبات {0}، لذلك لا يمكن إرسال أي من أوامر البيع المحددة إلى Bosta.
-{0} selected Sales Order(s) were left out: Bosta is not used for {1} orders.,تم استبعاد {0} من أوامر البيع المحددة: لا تُستخدم Bosta لطلبات {1}.
 New shipments can only use a Noon AWB.,يمكن للشحنات الجديدة استخدام بوليصة شحن (AWB) من Noon فقط.
 Noon is the only supported courier.,Noon هي شركة الشحن الوحيدة المدعومة.
 AWB Source,مصدر بوليصة الشحن
@@ -1932,7 +1711,7 @@ Mark units Out of Stock,تعليم الوحدات كنفدت من المخزون
 Upload shipment invoice,رفع فاتورة الشحنة
 Upload order invoice,رفع فاتورة الطلب
 Release Out of Stock reservation,تحرير حجز النفاد من المخزون
-"Type or scan the AWB on the Noon sticker. Leave empty to use a Noon AWB.","اكتب أو امسح رقم بوليصة الشحن (AWB) المطبوع على ملصق Noon. اتركه فارغًا لاستخدام بوليصة شحن من Noon."
+Type or scan the AWB on the Noon sticker. Leave empty to use a Noon AWB.,اكتب أو امسح رقم بوليصة الشحن (AWB) المطبوع على ملصق Noon. اتركه فارغًا لاستخدام بوليصة شحن من Noon.
 AWB {0} is already in use.,بوليصة الشحن (AWB) {0} مستخدمة بالفعل.
 AWB Nr cannot be longer than {0} characters.,يجب ألا يزيد رقم بوليصة الشحن (AWB) عن {0} حرفًا.
 Pending,معلّق
@@ -1995,3 +1774,113 @@ The Noon shipment is still live and no cancel is running. Close this and try aga
 Carrier,شركة الشحن
 AWB / Tracking No,رقم بوليصة الشحن / التتبع
 More,المزيد
+Actual Shipping Cost,تكلفة الشحن الفعلية
+Attempt No,رقم المحاولة
+Automatic Shopify payment mirroring,المطابقة التلقائية لمدفوعات Shopify
+Bosta City,مدينة Bosta
+Bosta cancelled this delivery.,ألغت Bosta هذا التسليم.
+Bosta has no delivery with this reference yet. The result is still unknown.,لا يوجد لدى Bosta تسليم بهذا المرجع حتى الآن. النتيجة ما زالت غير معروفة.
+Bosta is busy. Try again in a few minutes.,Bosta مشغولة. حاول مرة أخرى بعد بضع دقائق.
+Bosta reports this shipment was returned. Submit a return Delivery Note against it.,أفادت Bosta بأن هذه الشحنة أُرجعت. قدّم مذكرة تسليم مرتجعة مقابلها.
+Bosta returned a search result in an unrecognised format. Check the delivery in Bosta.,أعادت Bosta نتيجة بحث بصيغة غير معروفة. تحقق من التسليم في Bosta.
+Bosta returned a state this app does not recognise.,أعادت Bosta حالة لا يتعرف عليها التطبيق.
+Bosta shipment,شحنة Bosta
+Bosta's cities could not be loaded. Try again in a minute.,تعذر تحميل مدن Bosta. حاول مرة أخرى بعد دقيقة.
+Carrier Delivery ID,معرّف التسليم لدى شركة الشحن
+Carrier Reference,مرجع شركة الشحن
+Carrier Request Snapshot,نسخة طلب شركة الشحن
+Check with {0},تحقق لدى {0}
+Checking with {0}...,جارٍ التحقق لدى {0}...
+Choose the Bosta city before sending the shipment.,اختر مدينة Bosta قبل إرسال الشحنة.
+City set. Save the Delivery Note.,تم تحديد المدينة. احفظ مذكرة التسليم.
+Correlation ID,معرّف الربط
+Dedupe Key,مفتاح منع التكرار
+Delivery Note {0} has no Bosta tracking number yet.,مذكرة التسليم {0} ليس لها رقم تتبع Bosta بعد.
+Delivery Note {0} is in {1}; Bosta COD is only supported in the company currency {2}.,مذكرة التسليم {0} بعملة {1}؛ الدفع عند الاستلام عبر Bosta مدعوم بعملة الشركة {2} فقط.
+Error Code,رمز الخطأ
+Fetch Bosta Label,جلب بوليصة Bosta
+Fetching the label...,جارٍ جلب البوليصة...
+HTTP Status,حالة HTTP
+It is not known whether {0} created the shipment. The Delivery Note was not submitted.,من غير المعروف ما إذا كانت {0} قد أنشأت الشحنة. لم يتم اعتماد مذكرة التسليم.
+It is not known whether {0} created the shipment. Use Check with {0} before trying again.,من غير المعروف ما إذا كانت {0} قد أنشأت الشحنة. استخدم التحقق لدى {0} قبل المحاولة مرة أخرى.
+"Items, quantities and rows cannot be changed after the Bosta shipment was started. They must match the shipment sent to Bosta.",لا يمكن تغيير الأصناف والكميات والصفوف بعد بدء شحنة Bosta. يجب أن تطابق الشحنة المرسلة إلى Bosta.
+Last Bosta Event,آخر حدث من Bosta
+Last Synced,آخر مزامنة
+Only a draft Delivery Note can be sent to Bosta.,يمكن إرسال مذكرة التسليم المسودة فقط إلى Bosta.
+Only a note with a created Bosta shipment can be refreshed.,يمكن تحديث المذكرة التي لها شحنة Bosta منشأة فقط.
+Only a note with an unknown Bosta result can be checked.,يمكن فحص المذكرة التي نتيجة Bosta الخاصة بها غير معروفة فقط.
+"Open the Delivery Note later: if the shipment is Created, submit it again.",افتح مذكرة التسليم لاحقًا: إذا أصبحت الشحنة منشأة، فقدّمها مرة أخرى.
+Operation Type,نوع العملية
+Pick Bosta City,اختيار مدينة Bosta
+Please wait. The Delivery Note is submitted once {0} has created the shipment.,يرجى الانتظار. سيتم اعتماد مذكرة التسليم بعد أن تنشئ {0} الشحنة.
+Reading the status from {0}...,جارٍ قراءة الحالة من {0}...
+Refresh from {0},تحديث من {0}
+Sales Order {0} has a draft Delivery Note with a live Bosta shipment: {1}.,أمر البيع {0} له مذكرة تسليم مسودة بشحنة Bosta نشطة: {1}.
+"Save the Delivery Note first, then submit it.",احفظ مذكرة التسليم أولًا ثم قدّمها.
+Sending the shipment to {0}...,جارٍ إرسال الشحنة إلى {0}...
+Sending to {0}...,جارٍ الإرسال إلى {0}...
+Shipping Label,بوليصة الشحن
+Shipping Status,حالة الشحن
+Shipping Status Summary,ملخص حالات الشحن
+Shipping status: {0},حالة الشحن: {0}
+Still not known. Try again in a few minutes.,ما زال غير معروف. حاول مرة أخرى بعد بضع دقائق.
+Suggested from the delivery address.,مقترحة من عنوان التسليم.
+The Bosta lookup failed ({0}).,فشل البحث لدى Bosta ({0}).
+The Bosta request failed ({0}). It may or may not have reached Bosta.,فشل طلب Bosta ({0}). قد يكون وصل إلى Bosta وقد لا يكون.
+"The Bosta shipment of this Delivery Note is not Created yet, so it cannot be submitted.",شحنة Bosta الخاصة بمذكرة التسليم هذه لم تُنشأ بعد، لذلك لا يمكن تقديمها.
+The Delivery Note has no items.,مذكرة التسليم لا تحتوي على أصناف.
+The Delivery Note was changed. Reload it and try again.,تم تغيير مذكرة التسليم. أعد تحميلها وحاول مرة أخرى.
+The Delivery Note was not submitted.,لم يتم اعتماد مذكرة التسليم.
+"The carrier, tracking number, COD amount and city cannot be changed after the Bosta shipment was started.",لا يمكن تغيير شركة الشحن ورقم التتبع ومبلغ الدفع عند الاستلام والمدينة بعد بدء شحنة Bosta.
+The label can be fetched once the Bosta shipment is Created.,يمكن جلب البوليصة بعد أن تصبح شحنة Bosta منشأة.
+The label could not be fetched.,تعذر جلب البوليصة.
+The receiver address is missing. Add a shipping address to the Delivery Note.,عنوان المستلم مفقود. أضف عنوان شحن إلى مذكرة التسليم.
+The receiver name is missing.,اسم المستلم مفقود.
+The receiver phone is missing. Add a contact phone to the Delivery Note.,هاتف المستلم مفقود. أضف رقم هاتف جهة اتصال إلى مذكرة التسليم.
+The shipment is still being sent to Bosta. Check again in a few minutes.,ما زالت الشحنة قيد الإرسال إلى Bosta. تحقق مرة أخرى بعد بضع دقائق.
+"This Delivery Note has a Bosta shipment ({0}), so it cannot be cancelled or deleted.",لمذكرة التسليم هذه شحنة Bosta ({0})، لذلك لا يمكن إلغاؤها أو حذفها.
+This Delivery Note is not a Bosta shipment.,مذكرة التسليم هذه ليست شحنة Bosta.
+This Delivery Note is not a Bosta shipment. Choose the carrier Bosta.,مذكرة التسليم هذه ليست شحنة Bosta. اختر شركة الشحن Bosta.
+Unexpected error while sending the shipment to Bosta; see the Error Log. It may or may not have reached Bosta.,خطأ غير متوقع أثناء إرسال الشحنة إلى Bosta؛ راجع سجل الأخطاء. قد تكون وصلت إلى Bosta وقد لا تكون.
+Use Check with {0} on the Delivery Note before trying again.,استخدم التحقق لدى {0} في مذكرة التسليم قبل المحاولة مرة أخرى.
+Use this city,استخدم هذه المدينة
+{0} did not create the shipment: {1},لم تنشئ {0} الشحنة: {1}
+{0} has the shipment: it is now Created.,لدى {0} الشحنة: أصبحت الآن منشأة.
+{0} is taking longer than expected. The Delivery Note was not submitted.,{0} تستغرق وقتًا أطول من المتوقع. لم يتم اعتماد مذكرة التسليم.
+{0} shipment,شحنة {0}
+{0} shipment created. Tracking number: {1},تم إنشاء شحنة {0}. رقم التتبع: {1}
+{0} shipment: {1},شحنة {0}: {1}
+Shipping,الشحن
+Not Created,غير منشأة
+Creating,قيد الإنشاء
+Creation Unknown,نتيجة الإنشاء غير معروفة
+Creation Failed,فشل الإنشاء
+Cancellation Pending,الإلغاء قيد الانتظار
+Cancellation Unknown,نتيجة الإلغاء غير معروفة
+Last Sync,آخر مزامنة
+Last Integration Error,آخر خطأ في التكامل
+Create,إنشاء
+Cancel,إلغاء
+Return Pickup,استلام المرتجع
+Label Fetch,جلب البوليصة
+Webhook,Webhook
+Result,النتيجة
+Success,نجاح
+Delivery ID,معرّف التسليم
+Bosta Creation Problem,مشكلة في إنشاء شحنة Bosta
+Bosta Cancelled Delivery,تسليم ألغته Bosta
+Bosta Delivery Notes,مذكرات تسليم Bosta
+Carrier Exception,استثناء شركة الشحن
+"A Bosta shipment is started by submitting the Delivery Note, not by a retry.",تبدأ شحنة Bosta بتقديم مذكرة التسليم وليس بإعادة المحاولة.
+COD confirmed,تم تأكيد مبلغ الدفع عند الاستلام
+"Cash to collect on delivery. 0 means prepaid. Until confirmed, the default (the note's total minus the order's advance) is recalculated on every save.",النقد المطلوب تحصيله عند التسليم. 0 يعني مدفوع مسبقًا. حتى يتم التأكيد، يُعاد حساب القيمة الافتراضية (إجمالي المذكرة ناقص دفعة أمر البيع المقدمة) عند كل حفظ.
+"Close, keep sending",إغلاق مع متابعة الإرسال
+"Confirm the COD amount before sending the shipment: tick COD confirmed, or change the COD. 0 is allowed.",أكّد مبلغ الدفع عند الاستلام قبل إرسال الشحنة: فعّل «تم تأكيد مبلغ الدفع عند الاستلام» أو غيّر المبلغ. القيمة 0 مسموحة.
+"Confirm the COD amount before submitting: tick COD confirmed, or change the COD. 0 is allowed.",أكّد مبلغ الدفع عند الاستلام قبل التقديم: فعّل «تم تأكيد مبلغ الدفع عند الاستلام» أو غيّر المبلغ. القيمة 0 مسموحة.
+"Still sending to {0}. Open the Delivery Note later: if the shipment is Created, submit it again.",ما زال الإرسال إلى {0} جاريًا. افتح مذكرة التسليم لاحقًا: إذا أصبحت الشحنة منشأة فقدّمها مرة أخرى.
+The Delivery Note changed while checking with Bosta. Reload it and check again.,تغيّرت مذكرة التسليم أثناء الفحص مع Bosta. أعد تحميلها ثم افحص مرة أخرى.
+The shipment could not be sent.,تعذّر إرسال الشحنة.
+"Tick to keep the COD amount as it is, including 0. Required before the shipment is sent.",فعّله للإبقاء على مبلغ الدفع عند الاستلام كما هو، بما في ذلك 0. مطلوب قبل إرسال الشحنة.
+Bosta accepted the request without a delivery ID and tracking number.,قبلت Bosta الطلب دون معرّف توصيل ورقم تتبع.
+"#146 decision 13: -, n = 1 + every shipment ever created on this order (including cancelled ones) - never reused.",قرار #146 رقم 13: -، n = 1 + كل شحنة أُنشئت على هذا الطلب (بما في ذلك الملغاة) - لا يُعاد استخدامه أبدًا.
+The COD amount {0} differs from the amount calculated from the current items and advance ({1}). Change the COD if it is no longer right.,مبلغ التحصيل عند الاستلام {0} يختلف عن المبلغ المحسوب من الأصناف الحالية والمبلغ المدفوع مقدمًا ({1}). غيّر مبلغ التحصيل إذا لم يعد صحيحًا.

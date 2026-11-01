@@ -53,7 +53,7 @@
 				status_label = names.skipped;
 			}
 			$("<td></td>").text(status_label).appendTo($tr);
-			// `detail` is the one-line text of a caller whose rows carry one (Bosta bulk create).
+			// `detail` is the one-line text of a caller whose rows carry one.
 			$("<td></td>").text(row.detail || row.error || "").appendTo($tr);
 		});
 		if (truncated) {
@@ -258,24 +258,6 @@
 			account_failed: (account, error) =>
 				__("Sync failed for account {0}: {1}", [account, error]),
 			poll_failed: () => __("Could not retrieve the inventory sync status."),
-		},
-	};
-
-	// Constructor options for the Bosta bulk create (#305). Result rows are Sales Order
-	// names carrying a one-line `detail`; the status names are Created / Failed / Skipped.
-	frappe.ui.ShopifyCatalogPushStatus.BOSTA_BULK_OPTIONS = {
-		status_method: "marketplace_integrations.api.bosta_shipments.get_bulk_create_status",
-		result_link_route: "sales-order",
-		result_column_label: __("Sales Order"),
-		detail_column_label: __("Details"),
-		status_labels: { ok: __("Created"), skipped: __("Skipped"), error: __("Failed") },
-		labels: {
-			title: () => __("Creating Bosta shipments"),
-			nothing: () => __("Nothing to create."),
-			running: (counts) => __("Created {0}, failed {1}, skipped {2} so far.", counts),
-			complete: (counts) => __("Created {0}, failed {1}, skipped {2}", counts),
-			account_failed: (account, error) => __("Bulk create failed: {0}", [error]),
-			poll_failed: () => __("Could not retrieve the Bosta bulk create status."),
 		},
 	};
 

@@ -19,12 +19,5 @@
   "doctype": "Role",
   "name": "Shopify User",
   "role_name": "Shopify User"
- },
- {
-  "desk_access": 1,
-  "disabled": 0,
-  "doctype": "Role",
-  "name": "Bosta User",
-  "role_name": "Bosta User"
  }
 ]

@@ -111,12 +111,11 @@
 
 		if (data.marketplace) html += render_marketplace(data.marketplace);
 
-		if (data.bosta) {
-			const lines = [`${escape(__("Delivery status"))}: ${escape(data.bosta.status)}`];
-			if (data.bosta.tracking_number) {
-				lines.push(`${escape(__("Tracking number"))}: ${ltr(data.bosta.tracking_number)}`);
-			}
-			html += section("Bosta", lines.join("<br>"));
+		if (data.bosta && data.bosta.summary && typeof data.bosta.summary === "object") {
+			const lines = Object.entries(data.bosta.summary).map(
+				([state, count]) => `${escape(__(state))}: <bdi dir="ltr">${escape(count)}</bdi>`
+			);
+			if (lines.length) html += section("Bosta", lines.join("<br>"));
 		}
 
 		html += section(__("Total"), escape(money(data.total, data.currency)));

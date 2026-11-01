@@ -58,7 +58,12 @@ class IntegrationTestNoonItemEditGuard(IntegrationTestNoonFulfillmentBase):
 		self.assertIn(f"{GUARD}.block_row_change", events["before_update_after_submit"])
 		self.assertIn(f"{GUARD}.block_row_add", events["before_insert"])
 		self.assertIn(f"{GUARD}.block_row_remove", events["on_trash"])
-		self.assertNotIn("before_update_after_submit", frappe.get_hooks("doc_events", app_name="marketplace_integrations")["Sales Order"])
+		# The Noon guard is not on the parent; the only parent hook is the Bosta summary restore (#413).
+		parent = frappe.get_hooks("doc_events", app_name="marketplace_integrations")["Sales Order"]
+		self.assertEqual(
+			parent["before_update_after_submit"],
+			["marketplace_integrations.integrations.bosta.statuses.keep_stored_summary"],
+		)
 
 	def test_noon_quantity_change_is_refused_with_a_message_pointing_to_the_fulfillment_tab(self):
 		a = self.fx.items["A"].name

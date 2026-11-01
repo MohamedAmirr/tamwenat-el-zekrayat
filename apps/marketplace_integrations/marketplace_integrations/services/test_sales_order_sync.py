@@ -5378,7 +5378,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		)
 
 	def test_group_c_waits_for_receipt_and_creates_no_draft_before_it(self):
-		order, sales_order, delivery_note = self._delivered_and_cancelled_order()
+		order, _sales_order, delivery_note = self._delivered_and_cancelled_order()
 
 		result = sync_sales_order(order.name)
 		order.reload()
@@ -5426,7 +5426,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		from marketplace_integrations.api.marketplace_orders import confirm_goods_received
 		from marketplace_integrations.tests.utils import make_role_user
 
-		order, sales_order, delivery_note = self._delivered_and_cancelled_order()
+		order, _sales_order, delivery_note = self._delivered_and_cancelled_order()
 		sync_sales_order(order.name)
 		email, _role = make_role_user(
 			self, "Receipt Refused", {"Marketplace Order": ["write"], "Delivery Note": ["create"]}
@@ -5449,7 +5449,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.enterContext(recheck_jobs_run_inline())
 		from marketplace_integrations.api.marketplace_orders import confirm_goods_received
 
-		order, sales_order, delivery_note = self._delivered_and_cancelled_order()
+		order, sales_order, _delivery_note = self._delivered_and_cancelled_order()
 		sync_sales_order(order.name)
 		prepared = confirm_goods_received(order.name)["prepared_document"]
 

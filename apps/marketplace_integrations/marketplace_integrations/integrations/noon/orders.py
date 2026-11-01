@@ -36,7 +36,6 @@ import frappe
 from frappe import _
 from frappe.utils import cstr, flt
 
-from marketplace_integrations.services.sync_status import CANCELLED
 from marketplace_integrations.integrations.noon.catalog import get_account, validate_connection_enabled
 from marketplace_integrations.integrations.noon.client import NoonClient
 from marketplace_integrations.integrations.noon.constants import (
@@ -62,6 +61,7 @@ from marketplace_integrations.services.marketplace_orders import (
 	JSON_ITEM_FIELDS,
 	upsert_marketplace_order,
 )
+from marketplace_integrations.services.sync_status import CANCELLED
 
 _CUSTOMER_FIELDS = (
 	"customer_first_name",

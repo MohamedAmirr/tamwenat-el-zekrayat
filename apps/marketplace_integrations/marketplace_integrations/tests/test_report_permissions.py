@@ -55,8 +55,7 @@ class IntegrationTestReportPermissions(IntegrationTestCase):
 
 PLATFORM_ROLES = ("Talabat User", "Noon User", "Shopify User")
 
-# JSON file -> roles it must list (#323). Bosta User is deliberately absent everywhere: a
-# Bosta-only user has no Marketplace Account read, so none of these would work for them.
+# JSON file -> roles it must list (#323). Bosta has no role of its own (epic #413).
 REPORT_ROLES = {
 	"marketplace_channel_status": ("System Manager", *PLATFORM_ROLES),
 	"marketplace_needs_attention": ("System Manager", *PLATFORM_ROLES),
@@ -105,12 +104,3 @@ class IntegrationTestPlatformRolesForReportsAndPages(IntegrationTestCase):
 					frappe.get_doc("User", email).add_roles(role)
 					frappe.clear_cache(user=email)
 					self.assertTrue(frappe.has_permission(ref_doctype, "report", user=email))
-
-	def test_bosta_user_runs_none_of_the_reports(self):
-		email, _role = make_role_user(self, "Report Bosta", {})
-		frappe.get_doc("User", email).add_roles("Bosta User")
-		frappe.clear_cache(user=email)
-		for folder in REPORT_ROLES:
-			with self.subTest(report=folder):
-				ref_doctype = read_standard_json("report", folder)["ref_doctype"]
-				self.assertFalse(frappe.has_permission(ref_doctype, "report", user=email))

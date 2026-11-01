@@ -27,11 +27,11 @@ import frappe
 from frappe import _
 from frappe.utils import flt, get_datetime, getdate
 
-from marketplace_integrations.services.sync_status import CANCELLED, SYNC_ERROR, SYNCED
 from marketplace_integrations.integrations.shopify.webhooks import (
 	MAX_WEBHOOK_DELIVERY_ATTEMPTS,
 )
 from marketplace_integrations.services.marketplace_attention import get_resolved_import_failures
+from marketplace_integrations.services.sync_status import CANCELLED, SYNC_ERROR, SYNCED
 
 ORDER_IMPORT_FAILURES_LIMIT = 50
 SHOPIFY_READER_ROLES = ("System Manager", "Shopify User")
