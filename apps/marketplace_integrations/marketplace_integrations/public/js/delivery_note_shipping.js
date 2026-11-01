@@ -330,8 +330,12 @@
 	}
 
 	// The COD amount and its confirmation can only change while the note is editable.
-	function set_cod_state(frm) {
+	function set_cod_state(frm, carrier) {
 		const read_only = is_editable(frm) ? 0 : 1;
+		// Fields the carrier was sent (carrier.locked_fields) lock the same way; the server refuses them too.
+		((carriers[carrier] && carriers[carrier].locked_fields) || []).forEach((fieldname) =>
+			frm.set_df_property(fieldname, "read_only", read_only)
+		);
 		frm.set_df_property("custom_cod_amount", "read_only", read_only);
 		frm.set_df_property("custom_cod_confirmed", "read_only", read_only);
 	}
@@ -355,7 +359,7 @@
 				refresh(frm) {
 					const carrier = carrier_name(frm);
 					if (!carrier) return;
-					set_cod_state(frm);
+					set_cod_state(frm, carrier);
 					show_intro(frm, carrier);
 					show_shipping_status(frm);
 					show_cod_hint(frm, carrier);

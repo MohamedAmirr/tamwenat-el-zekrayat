@@ -1927,3 +1927,4 @@ Edit,تعديل
 "Choose the {0} city, then submit again.",اختر مدينة {0} ثم قدّم المستند مرة أخرى.
 Bosta Return Review,مراجعة مرتجع Bosta
 Bosta returned shipment {0}. Check the returned goods and submit this draft return.,أعادت Bosta الشحنة {0}. افحص البضاعة المرتجعة ثم قدّم مسودة المرتجع هذه.
+The receiver phone and shipping address cannot be changed after the Bosta shipment was started. Use Edit Bosta Shipment.,لا يمكن تغيير هاتف المستلم وعنوان الشحن بعد بدء شحنة Bosta. استخدم تعديل شحنة Bosta.

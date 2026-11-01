@@ -62,6 +62,7 @@ function load({ boot = ["Bosta"], statuses = [], call_fails = false, call_error 
 		refresh_method: "x.refresh",
 		add_buttons: (frm) => frm.extra_buttons++,
 		pick_city: (frm) => (frm.city_picked = (frm.city_picked || 0) + 1),
+		locked_fields: ["contact_mobile"],
 	});
 	return { handlers, calls, dialogs, msgprints, alerts, shipping };
 }
@@ -215,6 +216,16 @@ test("the COD amount and its confirmation are read-only once the shipment starte
 	const created = make_form({ custom_integration_status: "Created" });
 	handlers.refresh(created);
 	assert.equal(created.df["custom_cod_amount.read_only"], 1);
+});
+
+test("the carrier's locked fields are read-only once the shipment started, editable before", () => {
+	const { handlers } = load();
+	const draft = make_form({ custom_integration_status: "Not Created" });
+	handlers.refresh(draft);
+	assert.equal(draft.df["contact_mobile.read_only"], 0);
+	const created = make_form({ custom_integration_status: "Created" });
+	handlers.refresh(created);
+	assert.equal(created.df["contact_mobile.read_only"], 1);
 });
 
 test("changing the COD confirms it while the note is editable, and only then", () => {

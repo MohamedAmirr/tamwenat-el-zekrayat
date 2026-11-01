@@ -560,6 +560,22 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		with self.assertRaises(frappe.ValidationError):
 			doc.save()
 
+	def test_started_shipment_locks_the_receiver_phone_and_address_but_db_set_still_writes(self):
+		note = self.make_note()
+		doc = frappe.get_doc("Delivery Note", note.name)
+		doc.contact_mobile = "01011111111"
+		doc.save()  # still editable before the start
+		shipment.request_create(note.name)
+		for fieldname, value in {"contact_mobile": "01022222222", "shipping_address_name": "X-Other"}.items():
+			with self.subTest(fieldname):
+				doc = frappe.get_doc("Delivery Note", note.name)
+				doc.set(fieldname, value)
+				with self.assertRaises(frappe.ValidationError):
+					doc.save()
+		# the edit dialog's write path (db_set, no validate) is not blocked
+		frappe.get_doc("Delivery Note", note.name).db_set("contact_mobile", "01033333333")
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "contact_mobile"), "01033333333")
+
 	def test_a_failed_note_can_still_be_edited(self):
 		note = self.make_note()
 		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Creation Failed")

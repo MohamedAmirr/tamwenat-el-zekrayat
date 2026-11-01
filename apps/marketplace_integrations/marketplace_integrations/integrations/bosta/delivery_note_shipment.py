@@ -98,6 +98,10 @@ CLEARED_ON_NEW = (*SYSTEM_FIELDS, "custom_bosta_city", "custom_bosta_city_name")
 #: Fields a person edits that must stay put once the shipment is started.
 LOCKED_FIELDS = ("transporter", "lr_no", "custom_cod_amount", "custom_bosta_city", "custom_bosta_city_name")
 
+#: What Bosta received as the receiver phone and drop-off address (``build_payload``). After the start only
+#: the Edit Bosta Shipment dialog changes them (``editing.edit_shipment``, which writes with ``db_set``).
+RECEIVER_FIELDS = ("contact_mobile", "shipping_address_name", "shipping_address")
+
 _CREATE_JOB = "bosta-create|{}"
 _LABEL_JOB = "bosta-label|{}"
 _RETRYABLE_HTTP = {408, 429}
@@ -276,6 +280,14 @@ def guard_changes(doc):
 	):
 		frappe.throw(
 			_("The carrier, tracking number, COD amount and city cannot be changed after the Bosta shipment was started."),
+			title=_("Bosta shipment"),
+		)
+	if any(cstr(before.get(f)) != cstr(doc.get(f)) for f in RECEIVER_FIELDS):
+		frappe.throw(
+			_(
+				"The receiver phone and shipping address cannot be changed after the Bosta shipment was "
+				"started. Use Edit Bosta Shipment."
+			),
 			title=_("Bosta shipment"),
 		)
 	if _rows(before) != _rows(doc):

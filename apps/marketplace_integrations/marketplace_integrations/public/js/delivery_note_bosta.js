@@ -310,6 +310,8 @@
 		cod_hint_method: API + "get_cod_hint",
 		pick_city,
 		add_buttons,
+		// Sent to Bosta; after the start only Edit Bosta Shipment changes them.
+		locked_fields: ["contact_mobile", "shipping_address_name", "shipping_address"],
 	};
 
 
