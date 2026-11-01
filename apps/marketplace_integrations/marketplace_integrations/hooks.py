@@ -166,13 +166,12 @@ _RECHECK_EVENTS = {
 # also runs the handler that clears that link (it never raises). on_cancel keeps the link on
 # purpose: the amend flow re-links through amended_from (integrations/noon/handover_state.py).
 _HANDOVER_CLEAR_HANDLER = "marketplace_integrations.integrations.noon.handover_state.clear_deleted_delivery_note"
-# #391: Delivery Note-first Noon fulfillment (services/carrier_shipments.py). after_insert only queues
-# the shipment job (enqueue_after_commit, deduplicated job id): it never raises and makes no HTTP call.
+# #391/#415: Delivery Note-first carrier shipments (the neutral contract in services/carrier_shipments.py,
+# one adapter per carrier). Nothing is queued on insert: Submit starts the shipment (api/carrier_shipments.py).
 # validate, before_submit, before_cancel and on_trash (#393) are deliberate refusals, so they do raise:
-# transporter, lr_no, carrier status and items locked once the shipment is started; no submit until it is
-# Created; no cancel or delete while its Noon shipment is live (a shipment that never reached Noon is
-# discarded locally). The Sales Order before_cancel refuses while a draft note has a live shipment. All
-# only touch Delivery Notes of a submitted Noon Sales Order.
+# the carrier fields and items are locked once the shipment is started; no submit until it is Created; no
+# cancel or delete while its shipment is live. The Sales Order before_cancel refuses while a draft note has
+# a live shipment. Each only touches the Delivery Notes its carrier adapter claims.
 _CARRIER_GUARD = "marketplace_integrations.services.carrier_shipments.guard_cancel_or_delete"
 doc_events = {
 	"Delivery Note": {
@@ -181,7 +180,6 @@ doc_events = {
 		# the handover handler resets the shipment's note link.
 		"on_trash": [_CARRIER_GUARD, _RECHECK_HANDLER, _HANDOVER_CLEAR_HANDLER],
 		"before_cancel": _CARRIER_GUARD,
-		"after_insert": "marketplace_integrations.services.carrier_shipments.queue_shipment",
 		"validate": "marketplace_integrations.services.carrier_shipments.validate_delivery_note",
 		"before_submit": "marketplace_integrations.services.carrier_shipments.require_shipment_created",
 	},
@@ -242,7 +240,7 @@ scheduler_events = {
 	"cron": {
 		"59 23 * * *": [
 			"marketplace_integrations.services.marketplace_order_reconciliation.enqueue_nightly_order_reconciliation",
-			"marketplace_integrations.integrations.bosta.statuses.reconcile_open_notes",
+			"marketplace_integrations.services.carrier_shipments.reconcile_open_notes",
 		],
 		SHOPIFY_INVENTORY_SWEEP_CRON: [
 			"marketplace_integrations.integrations.shopify.inventory_sync.sweep_changed_bins",

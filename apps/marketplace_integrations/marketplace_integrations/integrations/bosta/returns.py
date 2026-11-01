@@ -6,7 +6,7 @@
 When Bosta reports a returned state (``statuses.RETURNED_STATE_CODES``) on a submitted Bosta Delivery Note,
 ``statuses._write_state`` queues ``create_returned_draft``. It makes ONE draft return Delivery Note through
 ERPNext's own ``make_sales_return`` and marks it ``custom_return_source`` = "Returned by Bosta". Stock moves
-only when staff submit that return after checking the goods (the Needs Attention row "Bosta Return" stays
+only when staff submit that return after checking the goods (the Needs Attention row "Carrier Return" stays
 open until a submitted return exists). No Bosta call is made: a shipment the customer never received needs
 no Customer Return Pickup (type 25).
 

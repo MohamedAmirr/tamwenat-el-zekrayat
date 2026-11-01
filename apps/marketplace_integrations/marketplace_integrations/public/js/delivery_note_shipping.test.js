@@ -57,9 +57,8 @@ function load({ boot = ["Bosta"], statuses = [], call_fails = false, call_error 
 	shipping.poll_ms = 1;
 	shipping.max_wait_ms = 30;
 	shipping.register_carrier("Bosta", {
-		request_method: "x.request",
-		check_method: "x.check",
-		refresh_method: "x.refresh",
+		before_send: (frm) => frm.doc.custom_cod_confirmed !== 0,
+		refresh: (frm) => (frm.carrier_refreshed = true),
 		add_buttons: (frm) => frm.extra_buttons++,
 		pick_city: (frm) => (frm.city_picked = (frm.city_picked || 0) + 1),
 		locked_fields: ["contact_mobile"],
@@ -188,7 +187,7 @@ test("the Check button calls the carrier method and reloads the form", async () 
 	const frm = make_form({ custom_integration_status: "Creation Unknown" });
 	handlers.refresh(frm);
 	await frm.buttons[0].action();
-	assert.equal(calls[0].method, "x.check");
+	assert.equal(calls[0].method, "marketplace_integrations.api.carrier_shipments.check_shipment");
 	assert.deepEqual(calls[0].args, { delivery_note: "MAT-DN-1" });
 	assert.equal(frm.reloads, 1);
 });
@@ -203,21 +202,6 @@ test("the carrier's answer to Check is escaped before it is shown as an alert", 
 	assert.ok(shipping);
 });
 
-test("the COD amount and its confirmation are read-only once the shipment started, editable before", () => {
-	const { handlers } = load();
-	const draft = make_form({ custom_integration_status: "Not Created" });
-	handlers.refresh(draft);
-	assert.equal(draft.df["custom_cod_amount.read_only"], 0);
-	assert.equal(draft.df["custom_cod_confirmed.read_only"], 0);
-	const started = make_form({ custom_integration_status: "Creating" });
-	handlers.refresh(started);
-	assert.equal(started.df["custom_cod_amount.read_only"], 1);
-	assert.equal(started.df["custom_cod_confirmed.read_only"], 1);
-	const created = make_form({ custom_integration_status: "Created" });
-	handlers.refresh(created);
-	assert.equal(created.df["custom_cod_amount.read_only"], 1);
-});
-
 test("the carrier's locked fields are read-only once the shipment started, editable before", () => {
 	const { handlers } = load();
 	const draft = make_form({ custom_integration_status: "Not Created" });
@@ -226,28 +210,6 @@ test("the carrier's locked fields are read-only once the shipment started, edita
 	const created = make_form({ custom_integration_status: "Created" });
 	handlers.refresh(created);
 	assert.equal(created.df["contact_mobile.read_only"], 1);
-});
-
-test("changing the COD confirms it while the note is editable, and only then", () => {
-	const { handlers } = load();
-	const draft = make_form({ custom_integration_status: "Not Created", custom_cod_confirmed: 0 });
-	handlers.custom_cod_amount(draft);
-	assert.equal(draft.values.custom_cod_confirmed, 1);
-	const started = make_form({ custom_integration_status: "Created", custom_cod_confirmed: 0 });
-	handlers.custom_cod_amount(started);
-	assert.deepEqual(started.values, {});
-	const other = make_form({ transporter_name: "Noon", custom_cod_confirmed: 0 });
-	handlers.custom_cod_amount(other);
-	assert.deepEqual(other.values, {});
-});
-
-test("submit with an unconfirmed COD asks to confirm it and does not call the carrier", () => {
-	const { handlers, calls, msgprints } = load();
-	const frm = make_form({ custom_integration_status: "Not Created", custom_cod_confirmed: 0 });
-	assert.equal(handlers.before_submit(frm), undefined);
-	assert.equal(global.frappe.validated, false);
-	assert.equal(calls.length, 0);
-	assert.match(msgprints[0].message, /Confirm the COD amount/);
 });
 
 test("submit of a note already Created continues without a dialog", () => {
@@ -279,7 +241,7 @@ test("submit waits for Created, reloads the form, then lets the submit continue"
 	});
 	const frm = make_form({ custom_integration_status: "Not Created" });
 	await handlers.before_submit(frm);
-	assert.equal(calls[0].method, "x.request");
+	assert.equal(calls[0].method, "marketplace_integrations.api.carrier_shipments.request_shipment");
 	assert.deepEqual(calls[0].args, { delivery_note: "MAT-DN-1", modified: "2026-10-31 10:00:00" });
 	assert.equal(dialogs[0].config.title, "Sending to Bosta...");
 	assert.equal(dialogs[0].hidden, true);
@@ -334,7 +296,7 @@ test("the Check with Bosta button of the Unknown dialog calls the check method a
 	const frm = make_form({ custom_integration_status: "Not Created" });
 	await handlers.before_submit(frm);
 	await msgprints[0].primary_action.action();
-	assert.equal(calls[calls.length - 1].method, "x.check");
+	assert.equal(calls[calls.length - 1].method, "marketplace_integrations.api.carrier_shipments.check_shipment");
 	assert.equal(frm.reloads, 1);
 });
 
@@ -388,46 +350,17 @@ test("closing the dialog abandons the wait without submitting", async () => {
 	assert.equal(global.frappe.validated, false);
 });
 
-test("a confirmed COD that differs from the computed one shows a note with both amounts, escaped", async () => {
-	const { shipping } = load();
-	shipping.register_carrier("Bosta", { request_method: "x.request", cod_hint_method: "x.hint" });
-	const comments = [];
-	const frm = make_form({ custom_integration_status: "Not Created", custom_cod_amount: 100, currency: "EGP" });
-	frm.dashboard.add_comment = (text, color, permanent) => comments.push({ text, color, permanent });
-	const calls = [];
-	global.frappe.call = (opts) => {
-		calls.push(opts);
-		return Promise.resolve({ message: { default: 250 } });
-	};
-	await shipping.show_cod_hint(frm, "Bosta");
-	assert.equal(calls[0].method, "x.hint");
-	assert.equal(comments.length, 1);
-	assert.match(comments[0].text, /100 differs .* \(250\)/);
-	assert.equal(comments[0].color, "yellow");
+test("a carrier's before_send returning false stops the submit before the carrier is called", () => {
+	const { handlers, calls } = load();
+	const frm = make_form({ custom_integration_status: "Not Created", custom_cod_confirmed: 0 });
+	assert.equal(handlers.before_submit(frm), undefined);
+	assert.equal(global.frappe.validated, false);
+	assert.equal(calls.length, 0);
 });
 
-test("no COD note when the amount matches, the form is unsaved or dirty, or the shipment started", async () => {
-	const { shipping } = load();
-	shipping.register_carrier("Bosta", { request_method: "x.request", cod_hint_method: "x.hint" });
-	let called = 0;
-	global.frappe.call = () => {
-		called++;
-		return Promise.resolve({ message: { default: null } });
-	};
-	const comments = [];
-	const add = (frm) => (frm.dashboard.add_comment = (text) => comments.push(text));
-	const same = make_form({ custom_integration_status: "Not Created" });
-	add(same);
-	await shipping.show_cod_hint(same, "Bosta");
-	assert.equal(called, 1);
-	assert.equal(comments.length, 0);
-	for (const frm of [
-		make_form({ custom_integration_status: "Creating" }),
-		make_form({ custom_integration_status: "Not Created", custom_cod_confirmed: 0 }),
-		make_form({ custom_integration_status: "Not Created" }, { dirty: true }),
-	]) {
-		add(frm);
-		await shipping.show_cod_hint(frm, "Bosta");
-	}
-	assert.equal(called, 1);
+test("the shell runs the carrier's refresh hook on every form refresh", () => {
+	const { handlers } = load();
+	const frm = make_form({ custom_integration_status: "Not Created" });
+	handlers.refresh(frm);
+	assert.equal(frm.carrier_refreshed, true);
 });

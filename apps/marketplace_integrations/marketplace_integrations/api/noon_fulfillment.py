@@ -14,7 +14,6 @@ queue. No Noon HTTP call ever happens inside a Desk request.
 import frappe
 
 from marketplace_integrations.integrations.noon import delivery_note_shipment, fulfillment, handover_state
-from marketplace_integrations.services import carrier_shipments
 
 
 def _get_noon_order(marketplace_order):
@@ -178,7 +177,7 @@ def retry_delivery_note_shipment(delivery_note: str):
 	whose carrier status is Error. Needs write permission on that Delivery Note (the Stock User's
 	own right); the worker writes the Noon records as the system user."""
 	frappe.has_permission("Delivery Note", "write", doc=delivery_note, throw=True)
-	return carrier_shipments.retry_shipment(delivery_note)
+	return delivery_note_shipment.retry(delivery_note)
 
 
 # ---------------------------------------------------------------------------

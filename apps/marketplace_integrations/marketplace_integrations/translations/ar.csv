@@ -318,10 +318,10 @@ Investigation,قيد التحقيق
 Awaiting your action,بانتظار الإجراء المطلوب منك
 Archived,مؤرشف
 On hold,معلّق
-Bosta Carrier Exception,استثناء من شركة شحن Bosta
-Bosta Return,مرتجع Bosta
-Bosta Status Stale,حالة شحنة Bosta قديمة
-Bosta has not updated this shipment for 5 days.,لم تحدّث Bosta هذه الشحنة منذ ٥ أيام.
+Carrier Exception,استثناء من شركة الشحن
+Carrier Return,مرتجع شركة الشحن
+Carrier Status Stale,حالة شحنة شركة الشحن قديمة
+{0} has not updated this shipment for 5 days.,لم تحدّث {0} هذه الشحنة منذ ٥ أيام.
 Last Error,آخر خطأ
 COD Amount,مبلغ الدفع عند التسليم (COD)
 External Account ID,معرّف الحساب الخارجي
@@ -1726,7 +1726,6 @@ Item {0} has no enabled Noon product mapping for a SKU on this order.,لا يو�
 Item {0} is mapped to more than one Noon SKU on this order ({1}).,العنصر {0} مربوط بأكثر من SKU واحد في Noon ضمن هذا الطلب ({1}).
 The quantity of Item {0} must be a whole number of units.,يجب أن تكون كمية العنصر {0} عددًا صحيحًا من الوحدات.
 "Item {0} needs {1} shippable unit(s) of SKU {2}, but only {3} are available.",يحتاج العنصر {0} إلى {1} وحدة قابلة للشحن من SKU {2}، لكن المتاح {3} فقط.
-This Delivery Note has no carrier shipment to retry.,لا توجد شحنة شركة شحن لإعادة المحاولة في مذكرة التسليم هذه.
 Noon shipments are now created from a Delivery Note. Open the Sales Order and use Create > Delivery Note.,تُنشأ شحنات Noon الآن من مذكرة التسليم. افتح أمر البيع واستخدم إنشاء > مذكرة تسليم.
 {0} failed on order {1} (Delivery Note {2}): {3},فشل {0} في الطلب {1} (مذكرة التسليم {2}): {3}
  (Delivery Note: {0}), (مذكرة التسليم: {0})
@@ -1778,10 +1777,8 @@ Actual Shipping Cost,تكلفة الشحن الفعلية
 Attempt No,رقم المحاولة
 Automatic Shopify payment mirroring,المطابقة التلقائية لمدفوعات Shopify
 Bosta City,مدينة Bosta
-Bosta cancelled this delivery.,ألغت Bosta هذا التسليم.
-Bosta has no delivery with this reference yet. The result is still unknown.,لا يوجد لدى Bosta تسليم بهذا المرجع حتى الآن. النتيجة ما زالت غير معروفة.
-Bosta is busy. Try again in a few minutes.,Bosta مشغولة. حاول مرة أخرى بعد بضع دقائق.
-Bosta reports this shipment was returned. Submit a return Delivery Note against it.,أفادت Bosta بأن هذه الشحنة أُرجعت. قدّم مذكرة تسليم مرتجعة مقابلها.
+{0} cancelled this delivery.,ألغت {0} هذا التسليم.
+{0} reports this shipment was returned. Submit a return Delivery Note against it.,أفادت {0} بأن هذه الشحنة أُرجعت. قدّم مذكرة تسليم مرتجعة مقابلها.
 Bosta returned a search result in an unrecognised format. Check the delivery in Bosta.,أعادت Bosta نتيجة بحث بصيغة غير معروفة. تحقق من التسليم في Bosta.
 Bosta returned a state this app does not recognise.,أعادت Bosta حالة لا يتعرف عليها التطبيق.
 Bosta shipment,شحنة Bosta
@@ -1807,8 +1804,6 @@ It is not known whether {0} created the shipment. Use Check with {0} before tryi
 Last Bosta Event,آخر حدث من Bosta
 Last Synced,آخر مزامنة
 Only a draft Delivery Note can be sent to Bosta.,يمكن إرسال مذكرة التسليم المسودة فقط إلى Bosta.
-Only a note with a created Bosta shipment can be refreshed.,يمكن تحديث المذكرة التي لها شحنة Bosta منشأة فقط.
-Only a note with an unknown Bosta result can be checked.,يمكن فحص المذكرة التي نتيجة Bosta الخاصة بها غير معروفة فقط.
 "Open the Delivery Note later: if the shipment is Created, submit it again.",افتح مذكرة التسليم لاحقًا: إذا أصبحت الشحنة منشأة، فقدّمها مرة أخرى.
 Operation Type,نوع العملية
 Pick Bosta City,اختيار مدينة Bosta
@@ -1827,7 +1822,6 @@ Still not known. Try again in a few minutes.,ما زال غير معروف. حا
 Suggested from the delivery address.,مقترحة من عنوان التسليم.
 The Bosta lookup failed ({0}).,فشل البحث لدى Bosta ({0}).
 The Bosta request failed ({0}). It may or may not have reached Bosta.,فشل طلب Bosta ({0}). قد يكون وصل إلى Bosta وقد لا يكون.
-"The Bosta shipment of this Delivery Note is not Created yet, so it cannot be submitted.",شحنة Bosta الخاصة بمذكرة التسليم هذه لم تُنشأ بعد، لذلك لا يمكن تقديمها.
 The Delivery Note has no items.,مذكرة التسليم لا تحتوي على أصناف.
 The Delivery Note was changed. Reload it and try again.,تم تغيير مذكرة التسليم. أعد تحميلها وحاول مرة أخرى.
 The Delivery Note was not submitted.,لم يتم اعتماد مذكرة التسليم.
@@ -1837,10 +1831,8 @@ The label could not be fetched.,تعذر جلب البوليصة.
 The receiver address is missing. Add a shipping address to the Delivery Note.,عنوان المستلم مفقود. أضف عنوان شحن إلى مذكرة التسليم.
 The receiver name is missing.,اسم المستلم مفقود.
 The receiver phone is missing. Add a contact phone to the Delivery Note.,هاتف المستلم مفقود. أضف رقم هاتف جهة اتصال إلى مذكرة التسليم.
-The shipment is still being sent to Bosta. Check again in a few minutes.,ما زالت الشحنة قيد الإرسال إلى Bosta. تحقق مرة أخرى بعد بضع دقائق.
 This Delivery Note is not a Bosta shipment.,مذكرة التسليم هذه ليست شحنة Bosta.
 This Delivery Note is not a Bosta shipment. Choose the carrier Bosta.,مذكرة التسليم هذه ليست شحنة Bosta. اختر شركة الشحن Bosta.
-Unexpected error while sending the shipment to Bosta; see the Error Log. It may or may not have reached Bosta.,خطأ غير متوقع أثناء إرسال الشحنة إلى Bosta؛ راجع سجل الأخطاء. قد تكون وصلت إلى Bosta وقد لا تكون.
 Use Check with {0} on the Delivery Note before trying again.,استخدم التحقق لدى {0} في مذكرة التسليم قبل المحاولة مرة أخرى.
 Use this city,استخدم هذه المدينة
 {0} did not create the shipment: {1},لم تنشئ {0} الشحنة: {1}
@@ -1866,26 +1858,21 @@ Webhook,Webhook
 Result,النتيجة
 Success,نجاح
 Delivery ID,معرّف التسليم
-Bosta Creation Problem,مشكلة في إنشاء شحنة Bosta
-Bosta Cancelled Delivery,تسليم ألغته Bosta
+Carrier Creation Problem,مشكلة في إنشاء شحنة شركة الشحن
+Carrier Cancelled,تسليم ألغته شركة الشحن
 Bosta Delivery Notes,مذكرات تسليم Bosta
 Carrier Exception,استثناء شركة الشحن
-"A Bosta shipment is started by submitting the Delivery Note, not by a retry.",تبدأ شحنة Bosta بتقديم مذكرة التسليم وليس بإعادة المحاولة.
 COD confirmed,تم تأكيد مبلغ الدفع عند الاستلام
 "Cash to collect on delivery. 0 means prepaid. Until confirmed, the default (the note's total minus the order's advance) is recalculated on every save.",النقد المطلوب تحصيله عند التسليم. 0 يعني مدفوع مسبقًا. حتى يتم التأكيد، يُعاد حساب القيمة الافتراضية (إجمالي المذكرة ناقص دفعة أمر البيع المقدمة) عند كل حفظ.
 "Close, keep sending",إغلاق مع متابعة الإرسال
 "Confirm the COD amount before sending the shipment: tick COD confirmed, or change the COD. 0 is allowed.",أكّد مبلغ الدفع عند الاستلام قبل إرسال الشحنة: فعّل «تم تأكيد مبلغ الدفع عند الاستلام» أو غيّر المبلغ. القيمة 0 مسموحة.
 "Confirm the COD amount before submitting: tick COD confirmed, or change the COD. 0 is allowed.",أكّد مبلغ الدفع عند الاستلام قبل التقديم: فعّل «تم تأكيد مبلغ الدفع عند الاستلام» أو غيّر المبلغ. القيمة 0 مسموحة.
 "Still sending to {0}. Open the Delivery Note later: if the shipment is Created, submit it again.",ما زال الإرسال إلى {0} جاريًا. افتح مذكرة التسليم لاحقًا: إذا أصبحت الشحنة منشأة فقدّمها مرة أخرى.
-The Delivery Note changed while checking with Bosta. Reload it and check again.,تغيّرت مذكرة التسليم أثناء الفحص مع Bosta. أعد تحميلها ثم افحص مرة أخرى.
 The shipment could not be sent.,تعذّر إرسال الشحنة.
 "Tick to keep the COD amount as it is, including 0. Required before the shipment is sent.",فعّله للإبقاء على مبلغ الدفع عند الاستلام كما هو، بما في ذلك 0. مطلوب قبل إرسال الشحنة.
 Bosta accepted the request without a delivery ID and tracking number.,قبلت Bosta الطلب دون معرّف توصيل ورقم تتبع.
 "#146 decision 13: -, n = 1 + every shipment ever created on this order (including cancelled ones) - never reused.",قرار #146 رقم 13: -، n = 1 + كل شحنة أُنشئت على هذا الطلب (بما في ذلك الملغاة) - لا يُعاد استخدامه أبدًا.
 The COD amount {0} differs from the amount calculated from the current items and advance ({1}). Change the COD if it is no longer right.,مبلغ التحصيل عند الاستلام {0} يختلف عن المبلغ المحسوب من الأصناف الحالية والمبلغ المدفوع مقدمًا ({1}). غيّر مبلغ التحصيل إذا لم يعد صحيحًا.
-"This Delivery Note has a Bosta shipment ({0}). Cancel the shipment at Bosta first (Cancel Bosta Shipment, or Cancel on a submitted note).",لهذه المذكرة شحنة Bosta ({0}). ألغِ الشحنة في Bosta أولًا (إلغاء شحنة Bosta، أو إلغاء المذكرة إذا كانت مُرحَّلة).
-Bosta is already being asked to cancel this shipment. Check again in a minute.,يجري بالفعل طلب إلغاء هذه الشحنة من Bosta. تحقق مرة أخرى بعد دقيقة.
-Only a note with a created Bosta shipment can be cancelled at Bosta.,لا يمكن إلغاء الشحنة في Bosta إلا لمذكرة لها شحنة Bosta منشأة.
 This Delivery Note has no Bosta tracking number.,ليس لمذكرة التسليم هذه رقم تتبع Bosta.
 Nothing was changed in ERPNext. Check the delivery in Bosta before trying again.,لم يتغير شيء في ERPNext. تحقق من التوصيل في Bosta قبل المحاولة مرة أخرى.
 Enter the receiver phone.,أدخل هاتف المستلم.
@@ -1925,6 +1912,19 @@ Customer Return Pickup,استلام مرتجع العميل
 Returned by Bosta,أعادته Bosta
 Edit,تعديل
 "Choose the {0} city, then submit again.",اختر مدينة {0} ثم قدّم المستند مرة أخرى.
-Bosta Return Review,مراجعة مرتجع Bosta
-Bosta returned shipment {0}. Check the returned goods and submit this draft return.,أعادت Bosta الشحنة {0}. افحص البضاعة المرتجعة ثم قدّم مسودة المرتجع هذه.
+Carrier Return Review,مراجعة مرتجع شركة الشحن
+{0} returned shipment {1}. Check the returned goods and submit this draft return.,أعادت {0} الشحنة {1}. افحص البضاعة المرتجعة ثم قدّم مسودة المرتجع هذه.
 The receiver phone and shipping address cannot be changed after the Bosta shipment was started. Use Edit Bosta Shipment.,لا يمكن تغيير هاتف المستلم وعنوان الشحن بعد بدء شحنة Bosta. استخدم تعديل شحنة Bosta.
+"The {0} shipment of this Delivery Note is not Created yet, so it cannot be submitted.",شحنة {0} الخاصة بمذكرة التسليم هذه لم تُنشأ بعد، لذلك لا يمكن تقديمها.
+"This Delivery Note has a {0} shipment ({1}). Cancel the shipment at {0} first (Cancel {0} Shipment, or Cancel on a submitted note).",لهذه المذكرة شحنة {0} ({1}). ألغِ الشحنة في {0} أولًا (إلغاء شحنة {0}، أو إلغاء المذكرة إذا كانت مُرحَّلة).
+Unexpected error while sending the shipment to {0}; see the Error Log. It may or may not have reached {0}.,خطأ غير متوقع أثناء إرسال الشحنة إلى {0}؛ راجع سجل الأخطاء. قد تكون وصلت إلى {0} وقد لا تكون.
+The shipment is still being sent to {0}. Check again in a few minutes.,ما زالت الشحنة قيد الإرسال إلى {0}. تحقق مرة أخرى بعد بضع دقائق.
+Only a note with an unknown {0} result can be checked.,يمكن فحص المذكرة التي نتيجة {0} الخاصة بها غير معروفة فقط.
+The Delivery Note changed while checking with {0}. Reload it and check again.,تغيّرت مذكرة التسليم أثناء الفحص مع {0}. أعد تحميلها ثم افحص مرة أخرى.
+{0} has no delivery with this reference yet. The result is still unknown.,لا يوجد لدى {0} تسليم بهذا المرجع حتى الآن. النتيجة ما زالت غير معروفة.
+{0} is already being asked to cancel this shipment. Check again in a minute.,يجري بالفعل طلب إلغاء هذه الشحنة من {0}. تحقق مرة أخرى بعد دقيقة.
+Only a note with a created {0} shipment can be cancelled at {0}.,لا يمكن إلغاء الشحنة في {0} إلا لمذكرة لها شحنة {0} منشأة.
+Only a note with a created {0} shipment can be refreshed.,يمكن تحديث المذكرة التي لها شحنة {0} منشأة فقط.
+{0} is busy. Try again in a few minutes.,{0} مشغولة. حاول مرة أخرى بعد بضع دقائق.
+{0} shipment,شحنة {0}
+This Delivery Note has no carrier shipment.,لا توجد شحنة شركة شحن لمذكرة التسليم هذه.

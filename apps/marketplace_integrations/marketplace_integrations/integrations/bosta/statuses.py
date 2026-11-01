@@ -21,7 +21,13 @@ from frappe import _
 from frappe.utils import add_days, cstr, escape_html, now_datetime
 
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as shipment
-from marketplace_integrations.integrations.bosta.client import BostaClient, is_success_response, response_body
+from marketplace_integrations.integrations.bosta.client import (
+	SERVICE_NAME,
+	BostaClient,
+	is_success_response,
+	response_body,
+)
+from marketplace_integrations.services import carrier_log, carrier_shipments
 
 # Bosta's own terminal states: a Delivered (45) or Canceled (49) delivery is not polled again.
 TERMINAL_STATE_CODES = (45, 49)
@@ -33,10 +39,13 @@ PENDING_EVENT_DAYS = 3
 #: Bosta states that mean the delivery was cancelled or terminated by Bosta.
 CANCELLED_STATE_CODES = (48, 49)
 #: Bosta states that mean the shipment came back to the merchant ("Returned to business", "Returned to
-#: stock"): the same pair the Needs Attention "Bosta Return" row uses. One draft Sales Return per note
+#: stock"): the same pair the Needs Attention "Carrier Return" row uses. One draft Sales Return per note
 #: (``returns.create_returned_draft``) is made for them. Open question D13: which of the two is the
 #: "customer never received it" state; the draft is idempotent, so both is safe.
 RETURNED_STATE_CODES = (46, 60)
+#: #344: carrier exceptions for Needs Attention. 48 and 49 are not listed (49 is a cancellation, which the
+#: poll records as a Canceled shipment).
+PROBLEM_STATE_CODES = (47, 100, 101, 102, 103, 105)
 
 # Names are deliberately from Bosta's supplied webhook guide.  We do not
 # derive a state name from an unknown numeric code or trust a free-text state
@@ -77,8 +86,8 @@ DOCUMENTED_DELIVERY_TYPES = {
 }
 
 
-class RateLimited(Exception):
-	"""Bosta answered 429; a reconciliation run stops early."""
+#: Bosta answered 429; a reconciliation run stops early (the neutral exception).
+RateLimited = carrier_log.RateLimited
 
 
 def terminal_state_names():
@@ -194,7 +203,7 @@ def _apply_event(log):
 	if outcome == "older":
 		return _ignore(log, "older or repeated event")
 	if outcome == "applied":
-		shipment.close_log(log, "Success")
+		carrier_log.close_log(log, "Success")
 		frappe.db.commit()
 		return outcome
 	# The event contradicts what the note says: ask Bosta and apply its answer. The log is closed after
@@ -203,14 +212,14 @@ def _apply_event(log):
 		refreshed = refresh_note(note)
 	except Exception as exc:
 		frappe.db.rollback()
-		shipment.close_log(log, "Failed", error=f"conflict, refresh from Bosta failed: {cstr(exc)[:300]}")
+		carrier_log.close_log(log, "Failed", error=f"conflict, refresh from Bosta failed: {cstr(exc)[:300]}")
 		frappe.db.commit()
 		return "failed"
 	if refreshed is None:
-		shipment.close_log(log, "Failed", error="conflict, the note has no tracking number to refresh from")
+		carrier_log.close_log(log, "Failed", error="conflict, the note has no tracking number to refresh from")
 		frappe.db.commit()
 		return "failed"
-	shipment.close_log(log, "Success", output="conflict: refreshed from Bosta")
+	carrier_log.close_log(log, "Success", output="conflict: refreshed from Bosta")
 	frappe.db.commit()
 	return "refreshed"
 
@@ -225,7 +234,7 @@ def _a_create_is_in_flight():
 
 
 def _ignore(log, reason):
-	shipment.close_log(log, "Success", output=f"ignored: {reason}")
+	carrier_log.close_log(log, "Success", output=f"ignored: {reason}")
 	frappe.db.commit()
 	return "ignored"
 
@@ -339,21 +348,21 @@ def refresh_note(delivery_note):
 	response = client.get_delivery(tracking)
 	if response.status_code == 429:
 		raise RateLimited()
-	log = shipment.open_log(delivery_note, "Refresh")
+	log = carrier_log.open_log(SERVICE_NAME, delivery_note, "Refresh")
 	if not is_success_response(response):
 		message = client.error_message(response)
-		shipment.close_log(log, "Failed", error=message, http_status=response.status_code)
+		carrier_log.close_log(log, "Failed", error=message, http_status=response.status_code)
 		frappe.db.commit()
 		frappe.throw(escape_html(message))
 	body = response_body(response)
 	state = _polled_state(body)
 	if state is None or state["code"] not in BOSTA_STATE_NAMES:
 		message = _("Bosta returned a state this app does not recognise.")
-		shipment.close_log(log, "Failed", error=message)
+		carrier_log.close_log(log, "Failed", error=message)
 		frappe.db.commit()
 		frappe.throw(message)
 	_write_state(delivery_note, state["code"], fee=_shipment_fee(body))
-	shipment.close_log(log, "Success", http_status=response.status_code)
+	carrier_log.close_log(log, "Success", http_status=response.status_code)
 	frappe.db.commit()
 	return BOSTA_STATE_NAMES[state["code"]]
 
@@ -399,10 +408,10 @@ def run_reconcile():
 	for note in _open_notes():
 		try:
 			status = shipment.status_of(note)
-			if status == shipment.CREATING and not shipment.is_stale_creating(note):
+			if status == shipment.CREATING and not carrier_shipments.is_stale_creating(note):
 				continue
 			if status in (shipment.CREATING, shipment.UNKNOWN):
-				shipment.check_with_bosta(note)
+				carrier_shipments.check(note)
 			else:
 				refresh_note(note)
 			done += 1

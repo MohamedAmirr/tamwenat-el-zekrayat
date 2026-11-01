@@ -1,42 +1,99 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-"""Carrier shipments driven by a Delivery Note (#391, #393, epic #392).
+"""The neutral carrier contract and state machine of a Delivery Note shipment (epic #413, issue #415).
 
-``hooks.py`` registers these ``doc_events`` that land here: Delivery Note ``after_insert``
-(``queue_shipment``), ``validate`` (``validate_delivery_note``), ``before_submit``
-(``require_shipment_created``), ``before_cancel`` and ``on_trash`` (``guard_cancel_or_delete``), and
-Sales Order ``before_cancel`` (``refuse_sales_order_cancel``). Each looks for the adapter whose carrier
-owns the note and delegates; a note no adapter claims is left alone.
+A Delivery Note whose transporter is a carrier's Supplier is the shipment (``docs/marketplace-integrations/
+delivery-note-first.md``). This module owns what every carrier shares: the ``CARRIERS`` registry, the
+document rules that ``hooks.py`` registers (``validate_delivery_note``, ``require_shipment_created``,
+``guard_cancel_or_delete``, Sales Order ``refuse_sales_order_cancel``) and the state machine of the
+Integration Status (``request_create`` -> ``run_create`` -> ``_finish``, ``check``, ``cancel``,
+``reconcile_open_notes``). Neutral code never branches on a carrier name and holds no carrier logic: it
+calls the adapter.
 
-``CARRIERS`` is a plain ``{carrier: adapter}`` dict. It holds Noon and Bosta on purpose: no base class
-and no registry until a second real carrier needs one. An adapter is a module exposing
-``applies_to(doc)``, ``guard_changes(doc)``, ``require_created(doc)``,
-``guard_cancel_or_delete(doc)``, ``refuse_sales_order_cancel(doc)``, ``queue(doc)`` and
-``retry(delivery_note)``.
+An adapter is a module exposing (the contract; a contract test checks every adapter in ``CARRIERS``):
+
+- ``SHIPPING_CARRIER``: the Supplier name (``transporter_name``) that shows the Shipping section.
+- ``SERVICE_NAME``: the Integration Request service and the name shown in messages.
+- ``applies_to(doc)``: does the note (or a dict with ``is_return`` and ``transporter``) belong to it.
+- ``guard_changes(doc)``: ``validate``: set up a new note, keep app-written fields and a started shipment
+  untouched. A deliberate refusal raises.
+- ``clear_inherited(doc)``: clear what an amended new note copied from a note of this carrier.
+- ``validate_ready(doc, action="create")``: everything refusable before the carrier is contacted (raises).
+  ``action`` is ``"create"`` (also run again under the row lock), ``"lookup"`` or ``"cancel"`` (configuration
+  and note checks only). For ``"create"`` it may return a dict instead of ``None``: the note needs the
+  person's input first and nothing is sent (the dict is returned to the form).
+- ``find_remote(doc)``: the carrier's data when it has the shipment, ``None`` when it confirms none, raises
+  ``carrier_log.Unknown`` when the answer is not certain.
+- ``create_remote(doc)``: create and return the carrier's data; raises ``carrier_log.Failed`` (definitive
+  refusal) or ``carrier_log.Unknown``.
+- ``created_values(doc, data)``: the Delivery Note fields to write once Created.
+- ``log_data(values)``: the text kept on the Integration Log row of a create (no personal data) or ``None``.
+- ``after_created(delivery_note, data)``: work after the Created write (runs in the worker).
+- ``cancel_remote(doc)``: ``_dict(outcome="cancelled"|"refused", message, values, http_status)`` or raises
+  ``carrier_log.Unknown``. ``values`` are extra fields written with the result.
+- ``after_cancelled(delivery_note)``: work after the Cancelled write.
+- ``refresh(delivery_note)``: read the carrier's state and apply it; returns the shipping status.
+- ``reconcile()``: the nightly job of this carrier.
+- ``refuse_sales_order_cancel(order)``: Sales Order ``before_cancel``.
+- ``problem_states()``: ``{problem_type: [shipping statuses]}`` for Needs Attention (the exception and return
+  types only; the other types come from ``custom_integration_status``).
+- ``terminal_states()``: the shipping statuses that never change again (not a stale status).
 """
 
 import frappe
+from frappe import _
+from frappe.utils import add_to_date, cstr, get_datetime, now_datetime
+from frappe.utils.background_jobs import is_job_enqueued
 
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as bosta_shipment
-from marketplace_integrations.integrations.noon import delivery_note_shipment
+from marketplace_integrations.services.carrier_log import (
+	CANCELLATION_PENDING,
+	CANCELLATION_UNKNOWN,
+	CANCELLED,
+	CREATED,
+	CREATING,
+	EDITABLE_STATUSES,
+	FAILED,
+	LIVE_STATUSES,
+	NOT_CREATED,
+	UNKNOWN,
+	Failed,
+	Unknown,
+	attempt_number,
+	close_log,
+	open_log,
+)
 
-#: Noon first, then Bosta. Bosta claims only a note whose transporter is the Bosta Supplier (and refuses
-#: a Noon or Talabat order), so a Noon note is never taken by it. To add a carrier: one adapter module,
-#: one row here, a Supplier, and its carrier-specific fields (docs/bosta-integration/README.md).
-CARRIERS = {"Noon": delivery_note_shipment, "Bosta": bosta_shipment}
-
+#: ``{carrier: adapter}``, a plain dict: no base class. To add a carrier: one adapter module with the
+#: contract above, one row here, a Supplier, and its carrier-specific fields, see the Provider contract in the integration READMEs.
+CARRIERS = {"Bosta": bosta_shipment}
 
 SKIP_FLAG = "skip_carrier_shipment"
+#: A Creating note with no queued job older than this counts as stuck (``check`` can resolve it).
+STALE_CREATING_MINUTES = 5
+#: A Cancellation Pending note older than this lost its request (the call is synchronous): it may be
+#: cancelled again, which is safe because a refused repeat is resolved by one read.
+STALE_CANCEL_MINUTES = 2
+
+_CREATE_JOB = "{}-create|{}"
 
 
-def _adapter_for(doc):
-	"""The adapter that owns ``doc``. A note the app drafts for a shipment that already exists (the
-	old Noon handover, ``services/delivery_note_drafts.py``) sets ``flags.skip_carrier_shipment``
-	and is left alone."""
-	if doc.flags.get(SKIP_FLAG):
+def adapter_for(doc):
+	"""The adapter that owns ``doc`` (a Delivery Note or a dict with ``is_return`` and ``transporter``). A
+	note the app drafts for a shipment that already exists sets ``flags.skip_carrier_shipment`` and is left
+	alone."""
+	flags = getattr(doc, "flags", None)
+	if flags and flags.get(SKIP_FLAG):
 		return None
 	return next((adapter for adapter in CARRIERS.values() if adapter.applies_to(doc)), None)
+
+
+def _adapter_of(delivery_note):
+	adapter = adapter_for(frappe.get_doc("Delivery Note", delivery_note))
+	if not adapter:
+		frappe.throw(_("This Delivery Note has no carrier shipment."))
+	return adapter
 
 
 def saved_state(doc):
@@ -44,17 +101,15 @@ def saved_state(doc):
 	return doc if doc.is_new() else (doc.get_doc_before_save() or doc)
 
 
-def queue_shipment(doc, method=None):
-	"""``after_insert``: queue the carrier shipment of a new Delivery Note.
+def status_of(doc_or_name):
+	"""The stored Integration Status of a note ("" counts as Not Created)."""
+	name = doc_or_name if isinstance(doc_or_name, str) else doc_or_name.name
+	return cstr(frappe.db.get_value("Delivery Note", name, "custom_integration_status")) or NOT_CREATED
 
-	Runs inside the saver's transaction, so it only queues (``enqueue_after_commit``) and never
-	raises or calls a carrier: a failure here must not block saving a Delivery Note."""
-	try:
-		adapter = _adapter_for(doc)
-		if adapter:
-			adapter.queue(doc)
-	except Exception:
-		frappe.log_error(title="Carrier shipment: could not queue", message=frappe.get_traceback())
+
+# ---------------------------------------------------------------------------
+# Document rules (hooks.py)
+# ---------------------------------------------------------------------------
 
 
 def validate_delivery_note(doc, method=None):
@@ -64,29 +119,45 @@ def validate_delivery_note(doc, method=None):
 	if doc.flags.get(SKIP_FLAG):
 		return
 	adapters = []
-	for adapter in (_adapter_for(saved_state(doc)), _adapter_for(doc)):
+	for adapter in (adapter_for(saved_state(doc)), adapter_for(doc)):
 		if adapter and adapter not in adapters:
 			adapters.append(adapter)
 	for adapter in adapters:
 		adapter.guard_changes(doc)
-	if doc.is_new() and doc.get("amended_from") and not bosta_shipment.applies_to(doc):
+	if doc.is_new() and doc.get("amended_from") and not adapter_for(doc):
+		# Amend copies even no_copy fields: the carrier was changed, so clear what the source note's carrier left.
 		source = frappe.db.get_value("Delivery Note", doc.amended_from, ["is_return", "transporter"], as_dict=True)
-		if source and bosta_shipment.applies_to(source):
-			bosta_shipment.clear_inherited(doc)
+		if source:
+			for adapter in CARRIERS.values():
+				if adapter.applies_to(source):
+					adapter.clear_inherited(doc)
 
 
 def require_shipment_created(doc, method=None):
-	"""``before_submit``: refuse to submit until the carrier shipment is Created."""
-	adapter = _adapter_for(doc)
-	if adapter:
-		adapter.require_created(doc)
+	"""``before_submit``: no submit unless the shipment is Created (judged by the stored status, not by the
+	copy a client sent)."""
+	adapter = adapter_for(doc)
+	if adapter and status_of(doc) != CREATED:
+		frappe.throw(
+			_("The {0} shipment of this Delivery Note is not Created yet, so it cannot be submitted.").format(
+				adapter.SERVICE_NAME
+			),
+			title=_("{0} shipment").format(adapter.SERVICE_NAME),
+		)
 
 
 def guard_cancel_or_delete(doc, method=None):
-	"""``before_cancel`` and ``on_trash``: refuse while a live carrier shipment is linked."""
-	adapter = _adapter_for(doc)
-	if adapter:
-		adapter.guard_cancel_or_delete(doc)
+	"""``before_cancel`` and ``on_trash``: refuse while a live shipment is linked. A note whose Integration
+	Status is Cancelled passes, without any call to the carrier."""
+	adapter = adapter_for(doc)
+	if adapter and status_of(doc) in LIVE_STATUSES:
+		frappe.throw(
+			_(
+				"This Delivery Note has a {0} shipment ({1}). Cancel the shipment at {0} first "
+				"(Cancel {0} Shipment, or Cancel on a submitted note)."
+			).format(adapter.SERVICE_NAME, _(status_of(doc))),
+			title=_("{0} shipment").format(adapter.SERVICE_NAME),
+		)
 
 
 def refuse_sales_order_cancel(doc, method=None):
@@ -95,18 +166,337 @@ def refuse_sales_order_cancel(doc, method=None):
 		adapter.refuse_sales_order_cancel(doc)
 
 
-def retry_shipment(delivery_note):
-	"""Re-queue a failed carrier shipment of a draft Delivery Note (caller checked write access)."""
-	doc = frappe.get_doc("Delivery Note", delivery_note)
-	adapter = _adapter_for(doc)
-	if not adapter:
-		frappe.throw(frappe._("This Delivery Note has no carrier shipment to retry."))
-	return adapter.retry(delivery_note)
-
-
 def boot_session(bootinfo):
-	"""Boot data: the carriers whose Delivery Note shows the generic Shipping section (an adapter with
-	``SHIPPING_CARRIER``). The section's ``depends_on`` reads it, so no carrier name is hard-coded."""
+	"""Boot data: the carriers whose Delivery Note shows the generic Shipping section. The section's
+	``depends_on`` reads it, so no carrier name is hard-coded."""
 	bootinfo.marketplace_shipping_carriers = [
 		adapter.SHIPPING_CARRIER for adapter in CARRIERS.values() if getattr(adapter, "SHIPPING_CARRIER", None)
 	]
+
+
+# ---------------------------------------------------------------------------
+# Request (user action) -> job
+# ---------------------------------------------------------------------------
+
+
+def request_create(delivery_note, modified=None):
+	"""Start the create of a draft note (the API has checked the submit permission). Idempotent: a note that
+	is already Creating or Created only returns its status. When the adapter answers that it needs the
+	person's input first, nothing is sent and that answer is returned."""
+	doc = frappe.get_doc("Delivery Note", delivery_note)
+	adapter = adapter_for(doc)
+	if not adapter:
+		frappe.throw(_("This Delivery Note has no carrier shipment."))
+	if modified and cstr(doc.modified) != cstr(modified) and status_of(doc) in EDITABLE_STATUSES:
+		frappe.throw(_("The Delivery Note was changed. Reload it and try again."), frappe.TimestampMismatchError)
+	if status_of(doc) not in (CREATING, CREATED):
+		needs = adapter.validate_ready(doc)
+		if needs:
+			return {"status": status_of(doc), "queued": False, **needs}
+	# Commit, then lock as the very next statement (MariaDB snapshot isolation).
+	frappe.db.commit()
+	locked = frappe.db.get_value(
+		"Delivery Note",
+		delivery_note,
+		["custom_integration_status", "docstatus", "modified"],
+		as_dict=True,
+		for_update=True,
+	)
+	if locked.docstatus != 0 or (cstr(locked.custom_integration_status) or NOT_CREATED) in (CREATING, CREATED):
+		frappe.db.commit()
+		return {"status": cstr(locked.custom_integration_status) or NOT_CREATED, "queued": False}
+	# What was validated above may have changed before the lock (a save, an edit): judge the locked row.
+	try:
+		if modified and cstr(locked.modified) != cstr(modified):
+			frappe.throw(_("The Delivery Note was changed. Reload it and try again."), frappe.TimestampMismatchError)
+		if adapter.validate_ready(frappe.get_doc("Delivery Note", delivery_note)):
+			frappe.throw(_("The Delivery Note was changed. Reload it and try again."), frappe.TimestampMismatchError)
+	except Exception:
+		frappe.db.commit()
+		raise
+	# A reference on the note means a create was tried before: look the shipment up first (durable, unlike
+	# the log rows). It is stored from the first attempt on and cleared on an amended note.
+	previous = cstr(frappe.db.get_value("Delivery Note", delivery_note, "custom_carrier_reference"))
+	reference = previous or doc.name
+	frappe.db.set_value(
+		"Delivery Note",
+		delivery_note,
+		{
+			"custom_integration_status": CREATING,
+			"custom_carrier_reference": reference,
+			"custom_last_integration_error": None,
+		},
+	)
+	log = open_log(
+		adapter.SERVICE_NAME,
+		delivery_note,
+		"Create",
+		attempt=attempt_number(adapter.SERVICE_NAME, delivery_note),
+		reference=reference,
+	)
+	frappe.enqueue(
+		"marketplace_integrations.services.carrier_shipments.run_create",
+		queue="short",
+		timeout=120,
+		job_id=_CREATE_JOB.format(adapter.SHIPPING_CARRIER.lower(), delivery_note),
+		deduplicate=True,
+		enqueue_after_commit=True,
+		delivery_note=delivery_note,
+		log=log,
+		lookup_first=bool(previous),
+	)
+	frappe.db.commit()
+	return {"status": CREATING, "queued": True}
+
+
+# ---------------------------------------------------------------------------
+# Worker
+# ---------------------------------------------------------------------------
+
+
+def run_create(delivery_note, log=None, lookup_first=True):
+	"""Create (or find) the shipment of one Creating note and write the result back. ``lookup_first`` is
+	False only for the very first attempt of a note (``request_create`` decides it)."""
+	frappe.set_user("Administrator")
+	if status_of(delivery_note) != CREATING:
+		frappe.db.commit()
+		return
+	adapter = None
+	try:
+		doc = frappe.get_doc("Delivery Note", delivery_note)
+		adapter = adapter_for(doc)
+		frappe.db.commit()
+		data = adapter.find_remote(doc) if lookup_first else None
+		if data is None:
+			data = adapter.create_remote(doc)
+		values = adapter.created_values(doc, data)
+		if _finish(
+			delivery_note,
+			CREATED,
+			values,
+			log,
+			"Success",
+			data=adapter.log_data(values),
+			delivery_id=values.get("custom_carrier_delivery_id"),
+		):
+			adapter.after_created(delivery_note, data)
+	except Failed as failure:
+		_finish(delivery_note, FAILED, {"custom_last_integration_error": cstr(failure)}, log, "Failed", error=cstr(failure))
+	except Unknown as unknown:
+		_finish(delivery_note, UNKNOWN, {"custom_last_integration_error": cstr(unknown)}, log, "Unknown", error=cstr(unknown))
+	except Exception:
+		frappe.db.rollback()
+		service = adapter.SERVICE_NAME if adapter else "Carrier"
+		frappe.log_error(title=f"{service} shipment from Delivery Note failed", message=frappe.get_traceback())
+		message = _(
+			"Unexpected error while sending the shipment to {0}; see the Error Log. It may or may not have reached {0}."
+		).format(service)
+		_finish(delivery_note, UNKNOWN, {"custom_last_integration_error": message}, log, "Unknown", error=message)
+
+
+def _finish(delivery_note, status, values, log, result, expected=CREATING, **log_values):
+	"""Close the log and write the note back, only if it is still ``expected`` (Creating for a create,
+	Cancellation Pending for a cancel). Commit, lock as the next statement, write with ``db_set`` (system
+	write-back, notifies open forms). Returns whether the note was written. The error text is stored raw: it
+	is escaped where it is rendered."""
+	close_log(log, result, **log_values)
+	frappe.db.commit()
+	locked = frappe.db.get_value("Delivery Note", delivery_note, "custom_integration_status", for_update=True)
+	if cstr(locked) != expected:
+		frappe.db.commit()
+		return False
+	doc = frappe.get_doc("Delivery Note", delivery_note)
+	doc.db_set(dict(values, custom_integration_status=status), update_modified=True, notify=True, commit=True)
+	return True
+
+
+# ---------------------------------------------------------------------------
+# Check (lookup only, never creates)
+# ---------------------------------------------------------------------------
+
+
+def is_stale_creating(delivery_note):
+	"""A Creating note with no queued job whose last change is older than ``STALE_CREATING_MINUTES``."""
+	values = frappe.db.get_value("Delivery Note", delivery_note, ["custom_integration_status", "modified"], as_dict=True)
+	if not values or cstr(values.custom_integration_status) != CREATING:
+		return False
+	adapter = adapter_for(frappe.get_doc("Delivery Note", delivery_note))
+	if adapter and is_job_enqueued(_CREATE_JOB.format(adapter.SHIPPING_CARRIER.lower(), delivery_note)):
+		return False
+	return get_datetime(values.modified) <= add_to_date(now_datetime(), minutes=-STALE_CREATING_MINUTES)
+
+
+def check(delivery_note):
+	"""Ask the carrier whether a Creation Unknown (or stuck Creating) note's shipment exists. Found: Created.
+	Otherwise the note stays Creation Unknown: this never creates. The result is written only if the note
+	is still as it was when the check started. The caller checked write access. The returned ``message``
+	may hold the carrier's text: the caller escapes it where it is shown."""
+	adapter = _adapter_of(delivery_note)
+	service = adapter.SERVICE_NAME
+	start = frappe.db.get_value(
+		"Delivery Note", delivery_note, ["custom_integration_status", "modified", "custom_carrier_reference"], as_dict=True
+	)
+	status = cstr(start.custom_integration_status) or NOT_CREATED
+	if status == CREATING and not is_stale_creating(delivery_note):
+		frappe.throw(_("The shipment is still being sent to {0}. Check again in a few minutes.").format(service))
+	if status not in (CREATING, UNKNOWN):
+		frappe.throw(_("Only a note with an unknown {0} result can be checked.").format(service))
+	reference = start.custom_carrier_reference or delivery_note
+	doc = frappe.get_doc("Delivery Note", delivery_note)
+	adapter.validate_ready(doc, "lookup")
+	frappe.db.commit()
+	log = open_log(service, delivery_note, "Refresh", reference=reference)
+	frappe.db.commit()
+	changed = {
+		"status": status,
+		"found": False,
+		"message": _("The Delivery Note changed while checking with {0}. Reload it and check again.").format(service),
+	}
+	try:
+		data = adapter.find_remote(doc)
+	except Unknown as unknown:
+		message = cstr(unknown)
+		if not _resolve_unknown(delivery_note, start, UNKNOWN, {"custom_last_integration_error": message}, log, "Unknown", error=message):
+			return changed
+		return {"status": UNKNOWN, "found": False, "message": message}
+	if data is None:
+		message = _("{0} has no delivery with this reference yet. The result is still unknown.").format(service)
+		if not _resolve_unknown(delivery_note, start, UNKNOWN, {"custom_last_integration_error": message}, log, "Unknown", error=message):
+			return changed
+		return {"status": UNKNOWN, "found": False, "message": message}
+	values = adapter.created_values(doc, data)
+	if not _resolve_unknown(
+		delivery_note, start, CREATED, values, log, "Success", delivery_id=values.get("custom_carrier_delivery_id")
+	):
+		return changed
+	adapter.after_created(delivery_note, data)
+	return {"status": CREATED, "found": True}
+
+
+def _resolve_unknown(delivery_note, start, status, values, log, result, **log_values):
+	"""Like ``_finish`` but for a note that is Creation Unknown or a stuck Creating: ``start`` is the
+	status and ``modified`` read before the carrier call; nothing is written if either changed since (a
+	retry, another check or the worker may have moved the note on). Returns whether it was written."""
+	close_log(log, result, **log_values)
+	frappe.db.commit()
+	locked = frappe.db.get_value(
+		"Delivery Note", delivery_note, ["custom_integration_status", "modified"], as_dict=True, for_update=True
+	)
+	if (
+		not locked
+		or cstr(locked.custom_integration_status) != cstr(start.custom_integration_status)
+		or cstr(locked.modified) != cstr(start.modified)
+	):
+		frappe.db.commit()
+		return False
+	frappe.get_doc("Delivery Note", delivery_note).db_set(
+		dict(values, custom_integration_status=status), update_modified=True, notify=True, commit=True
+	)
+	return True
+
+
+# ---------------------------------------------------------------------------
+# Cancel (#410)
+# ---------------------------------------------------------------------------
+
+
+def cancel(delivery_note):
+	"""Cancel the note's shipment at the carrier (the API checked the cancel / write permission). The ERPNext
+	cancel or delete comes after, natively, and is allowed by ``guard_cancel_or_delete`` only once the
+	Integration Status is Cancelled.
+
+	Synchronous (no lock held across the carrier call). Created / Cancellation Unknown -> Cancellation
+	Pending (committed) -> Cancelled, Cancellation Unknown (the adapter raised ``Unknown``) or back to
+	Created with the refusal in ``custom_last_integration_error``. A note that is already Cancelled is
+	answered without calling the carrier: this is how a failed local cancel is retried.
+
+	Returns ``{"status", "outcome", "message"}``; ``outcome`` is ``cancelled``, ``refused`` or ``unknown`` and
+	``message`` is the carrier's raw text (the caller escapes it where it is shown)."""
+	adapter = _adapter_of(delivery_note)
+	service = adapter.SERVICE_NAME
+	# Commit, then lock as the very next statement (MariaDB snapshot isolation).
+	frappe.db.commit()
+	locked = frappe.db.get_value(
+		"Delivery Note",
+		delivery_note,
+		["custom_integration_status", "docstatus", "modified", "custom_carrier_reference"],
+		as_dict=True,
+		for_update=True,
+	)
+	status = cstr(locked.custom_integration_status) or NOT_CREATED
+	if status == CANCELLED and locked.docstatus != 2:
+		frappe.db.commit()
+		return {"status": CANCELLED, "outcome": "cancelled", "message": ""}
+	too_new = status == CANCELLATION_PENDING and get_datetime(locked.modified) > add_to_date(
+		now_datetime(), minutes=-STALE_CANCEL_MINUTES
+	)
+	if (
+		locked.docstatus == 2
+		or too_new
+		or status not in (CREATED, CANCELLATION_PENDING, CANCELLATION_UNKNOWN)
+	):
+		frappe.db.commit()
+		if too_new:
+			frappe.throw(_("{0} is already being asked to cancel this shipment. Check again in a minute.").format(service))
+		frappe.throw(_("Only a note with a created {0} shipment can be cancelled at {0}.").format(service))
+	doc = frappe.get_doc("Delivery Note", delivery_note)
+	try:
+		adapter.validate_ready(doc, "cancel")
+	except Exception:
+		frappe.db.commit()
+		raise
+	doc.db_set(
+		{"custom_integration_status": CANCELLATION_PENDING, "custom_last_integration_error": None},
+		update_modified=True,
+		notify=True,
+	)
+	log = open_log(service, delivery_note, "Cancel", reference=cstr(locked.custom_carrier_reference) or delivery_note)
+	frappe.db.commit()
+
+	http_status = None
+	try:
+		result = adapter.cancel_remote(doc)
+	except Unknown as unknown:
+		outcome, message, http_status, extra = "unknown", cstr(unknown), unknown.http_status, {}
+	else:
+		outcome, message, http_status, extra = result.outcome, result.message, result.http_status, result.values or {}
+
+	if outcome == "cancelled":
+		values = {"custom_last_integration_error": None, "custom_last_sync_at": now_datetime(), **extra}
+		new_status, log_result = CANCELLED, "Success"
+	elif outcome == "refused":
+		values, new_status, log_result = {"custom_last_integration_error": message}, CREATED, "Failed"
+	else:
+		values, new_status, log_result = {"custom_last_integration_error": message}, CANCELLATION_UNKNOWN, "Unknown"
+	written = _finish(
+		delivery_note,
+		new_status,
+		values,
+		log,
+		log_result,
+		expected=CANCELLATION_PENDING,
+		error=message if outcome != "cancelled" else None,
+		http_status=http_status,
+	)
+	if not written:
+		# A webhook or a refresh moved the note on while the carrier was asked; report what is stored now.
+		return {"status": status_of(delivery_note), "outcome": outcome, "message": message}
+	if new_status == CANCELLED:
+		adapter.after_cancelled(delivery_note)
+	return {"status": new_status, "outcome": outcome, "message": message}
+
+
+# ---------------------------------------------------------------------------
+# Nightly
+# ---------------------------------------------------------------------------
+
+
+def reconcile_open_notes():
+	"""Nightly (``59 23 * * *``, ``hooks.py``): each carrier reconciles its own open notes. One carrier's
+	failure does not stop the others."""
+	for adapter in CARRIERS.values():
+		try:
+			adapter.reconcile()
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(title=f"{adapter.SERVICE_NAME} reconciliation could not start", message=frappe.get_traceback())

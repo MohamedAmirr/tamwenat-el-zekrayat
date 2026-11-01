@@ -200,8 +200,12 @@ based flow (the `Bosta Shipment` and `Bosta Shipment Item` doctypes, the Sales O
 dialogs, bulk create, stock reservation, physical handover, the `*/30` poll) was replaced, not
 wrapped. The Delivery Note is the shipment: a draft note whose native `transporter_name` is the
 Supplier "Bosta" is claimed by the adapter `integrations/bosta/delivery_note_shipment.py`, registered
-in `services/carrier_shipments.CARRIERS` (Noon first, then Bosta) and driven by the existing Delivery
-Note `doc_events`. Neutral Custom Fields on Delivery Note (`custom_integration_status` plus native
+in `services/carrier_shipments.CARRIERS` (only Bosta until the Noon adapter lands, #415) and driven by the
+existing Delivery Note `doc_events`. `services/carrier_shipments.py` is the neutral contract and state
+machine (`request_create`, `run_create`, `check`, `cancel`, `reconcile_open_notes`); `services/carrier_log.py`
+holds the Integration Log rows and shared statuses; `api/carrier_shipments.py` the neutral endpoints
+(`request_shipment`, `check_shipment`, `refresh_shipment`, `cancel_shipment`). The Bosta adapter only
+implements the contract (the methods are listed at the top of `carrier_shipments.py`). Neutral Custom Fields on Delivery Note (`custom_integration_status` plus native
 `docstatus`, `custom_shipping_status`, `custom_carrier_delivery_id`, `custom_carrier_reference`,
 `custom_cod_amount`, `custom_cod_confirmed`, `custom_shipping_label`, `custom_last_sync_at`, `custom_last_integration_error`,
 `custom_actual_shipping_cost`, `custom_carrier_request_snapshot`) and Bosta-only ones
@@ -211,10 +215,10 @@ section; its visibility reads `frappe.boot.marketplace_shipping_carriers` (set b
 Noon keeps `custom_carrier_status` / `custom_carrier_error` for now.
 
 - **Create on Submit.** The browser's `before_submit` (`public/js/delivery_note_shipping.js`) calls
-  `api.bosta_shipments.request_shipment`, which commits, takes a row lock, sets
-  `Creating`, opens an Integration Request log row and enqueues `run_create` (job id
-  `bosta-create|<note>`); the form shows "Sending to Bosta..." and polls every 2 seconds for up to 60.
-  The note submits only after `Created`; the server `before_submit` (`require_created`) reads the
+  `api.carrier_shipments.request_shipment`, which commits, takes a row lock, sets
+  `Creating`, opens an Integration Request log row and enqueues `carrier_shipments.run_create` (job id
+  `{carrier}-create|<note>`); the form shows "Sending to Bosta..." and polls every 2 seconds for up to 60.
+  The note submits only after `Created`; the server `before_submit` (`carrier_shipments.require_shipment_created`) reads the
   stored status and refuses otherwise. Nothing holds a DB lock across the HTTP call.
 - **Unknown is not Failed.** Bosta has no idempotency key. A timeout, connection error, 5xx/429 or a
   malformed 2xx ends `Creation Unknown`; only a 4xx (not 408/429) is `Creation Failed`. There is no
@@ -223,7 +227,7 @@ Noon keeps `custom_carrier_status` / `custom_carrier_error` for now.
   ambiguous lookup stays Unknown. "Later attempt" means the note already has `custom_carrier_reference`
   (set when the first attempt starts; never a count of log rows, which Log Settings deletes). The
   **Check with Bosta** button runs the lookup alone and writes only if the note is unchanged since it
-  started; the generic Retry refuses a Bosta note (only Submit starts a create). The error text is
+  started; only Submit starts a create (there is no generic retry). The error text is
   stored raw and escaped where it is rendered.
 - **Integration Log** is the native Integration Request with Custom Fields (`custom_operation_type`,
   `custom_result`, `custom_external_reference`, `custom_delivery_id`, `custom_attempt_no`,
@@ -233,7 +237,7 @@ Noon keeps `custom_carrier_status` / `custom_carrier_error` for now.
 - **Status sync (#409).** The webhook (`api/bosta_webhooks.py`, auth unchanged) validates the event and
   `statuses.process_webhook_event` inserts a Webhook log row whose unique sha256 dedupe key
   (`tracking|state|timestamp`) makes a replay a no-op, then enqueues `apply_event`. A nightly
-  `reconcile_open_notes` (cron `59 23 * * *`) reads every open note from Bosta and stops on HTTP 429.
+  `carrier_shipments.reconcile_open_notes` (cron `59 23 * * *`) calls each adapter's `reconcile()`; Bosta's reads every open note and stops on HTTP 429.
   `_write_state` commits, takes the row lock, compares the event time with `custom_bosta_last_event_at`
   and writes in that one lock (a late event writes nothing). An event for a note still Creating, or
   for a delivery no note holds yet while a create is in flight, stays `Queued` and is applied after
@@ -244,17 +248,21 @@ Noon keeps `custom_carrier_status` / `custom_carrier_error` for now.
 - **Guards** (`validate`): items, quantities, carrier, tracking number, COD and city are locked once
   the shipment started; integration fields cannot be hand-edited; a note with a live shipment cannot
   be cancelled or deleted until it is Cancelled at Bosta, and its Sales Order cannot be cancelled.
-- **Cancel, edit, returns, costs (Batch B, #410-#412, partial).** `delivery_note_shipment.cancel_at_bosta`
-  (API `bosta_shipments.cancel_at_bosta`) terminates the delivery and sets Cancellation Pending, then
+- **Cancel, edit, returns, costs (Batch B, #410-#412, partial).** `carrier_shipments.cancel`
+  (API `carrier_shipments.cancel_shipment`, Bosta calls in `delivery_note_shipment.cancel_remote`) terminates the delivery and sets Cancellation Pending, then
   Cancelled / Cancellation Unknown / back to Created; the native cancel (form `before_cancel`) or delete
   follows once Cancelled. `integrations/bosta/editing.py` (APIs `get_edit_values`, `edit_shipment`) sends
   changed receiver phone / drop-off address with `PUT` and records them on the note and the snapshot.
   `integrations/bosta/returns.py` makes one draft Sales Return (`custom_return_source`) when a returned
   state (`statuses.RETURNED_STATE_CODES`) arrives. New Delivery Note fields `custom_return_source` and
   `custom_actual_cost_received_on`. Open decisions: `docs/bosta-integration/README.md`.
-- **Needs Attention** (`services/marketplace_attention.py`, platform `Bosta`) reads Delivery Notes:
-  Bosta Creation Problem (draft in Creation Failed/Unknown), Bosta Cancelled Delivery, Bosta Carrier
-  Exception, Bosta Return (no submitted return note), Bosta Return Review (the draft Sales Return, `role` "Stock User"), Bosta Status Stale. Bosta Cancelled Delivery
+- **Needs Attention** (`services/marketplace_attention.py::_collect_carrier_items`, #415) reads the Delivery
+  Notes of every carrier in `CARRIERS` (platform = the carrier name, message names the carrier through the
+  adapter's `SERVICE_NAME`) with neutral problem types: Carrier Creation Problem (draft in Creation
+  Failed/Unknown), Carrier Cancelled, Carrier Exception, Carrier Return (no submitted return note), Carrier
+  Return Review (the draft Sales Return, `custom_return_source` "Returned by ...", `role` "Stock User"),
+  Carrier Status Stale. The adapter's `problem_states()` supplies the Exception and Return shipping
+  statuses, `terminal_states()` the statuses that are never stale. Carrier Cancelled
   clears when the Delivery Note is cancelled in ERPNext or after 14 days, and skips a note with a Success
   "Cancel" log row (cancelled from here).
 - **COD** defaults to the Sales Order total minus advance payments, proportionally per note, and is
@@ -274,7 +282,7 @@ Noon keeps `custom_carrier_status` / `custom_carrier_error` for now.
 
 **Bosta Settings and city lookup.** `Bosta Settings`, the pickup-location picker and
 `integrations/bosta/locations.py` are unchanged (see above). The Delivery Note's **Pick Bosta City**
-button uses `api.bosta_shipments.get_cities` and `resolve_city`; Submit first fills an empty city from the address (`delivery_note_shipment.autofill_city`) and only answers `needs_city` (the form opens the picker) when that finds none. `get_cod_hint` returns the computed COD when it differs from the merchant's confirmed one (shown on the form, never blocks). A Sales Order `validate`/`before_update_after_submit` hook (`statuses.keep_stored_summary`) keeps the app-written summary from being overwritten by an older form copy.
+button uses `api.bosta_shipments.get_cities` and `resolve_city`; Submit first fills an empty city from the address (`delivery_note_shipment.autofill_city`, run inside the adapter's `validate_ready`) and only answers `needs_city` (the form opens the picker) when that finds none. `get_cod_hint` returns the computed COD when it differs from the merchant's confirmed one (shown on the form, never blocks). A Sales Order `validate`/`before_update_after_submit` hook (`statuses.keep_stored_summary`) keeps the app-written summary from being overwritten by an older form copy.
 
 **No district: Bosta resolves it (#318).** The create call is `POST /deliveries` **without**
 `?apiVersion=1` (that version requires a district and rejects a create without one with

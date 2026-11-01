@@ -2,14 +2,17 @@
 // For license information, please see license.txt
 
 // Bosta part of the Delivery Note Shipping section (epic #413). delivery_note_shipping.js owns the
-// shared behaviour; this file registers Bosta's server methods with it and adds the Bosta-only pieces:
-// choosing the Bosta city (Bosta is sent a city code), fetching the A4 Arabic label, cancelling the
+// shared behaviour; this file registers Bosta with it and adds the Bosta-only pieces: the COD rules
+// (confirm before Submit, the differs hint), choosing the Bosta city (Bosta is sent a city code), fetching
+// the A4 Arabic label, cancelling the
 // shipment at Bosta before the native cancel (and the "Cancel Bosta Shipment" button of a draft note, whose
 // delete the server refuses until then) and editing the receiver phone and address (#410).
 //
 // Wrapped in a function: doctype_js files share one scope with ERPNext's own Delivery Note script.
 (function () {
 	const API = "marketplace_integrations.api.bosta_shipments.";
+	// request, check, refresh and cancel are neutral
+	const CARRIER_API = "marketplace_integrations.api.carrier_shipments.";
 	const EDITABLE = ["", "Not Created", "Creation Failed"];
 	// Integration Statuses with a Bosta shipment that must be cancelled at Bosta before ERPNext cancels.
 	const CANCELLABLE = ["Created", "Cancellation Pending", "Cancellation Unknown"];
@@ -78,6 +81,72 @@
 		return (shipping && shipping.server_message && shipping.server_message(error)) || "";
 	}
 
+	// ---- COD ------------------------------------------------------------------------------------
+
+	function is_editable(frm) {
+		return Boolean(frm.doc && frm.doc.docstatus === 0 && EDITABLE.includes(frm.doc.custom_integration_status || ""));
+	}
+
+	function money(value, currency) {
+		return typeof format_currency === "function" ? format_currency(value, currency) : String(value);
+	}
+
+	// Submit gate: the COD amount must be confirmed. Returns false (after saying why) to stop the Submit.
+	function before_send(frm) {
+		if (frm.doc.custom_cod_confirmed) return true;
+		frappe.msgprint({
+			message: __("Confirm the COD amount before submitting: tick COD confirmed, or change the COD. 0 is allowed."),
+			indicator: "orange",
+		});
+		return false;
+	}
+
+	// A confirmed COD is never recomputed (it may be a deliberate choice), so when the items or the
+	// advance changed since, say what the computed amount is. The merchant decides; nothing is written.
+	// The saved note is judged by the server, so an unsaved form shows no hint.
+	function show_cod_hint(frm) {
+		if (frm.is_new() || frm.is_dirty() || !is_editable(frm) || !frm.doc.custom_cod_confirmed) return;
+		if (!frm.dashboard || !frm.dashboard.add_comment) return;
+		return frappe
+			.call({ method: API + "get_cod_hint", type: "POST", args: { delivery_note: frm.doc.name } })
+			.then((r) => {
+				const hint = r && r.message;
+				if (!hint || hint.default === null || hint.default === undefined) return;
+				frm.dashboard.add_comment(
+					frappe.utils.escape_html(
+						__("The COD amount {0} differs from the amount calculated from the current items and advance ({1}). Change the COD if it is no longer right.", [
+							money(frm.doc.custom_cod_amount, frm.doc.currency),
+							money(hint.default, frm.doc.currency),
+						])
+					),
+					"yellow",
+					true
+				);
+			})
+			.catch(() => {
+				// a hint only: a failed lookup must not disturb the form
+			});
+	}
+
+	// The COD amount and its confirmation can only change while the note is editable.
+	function set_cod_state(frm) {
+		const read_only = is_editable(frm) ? 0 : 1;
+		frm.set_df_property("custom_cod_amount", "read_only", read_only);
+		frm.set_df_property("custom_cod_confirmed", "read_only", read_only);
+	}
+
+	function refresh(frm) {
+		set_cod_state(frm);
+		show_cod_hint(frm);
+	}
+
+	// Editing the COD is the person's choice: it confirms the amount.
+	function custom_cod_amount(frm) {
+		if (frm.doc.transporter_name === "Bosta" && is_editable(frm) && !frm.doc.custom_cod_confirmed) {
+			frm.set_value("custom_cod_confirmed", 1);
+		}
+	}
+
 	// ---- Cancel at Bosta ------------------------------------------------------------------------
 
 	// Calls the server once. `done` is called when Bosta confirmed (or the note was already Cancelled);
@@ -86,7 +155,7 @@
 		const retry = () => cancel_at_bosta(frm, { done, stop });
 		return frappe
 			.call({
-				method: API + "cancel_at_bosta",
+				method: CARRIER_API + "cancel_shipment",
 				type: "POST",
 				args: { delivery_note: frm.doc.name },
 				freeze: true,
@@ -130,7 +199,7 @@
 		const check = () =>
 			frappe
 				.call({
-					method: API + "refresh_from_bosta",
+					method: CARRIER_API + "refresh_shipment",
 					type: "POST",
 					args: { delivery_note: frm.doc.name },
 					freeze: true,
@@ -304,10 +373,8 @@
 	}
 
 	const hooks = {
-		request_method: API + "request_shipment",
-		check_method: API + "check_with_bosta",
-		refresh_method: API + "refresh_from_bosta",
-		cod_hint_method: API + "get_cod_hint",
+		before_send,
+		refresh,
 		pick_city,
 		add_buttons,
 		// Sent to Bosta; after the start only Edit Bosta Shipment changes them.
@@ -318,7 +385,7 @@
 	if (typeof frappe !== "undefined" && frappe.marketplace_integrations && frappe.marketplace_integrations.shipping) {
 		frappe.marketplace_integrations.shipping.register_carrier("Bosta", hooks);
 		if (frappe.ui && frappe.ui.form) {
-			frappe.ui.form.on("Delivery Note", { before_cancel });
+			frappe.ui.form.on("Delivery Note", { before_cancel, custom_cod_amount });
 		}
 	}
 
@@ -330,6 +397,10 @@
 			add_buttons,
 			city_label,
 			before_cancel,
+			custom_cod_amount,
+			before_send,
+			show_cod_hint,
+			set_cod_state,
 			cancel_shipment,
 			edit_shipment,
 			edit_error,

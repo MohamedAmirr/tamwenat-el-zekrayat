@@ -22,7 +22,8 @@ from frappe.utils import cstr, escape_html, now_datetime
 
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as shipment
 from marketplace_integrations.integrations.bosta import locations, statuses
-from marketplace_integrations.integrations.bosta.client import BostaClient, is_success_response
+from marketplace_integrations.integrations.bosta.client import SERVICE_NAME, BostaClient, is_success_response
+from marketplace_integrations.services import carrier_log
 
 #: Bosta's documented states in which a delivery may be edited (docs.yaml, "Business update delivery").
 EDITABLE_STATE_CODES = (10, 11, 20, 21, 22, 24, 30, 41, 47)
@@ -156,8 +157,8 @@ def edit_shipment(delivery_note, receiver_phone, city_id, address_first_line):
 		# Release the row lock before the HTTP call (also when a refusal was thrown).
 		frappe.db.commit()
 	tracking = cstr(values.lr_no).strip()
-	log = shipment.open_log(
-		delivery_note, "Edit", reference=cstr(values.custom_carrier_reference) or delivery_note
+	log = carrier_log.open_log(
+		SERVICE_NAME, delivery_note, "Edit", reference=cstr(values.custom_carrier_reference) or delivery_note
 	)
 	frappe.db.commit()
 
@@ -166,7 +167,7 @@ def edit_shipment(delivery_note, receiver_phone, city_id, address_first_line):
 		response = client.update_delivery(tracking, payload)
 	except Exception:
 		frappe.db.rollback()
-		shipment.close_log(
+		carrier_log.close_log(
 			log, "Unknown", error=_("The Bosta request failed. It may or may not have reached Bosta.")
 		)
 		frappe.db.commit()
@@ -175,10 +176,10 @@ def edit_shipment(delivery_note, receiver_phone, city_id, address_first_line):
 		frappe.throw(_("Could not confirm that Bosta updated the delivery. {0}").format(_hint()))
 	if not is_success_response(response):
 		message = client.error_message(response)
-		shipment.close_log(log, "Failed", error=message, http_status=response.status_code)
+		carrier_log.close_log(log, "Failed", error=message, http_status=response.status_code)
 		frappe.db.commit()
 		frappe.throw(f"{escape_html(message)} {_hint()}")
-	shipment.close_log(log, "Success", http_status=response.status_code)
+	carrier_log.close_log(log, "Success", http_status=response.status_code)
 	return _record(delivery_note, payload, snapshot, phone, city)
 
 

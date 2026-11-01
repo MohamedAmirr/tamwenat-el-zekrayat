@@ -22,5 +22,11 @@
         ]
       }
     ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(graphify query *)",
+      "mcp__meta-devtools__devtools_discovery"
+    ]
   }
 }

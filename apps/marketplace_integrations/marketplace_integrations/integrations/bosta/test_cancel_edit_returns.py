@@ -12,8 +12,10 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_to_date, now_datetime
 
 from marketplace_integrations.api import bosta_shipments
+from marketplace_integrations.api import carrier_shipments as carrier_api
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as shipment
 from marketplace_integrations.integrations.bosta import editing, returns, statuses
+from marketplace_integrations.services import carrier_shipments
 from marketplace_integrations.services import marketplace_attention as attention
 from marketplace_integrations.tests.bosta_fixtures import BostaFixtureMixin, FakeResponse
 from marketplace_integrations.tests.utils import make_role_user
@@ -58,7 +60,7 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 		note = self._live()
 		self.http.queue["terminate"].append(OK)
 
-		result = shipment.cancel_at_bosta(note.name)
+		result = carrier_shipments.cancel(note.name)
 
 		self.assertEqual(result["outcome"], "cancelled")
 		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Cancelled")
@@ -75,7 +77,7 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 		self.http.queue["terminate"].append(FakeResponse(400, {"success": False, "message": "no"}))
 		self.http.queue["get"].append(delivery(49))
 
-		result = shipment.cancel_at_bosta(note.name)
+		result = carrier_shipments.cancel(note.name)
 
 		self.assertEqual(result["outcome"], "cancelled")
 		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Cancelled")
@@ -86,7 +88,7 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 		self.http.queue["terminate"].append(FakeResponse(400, {"success": False, "message": "bad <b>x</b>"}))
 		self.http.queue["get"].append(delivery(24))
 
-		result = shipment.cancel_at_bosta(note.name)
+		result = carrier_shipments.cancel(note.name)
 
 		self.assertEqual(result["outcome"], "refused")
 		values = stored(note, "custom_integration_status", "custom_last_integration_error")
@@ -99,7 +101,7 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 				note = self._live()
 				self.http.queue["terminate"].append(response)
 
-				result = shipment.cancel_at_bosta(note.name)
+				result = carrier_shipments.cancel(note.name)
 
 				self.assertEqual(result["outcome"], "unknown")
 				self.assertEqual(
@@ -119,7 +121,7 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 				cancelled = self._live()
 				self.http.queue["terminate"].append(answer)
 				self.http.queue["get"].append(delivery(48))
-				result = shipment.cancel_at_bosta(cancelled.name)
+				result = carrier_shipments.cancel(cancelled.name)
 				self.assertEqual(result["outcome"], "cancelled")
 				self.assertEqual(
 					stored(cancelled, "custom_integration_status").custom_integration_status, "Cancelled"
@@ -128,7 +130,7 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 				live = self._live()
 				self.http.queue["terminate"].append(answer)
 				self.http.queue["get"].append(delivery(24))
-				result = shipment.cancel_at_bosta(live.name)
+				result = carrier_shipments.cancel(live.name)
 				self.assertEqual(result["outcome"], "refused")
 				values = stored(live, "custom_integration_status", "custom_last_integration_error")
 				self.assertEqual(values.custom_integration_status, "Created")
@@ -137,7 +139,7 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 				missing = self._live()
 				self.http.queue["terminate"].append(answer)
 				self.http.queue["get"].append(FakeResponse(404, {}))
-				self.assertEqual(shipment.cancel_at_bosta(missing.name)["outcome"], "unknown")
+				self.assertEqual(carrier_shipments.cancel(missing.name)["outcome"], "unknown")
 				self.assertEqual(
 					stored(missing, "custom_integration_status").custom_integration_status,
 					"Cancellation Unknown",
@@ -146,7 +148,7 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 				failed = self._live()
 				self.http.queue["terminate"].append(answer)
 				self.http.queue["get"].append(TimeoutError("slow"))
-				self.assertEqual(shipment.cancel_at_bosta(failed.name)["outcome"], "unknown")
+				self.assertEqual(carrier_shipments.cancel(failed.name)["outcome"], "unknown")
 				self.assertEqual(
 					stored(failed, "custom_integration_status").custom_integration_status,
 					"Cancellation Unknown",
@@ -157,7 +159,7 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 		self.http.queue["terminate"].append(FakeResponse(404, {}))
 		self.http.queue["get"].append(delivery(24))
 
-		shipment.cancel_at_bosta(note.name)
+		carrier_shipments.cancel(note.name)
 
 		self.assertEqual(self._sent_kinds(), ["terminate", "get"])
 
@@ -195,7 +197,7 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 	def test_an_already_cancelled_note_makes_no_bosta_call(self):
 		note = self._live(custom_integration_status="Cancelled")
 
-		result = shipment.cancel_at_bosta(note.name)
+		result = carrier_shipments.cancel(note.name)
 
 		self.assertEqual(result["status"], "Cancelled")
 		self.assertEqual(self.http.sent(), [])
@@ -203,7 +205,7 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 	def test_a_fresh_pending_is_refused_and_a_stale_one_is_retried(self):
 		note = self._live(custom_integration_status="Cancellation Pending")
 		with self.assertRaises(frappe.ValidationError):
-			shipment.cancel_at_bosta(note.name)
+			carrier_shipments.cancel(note.name)
 		self.assertEqual(self.http.sent(), [])
 
 		frappe.db.set_value(
@@ -215,12 +217,12 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 		)
 		frappe.db.commit()
 		self.http.queue["terminate"].append(OK)
-		self.assertEqual(shipment.cancel_at_bosta(note.name)["outcome"], "cancelled")
+		self.assertEqual(carrier_shipments.cancel(note.name)["outcome"], "cancelled")
 
 	def test_only_a_created_shipment_can_be_cancelled_at_bosta(self):
 		note = self.make_note()
 		with self.assertRaises(frappe.ValidationError):
-			shipment.cancel_at_bosta(note.name)
+			carrier_shipments.cancel(note.name)
 		self.assertEqual(self.http.sent(), [])
 
 	def test_cancel_and_delete_are_allowed_only_once_cancelled(self):
@@ -236,16 +238,16 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 		email, _role = make_role_user(self, "Bosta Cancel Reader", {"Delivery Note": ["read"]})
 		frappe.set_user(email)
 		with self.assertRaises(frappe.PermissionError):
-			bosta_shipments.cancel_at_bosta(note.name)
+			carrier_api.cancel_shipment(note.name)
 		frappe.set_user("Administrator")
 		self.assertEqual(self.http.sent(), [])
 
 	def test_a_delivery_cancelled_from_here_is_not_a_needs_attention_item(self):
 		note = self._live()
 		self.http.queue["terminate"].append(OK)
-		shipment.cancel_at_bosta(note.name)
+		carrier_shipments.cancel(note.name)
 
-		items = attention._collect_bosta_items(attention.BOSTA_CANCELLED)
+		items = attention._collect_carrier_items(attention.CARRIER_CANCELLED)
 		self.assertEqual([i for i in items if i["reference_name"] == note.name], [])
 
 	# -- edit ---------------------------------------------------------------------------------
@@ -371,7 +373,7 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 		note = self._submitted()
 		draft = returns.create_returned_draft(note.name)
 
-		items = attention._collect_bosta_items(attention.BOSTA_RETURN_REVIEW)
+		items = attention._collect_carrier_items(attention.CARRIER_RETURN_REVIEW)
 		mine = [i for i in items if i["reference_name"] == draft]
 		self.assertEqual(len(mine), 1)
 		self.assertEqual(mine[0]["role"], "Stock User")
@@ -380,7 +382,7 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 		self.assertIn(note.name, mine[0]["explanation"])
 
 		frappe.db.set_value("Delivery Note", draft, "docstatus", 1)
-		items = attention._collect_bosta_items(attention.BOSTA_RETURN_REVIEW)
+		items = attention._collect_carrier_items(attention.CARRIER_RETURN_REVIEW)
 		self.assertEqual([i for i in items if i["reference_name"] == draft], [])
 		frappe.db.set_value("Delivery Note", draft, "docstatus", 0)
 

@@ -6,9 +6,10 @@
 // This shell owns what every carrier shares: the intro text per Integration Status, the "Sending to
 // <carrier>..." dialog that Submit waits on, the Check / Refresh buttons and the shipping status
 // indicator. A carrier plugs in by calling register_carrier() from its own file (see
-// delivery_note_bosta.js) with the server methods and an optional add_buttons(frm). Which carriers
-// show the section is decided by the server (frappe.boot.marketplace_shipping_carriers), and every
-// rule is enforced server side (services/carrier_shipments.py): this script only shows and drives.
+// the carrier's own delivery_note_<carrier>.js file) with optional before_send(frm) -> bool, refresh(frm), add_buttons(frm) and
+// pick_city(frm). The shell calls the neutral API (api/carrier_shipments.py). Which carriers show the
+// section is decided by the server (frappe.boot.marketplace_shipping_carriers), and every rule is
+// enforced server side (services/carrier_shipments.py): this script only shows and drives.
 //
 // Wrapped in a function: doctype_js files share one scope with ERPNext's own Delivery Note script.
 (function () {
@@ -23,11 +24,14 @@
 	const CANCEL_STATUSES = ["Cancellation Pending", "Cancellation Unknown", "Cancelled"];
 	const EDITABLE = ["", NOT_CREATED, FAILED];
 
+	const API = "marketplace_integrations.api.carrier_shipments.";
 	const carriers = {};
 
-	// carrier = { request_method, check_method, refresh_method, add_buttons(frm), pick_city(frm) } (all
-	// optional but request_method; pick_city opens the carrier's city picker when the server answers
-	// needs_city). The key is the Supplier name stored in Delivery Note.transporter_name.
+	// carrier = { before_send(frm) -> bool, refresh(frm), add_buttons(frm), pick_city(frm), locked_fields }
+	// (all optional). before_send returns false to stop the Submit (it shows why); refresh runs on every
+	// form refresh; pick_city opens the carrier's picker when the server answers needs_city; locked_fields
+	// are read-only once the shipment is started. The key is the Supplier name stored in
+	// Delivery Note.transporter_name.
 	function register_carrier(name, carrier) {
 		carriers[name] = carrier;
 	}
@@ -118,7 +122,7 @@
 	// text is escaped: frappe.show_alert renders HTML.
 	function check_with_carrier(frm, carrier) {
 		const escape = frappe.utils.escape_html;
-		return call_and_reload(frm, carriers[carrier].check_method, __("Checking with {0}...", [carrier]), (result) => {
+		return call_and_reload(frm, API + "check_shipment", __("Checking with {0}...", [carrier]), (result) => {
 			frappe.show_alert({
 				message: escape(
 					result.status === CREATED
@@ -134,12 +138,12 @@
 		if (frm.is_new() || !frm.doc || !frappe.model.can_write("Delivery Note")) return;
 		const hooks = carriers[carrier];
 		const status = status_of(frm);
-		if (frm.doc.docstatus === 0 && [UNKNOWN, CREATING].includes(status) && hooks.check_method) {
+		if (frm.doc.docstatus === 0 && [UNKNOWN, CREATING].includes(status)) {
 			frm.add_custom_button(__("Check with {0}", [carrier]), () => check_with_carrier(frm, carrier));
 		}
-		if ([CREATED, ...CANCEL_STATUSES].includes(status) && hooks.refresh_method) {
+		if ([CREATED, ...CANCEL_STATUSES].includes(status)) {
 			frm.add_custom_button(__("Refresh from {0}", [carrier]), () =>
-				call_and_reload(frm, hooks.refresh_method, __("Reading the status from {0}...", [carrier]))
+				call_and_reload(frm, API + "refresh_shipment", __("Reading the status from {0}...", [carrier]))
 			);
 		}
 		if (hooks.add_buttons) hooks.add_buttons(frm);
@@ -175,11 +179,7 @@
 			frappe.validated = false;
 			return;
 		}
-		if (!frm.doc.custom_cod_confirmed) {
-			frappe.msgprint({
-				message: __("Confirm the COD amount before submitting: tick COD confirmed, or change the COD. 0 is allowed."),
-				indicator: "orange",
-			});
+		if (hooks.before_send && hooks.before_send(frm) === false) {
 			frappe.validated = false;
 			return;
 		}
@@ -212,7 +212,7 @@
 						indicator: "red",
 						title: __("{0} shipment", [carrier]),
 						primary_action:
-							status === UNKNOWN && hooks.check_method
+							status === UNKNOWN
 								? {
 										label: __("Check with {0}", [carrier]),
 										action: () => {
@@ -258,7 +258,7 @@
 					);
 			frappe
 				.call({
-					method: hooks.request_method,
+					method: API + "request_shipment",
 					type: "POST",
 					args: { delivery_note: frm.doc.name, modified: frm.doc.modified },
 					// the server's refusal is shown below (parsed and escaped), not by frappe.call
@@ -297,47 +297,13 @@
 		});
 	}
 
-	function money(value, currency) {
-		return typeof format_currency === "function" ? format_currency(value, currency) : String(value);
-	}
-
-	// A confirmed COD is never recomputed (it may be a deliberate choice), so when the items or the
-	// advance changed since, say what the computed amount is. The merchant decides; nothing is written.
-	// The saved note is judged by the server, so an unsaved form shows no hint.
-	function show_cod_hint(frm, carrier) {
-		const hooks = carriers[carrier];
-		if (!hooks.cod_hint_method || frm.is_new() || frm.is_dirty() || !is_editable(frm) || !frm.doc.custom_cod_confirmed) return;
-		if (!frm.dashboard || !frm.dashboard.add_comment) return;
-		return frappe
-			.call({ method: hooks.cod_hint_method, type: "POST", args: { delivery_note: frm.doc.name } })
-			.then((r) => {
-				const hint = r && r.message;
-				if (!hint || hint.default === null || hint.default === undefined) return;
-				frm.dashboard.add_comment(
-					frappe.utils.escape_html(
-						__("The COD amount {0} differs from the amount calculated from the current items and advance ({1}). Change the COD if it is no longer right.", [
-							money(frm.doc.custom_cod_amount, frm.doc.currency),
-							money(hint.default, frm.doc.currency),
-						])
-					),
-					"yellow",
-					true
-				);
-			})
-			.catch(() => {
-				// a hint only: a failed lookup must not disturb the form
-			});
-	}
-
-	// The COD amount and its confirmation can only change while the note is editable.
-	function set_cod_state(frm, carrier) {
+	// Fields the carrier was sent (carrier.locked_fields) lock once the shipment is started; the server
+	// refuses a change too.
+	function set_locked_fields(frm, carrier) {
 		const read_only = is_editable(frm) ? 0 : 1;
-		// Fields the carrier was sent (carrier.locked_fields) lock the same way; the server refuses them too.
 		((carriers[carrier] && carriers[carrier].locked_fields) || []).forEach((fieldname) =>
 			frm.set_df_property(fieldname, "read_only", read_only)
 		);
-		frm.set_df_property("custom_cod_amount", "read_only", read_only);
-		frm.set_df_property("custom_cod_confirmed", "read_only", read_only);
 	}
 
 	const api = {
@@ -348,7 +314,6 @@
 		failure_html,
 		server_message,
 		is_editable,
-		show_cod_hint,
 	};
 
 	if (typeof frappe !== "undefined") {
@@ -359,17 +324,11 @@
 				refresh(frm) {
 					const carrier = carrier_name(frm);
 					if (!carrier) return;
-					set_cod_state(frm, carrier);
+					set_locked_fields(frm, carrier);
 					show_intro(frm, carrier);
 					show_shipping_status(frm);
-					show_cod_hint(frm, carrier);
+					if (carriers[carrier].refresh) carriers[carrier].refresh(frm);
 					add_buttons(frm, carrier);
-				},
-				// Editing the COD is the person's choice: it confirms the amount.
-				custom_cod_amount(frm) {
-					if (carrier_name(frm) && is_editable(frm) && !frm.doc.custom_cod_confirmed) {
-						frm.set_value("custom_cod_confirmed", 1);
-					}
 				},
 				before_submit,
 			});

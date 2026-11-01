@@ -86,13 +86,14 @@ function make_form(doc = {}) {
 	};
 }
 
-test("Bosta registers its server methods with the shared shipping shell", () => {
+test("Bosta registers its hooks with the shared shipping shell", () => {
 	const { registered } = load();
 	assert.deepEqual(Object.keys(registered), ["Bosta"]);
-	assert.equal(registered.Bosta.request_method, "marketplace_integrations.api.bosta_shipments.request_shipment");
-	assert.equal(registered.Bosta.check_method, "marketplace_integrations.api.bosta_shipments.check_with_bosta");
-	assert.equal(registered.Bosta.refresh_method, "marketplace_integrations.api.bosta_shipments.refresh_from_bosta");
-	assert.equal(registered.Bosta.pick_city, require("./delivery_note_bosta.js").pick_city);
+	const mod = require("./delivery_note_bosta.js");
+	assert.equal(registered.Bosta.before_send, mod.before_send);
+	assert.equal(typeof registered.Bosta.refresh, "function");
+	assert.equal(registered.Bosta.pick_city, mod.pick_city);
+	assert.equal(registered.Bosta.request_method, undefined);
 });
 
 test("the city button shows only while the shipment can still be created", () => {
@@ -172,13 +173,13 @@ test("a note without a live Bosta shipment is cancelled natively without a call"
 });
 
 test("a confirmed cancel reloads the note and lets the native cancel go on", async () => {
-	const { mod, calls } = load({ responses: { cancel_at_bosta: CANCELLED } });
+	const { mod, calls } = load({ responses: { cancel_shipment: CANCELLED } });
 	const frm = bosta_form();
 	global.frappe.validated = true;
 
 	await mod.before_cancel(frm);
 
-	assert.equal(calls[0].method, "marketplace_integrations.api.bosta_shipments.cancel_at_bosta");
+	assert.equal(calls[0].method, "marketplace_integrations.api.carrier_shipments.cancel_shipment");
 	assert.equal(calls[0].freeze, true);
 	assert.equal(calls[0].freeze_message, "Cancelling at Bosta...");
 	assert.equal(frm.reloads, 1);
@@ -187,7 +188,7 @@ test("a confirmed cancel reloads the note and lets the native cancel go on", asy
 
 test("a Bosta refusal stops the cancel and shows Bosta's text escaped", async () => {
 	const { mod, msgprints } = load({
-		responses: { cancel_at_bosta: { outcome: "refused", status: "Created", message: "<img src=x onerror=1> not cancellable" } },
+		responses: { cancel_shipment: { outcome: "refused", status: "Created", message: "<img src=x onerror=1> not cancellable" } },
 	});
 	const frm = bosta_form();
 	global.frappe.validated = true;
@@ -202,7 +203,7 @@ test("a Bosta refusal stops the cancel and shows Bosta's text escaped", async ()
 
 test("an unknown result opens a dialog with Retry and Check with Bosta; closing it stops the cancel", async () => {
 	const { mod, dialogs } = load({
-		responses: { cancel_at_bosta: { outcome: "unknown", status: "Cancellation Unknown", message: "<b>timeout</b>" } },
+		responses: { cancel_shipment: { outcome: "unknown", status: "Cancellation Unknown", message: "<b>timeout</b>" } },
 	});
 	const frm = bosta_form();
 	global.frappe.validated = true;
@@ -222,7 +223,7 @@ test("an unknown result opens a dialog with Retry and Check with Bosta; closing 
 
 test("Retry asks Bosta again and continues the cancel when Bosta confirms", async () => {
 	let answers = [{ outcome: "unknown", message: "" }, CANCELLED];
-	const { mod, dialogs, calls } = load({ responses: { cancel_at_bosta: () => answers.shift() } });
+	const { mod, dialogs, calls } = load({ responses: { cancel_shipment: () => answers.shift() } });
 	const frm = bosta_form();
 	global.frappe.validated = true;
 	const finished = mod.before_cancel(frm);
@@ -231,13 +232,13 @@ test("Retry asks Bosta again and continues the cancel when Bosta confirms", asyn
 	dialogs[0].config.primary_action();
 	await finished;
 
-	assert.equal(calls.filter((c) => c.method.endsWith("cancel_at_bosta")).length, 2);
+	assert.equal(calls.filter((c) => c.method.endsWith("cancel_shipment")).length, 2);
 	assert.equal(global.frappe.validated, true);
 });
 
 test("Check with Bosta reads the state and continues when the note is Cancelled", async () => {
 	const { mod, dialogs, calls } = load({
-		responses: { cancel_at_bosta: { outcome: "unknown", message: "" }, refresh_from_bosta: {} },
+		responses: { cancel_shipment: { outcome: "unknown", message: "" }, refresh_shipment: {} },
 	});
 	const frm = bosta_form();
 	frm.reload_doc = function () {
@@ -252,12 +253,12 @@ test("Check with Bosta reads the state and continues when the note is Cancelled"
 	dialogs[0].config.secondary_action();
 	await finished;
 
-	assert.ok(calls.some((c) => c.method.endsWith("refresh_from_bosta")));
+	assert.ok(calls.some((c) => c.method.endsWith("refresh_shipment")));
 	assert.equal(global.frappe.validated, true);
 });
 
 test("the draft note offers Cancel Bosta Shipment and asks before cancelling", async () => {
-	const { mod, confirms, calls } = load({ responses: { cancel_at_bosta: CANCELLED } });
+	const { mod, confirms, calls } = load({ responses: { cancel_shipment: CANCELLED } });
 	const frm = bosta_form({ docstatus: 0 });
 	mod.add_buttons(frm);
 	const button = frm.buttons.find((b) => b.label === "Cancel Bosta Shipment");
@@ -266,7 +267,7 @@ test("the draft note offers Cancel Bosta Shipment and asks before cancelling", a
 	await button.action();
 
 	assert.match(confirms[0], /This cannot be undone/);
-	assert.equal(calls[0].method.endsWith("cancel_at_bosta"), true);
+	assert.equal(calls[0].method.endsWith("cancel_shipment"), true);
 	assert.equal(frm.reloads, 1);
 });
 
@@ -338,4 +339,83 @@ test("a refused edit re-enables the button and shows the escaped reason", async 
 	assert.equal(dialog.primary.disabled, false);
 	assert.equal(msgprints.length, 1);
 	assert.equal(msgprints[0].indicator, "red");
+});
+
+function cod_form(doc = {}, { dirty = false } = {}) {
+	return {
+		doc: { name: "MAT-DN-1", transporter_name: "Bosta", docstatus: 0, custom_cod_confirmed: 1, ...doc },
+		df: {},
+		values: {},
+		dashboard: { add_comment: () => {} },
+		is_new: () => false,
+		is_dirty: () => dirty,
+		set_df_property(field, prop, value) {
+			this.df[`${field}.${prop}`] = value;
+		},
+		set_value(field, value) {
+			this.values[field] = value;
+		},
+	};
+}
+
+test("the COD amount and its confirmation are read-only once the shipment started, editable before", () => {
+	const { mod } = load();
+	for (const [status, read_only] of [["Not Created", 0], ["Creating", 1], ["Created", 1]]) {
+		const frm = cod_form({ custom_integration_status: status });
+		mod.set_cod_state(frm);
+		assert.equal(frm.df["custom_cod_amount.read_only"], read_only, status);
+		assert.equal(frm.df["custom_cod_confirmed.read_only"], read_only, status);
+	}
+});
+
+test("changing the COD confirms it while the note is editable, and only then", () => {
+	const { mod } = load();
+	const draft = cod_form({ custom_integration_status: "Not Created", custom_cod_confirmed: 0 });
+	mod.custom_cod_amount(draft);
+	assert.equal(draft.values.custom_cod_confirmed, 1);
+	const started = cod_form({ custom_integration_status: "Created", custom_cod_confirmed: 0 });
+	mod.custom_cod_amount(started);
+	assert.deepEqual(started.values, {});
+	const other = cod_form({ transporter_name: "Noon", custom_cod_confirmed: 0 });
+	mod.custom_cod_amount(other);
+	assert.deepEqual(other.values, {});
+});
+
+test("the submit gate asks to confirm an unconfirmed COD and passes a confirmed one", () => {
+	const { mod, msgprints } = load();
+	assert.equal(mod.before_send(cod_form({ custom_cod_confirmed: 0 })), false);
+	assert.match(msgprints[0].message, /Confirm the COD amount/);
+	assert.equal(mod.before_send(cod_form({ custom_cod_confirmed: 1 })), true);
+});
+
+test("a confirmed COD that differs from the computed one shows a note with both amounts, escaped", async () => {
+	const { mod, calls } = load({ responses: { get_cod_hint: { default: 250 } } });
+	const comments = [];
+	const frm = cod_form({ custom_integration_status: "Not Created", custom_cod_amount: 100, currency: "EGP" });
+	frm.dashboard.add_comment = (text, color, permanent) => comments.push({ text, color, permanent });
+	await mod.show_cod_hint(frm);
+	assert.equal(calls[0].method, "marketplace_integrations.api.bosta_shipments.get_cod_hint");
+	assert.equal(comments.length, 1);
+	assert.match(comments[0].text, /100 differs .* \(250\)/);
+	assert.equal(comments[0].color, "yellow");
+});
+
+test("no COD note when the amount matches, the form is unsaved or dirty, or the shipment started", async () => {
+	const { mod, calls } = load({ responses: { get_cod_hint: { default: null } } });
+	const comments = [];
+	const add = (frm) => (frm.dashboard.add_comment = (text) => comments.push(text));
+	const same = cod_form({ custom_integration_status: "Not Created" });
+	add(same);
+	await mod.show_cod_hint(same);
+	assert.equal(calls.length, 1);
+	assert.equal(comments.length, 0);
+	for (const frm of [
+		cod_form({ custom_integration_status: "Creating" }),
+		cod_form({ custom_integration_status: "Not Created", custom_cod_confirmed: 0 }),
+		cod_form({ custom_integration_status: "Not Created" }, { dirty: true }),
+	]) {
+		add(frm);
+		await mod.show_cod_hint(frm);
+	}
+	assert.equal(calls.length, 1);
 });
