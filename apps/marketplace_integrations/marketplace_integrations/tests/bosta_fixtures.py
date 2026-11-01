@@ -14,8 +14,6 @@ from unittest.mock import patch
 import frappe
 from frappe.utils import add_days, now_datetime, nowdate
 
-BOSTA_ROLES = ("Sales Manager", "Stock User", "Sales User")
-
 # Bosta's city list (GET /cities) and directory (GET /cities/getAllDistricts) as the fake
 # serves them by default. Cairo is the city the tests use; its code (EG-01) is what Bosta gets.
 DEFAULT_CITIES = {
@@ -132,6 +130,9 @@ class FakeBosta:
 
 
 class BostaFixtureMixin:
+	"""A Bosta Delivery Note on the real database. ``make_note`` builds a submitted non-stock Sales Order
+	and a draft Delivery Note from it (transporter Bosta, city, phone and address filled in)."""
+
 	def setUp(self):
 		from marketplace_integrations.integrations.bosta import locations
 
@@ -149,7 +150,9 @@ class BostaFixtureMixin:
 		self._purged = []
 		self._error_log_floor = now_datetime()
 		self.http = FakeBosta()
-		stub = SimpleNamespace(enabled=1, get_password=lambda *a, **k: "api-key")
+		stub = SimpleNamespace(
+			enabled=1, business_location_id="LOC-1", get_password=lambda *a, **k: "api-key"
+		)
 		patchers = [
 			patch(
 				"marketplace_integrations.integrations.bosta.client.http_request",
@@ -159,10 +162,15 @@ class BostaFixtureMixin:
 				"marketplace_integrations.integrations.bosta.client.BostaClient.get_settings",
 				return_value=stub,
 			),
+			# The create job is queued, never run by a worker, in a test.
+			patch("frappe.enqueue"),
 		]
+		self.enqueue = patchers[2]
 		for patcher in patchers:
-			patcher.start()
+			started = patcher.start()
 			self.addCleanup(patcher.stop)
+			if patcher is self.enqueue:
+				self.enqueue = started
 		self.company = frappe.defaults.get_global_default("company")
 		self.customer = self._track(
 			frappe.get_doc(
@@ -185,20 +193,48 @@ class BostaFixtureMixin:
 				}
 			).insert()
 		)
+		supplier = frappe.db.get_value("Supplier", {"supplier_name": "Bosta"}, "name")
+		if not supplier:
+			supplier = self._track(
+				frappe.get_doc(
+					{
+						"doctype": "Supplier",
+						"supplier_name": "Bosta",
+						"supplier_group": "All Supplier Groups",
+						"supplier_type": "Company",
+						"is_transporter": 1,
+					}
+				).insert()
+			).name
+		self.supplier = supplier
+		self.address = self._track(
+			frappe.get_doc(
+				{
+					"doctype": "Address",
+					"address_title": f"Bosta Test {self.suffix}",
+					"address_type": "Shipping",
+					"address_line1": "12 Example Street",
+					"city": "Cairo",
+					"country": "Egypt",
+					"links": [{"link_doctype": "Customer", "link_name": self.customer.name}],
+				}
+			).insert()
+		)
 		frappe.db.commit()
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
 		frappe.db.rollback()
-		for name in frappe.get_all(
-			"Bosta Shipment", filters={"receiver_name": self._receiver()}, pluck="name"
-		):
-			self._purge("Bosta Shipment", name)
 		orders = {d.name for d in self._created if d.doctype == "Sales Order"}
-		for delivery_note in frappe.get_all(
+		notes = frappe.get_all(
 			"Delivery Note Item", filters={"against_sales_order": ["in", list(orders)]}, pluck="parent"
-		):
-			self._purge("Delivery Note", delivery_note)
+		)
+		for note in set(notes):
+			frappe.db.set_value("Delivery Note", note, "custom_integration_status", "")
+			frappe.db.delete(
+				"Integration Request", {"reference_doctype": "Delivery Note", "reference_docname": note}
+			)
+			self._purge("Delivery Note", note)
 		for doc in reversed(self._created):
 			self._purge(doc.doctype, doc.name)
 		filters = {"method": ["like", "Bosta%"]}
@@ -222,9 +258,6 @@ class BostaFixtureMixin:
 			},
 		)
 		frappe.db.commit()
-
-	def _receiver(self):
-		return f"Receiver {self.suffix}"
 
 	def _track(self, doc):
 		self._created.append(doc)
@@ -266,6 +299,26 @@ class BostaFixtureMixin:
 		frappe.db.commit()
 		return order
 
+	def make_note(self, order=None, city="EG-01", cod=None, confirm_cod=True, **overrides):
+		"""A saved draft Bosta Delivery Note. ``cod=None`` lets the adapter default it. The COD is marked
+		confirmed (Submit refuses an unconfirmed one) unless ``confirm_cod=False``."""
+		from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
+
+		order = order or self.make_order()
+		note = make_delivery_note(order.name)
+		note.transporter = self.supplier
+		note.shipping_address_name = self.address.name
+		note.contact_mobile = "01000000000"
+		note.custom_bosta_city = city
+		note.custom_bosta_city_name = "Cairo"
+		if cod is not None:
+			note.custom_cod_amount = cod
+		note.custom_cod_confirmed = 1 if confirm_cod else 0
+		note.update(overrides)
+		note.insert()
+		frappe.db.commit()
+		return note
+
 	def make_user(self, role, *extra_roles):
 		email = f"bosta-{frappe.scrub(role)}-{len(extra_roles)}-{self.suffix}@example.com"
 		user = frappe.get_doc(
@@ -280,24 +333,3 @@ class BostaFixtureMixin:
 		self._track(user)
 		frappe.db.commit()
 		return email
-
-	def create(self, order, **overrides):
-		from marketplace_integrations.integrations.bosta import deliveries
-
-		confirm_handover = overrides.pop("confirm_handover", True)
-		args = {
-			"receiver_name": self._receiver(),
-			"receiver_phone": "01000000000",
-			"city_id": "city-cairo",
-			"address_first_line": "12 Example Street",
-		}
-		args.update(overrides)
-		result = deliveries.create_bosta_shipment(order.name, **args)
-		# Legacy flow tests opt into this convenience; production creation never posts stock.
-		if confirm_handover and result.get("tracking_number"):
-			deliveries.confirm_physical_handover(result["shipment"])
-		return result
-
-	def shipment_for(self, order, **filters):
-		name = frappe.db.get_value("Bosta Shipment", {"sales_order": order.name, **filters}, "name")
-		return frappe.get_doc("Bosta Shipment", name) if name else None
