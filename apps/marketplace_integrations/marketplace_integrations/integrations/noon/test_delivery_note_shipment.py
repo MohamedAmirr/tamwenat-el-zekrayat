@@ -48,6 +48,7 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 	def setUp(self):
 		super().setUp()
 		self.fixtures = []
+		self._fbpi_ready_account()
 		self.created_supplier = False
 		if not noon.transporter_name():
 			create_noon_transporter_supplier.execute()
@@ -68,6 +69,18 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 			frappe.db.commit()
 
 	# ---- helpers -------------------------------------------------------------------------
+
+	def _fbpi_ready_account(self, **overrides):
+		"""The account as after Check Noon Warehouse and the one-time FBPI Code confirmation (#416)."""
+		values = {
+			"noon_fbpi_code": "FBPI",
+			"noon_fulfillment_system_code": "FBPI",
+			"noon_warehouse_active": 1,
+			"noon_warehouse_checked_on": frappe.utils.now_datetime(),
+		}
+		values.update(overrides)
+		frappe.db.set_value("Marketplace Account", self.account.name, values, update_modified=False)
+		frappe.db.commit()
 
 	def _order(self, rows, payload_skus):
 		"""A submitted Noon Sales Order of ``rows`` ([(sku, qty)]) whose Noon payload holds one CONFIRMED +
@@ -195,6 +208,27 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		frappe.db.set_value("Delivery Note Item", {"parent": note.name}, "qty", 1.5)
 		with self.assertRaises(frappe.ValidationError):
 			noon.validate_ready(self._note(note.name))
+
+	def test_validate_ready_refuses_a_warehouse_that_is_not_fbpi_ready(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._draft_note(fx, lr_no="TYPED-1")
+		cases = (
+			({"noon_fbpi_code": ""}, "no FBPI Code"),
+			({"noon_fulfillment_system_code": "", "noon_warehouse_checked_on": None}, "never checked"),
+			({"noon_fulfillment_system_code": "OTHER"}, "is not its FBPI Code"),
+			({"noon_warehouse_active": 0}, "not active"),
+		)
+		for overrides, reason in cases:
+			self._fbpi_ready_account(**overrides)
+			with self.assertRaisesRegex(frappe.ValidationError, reason):
+				noon.validate_ready(self._note(note.name))
+			with patch(_CLIENT) as client_class:
+				with self.assertRaises(frappe.ValidationError):
+					carrier_shipments.request_create(note.name)
+			client_class.return_value.request.assert_not_called()
+			self.assertEqual(self._note(note.name).custom_integration_status, "Not Created")
+			self._fbpi_ready_account()
+		noon.validate_ready(self._note(note.name))  # ready again
 
 	# ---- create (the job) -----------------------------------------------------------------------
 

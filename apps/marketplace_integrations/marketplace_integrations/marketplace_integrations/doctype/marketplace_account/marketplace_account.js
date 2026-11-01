@@ -22,7 +22,16 @@ const RECONCILE_INVENTORY_LABEL = "Reconcile Shopify Inventory";
 const LOAD_SHOPIFY_GATEWAYS_LABEL = "Load Shopify Payment Gateways";
 
 const SHOPIFY_LOCATION_FIELDS = ["shopify_location_section", "shopify_location_gid", "shopify_location_name"];
-const NOON_FIELDS = ["noon_warehouse_section", "noon_warehouse_code", "noon_country_code"];
+const NOON_FIELDS = [
+	"noon_warehouse_section",
+	"noon_warehouse_code",
+	"noon_country_code",
+	"noon_fulfillment_system_code",
+	"noon_warehouse_active",
+	"noon_warehouse_checked_on",
+	"noon_fbpi_code",
+];
+const NOON_CHECK_WAREHOUSE_LABEL = "Check Noon Warehouse";
 const NOON_SYNC_LABEL = "Sync Noon Pricing and Stock";
 const NOON_IMPORT_ORDERS_LABEL = "Import Noon Orders";
 const NOON_LOOKUP_RETURN_LABEL = "Look Up Noon Return";
@@ -208,6 +217,7 @@ function configure_noon(frm) {
 	const is_noon = frm.doc.platform === "Noon";
 	for (const fieldname of NOON_FIELDS) frm.toggle_display(fieldname, is_noon);
 	frm.remove_custom_button(__("Load Noon Warehouses"));
+	frm.remove_custom_button(__(NOON_CHECK_WAREHOUSE_LABEL));
 	frm.remove_custom_button(__(NOON_SYNC_LABEL));
 	frm.remove_custom_button(__(NOON_IMPORT_ORDERS_LABEL));
 	frm.remove_custom_button(__(NOON_LOOKUP_RETURN_LABEL));
@@ -217,10 +227,32 @@ function configure_noon(frm) {
 		frm.add_custom_button(__("Load Noon Warehouses"), () => show_noon_warehouse_picker(frm));
 	}
 	if (!frm.is_new() && frm.doc.enabled && frappe.model.can_write("Marketplace Account")) {
+		frm.add_custom_button(__(NOON_CHECK_WAREHOUSE_LABEL), () => check_noon_warehouse(frm));
 		frm.add_custom_button(__(NOON_SYNC_LABEL), () => sync_noon(frm));
 		frm.add_custom_button(__(NOON_IMPORT_ORDERS_LABEL), () => import_noon_orders(frm));
 		frm.add_custom_button(__(NOON_LOOKUP_RETURN_LABEL), () => lookup_noon_return(frm));
 	}
+}
+
+// #416: asks Noon (ListWarehouses) for this account's warehouse and stores its fulfillment system code and
+// active flag on the account. Unsaved edits must be saved first: the server reads the saved warehouse code.
+// A Noon or permission error is shown by Frappe's own dialog (the server escapes Noon's text).
+function check_noon_warehouse(frm) {
+	if (frm.is_dirty()) {
+		frappe.msgprint(__("Save the Marketplace Account first."));
+		return Promise.resolve();
+	}
+	return frappe
+		.call({
+			method: "marketplace_integrations.api.noon_catalog.check_noon_warehouse",
+			args: { account: frm.doc.name },
+			freeze: true,
+			freeze_message: __("Checking the Noon warehouse..."),
+		})
+		.then(() => {
+			frappe.show_alert({ message: __("Noon warehouse checked."), indicator: "green" });
+			return frm.reload_doc();
+		});
 }
 
 // Manual barcode lookup (#153) - the manual Desk trigger for
@@ -668,5 +700,9 @@ if (typeof module !== "undefined") {
 		LOAD_SHOPIFY_GATEWAYS_LABEL,
 		show_shopify_gateway_picker,
 		configure_view_shortcuts,
+		configure_noon,
+		check_noon_warehouse,
+		NOON_CHECK_WAREHOUSE_LABEL,
+		NOON_FIELDS,
 	};
 }

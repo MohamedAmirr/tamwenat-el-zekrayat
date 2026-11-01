@@ -33,8 +33,8 @@ Rules enforced here:
 
 Status: ``refresh`` (GetShipment + GetFbpiOrder) derives the Shipping Status and the per-row Noon status from
 the units' item statuses and never edits items; ``enqueue_note_refreshes`` (webhook) and ``run_reconcile``
-(nightly) call it. The FBPI warehouse check of ``validate_ready`` is ``check_fbpi_warehouse``, filled in by
-sub-issue #416.
+(nightly) call it. The FBPI warehouse check of ``validate_ready`` is ``check_fbpi_warehouse`` (#416): it
+refuses Submit-time creation unless ``catalog.fbpi_ready(account)`` says the stored warehouse is FBPI.
 """
 
 import json
@@ -44,7 +44,7 @@ from frappe import _
 from frappe.query_builder.functions import Lower
 from frappe.utils import cint, cstr, flt, getdate, now_datetime, strip_html
 
-from marketplace_integrations.integrations.noon import fulfillment
+from marketplace_integrations.integrations.noon import catalog, fulfillment
 from marketplace_integrations.integrations.noon.client import SERVICE_NAME
 from marketplace_integrations.integrations.noon.constants import (
 	NOON_LOGISTICS_AWBS_GET_PATH,
@@ -360,9 +360,12 @@ def refuse_sales_order_cancel(order):
 
 
 def check_fbpi_warehouse(doc, account):
-	"""Hook point (sub-issue #416): the FBPI warehouse check, that the stored warehouse code equals the
-	account's FBPI code and the warehouse is active. Its Marketplace Account fields come with #416, so
-	nothing is checked yet."""
+	"""The FBPI warehouse check (sub-issue #416): refuse unless the account's FBPI Code is set, equals the
+	stored Noon fulfillment system code and the warehouse is active (``catalog.fbpi_ready``). Reads stored
+	values only; nothing is sent to Noon."""
+	ready, reason = catalog.fbpi_ready(account)
+	if not ready:
+		frappe.throw(reason, title=_("Noon shipment"))
 
 
 def _started_units(doc):

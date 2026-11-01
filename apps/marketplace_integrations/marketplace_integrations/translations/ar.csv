@@ -1800,3 +1800,20 @@ Noon did not answer the order lookup ({0}).,لم ترد Noon على الاستع
 Noon has no shipment with number {0}.,ليس لدى Noon شحنة بالرقم {0}.
 This draft holds a Noon shipment ({0}). Check it in Noon before sending or deleting the draft.,هذه المسودة تحمل شحنة Noon ({0}). افحصها في Noon قبل إرسال المسودة أو حذفها.
 {0} shipment is cancelled but this Delivery Note is still submitted. Press Cancel.,شحنة {0} ملغاة لكن مذكرة التسليم هذه ما زالت معتمدة. اضغط إلغاء.
+Noon Fulfillment System Code,رمز نظام التنفيذ في Noon
+Noon Warehouse Active,مستودع Noon نشط
+Noon Warehouse Checked On,تاريخ فحص مستودع Noon
+FBPI Code,رمز FBPI
+Stored by Check Noon Warehouse. Noon does not document which value means FBPI.,تُحفَظ بزر فحص مستودع Noon. لا توثّق Noon أي قيمة تعني FBPI.
+"Type the Fulfillment System Code that means FBPI, once, after looking at the stored code above. Shipments, Out of Stock and invoices are refused unless it equals the stored code and the warehouse is active.",اكتب رمز نظام التنفيذ الذي يعني FBPI مرة واحدة بعد الاطلاع على الرمز المخزَّن أعلاه. تُرفض الشحنات وإنفاد المخزون والفواتير ما لم يطابق الرمز المخزَّن وكان المستودع نشطًا.
+Check Noon Warehouse,فحص مستودع Noon
+Save the Marketplace Account first.,احفظ حساب السوق أولًا.
+Checking the Noon warehouse...,جارٍ فحص مستودع Noon...
+Noon warehouse checked.,تم فحص مستودع Noon.
+Noon Warehouse,مستودع Noon
+Noon has no warehouse with code {0}.,ليس لدى Noon مستودع بالرمز {0}.
+Noon did not answer the warehouse request. Try again.,لم ترد Noon على طلب المستودع. حاول مرة أخرى.
+"Marketplace Account {0} has no FBPI Code. Press Check Noon Warehouse, then type the code that means FBPI.",ليس لحساب السوق {0} رمز FBPI. اضغط فحص مستودع Noon ثم اكتب الرمز الذي يعني FBPI.
+The Noon warehouse of Marketplace Account {0} was never checked. Press Check Noon Warehouse.,لم يُفحص مستودع Noon لحساب السوق {0} قط. اضغط فحص مستودع Noon.
+"The Noon fulfillment system code of Marketplace Account {0} ({1}) is not its FBPI Code ({2}). Press Check Noon Warehouse again, or correct the FBPI Code.",رمز نظام التنفيذ في Noon لحساب السوق {0} ({1}) ليس رمز FBPI الخاص به ({2}). اضغط فحص مستودع Noon مرة أخرى أو صحّح رمز FBPI.
+The Noon warehouse of Marketplace Account {0} is not active at Noon.,مستودع Noon لحساب السوق {0} غير نشط لدى Noon.

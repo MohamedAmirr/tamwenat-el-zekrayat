@@ -65,7 +65,18 @@ The Delivery Note of a Noon Sales Order is the shipment. The Noon adapter
   = refresh; a draft with a shipment number whose shipment Noon has = the error "draft holds a Noon
   shipment" (Needs Attention, Carrier Creation Problem).
 - **Retired in #415 (phase 4).** Removed: the AWB pool (`awb_pool.py`, `api/noon_awbs.py`, doctype `Noon AWB`, the Generate Noon AWBs button), the old note flow (`delivery_note.js`, `delivery_note_drafts.py`, the `after_insert` hook, Retry endpoint), the Sales Order shipment actions, the handover chain (`handover_state.py`, Mark Handed Over, its Needs Attention rows), `custom_carrier_status` / `custom_carrier_error` and the doctypes `Marketplace Order Shipment`, `...Unit`, `...AWB`. Kept in `fulfillment.py`: Mark Out of Stock, the order invoice, the stuck-reservation release and the shared helpers. The per-shipment invoice returns on the Delivery Note with #416. Order reconciliation, the return AWB scan, the sync debounce and Mark Out of Stock read started units and AWBs from the Noon Delivery Notes (`started_units_of_order`, `recent_awbs_of_orders`, `has_created_note`).
-- **Not built yet:** the FBPI warehouse check (hook `check_fbpi_warehouse`, sub-issue #416).
+- **FBPI warehouse check (#416).** The Noon Marketplace Account form has a Check Noon Warehouse button
+  (`api/noon_catalog.check_noon_warehouse`, needs write on the account). It calls `ListWarehouses` (all pages;
+  Noon filters only by fulfillment system code, so the account's `noon_warehouse_code` is picked from the list)
+  and stores `noon_fulfillment_system_code`, `noon_warehouse_active` and `noon_warehouse_checked_on`
+  (read-only). The call is logged as an Integration Request (operation Warehouse, reference the account).
+  Noon does not document which code means FBPI, so the user looks at the stored code and types it once into
+  the FBPI Code field (`noon_fbpi_code`). `catalog.fbpi_ready(account) -> (ok, reason)` is true only when the
+  FBPI Code is set, equals the stored code and the warehouse is active; it reads stored values and never calls
+  Noon. `check_fbpi_warehouse` (in `validate_ready`) refuses Create/Submit with its reason. Changing the
+  account's warehouse code or connection clears the stored answer (check again). Mark Out of Stock and the
+  invoice actions reuse `fbpi_ready` in the next sub-issue #416 runs.
+- **Not built yet:** Mark Out of Stock on a Sales Order row and the invoice uploads (rest of sub-issue #416).
 
 ## Provider contract
 

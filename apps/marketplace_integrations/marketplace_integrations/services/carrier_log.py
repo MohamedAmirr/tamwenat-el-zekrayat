@@ -59,14 +59,18 @@ def attempt_number(service, delivery_note):
 	)
 
 
-def open_log(service, delivery_note, operation, attempt=None, correlation_id=None, reference=None):
+def open_log(
+	service, delivery_note, operation, attempt=None, correlation_id=None, reference=None, reference_doctype="Delivery Note"
+):
 	"""Insert the Integration Log row of one operation; returns its name. Inserted as the system after
-	the caller's own permission check (Integration Request only grants System Manager)."""
+	the caller's own permission check (Integration Request only grants System Manager). ``delivery_note`` is
+	the name of the ``reference_doctype`` document (a Delivery Note unless the caller passes another, e.g. the
+	Marketplace Account of a warehouse check)."""
 	log = frappe.get_doc(
 		{
 			"doctype": "Integration Request",
 			"integration_request_service": service,
-			"reference_doctype": "Delivery Note",
+			"reference_doctype": reference_doctype,
 			"reference_docname": delivery_note,
 			"status": "Queued",
 			"custom_operation_type": operation,
