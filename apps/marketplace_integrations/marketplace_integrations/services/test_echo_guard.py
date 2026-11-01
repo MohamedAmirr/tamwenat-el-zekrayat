@@ -292,7 +292,7 @@ class IntegrationTestEchoGuard(IntegrationTestCase):
 	def test_echo_of_a_linked_order_skips_the_replan_and_queues_the_sales_order_sync(self):
 		echo_guard.record_expected_change(self.order, "h" * 64, None)
 
-		(order, echo), upsert, finish = self.upsert_with_echo_guard("h" * 64)
+		(_order, echo), upsert, finish = self.upsert_with_echo_guard("h" * 64)
 
 		self.assertTrue(echo)
 		self.assertTrue(upsert.call_args.kwargs["skip_status_replan"])
@@ -302,7 +302,7 @@ class IntegrationTestEchoGuard(IntegrationTestCase):
 	def test_a_different_incoming_state_takes_the_normal_path_and_clears_the_marker(self):
 		echo_guard.record_expected_change(self.order, "h" * 64, None)
 
-		(order, echo), upsert, finish = self.upsert_with_echo_guard("x" * 64)
+		(_order, echo), upsert, finish = self.upsert_with_echo_guard("x" * 64)
 
 		self.assertFalse(echo)
 		self.assertFalse(upsert.call_args.kwargs["skip_status_replan"])
@@ -310,7 +310,7 @@ class IntegrationTestEchoGuard(IntegrationTestCase):
 		self.assertFalse(self.marker().expected_change_hash)
 
 	def test_no_marker_takes_the_normal_path(self):
-		(order, echo), upsert, finish = self.upsert_with_echo_guard("h" * 64)
+		(_order, echo), upsert, finish = self.upsert_with_echo_guard("h" * 64)
 
 		self.assertFalse(echo)
 		self.assertFalse(upsert.call_args.kwargs["skip_status_replan"])
@@ -319,7 +319,7 @@ class IntegrationTestEchoGuard(IntegrationTestCase):
 	def test_an_unlinked_order_takes_the_normal_path_but_clears_the_marker(self):
 		echo_guard.record_expected_change(self.order, "h" * 64, None)
 
-		(order, echo), upsert, finish = self.upsert_with_echo_guard("h" * 64, linked=False)
+		(_order, echo), upsert, finish = self.upsert_with_echo_guard("h" * 64, linked=False)
 
 		self.assertFalse(echo)
 		self.assertFalse(upsert.call_args.kwargs["skip_status_replan"])
