@@ -37,7 +37,10 @@ the units' item statuses and never edits items; ``enqueue_note_refreshes`` (webh
 refuses Submit-time creation unless ``catalog.fbpi_ready(account)`` says the stored warehouse is FBPI.
 """
 
+import base64
+import hashlib
 import json
+import re
 
 import frappe
 from frappe import _
@@ -51,6 +54,7 @@ from marketplace_integrations.integrations.noon.constants import (
 	SHIPMENT_CANCEL_PATH,
 	SHIPMENT_CREATE_PATH,
 	SHIPMENT_GET_PATH,
+	SHIPMENT_INVOICE_UPLOAD_PATH,
 )
 from marketplace_integrations.services import carrier_log
 from marketplace_integrations.services.carrier_log import (
@@ -102,6 +106,9 @@ SYSTEM_FIELDS = (
 	"custom_last_sync_at",
 	"custom_last_integration_error",
 	"custom_carrier_request_snapshot",
+	# the shipment invoice record: an amended note has not had its invoice uploaded
+	"custom_noon_invoice_uploaded_on",
+	"custom_noon_invoice_items_hash",
 )
 #: Fields a person edits that must stay put once the shipment is started (and the Generate AWB checkbox).
 LOCKED_FIELDS = ("transporter", "lr_no")
@@ -777,6 +784,148 @@ def cancel_remote(doc):
 
 def after_cancelled(delivery_note):
 	"""Noon has nothing to do after the Cancelled write."""
+
+
+# ---------------------------------------------------------------------------
+# Shipment invoice (spec section 9, #416)
+# ---------------------------------------------------------------------------
+# Invoice upload is a backup step: it never blocks Submit or Cancel (nothing here is called from a document
+# event). The PDF is attached by a person; nothing is generated.
+
+_KEY_PATTERN = re.compile(r"[A-Za-z0-9]{1,64}")
+
+
+def items_hash(rows):
+	"""Fingerprint of the note's rows (name, Item, quantity), stored with an upload so a later change shows up."""
+	data = sorted((cstr(row.get("name")), cstr(row.get("item_code")), flt(row.get("qty"), 6)) for row in rows)
+	return hashlib.sha256(json.dumps(data).encode()).hexdigest()
+
+
+def upload_invoice_for_note(delivery_note, file_url, invoice_nr, issued_at, idempotency_key=None):
+	"""Request path of "Upload Shipment Invoice" (the API checked write on the note). Needs a submitted note
+	whose Noon shipment is Created and an FBPI warehouse (clear refusal otherwise). The PDF becomes a private
+	File attached to the note, then the job is queued. A new press makes a new idempotency key; Retry passes
+	the key of its press back so Noon sees the same upload. Returns ``{"queued", "idempotency_key",
+	"file_url"}`` (the attached copy, which a Retry sends)."""
+	doc = frappe.get_doc("Delivery Note", delivery_note)
+	if not noon_order_name(doc):
+		frappe.throw(_("This Delivery Note is not a Noon shipment."))
+	if doc.docstatus != 1 or cstr(doc.get("custom_integration_status")) != CREATED:
+		frappe.throw(_("A shipment invoice can be uploaded only for a submitted Delivery Note whose Noon shipment is Created."))
+	account, _client = _account_and_client(doc)
+	check_fbpi_warehouse(doc, account)
+	invoice_nr = cstr(invoice_nr).strip()
+	if not invoice_nr or not issued_at:
+		frappe.throw(_("Invoice Nr and Issued At are required."))
+	if idempotency_key is not None and not _KEY_PATTERN.fullmatch(cstr(idempotency_key)):
+		frappe.throw(_("Invalid upload key."))
+	# the caller has write permission on this note (api/noon_fulfillment.py); the File is attached to it
+	file_url = fulfillment.attach_invoice_file(file_url, "Delivery Note", doc.name)
+	key = cstr(idempotency_key) or frappe.generate_hash(length=32)
+	fulfillment.set_invoice_result(key, "pending")
+	frappe.db.commit()
+	job = frappe.enqueue(
+		"marketplace_integrations.integrations.noon.delivery_note_shipment.run_upload_invoice",
+		queue="long",
+		timeout=300,
+		job_id=f"noon-shipment-invoice-{doc.name}-{key}",
+		deduplicate=True,
+		delivery_note=doc.name,
+		file_url=file_url,
+		invoice_nr=invoice_nr,
+		issued_at=cstr(issued_at),
+		idempotency_key=key,
+	)
+	return {"queued": job is not None, "idempotency_key": key, "file_url": file_url}
+
+
+def run_upload_invoice(delivery_note, file_url, invoice_nr, issued_at, idempotency_key):
+	"""Job of ``upload_invoice_for_note``: UploadShipmentInvoice with the note's shipment number
+	(``custom_carrier_reference``), logged, never holding a lock across the call. Success records the upload
+	time and the items fingerprint on the note (``db_set``: a system write-back on a submitted note); every
+	failure only reaches the result the dialog reads (Retry) and never touches the note's state."""
+	frappe.set_user("Administrator")
+	try:
+		doc = frappe.get_doc("Delivery Note", delivery_note)
+		if doc.docstatus != 1 or cstr(doc.get("custom_integration_status")) != CREATED or not noon_order_name(doc):
+			fulfillment.set_invoice_result(
+				idempotency_key, "failed", _("The Delivery Note no longer has a Created Noon shipment.")
+			)
+			return
+		account, client = _account_and_client(doc)
+		reference = _reference(doc)
+		date = getdate(issued_at).strftime("%Y-%m-%d")
+		file_doc = frappe.get_doc("File", {"file_url": file_url})
+		content = file_doc.get_content()
+		if isinstance(content, str):
+			content = content.encode()
+		body = {
+			"warehouse_code": account.noon_warehouse_code,
+			"integration_shipment_nr": reference,
+			"invoice": base64.b64encode(content).decode(),
+			"invoice_nr": invoice_nr,
+			"issued_at": date,
+			"idempotency_key": idempotency_key,
+		}
+		frappe.db.commit()  # no transaction open across the call
+		outcome, message = fulfillment.send_invoice(
+			client,
+			SHIPMENT_INVOICE_UPLOAD_PATH,
+			body,
+			"Delivery Note",
+			doc.name,
+			reference,
+			{"integration_shipment_nr": reference, "invoice_nr": invoice_nr, "issued_at": date},
+		)
+		if outcome != "done":
+			fulfillment.set_invoice_result(idempotency_key, "failed", message)
+			return
+		doc.db_set(
+			{
+				"custom_noon_invoice_uploaded_on": now_datetime(),
+				"custom_noon_invoice_items_hash": items_hash(doc.get("items") or []),
+			},
+			update_modified=False,
+			notify=True,
+			commit=True,
+		)
+		fulfillment.set_invoice_result(idempotency_key, "done")
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(title="Noon shipment invoice failed", message=frappe.get_traceback())
+		fulfillment.set_invoice_result(
+			idempotency_key, "failed", _("The invoice could not be sent. See the Error Log.")
+		)
+
+
+def outdated_invoices(rows):
+	"""``{Delivery Note name: Marketplace Order name}`` of the notes in ``rows`` (``name`` and
+	``custom_noon_invoice_items_hash``, already read with the caller's permissions) whose items differ from
+	the ones that were present at the upload: the invoice may need re-upload (Needs Attention). Read as the
+	system: only this derived answer leaves."""
+	stored = {row.name: row.custom_noon_invoice_items_hash for row in rows}
+	if not stored:
+		return {}
+	items = frappe.get_all(
+		"Delivery Note Item",
+		filters={"parent": ["in", list(stored)], "parenttype": "Delivery Note"},
+		fields=["parent", "name", "item_code", "qty", "against_sales_order"],
+		parent_doctype="Delivery Note",
+		limit_page_length=0,
+	)
+	by_note = {}
+	for item in items:
+		by_note.setdefault(item.parent, []).append(item)
+	result = {}
+	for note, note_items in by_note.items():
+		if items_hash(note_items) == stored[note]:
+			continue
+		orders = {item.against_sales_order for item in note_items if item.against_sales_order}
+		if len(orders) == 1:
+			order = frappe.db.get_value("Sales Order", next(iter(orders)), "custom_marketplace_order")
+			if order:
+				result[note] = order
+	return result
 
 
 # ---------------------------------------------------------------------------

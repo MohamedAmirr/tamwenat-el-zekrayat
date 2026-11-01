@@ -68,6 +68,10 @@ UPDATE_ORDER_ITEM_STATUS_OUT_OF_STOCK = "UPDATE_ORDER_REQUEST_ITEM_STATUS_OUT_OF
 OUT_OF_STOCK_OPERATION = "Out of Stock"
 #: How long the dialog can read the outcome of one Mark as Out of Stock press (seconds).
 _OOS_RESULT_TTL = 3600
+#: ``Integration Request.custom_operation_type`` of every Noon call of an invoice upload (order and shipment).
+INVOICE_OPERATION = "Invoice"
+#: How long the dialog can read the outcome of one invoice upload (seconds).
+_INVOICE_RESULT_TTL = 3600
 
 
 def _order_invoice_job_id(order_name, idempotency_key):
@@ -214,14 +218,7 @@ def get_available_actions(order):
 	buttons that would just fail). Returns ``{"actions": [...],
 	"cancelled_on_noon": bool}``; ``cancelled_on_noon`` is true only when no
 	action applies and the payload has no CONFIRMED unit left."""
-	from marketplace_integrations.integrations.noon.delivery_note_shipment import has_created_note
-
 	actions = []
-	created = has_created_note(order.name)
-	if created and order.noon_order_invoice_status != "Pending":
-		actions.append("upload_order_invoice")
-	if created and order.noon_order_invoice_status in ("Pending", "Error"):
-		actions.append("retry_order_invoice")
 	if _pending_oos_units(order):
 		actions.append("release_stuck_oos_reservation")
 
@@ -230,6 +227,20 @@ def get_available_actions(order):
 		not actions and bool(items) and not any(item.get("mp_status") == MP_STATUS_CONFIRMED for item in items)
 	)
 	return {"actions": actions, "cancelled_on_noon": cancelled_on_noon}
+
+
+def order_invoice_state(order):
+	"""Which order-invoice buttons the Sales Order offers: ``{"can_upload", "can_retry", "uploaded"}``. Upload
+	needs a Created shipment and no upload in flight; Retry follows a Pending or Error upload. The server
+	re-validates both."""
+	from marketplace_integrations.integrations.noon.delivery_note_shipment import has_created_note
+
+	status = order.noon_order_invoice_status
+	return {
+		"can_upload": bool(has_created_note(order.name)) and status != "Pending",
+		"can_retry": status in ("Pending", "Error") and bool(order.noon_order_invoice_file),
+		"uploaded": status == "Uploaded",
+	}
 
 
 def _with_readable_keys(order, request_data):
@@ -659,12 +670,77 @@ def run_mark_out_of_stock(marketplace_order_name, mp_item_nrs, sales_order, requ
 # ---------------------------------------------------------------------------
 # Order invoice (UploadFbpiOrderInvoice)
 # ---------------------------------------------------------------------------
-# The shipment invoice (UploadShipmentInvoice) lived on the removed Marketplace Order shipment rows; sub-issue
-# #416 brings it back on the Delivery Note.
+# The shipment invoice (UploadShipmentInvoice) is sent from the Delivery Note
+# (``delivery_note_shipment.upload_invoice_for_note``, #416); it shares the file rules, the result the dialog
+# polls and the logged Noon call defined here.
+
+
+def _invoice_result_key(idempotency_key):
+	return f"noon-invoice-result|{idempotency_key}"
+
+
+def set_invoice_result(idempotency_key, state, message=""):
+	"""What the invoice dialog reads (``invoice_result``): ``pending``, ``done`` or ``failed``. Display only:
+	the Integration Request rows (and, for the order invoice, the Marketplace Order fields) are the record.
+	The idempotency key is one per press and is reused by Retry, so a Retry starts ``pending`` again."""
+	frappe.cache().set_value(
+		_invoice_result_key(idempotency_key),
+		{"state": state, "message": strip_html(cstr(message))[:500]},
+		expires_in_sec=_INVOICE_RESULT_TTL,
+	)
+
+
+def invoice_result(idempotency_key):
+	"""``{"state", "message"}`` of one invoice press, ``pending`` until the job has written one."""
+	return frappe.cache().get_value(_invoice_result_key(idempotency_key)) or {"state": "pending", "message": ""}
+
+
+def send_invoice(client, path, body, reference_doctype, reference_name, reference, metadata):
+	"""One Noon invoice call, logged to the Integration Request through ``carrier_log`` (operation "Invoice",
+	the key of the press as correlation id). The log holds ``metadata`` only (invoice number, issue date,
+	order or shipment number), never the file bytes, a secret or customer data. Returns ``("done", "")`` on
+	200, else ``("failed", Noon's text)``: a same-key Retry is safe at Noon (idempotency key), so an unknown
+	answer is not told apart from a refusal."""
+	log = carrier_log.open_log(
+		SERVICE_NAME,
+		reference_name,
+		INVOICE_OPERATION,
+		correlation_id=body["idempotency_key"],
+		reference=reference,
+		reference_doctype=reference_doctype,
+	)
+	frappe.db.commit()  # logged before the call: a worker that dies mid-call leaves the row
+	try:
+		response = client.request("POST", path, json=body)
+	except Exception as exc:
+		message = _("The Noon request failed ({0}).").format(strip_html(cstr(exc))[:200])
+		carrier_log.close_log(log, "Unknown", error=message)
+		frappe.db.commit()
+		return "failed", message
+	if response.status_code == 200:
+		carrier_log.close_log(log, "Success", http_status=200, data=frappe.as_json(metadata))
+		frappe.db.commit()
+		return "done", ""
+	message = client.error_message(response)
+	carrier_log.close_log(
+		log,
+		"Failed" if _is_definite_refusal(response.status_code) else "Unknown",
+		error=message,
+		http_status=response.status_code,
+	)
+	frappe.db.commit()
+	return "failed", message
+
+
+def require_fbpi(account):
+	"""Refuse (a clear message) unless the account's stored warehouse is FBPI (``catalog.fbpi_ready``)."""
+	ready, reason = fbpi_ready(account)
+	if not ready:
+		frappe.throw(reason)
 
 
 def _validate_invoice_file(file_url):
-	"""The File must be readable, private, a real PDF and within Noon's 5 MiB decoded limit."""
+	"""The File must be readable, private, a real PDF and within Noon's 5 MiB decoded limit. Returns the File."""
 	file_doc = frappe.get_doc("File", {"file_url": file_url})
 	file_doc.check_permission("read")
 	# #146 review finding #9: this field's own description says "Private PDF
@@ -683,18 +759,51 @@ def _validate_invoice_file(file_url):
 		frappe.throw(_("Invoice must be a PDF file."))
 	if len(raw_bytes) > SHIPMENT_INVOICE_MAX_BYTES:
 		frappe.throw(_("Invoice file exceeds the 5 MiB limit."))
+	return file_doc
 
 
-def upload_order_invoice(marketplace_order_name, file_url, invoice_nr, issued_at):
+def attach_invoice_file(file_url, doctype, name):
+	"""Validate the uploaded PDF (``_validate_invoice_file``), then make sure it is a native private File
+	attached to ``doctype`` ``name`` (the document the button was used on): the dialog's Attach field uploads
+	a File attached to nothing, so its content is saved again with ``file_manager.save_file``. Returns the
+	``file_url`` to send. The caller authorized the user on that document. The loose upload is removed once
+	the attached copy has its own file (a shared file is left alone)."""
+	from frappe.utils.file_manager import save_file
+
+	file_doc = _validate_invoice_file(file_url)
+	if file_doc.attached_to_doctype == doctype and file_doc.attached_to_name == name:
+		return file_doc.file_url
+	content = file_doc.get_content()
+	if isinstance(content, str):
+		content = content.encode()
+	# save_file inserts the File as the system; the caller checked write on the document it attaches to
+	saved = save_file(file_doc.file_name, content, doctype, name, is_private=1)
+	if (
+		not file_doc.attached_to_doctype
+		and not file_doc.attached_to_name
+		and saved.file_url != file_doc.file_url
+		and file_doc.owner == frappe.session.user
+	):
+		frappe.delete_doc("File", file_doc.name, ignore_permissions=True, force=True)
+	return saved.file_url
+
+
+def upload_order_invoice(marketplace_order_name, file_url, invoice_nr, issued_at, sales_order=None):
 	"""Request path for the order-level invoice. Reads and validates the File here (never logs its
 	bytes), generates a fresh idempotency key for this explicit upload action, and writes Pending
-	invoice state before enqueuing the actual Noon call. Precondition: at least one Delivery Note
-	with a Created Noon shipment. Re-uploading over an Uploaded order invoice is allowed (Noon
-	supersedes the previous one)."""
+	invoice state before enqueuing the actual Noon call. Refused unless the account's warehouse is FBPI.
+	Precondition: at least one Delivery Note with a Created Noon shipment. Re-uploading over an Uploaded
+	order invoice is allowed (Noon supersedes the previous one; the dialog warns first).
+
+	``sales_order`` (the document the button was used on; the API checked write on it) makes the PDF a
+	private File attached to that Sales Order and the order row is written as the system (the user needs no
+	Marketplace Order right); without it the File is attached to the Marketplace Order. Returns
+	``{"queued", "idempotency_key"}``."""
 	from marketplace_integrations.integrations.noon.delivery_note_shipment import has_created_note
 
-	order = _lock_and_load_order(marketplace_order_name)
-	_account_and_client(order)
+	order = _lock_and_load_order(marketplace_order_name, as_system=bool(sales_order))
+	account, _client = _account_and_client(order)
+	require_fbpi(account)
 	if not has_created_note(order.name):
 		frappe.throw(_("The order needs at least one Created shipment before uploading an order invoice."))
 	if order.noon_order_invoice_status == "Pending":
@@ -702,7 +811,8 @@ def upload_order_invoice(marketplace_order_name, file_url, invoice_nr, issued_at
 	invoice_nr = cstr(invoice_nr).strip()
 	if not invoice_nr or not issued_at:
 		frappe.throw(_("Invoice Nr and Issued At are required."))
-	_validate_invoice_file(file_url)
+	attach_to = ("Sales Order", sales_order) if sales_order else ("Marketplace Order", order.name)
+	file_url = attach_invoice_file(file_url, *attach_to)
 
 	order.noon_order_invoice_file = file_url
 	order.noon_order_invoice_nr = invoice_nr
@@ -711,32 +821,40 @@ def upload_order_invoice(marketplace_order_name, file_url, invoice_nr, issued_at
 	order.noon_order_invoice_status = "Pending"
 	order.noon_order_invoice_last_error = None
 	order.save()
+	set_invoice_result(order.noon_order_invoice_idempotency_key, "pending")
 	frappe.db.commit()
+	return _enqueue_order_invoice(order, sales_order)
 
+
+def _enqueue_order_invoice(order, sales_order):
+	key = order.noon_order_invoice_idempotency_key
 	job = frappe.enqueue(
 		run_upload_order_invoice,
 		queue="long",
 		timeout=300,
-		job_id=_order_invoice_job_id(order.name, order.noon_order_invoice_idempotency_key),
+		job_id=_order_invoice_job_id(order.name, key),
 		deduplicate=True,
 		marketplace_order_name=order.name,
-		invoice_idempotency_key=order.noon_order_invoice_idempotency_key,
+		invoice_idempotency_key=key,
+		sales_order=sales_order,
 	)
-	return {"queued": job is not None}
+	return {"queued": job is not None, "idempotency_key": key}
 
 
 def _set_order_invoice_error(order, message):
 	order.noon_order_invoice_status = "Error"
 	order.noon_order_invoice_last_error = message
 	order.save()
+	set_invoice_result(order.noon_order_invoice_idempotency_key, "failed", message)
 	frappe.db.commit()
 
 
-def run_upload_order_invoice(marketplace_order_name, invoice_idempotency_key):
+def run_upload_order_invoice(marketplace_order_name, invoice_idempotency_key, sales_order=None):
 	"""Worker for ``upload_order_invoice()``. Releases the order lock around the File read and Noon
 	call and re-checks ``invoice_idempotency_key`` on re-acquisition (a deliberate re-upload with a
 	fresh key supersedes an in-flight call). Errors go to the dedicated
-	``noon_order_invoice_last_error`` field."""
+	``noon_order_invoice_last_error`` field and to the dialog's result. The Noon call is logged to the
+	Integration Request on the Sales Order the button was used on (``sales_order``), else the order."""
 	from marketplace_integrations.integrations.noon.delivery_note_shipment import has_created_note
 
 	frappe.set_user("Administrator")
@@ -776,16 +894,20 @@ def run_upload_order_invoice(marketplace_order_name, invoice_idempotency_key):
 		if isinstance(raw_bytes, str):
 			raw_bytes = raw_bytes.encode()
 		encoded = base64.b64encode(raw_bytes).decode()
-		response = client.request(
-			"POST",
+		outcome, remote_message = send_invoice(
+			client,
 			FBPI_ORDER_INVOICE_UPLOAD_PATH,
-			json={
+			{
 				"fbpi_order_nr": fbpi_order_nr,
 				"invoice": encoded,
 				"invoice_nr": invoice_nr,
 				"issued_at": issued_at,
 				"idempotency_key": invoice_idempotency_key,
 			},
+			"Sales Order" if sales_order else "Marketplace Order",
+			sales_order or order.name,
+			fbpi_order_nr,
+			request_metadata,
 		)
 	except Exception:
 		order = _lock_and_load_order(marketplace_order_name)
@@ -793,6 +915,9 @@ def run_upload_order_invoice(marketplace_order_name, invoice_idempotency_key):
 			order.noon_order_invoice_status = "Error"
 			order.noon_order_invoice_last_error = cstr(frappe.get_traceback()).strip()[:500]
 			order.save()
+			set_invoice_result(
+				invoice_idempotency_key, "failed", _("The invoice could not be sent. See the Error Log.")
+			)
 		frappe.db.commit()
 		# Never include the base64 payload in the Sync Log.
 		_log_fulfillment(
@@ -806,30 +931,27 @@ def run_upload_order_invoice(marketplace_order_name, invoice_idempotency_key):
 		frappe.db.commit()
 		return
 
-	if response.status_code != 200:
-		_set_order_invoice_error(order, client.error_message(response)[:500])
-		_log_fulfillment(order, "UploadOrderInvoice", "Error", request_metadata, client.error_message(response))
+	if outcome != "done":
+		_set_order_invoice_error(order, remote_message[:500])
+		_log_fulfillment(order, "UploadOrderInvoice", "Error", request_metadata, remote_message)
 		return
 
 	order.noon_order_invoice_status = "Uploaded"
 	order.noon_order_invoice_last_error = None
 	order.save()
+	set_invoice_result(invoice_idempotency_key, "done")
 	frappe.db.commit()
 	_log_fulfillment(order, "UploadOrderInvoice", "Success", request_metadata)
 
 
-def retry_order_invoice(marketplace_order_name):
-	"""Re-enqueue a Pending/Error order invoice upload with its saved key."""
-	order = _lock_and_load_order(marketplace_order_name)
+def retry_order_invoice(marketplace_order_name, sales_order=None):
+	"""Re-enqueue a Pending/Error order invoice upload with its saved key (Noon treats a same-key call as
+	the same upload). Same FBPI refusal as the first press. Returns ``{"queued", "idempotency_key"}``."""
+	order = _lock_and_load_order(marketplace_order_name, as_system=bool(sales_order))
+	account, _client = _account_and_client(order)
+	require_fbpi(account)
 	if order.noon_order_invoice_status not in ("Pending", "Error") or not order.noon_order_invoice_file:
 		frappe.throw(_("The order invoice has nothing to retry."))
-	job = frappe.enqueue(
-		run_upload_order_invoice,
-		queue="long",
-		timeout=300,
-		job_id=_order_invoice_job_id(order.name, order.noon_order_invoice_idempotency_key),
-		deduplicate=True,
-		marketplace_order_name=order.name,
-		invoice_idempotency_key=order.noon_order_invoice_idempotency_key,
-	)
-	return {"queued": job is not None}
+	set_invoice_result(order.noon_order_invoice_idempotency_key, "pending")
+	frappe.db.commit()
+	return _enqueue_order_invoice(order, sales_order)

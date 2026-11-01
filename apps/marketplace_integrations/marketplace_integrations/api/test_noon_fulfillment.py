@@ -18,8 +18,10 @@ from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api import noon_fulfillment
 from marketplace_integrations.api.noon_fulfillment import (
+	check_invoice_upload,
 	check_mark_out_of_stock,
 	get_available_actions,
+	get_order_invoice_state,
 	get_out_of_stock_rows,
 	mark_item_out_of_stock,
 	release_stuck_oos_reservation,
@@ -104,19 +106,15 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 			self.assertFalse(frappe.has_permission("Marketplace Order", "write"))
 			with self.assertRaises(frappe.PermissionError):
 				release_stuck_oos_reservation(self.order.name)
-			with self.assertRaises(frappe.PermissionError):
-				retry_order_invoice(self.order.name)
 
 	def test_rejects_non_noon_order(self):
 		frappe.db.set_value("Marketplace Order", self.order.name, "platform", "Talabat")
 		with self.assertRaises(frappe.ValidationError):
 			release_stuck_oos_reservation(self.order.name)
-		with self.assertRaises(frappe.ValidationError):
-			retry_order_invoice(self.order.name)
 
 	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.get_available_actions")
 	def test_get_available_actions_needs_only_read(self, mock_fn):
-		mock_fn.return_value = {"actions": ["upload_order_invoice"], "cancelled_on_noon": False}
+		mock_fn.return_value = {"actions": ["release_stuck_oos_reservation"], "cancelled_on_noon": False}
 		email, _role = make_role_user(self, "Noon Fulfillment Read Only", {"Marketplace Order": ["read"]})
 		# A document-level read also passes the platform filter (permissions.py), which needs the
 		# platform role; that role carries write too, so the rule "read only" is proved by the
@@ -127,7 +125,7 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 			patch("frappe.model.document.Document.check_permission", autospec=True) as check_permission,
 		):
 			result = get_available_actions(self.order.name)
-		self.assertEqual(result, {"actions": ["upload_order_invoice"], "cancelled_on_noon": False})
+		self.assertEqual(result, {"actions": ["release_stuck_oos_reservation"], "cancelled_on_noon": False})
 		self.assertEqual([call.args[1] for call in check_permission.call_args_list], ["read"])
 
 	def test_get_available_actions_requires_read_and_a_noon_order(self):
@@ -189,19 +187,59 @@ class IntegrationTestNoonFulfillmentEndpoints(IntegrationTestCase):
 				with self.assertRaises(frappe.PermissionError):
 					check_mark_out_of_stock(fixture.name, "r1")
 
-	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.upload_order_invoice")
-	def test_upload_order_invoice_delegates(self, mock_fn):
-		mock_fn.return_value = {"queued": True}
-		result = upload_order_invoice(self.order.name, "/files/invoice.pdf", "INV-1", "2026-10-01")
-		mock_fn.assert_called_once_with(self.order.name, "/files/invoice.pdf", "INV-1", "2026-10-01")
-		self.assertEqual(result, {"queued": True})
+	def test_the_order_invoice_endpoints_need_write_on_the_sales_order_only(self):
+		"""A Sales Order writer without any Marketplace Order right can upload, retry and read the state; a
+		reader cannot. The Marketplace Order is derived from the Sales Order and passed with the Sales Order."""
+		fixture = self._sales_order()
+		order = fixture.marketplace_order.name
+		writer, _role = make_role_user(self, "Noon Invoice Sales Writer", {"Sales Order": ["read", "write"]})
+		reader, _role = make_role_user(self, "Noon Invoice Sales Reader", {"Sales Order": ["read"]})
+		base = "marketplace_integrations.api.noon_fulfillment.fulfillment"
+		with (
+			patch(f"{base}.upload_order_invoice", return_value={"queued": True, "idempotency_key": "k"}) as upload,
+			patch(f"{base}.retry_order_invoice", return_value={"queued": True, "idempotency_key": "k"}) as retry,
+			patch(f"{base}.order_invoice_state", return_value={"can_upload": True}) as state,
+		):
+			with self.set_user(writer):
+				self.assertFalse(frappe.has_permission("Marketplace Order", "read"))
+				upload_order_invoice(fixture.name, "/private/files/invoice.pdf", "INV-1", "2026-10-01")
+				retry_order_invoice(fixture.name)
+				self.assertEqual(get_order_invoice_state(fixture.name), {"can_upload": True})
+			upload.assert_called_once_with(
+				order, "/private/files/invoice.pdf", "INV-1", "2026-10-01", sales_order=fixture.name
+			)
+			retry.assert_called_once_with(order, sales_order=fixture.name)
+			self.assertEqual(state.call_count, 1)
+			with self.set_user(reader):
+				for call in (
+					lambda: upload_order_invoice(fixture.name, "/private/files/invoice.pdf", "INV-1", "2026-10-01"),
+					lambda: retry_order_invoice(fixture.name),
+					lambda: get_order_invoice_state(fixture.name),
+				):
+					with self.assertRaises(frappe.PermissionError):
+						call()
+			self.assertEqual((upload.call_count, retry.call_count, state.call_count), (1, 1, 1))
 
-	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.retry_order_invoice")
-	def test_retry_order_invoice_delegates(self, mock_fn):
-		mock_fn.return_value = {"queued": True}
-		result = retry_order_invoice(self.order.name)
-		mock_fn.assert_called_once_with(self.order.name)
-		self.assertEqual(result, {"queued": True})
+	def test_the_order_invoice_endpoints_refuse_a_sales_order_that_is_not_a_noon_order(self):
+		fixture = self._sales_order()
+		frappe.db.set_value("Marketplace Order", fixture.marketplace_order.name, "platform", "Talabat")
+		with self.assertRaises(frappe.ValidationError):
+			upload_order_invoice(fixture.name, "/private/files/invoice.pdf", "INV-1", "2026-10-01")
+
+	def test_the_invoice_poll_needs_write_on_the_document_and_a_known_type(self):
+		fixture = self._sales_order()
+		writer, _role = make_role_user(self, "Noon Poll Writer", {"Sales Order": ["read", "write"]})
+		reader, _role = make_role_user(self, "Noon Poll Reader", {"Sales Order": ["read"]})
+		with patch(
+			"marketplace_integrations.api.noon_fulfillment.fulfillment.invoice_result",
+			return_value={"state": "done", "message": ""},
+		):
+			with self.set_user(writer):
+				self.assertEqual(check_invoice_upload("Sales Order", fixture.name, "k")["state"], "done")
+			with self.set_user(reader), self.assertRaises(frappe.PermissionError):
+				check_invoice_upload("Sales Order", fixture.name, "k")
+			with self.assertRaises(frappe.ValidationError):
+				check_invoice_upload("User", "Administrator", "k")
 
 	@patch("marketplace_integrations.api.noon_fulfillment.fulfillment.release_stuck_oos_reservation")
 	def test_release_stuck_oos_reservation_delegates(self, mock_fn):

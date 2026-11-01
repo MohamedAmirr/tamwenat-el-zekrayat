@@ -92,7 +92,25 @@ The Delivery Note of a Noon Sales Order is the shipment. The Noon adapter
   the reservation stays (Needs Attention "units pending Out of Stock"), Retry repeats only the local step. Every
   Noon call is an Integration Request (operation Out of Stock, reference the Sales Order, no customer data).
   Release Stuck Out of Stock Reservation stays for a dead worker.
-- **Not built yet:** the invoice uploads (rest of sub-issue #416).
+- **Invoices (#416, spec section 9).** Backup step: never blocks Submit or Cancel (no document event calls it).
+  "Upload Shipment Invoice" is a button on a submitted Noon Delivery Note whose Integration Status is Created;
+  "Upload Order Invoice" (and Retry Order Invoice) are in the Noon Fulfillment group of the submitted Noon
+  Sales Order. The PDF is attached by the person (Attach, invoice number, issue date; nothing is generated), must
+  be private, a real PDF and at most 5 MiB, and is saved as a native private File attached to the document the
+  button was used on (`fulfillment.attach_invoice_file`). Then a job sends it: `delivery_note_shipment.run_upload_invoice`
+  (UploadShipmentInvoice, shipment number = `custom_carrier_reference`) or `fulfillment.run_upload_order_invoice`
+  (UploadFbpiOrderInvoice). One idempotency key per press; Retry reuses it, a new press makes a new key (Noon
+  supersedes the earlier invoice for the same shipment or order, so the dialog warns first). Both refuse unless
+  `catalog.fbpi_ready(account)` is ok. The order invoice keeps its state in `Marketplace Order.noon_order_invoice_*`;
+  the note records `custom_noon_invoice_uploaded_on` and `custom_noon_invoice_items_hash` (written only on a
+  successful upload, cleared on amend). The dialog ("Sending to Noon...", polls `api.noon_fulfillment.check_invoice_upload`)
+  ends in a small alert or an error dialog with Retry. A shipment-invoice failure keeps no state on the note:
+  Retry works from the open dialog (the key and the attached copy come back with the first answer), after a
+  reload a new press is a new key. Rights: write on the Delivery Note / write on the Sales Order (no Marketplace
+  Order right needed). Every call is an Integration Request (operation Invoice, reference the document, the
+  idempotency key as correlation id, no file bytes). If the note's items differ from the stored hash, Needs
+  Attention (Noon Fulfillment) says "The invoice may need re-upload"; nothing is re-uploaded.
+  Open items to verify on the first real use: when Noon accepts an invoice (order or shipment state), rate limits.
 
 ## Provider contract
 

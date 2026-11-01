@@ -17,7 +17,7 @@ queue. No Noon HTTP call ever happens inside a Desk request.
 
 import frappe
 
-from marketplace_integrations.integrations.noon import fulfillment
+from marketplace_integrations.integrations.noon import delivery_note_shipment, fulfillment
 
 
 def _get_noon_order(marketplace_order):
@@ -82,13 +82,58 @@ def check_mark_out_of_stock(sales_order: str, request_id: str):
 	return fulfillment.out_of_stock_result(sales_order, request_id)
 
 
-@frappe.whitelist(methods=["POST"])
-def upload_order_invoice(marketplace_order: str, file_url: str, invoice_nr: str, issued_at: str):
-	_get_noon_order(marketplace_order)
-	return fulfillment.upload_order_invoice(marketplace_order, file_url, invoice_nr, issued_at)
+def _noon_order_of_sales_order(sales_order):
+	"""The Marketplace Order of a submitted Noon Sales Order, after the right of the invoice actions: write on
+	the Sales Order (the order row is then read and written as the system: no Marketplace Order right needed)."""
+	frappe.has_permission("Sales Order", "write", doc=sales_order, throw=True)
+	values = frappe.db.get_value("Sales Order", sales_order, ["docstatus", "custom_marketplace_order"], as_dict=True)
+	if not values or values.docstatus != 1 or not values.custom_marketplace_order:
+		frappe.throw(frappe._("Sales Order {0} is not a submitted Noon order.").format(sales_order))
+	if frappe.db.get_value("Marketplace Order", values.custom_marketplace_order, "platform") != "Noon":
+		frappe.throw(frappe._("Sales Order {0} is not a submitted Noon order.").format(sales_order))
+	return values.custom_marketplace_order
 
 
 @frappe.whitelist(methods=["POST"])
-def retry_order_invoice(marketplace_order: str):
-	_get_noon_order(marketplace_order)
-	return fulfillment.retry_order_invoice(marketplace_order)
+def get_order_invoice_state(sales_order: str):
+	"""``{"can_upload", "can_retry", "uploaded"}`` for the order-invoice buttons (write on the Sales Order)."""
+	marketplace_order = _noon_order_of_sales_order(sales_order)
+	return fulfillment.order_invoice_state(frappe.get_doc("Marketplace Order", marketplace_order))
+
+
+@frappe.whitelist(methods=["POST"])
+def upload_order_invoice(sales_order: str, file_url: str, invoice_nr: str, issued_at: str):
+	"""Upload Order Invoice from the Sales Order: authorizes, then delegates (the PDF is attached to the Sales
+	Order). Queues the Noon call; returns ``{"queued", "idempotency_key"}``."""
+	marketplace_order = _noon_order_of_sales_order(sales_order)
+	return fulfillment.upload_order_invoice(
+		marketplace_order, file_url, invoice_nr, issued_at, sales_order=sales_order
+	)
+
+
+@frappe.whitelist(methods=["POST"])
+def retry_order_invoice(sales_order: str):
+	marketplace_order = _noon_order_of_sales_order(sales_order)
+	return fulfillment.retry_order_invoice(marketplace_order, sales_order=sales_order)
+
+
+@frappe.whitelist(methods=["POST"])
+def upload_delivery_note_invoice(
+	delivery_note: str, file_url: str, invoice_nr: str, issued_at: str, idempotency_key: str | None = None
+):
+	"""Upload Shipment Invoice from a Delivery Note (right: write on that note). ``idempotency_key`` is given
+	only by Retry (the key of the press that failed)."""
+	frappe.has_permission("Delivery Note", "write", doc=delivery_note, throw=True)
+	return delivery_note_shipment.upload_invoice_for_note(
+		delivery_note, file_url, invoice_nr, issued_at, idempotency_key
+	)
+
+
+@frappe.whitelist(methods=["POST"])
+def check_invoice_upload(document_type: str, document_name: str, idempotency_key: str):
+	"""Poll of the invoice dialog: ``{"state": pending|done|failed, "message"}`` (write on the document the
+	button was used on, a Sales Order or a Delivery Note)."""
+	if document_type not in ("Sales Order", "Delivery Note"):
+		frappe.throw(frappe._("Invalid document type."))
+	frappe.has_permission(document_type, "write", doc=document_name, throw=True)
+	return fulfillment.invoice_result(idempotency_key)

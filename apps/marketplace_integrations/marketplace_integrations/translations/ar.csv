@@ -901,7 +901,6 @@ Noon connection succeeded.,نجح الاتصال بـ Noon.
 Noon cookies are managed by the client.,ملفات تعريف الارتباط لـ Noon يديرها العميل البرمجي.
 Noon created the destination but returned no destination code. Refresh status.,أنشأت Noon الوجهة لكنها لم تُرجع رمز الوجهة. حدّث الحالة.
 Noon did not return a status for this item.,لم تُرجع Noon حالة لهذا العنصر.
-Noon fulfillment action queued. Refresh this document to see the results.,تمت إضافة إجراء تنفيذ Noon إلى قائمة الانتظار. حدّث هذا المستند لرؤية النتائج.
 "Noon fulfillment has already started for every line, so the change was not applied.",بدأ تنفيذ Noon بالفعل لكل البنود، لذا لم يُطبَّق التغيير.
 Noon order refresh queued. Refresh this document to see the results.,تمت إضافة تحديث طلب Noon إلى قائمة الانتظار. حدّث هذا المستند لرؤية النتائج.
 Noon order {0} country {1} does not match Marketplace Account {2}'s Noon Country Code {3}.,دولة طلب Noon {0} ({1}) لا تطابق رمز دولة Noon لحساب السوق {2} ({3}).
@@ -999,8 +998,6 @@ Queuing Out of Stock update...,جارٍ إضافة تحديث النفاد من 
 Queuing Shopify inventory sync...,جارٍ إضافة مزامنة مخزون Shopify إلى قائمة الانتظار...
 Queuing Shopify price push...,جارٍ إضافة إرسال أسعار Shopify إلى قائمة الانتظار...
 Queuing Talabat catalog update...,جارٍ إضافة تحديث كتالوج Talabat إلى قائمة الانتظار...
-Queuing invoice upload...,جارٍ إضافة رفع الفاتورة إلى قائمة الانتظار...
-Queuing retry...,جارٍ إضافة إعادة المحاولة إلى قائمة الانتظار...
 READY_FOR_PICKUP is only valid for Logistics Delivery orders.,READY_FOR_PICKUP صالحة فقط لطلبات التوصيل اللوجستي.
 REPLACED,مستبدَل
 "Raw Talabat order.promotion_status text, e.g. AVAILABLE (no item promotions means none applied) or UNAVAILABLE (detailed item promotion data may be unavailable; payment sub_total/order_total remain accurate regardless). Not a closed Select: an unrecognized future value from Talabat must not fail the whole order.",النص الخام لـ order.promotion_status من Talabat، مثل AVAILABLE (عدم وجود عروض على العناصر يعني عدم تطبيق أي عرض) أو UNAVAILABLE (قد تكون بيانات العروض التفصيلية للعناصر غير متاحة؛ ويبقى sub_total/order_total للدفع دقيقًا في كل الأحوال). ليست قائمة اختيار مغلقة: يجب ألا تُفشل قيمة مستقبلية غير معروفة من Talabat الطلب كله.
@@ -1839,3 +1836,23 @@ The item stays in the order.,يبقى الصنف في الطلب.
 Sending to Noon...,جارٍ الإرسال إلى Noon...
 Please wait. The item is removed from the order once Noon confirms.,يرجى الانتظار. تتم إزالة الصنف من الطلب بعد تأكيد Noon.
 The request could not be sent.,تعذّر إرسال الطلب.
+Invoice,فاتورة
+Noon Invoice Uploaded On,تاريخ رفع فاتورة Noon
+Noon Invoice Items Hash,بصمة أصناف فاتورة Noon
+Upload Shipment Invoice,رفع فاتورة الشحنة
+Invoice uploaded on {0},تم رفع الفاتورة في {0}
+An invoice was already uploaded on {0}.,سبق رفع فاتورة في {0}.
+An invoice was already uploaded.,سبق رفع فاتورة.
+The new upload replaces it at Noon. Continue?,سيحل الرفع الجديد محلها لدى Noon. هل تريد المتابعة؟
+The invoice could not be uploaded.,تعذّر رفع الفاتورة.
+Nothing else is blocked. Retry sends the same upload again.,لا شيء آخر محجوب. تعيد إعادة المحاولة إرسال الرفع نفسه.
+Still sending to Noon. Refresh this document later to see the result.,ما زال الإرسال إلى Noon جاريًا. حدّث هذا المستند لاحقًا لرؤية النتيجة.
+The invoice was uploaded to Noon.,تم رفع الفاتورة إلى Noon.
+Please wait. The invoice is being sent to Noon.,يرجى الانتظار. يجري إرسال الفاتورة إلى Noon.
+The Noon request failed ({0}).,فشل طلب Noon ({0}).
+The invoice could not be sent. See the Error Log.,تعذّر إرسال الفاتورة. راجع سجل الأخطاء.
+A shipment invoice can be uploaded only for a submitted Delivery Note whose Noon shipment is Created.,يمكن رفع فاتورة الشحنة فقط لمذكرة تسليم معتمدة تكون شحنة Noon الخاصة بها بحالة Created.
+Invalid upload key.,مفتاح الرفع غير صالح.
+Invalid document type.,نوع المستند غير صالح.
+The Delivery Note no longer has a Created Noon shipment.,لم يعد لمذكرة التسليم شحنة Noon بحالة Created.
+The items changed after the invoice was uploaded. The invoice may need re-upload.,تغيّرت الأصناف بعد رفع الفاتورة. قد تحتاج الفاتورة إلى إعادة رفع.

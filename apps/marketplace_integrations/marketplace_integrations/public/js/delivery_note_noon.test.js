@@ -164,9 +164,56 @@ test("the cancel button shows on a draft note with a live shipment only", () => 
 		mod.add_buttons(frm);
 		assert.deepEqual(frm.buttons, [], status);
 	}
+	// a submitted note has no cancel button here (the native Cancel runs before_cancel); it offers the invoice
 	const submitted = make_form({ docstatus: 1, custom_integration_status: "Created" });
 	mod.add_buttons(submitted);
-	assert.deepEqual(submitted.buttons, []);
+	assert.deepEqual(submitted.buttons.map((b) => b.label), ["Upload Shipment Invoice"]);
+});
+
+test("Upload Shipment Invoice shows only on a submitted note whose shipment is Created", () => {
+	const { mod } = load();
+	for (const [doc, shown] of [
+		[{ docstatus: 1, custom_integration_status: "Created" }, true],
+		[{ docstatus: 1, custom_integration_status: "Cancelled" }, false],
+		[{ docstatus: 1, custom_integration_status: "Cancellation Unknown" }, false],
+		[{ docstatus: 0, custom_integration_status: "Created" }, false],
+		[{ docstatus: 1, custom_integration_status: "" }, false],
+	]) {
+		const frm = make_form(doc);
+		mod.add_buttons(frm);
+		assert.equal(frm.buttons.some((b) => b.label === "Upload Shipment Invoice"), shown, JSON.stringify(doc));
+	}
+});
+
+test("the shipment invoice uses the shared dialog with the note, the upload time and the right endpoint", async () => {
+	const { mod, calls } = load({ responses: { upload_delivery_note_invoice: { queued: true } } });
+	let started = null;
+	global.frappe.marketplace_integrations.noon_invoice = { start: (opts) => (started = opts) };
+	const frm = make_form({ docstatus: 1, custom_integration_status: "Created", custom_noon_invoice_uploaded_on: "2026-11-01 10:00:00" });
+	mod.upload_shipment_invoice(frm);
+	assert.equal(started.doctype, "Delivery Note");
+	assert.equal(started.name, "MAT-DN-1");
+	assert.equal(started.uploaded_on, "2026-11-01 10:00:00");
+	await started.send({ invoice_file: "/private/files/i.pdf", invoice_nr: "INV-1", issued_at: "2026-11-01" }, "");
+	await started.send({ invoice_file: "/private/files/i.pdf", invoice_nr: "INV-1", issued_at: "2026-11-01" }, "key-1");
+	assert.deepEqual(calls[0].args, {
+		delivery_note: "MAT-DN-1",
+		file_url: "/private/files/i.pdf",
+		invoice_nr: "INV-1",
+		issued_at: "2026-11-01",
+		idempotency_key: null,
+	});
+	assert.equal(calls[1].args.idempotency_key, "key-1");
+	assert.match(calls[0].method, /noon_fulfillment\.upload_delivery_note_invoice$/);
+});
+
+test("the form shows when the invoice was uploaded, escaped", () => {
+	const { mod } = load();
+	const indicators = [];
+	const frm = make_form({ docstatus: 1, custom_noon_invoice_uploaded_on: "2026-11-01 <b>" });
+	frm.dashboard = { add_indicator: (text, color) => indicators.push({ text, color }) };
+	mod.refresh(frm);
+	assert.equal(indicators[0].text, "Invoice uploaded on 2026-11-01 &lt;b&gt;");
 });
 
 test("before_cancel ignores a note that is not a created Noon shipment", async () => {

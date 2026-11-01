@@ -1200,7 +1200,54 @@ def _collect_noon_rollups(accounts):
 				NEXT_OPEN_ORDER,
 			)
 		)
-	return items
+	return items + _collect_outdated_noon_invoices(noon_accounts)
+
+
+def _collect_outdated_noon_invoices(noon_accounts):
+	"""One row per submitted Noon Delivery Note whose items changed after its shipment invoice was uploaded
+	(#416): the invoice may need re-upload. Nothing is re-uploaded automatically. Notes are read with the
+	caller's permissions (``get_list``, uploads of the last ``CARRIER_MAX_AGE_DAYS`` days); the item
+	comparison is done by the Noon adapter."""
+	if not frappe.has_permission("Delivery Note", "read"):
+		return []
+	from marketplace_integrations.integrations.noon.delivery_note_shipment import outdated_invoices
+
+	rows = frappe.get_list(
+		"Delivery Note",
+		filters={
+			"docstatus": 1,
+			"custom_noon_invoice_uploaded_on": [">=", add_to_date(now_datetime(), days=-CARRIER_MAX_AGE_DAYS)],
+		},
+		fields=["name", "custom_noon_invoice_items_hash", "custom_noon_invoice_uploaded_on"],
+		limit_page_length=0,
+	)
+	outdated = outdated_invoices(rows)
+	if not outdated:
+		return []
+	# a derived lookup of orders, after the Delivery Note read check above
+	accounts_of = {
+		order.name: order.marketplace_account
+		for order in frappe.get_all(
+			"Marketplace Order",
+			filters={"name": ["in", list(set(outdated.values()))], "marketplace_account": ["in", list(noon_accounts)]},
+			fields=["name", "marketplace_account"],
+			limit_page_length=0,
+		)
+	}
+	uploaded_on = {row.name: row.custom_noon_invoice_uploaded_on for row in rows}
+	return [
+		_item(
+			NOON_FULFILLMENT,
+			noon_accounts[accounts_of[order]],
+			"Delivery Note",
+			note,
+			_("The items changed after the invoice was uploaded. The invoice may need re-upload."),
+			uploaded_on[note],
+			NEXT_OPEN_SHIPMENT,
+		)
+		for note, order in outdated.items()
+		if order in accounts_of
+	]
 
 
 def _collect_unlinked_noon_returns(accounts):

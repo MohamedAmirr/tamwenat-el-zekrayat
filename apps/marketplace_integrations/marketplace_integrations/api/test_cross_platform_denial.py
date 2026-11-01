@@ -79,7 +79,6 @@ SHOPIFY_AND_NOON_CASES = (
 	(f"{API}.noon_inventory.queue_stock_push", {"account": "NOON_ACCOUNT"}),
 	(f"{API}.noon_fulfillment.get_available_actions", {"marketplace_order": "NOON_ORDER"}),
 	(f"{API}.noon_fulfillment.release_stuck_oos_reservation", {"marketplace_order": "NOON_ORDER"}),
-	(f"{API}.noon_fulfillment.retry_order_invoice", {"marketplace_order": "NOON_ORDER"}),
 )
 
 TALABAT_CASES = (

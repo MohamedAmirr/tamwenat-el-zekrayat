@@ -43,6 +43,10 @@
 		return Boolean(frappe.model.can_write("Marketplace Order"));
 	}
 
+	// The order-invoice buttons need write on the Sales Order only (no Marketplace Order right); the
+	// stuck-reservation recovery still needs write on the Marketplace Order.
+	const INVOICE_ACTIONS = ["upload_order_invoice", "retry_order_invoice"];
+
 	function noon_fulfillment_buttons(ctx) {
 		return [
 			{
@@ -67,10 +71,38 @@
 
 	function render_noon_fulfillment_buttons(frm, ctx, available_actions) {
 		const group = __("Noon Fulfillment");
-		const buttons = noon_fulfillment_buttons(ctx).filter(() => can_use_noon_fulfillment());
+		const buttons = noon_fulfillment_buttons(ctx).filter((button) =>
+			INVOICE_ACTIONS.includes(button.action)
+				? frappe.model.can_write("Sales Order")
+				: can_use_noon_fulfillment()
+		);
 		select_noon_fulfillment_buttons(buttons, available_actions).forEach((button) =>
 			frm.add_custom_button(button.label, button.click, group)
 		);
+	}
+
+	// Asks the server which order-invoice buttons apply (write on the Sales Order only) and adds them.
+	// Resolves with the state ({can_upload, can_retry, uploaded}) or null.
+	function add_noon_invoice_actions(frm) {
+		if (!frm.doc || frm.doc.docstatus !== 1 || !frappe.model.can_write("Sales Order")) {
+			return Promise.resolve(null);
+		}
+		const sales_order = frm.doc.name;
+		return frappe
+			.call({ method: API + "get_order_invoice_state", type: "POST", args: { sales_order }, silent: true })
+			.then(
+				(r) => {
+					if (frm.doc.name !== sales_order) return null;
+					const state = r.message || {};
+					const ctx = Object.assign(build_context(frm), { order_invoice_uploaded: Boolean(state.uploaded) });
+					const actions = [];
+					if (state.can_upload) actions.push("upload_order_invoice");
+					if (state.can_retry) actions.push("retry_order_invoice");
+					render_noon_fulfillment_buttons(frm, ctx, actions);
+					return state;
+				},
+				() => null
+			);
 	}
 
 	// Loads the fulfillment state of the linked Noon order and adds the "Noon Fulfillment" button
@@ -79,6 +111,7 @@
 	function add_noon_fulfillment_actions(frm) {
 		// the row action needs only write on the Sales Order: it runs before the Marketplace Order gate
 		add_noon_out_of_stock_rows(frm);
+		add_noon_invoice_actions(frm);
 		const sales_order = frm.doc.name;
 		const marketplace_order = frm.doc.custom_marketplace_order;
 		if (!frappe.model.can_read("Marketplace Order")) return Promise.resolve(null);
@@ -105,19 +138,6 @@
 				},
 				() => null
 			);
-	}
-
-	// {queued: bool} is the shape every api.noon_fulfillment endpoint that enqueues returns (a
-	// deduplicated job_id), so the "already queued" toast applies to all of them.
-	function show_noon_queue_toast(r, ctx) {
-		const queued = (r.message || {}).queued;
-		frappe.show_alert({
-			message: queued
-				? __("Noon fulfillment action queued. Refresh this document to see the results.")
-				: __("A Noon fulfillment action for this order is already queued or running."),
-			indicator: "blue",
-		});
-		ctx.reload();
 	}
 
 	// ---- Mark as Out of Stock: one Sales Order item row (#416) -------------------------------------
@@ -315,51 +335,41 @@
 		if ((frm.__mi_noon_oos_rows || []).includes(cdn)) confirm_noon_out_of_stock(frm, cdn);
 	}
 
-	function show_noon_upload_order_invoice_dialog(ctx) {
-		const dialog = new frappe.ui.Dialog({
+	// The order invoice uses the dialog shared with the shipment invoice (noon_invoice.js): a new press has
+	// no key, a Retry passes one (any value: the server reuses the key saved on the Marketplace Order).
+	function order_invoice_options(ctx) {
+		return {
+			doctype: "Sales Order",
+			name: ctx.sales_order,
 			title: __("Upload Noon Order Invoice"),
-			fields: [
-				{
-					fieldname: "invoice_file",
-					fieldtype: "Attach",
-					label: __("Invoice PDF"),
-					reqd: 1,
-					// The server rejects a non-private File; this just tells the user up front.
-					description: __("Must be uploaded as Private - a public file is rejected."),
-				},
-				{ fieldname: "invoice_nr", fieldtype: "Data", label: __("Invoice Nr"), reqd: 1 },
-				{ fieldname: "issued_at", fieldtype: "Date", label: __("Issued At"), reqd: 1 },
-			],
-			primary_action_label: __("Upload"),
-			primary_action(values) {
-				dialog.hide();
-				frappe
-					.call({
-						method: API + "upload_order_invoice",
-						args: {
-							marketplace_order: ctx.marketplace_order,
-							file_url: values.invoice_file,
-							invoice_nr: values.invoice_nr,
-							issued_at: values.issued_at,
-						},
-						freeze: true,
-						freeze_message: __("Queuing invoice upload..."),
-					})
-					.then((r) => show_noon_queue_toast(r, ctx));
-			},
-		});
-		dialog.show();
+			uploaded: ctx.order_invoice_uploaded,
+			send: (values, key) =>
+				frappe.call({
+					method: API + (key ? "retry_order_invoice" : "upload_order_invoice"),
+					type: "POST",
+					args: key
+						? { sales_order: ctx.sales_order }
+						: {
+								sales_order: ctx.sales_order,
+								file_url: values.invoice_file,
+								invoice_nr: values.invoice_nr,
+								issued_at: values.issued_at,
+							},
+					// the refusal is shown by the shared dialog (parsed and escaped), not by frappe.call
+					silent: true,
+				}),
+			reload: ctx.reload,
+		};
+	}
+
+	function show_noon_upload_order_invoice_dialog(ctx) {
+		const invoice = frappe.marketplace_integrations && frappe.marketplace_integrations.noon_invoice;
+		if (invoice) invoice.start(order_invoice_options(ctx));
 	}
 
 	function run_noon_retry_order_invoice(ctx) {
-		frappe
-			.call({
-				method: API + "retry_order_invoice",
-				args: { marketplace_order: ctx.marketplace_order },
-				freeze: true,
-				freeze_message: __("Queuing retry..."),
-			})
-			.then((r) => show_noon_queue_toast(r, ctx));
+		const invoice = frappe.marketplace_integrations && frappe.marketplace_integrations.noon_invoice;
+		if (invoice) invoice.send(order_invoice_options(ctx), {}, "retry");
 	}
 
 	// release_stuck_oos_reservation() runs synchronously (no Noon HTTP call, so nothing to
@@ -390,6 +400,8 @@
 
 	const exported = {
 		add_noon_fulfillment_actions,
+		add_noon_invoice_actions,
+		run_noon_retry_order_invoice,
 		build_context,
 		can_use_noon_fulfillment,
 		noon_fulfillment_buttons,

@@ -41,9 +41,10 @@ boot_session = "marketplace_integrations.services.carrier_shipments.boot_session
 
 # include js in doctype views
 doctype_js = {
-	"Sales Order": "public/js/sales_order.js",
+	"Sales Order": ["public/js/noon_invoice.js", "public/js/sales_order.js"],
 	"Delivery Note": [
 		"public/js/delivery_note_shipping.js",
+		"public/js/noon_invoice.js",
 		"public/js/delivery_note_bosta.js",
 		"public/js/delivery_note_noon.js",
 	],
@@ -406,6 +407,8 @@ fixtures = [
 					"Delivery Note-custom_last_integration_error",
 					"Delivery Note-custom_carrier_request_snapshot",
 					"Delivery Note-custom_noon_generate_awb",
+					"Delivery Note-custom_noon_invoice_uploaded_on",
+					"Delivery Note-custom_noon_invoice_items_hash",
 					"Delivery Note Item-custom_noon_item_status",
 					# #416: the row-form button of Mark as Out of Stock (hidden until sales_order.js shows it)
 					"Sales Order Item-custom_noon_mark_out_of_stock",

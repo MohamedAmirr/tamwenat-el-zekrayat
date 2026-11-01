@@ -24,6 +24,7 @@ function load({
 	noon_state = { actions: [], cancelled_on_noon: false, shipments: [] },
 	noon_fails = false,
 		oos_rows = [],
+		invoice_state = {},
 	can_create_delivery_note = true,
 	marketplace_summary = { name: "MO-1", platform: "Shopify", reference: "#SHOP-1", erpnext_sync_status: "Syncing", erpnext_sales_order: "" },
 } = {}) {
@@ -32,6 +33,7 @@ function load({
 	const marketplace_calls = [];
 	const noon_calls = [];
 	const oos_calls = [];
+	const invoice_calls = [];
 	const confirms = [];
 	const required = [];
 	const alerts = [];
@@ -93,6 +95,10 @@ function load({
 				oos_calls.push(opts);
 				return Promise.resolve({ message: oos_rows });
 			}
+			if (opts.method.endsWith("noon_fulfillment.get_order_invoice_state")) {
+				invoice_calls.push(opts);
+				return Promise.resolve({ message: invoice_state });
+			}
 			if (opts.method.includes("api.noon_fulfillment.")) {
 				noon_calls.push(opts);
 				if (opts.method.endsWith("get_available_actions")) {
@@ -126,10 +132,14 @@ function load({
 		},
 	};
 	global.format_currency = (value, currency) => `${currency || "EGP"} ${value}`;
+	// noon_invoice.js is a doctype_js file of the Sales Order (hooks.py): loaded with the form script
+	const invoice_path = require.resolve("./noon_invoice.js");
+	delete require.cache[invoice_path];
+	require(invoice_path);
 	const path = require.resolve("./sales_order.js");
 	delete require.cache[path];
 	const module_exports = require(path);
-	return { calls, edit_calls, marketplace_calls, noon_calls, oos_calls, confirms, required, alerts, msgprints, dialogs, handlers, module_exports };
+	return { calls, edit_calls, marketplace_calls, noon_calls, oos_calls, invoice_calls, confirms, required, alerts, msgprints, dialogs, handlers, module_exports };
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
@@ -783,10 +793,12 @@ async function refresh_noon(options, doc) {
 
 test("a submitted Noon Sales Order gets the Noon Fulfillment group with one button per available action", async () => {
 	const { frm, noon_calls, required } = await refresh_noon({
-		noon_state: { actions: NOON_ALL_ACTIONS, cancelled_on_noon: false },
+		noon_state: { actions: ["release_stuck_oos_reservation"], cancelled_on_noon: false },
+		invoice_state: { can_upload: true, can_retry: true },
 	});
 	assert.deepEqual(required.filter((a) => a.endsWith("noon_fulfillment.js")), ["/assets/marketplace_integrations/js/noon_fulfillment.js"]);
-	assert.deepEqual(frm.buttons.map((b) => b.label), NOON_ALL_ACTIONS.map((a) => NOON_LABELS[a]));
+	// the invoice buttons come from get_order_invoice_state, the recovery from get_available_actions
+	assert.deepEqual(frm.buttons.map((b) => b.label).sort(), ["Release Stuck Out of Stock Reservation", "Retry Order Invoice", "Upload Order Invoice"]);
 	assert.ok(frm.buttons.every((b) => b.group === "Noon Fulfillment"));
 	assert.equal(noon_calls.length, 1);
 	assert.equal(noon_calls[0].method, "marketplace_integrations.api.noon_fulfillment.get_available_actions");
@@ -794,8 +806,8 @@ test("a submitted Noon Sales Order gets the Noon Fulfillment group with one butt
 });
 
 test("only the actions the server reports are shown, and none when the list is empty", async () => {
-	const some = await refresh_noon({ noon_state: { actions: ["retry_order_invoice", "mark_out_of_stock", "unknown"] } });
-	assert.deepEqual(some.frm.buttons.map((b) => b.label), ["Retry Order Invoice"]);
+	const some = await refresh_noon({ noon_state: { actions: ["release_stuck_oos_reservation", "mark_out_of_stock", "unknown"] } });
+	assert.deepEqual(some.frm.buttons.map((b) => b.label), ["Release Stuck Out of Stock Reservation"]);
 	const none = await refresh_noon({ noon_state: { actions: [] } });
 	assert.deepEqual(none.frm.buttons, []);
 });
@@ -888,7 +900,7 @@ test("the Sales Order asks the server which item rows offer Mark as Out of Stock
 
 test("a Closed submitted Noon Sales Order keeps the Noon Fulfillment buttons (the server decides)", async () => {
 	const { frm } = await refresh_noon(
-		{ noon_state: { actions: ["retry_order_invoice"] } },
+		{ invoice_state: { can_retry: true } },
 		noon_so({ status: "Closed" })
 	);
 	assert.deepEqual(frm.buttons.map((b) => b.label), ["Retry Order Invoice"]);
@@ -907,12 +919,43 @@ test("the recovery button calls the endpoint with the linked Marketplace Order",
 	assert.deepEqual(noon_calls[noon_calls.length - 1].args, { marketplace_order: "MO-NOON" });
 });
 
-test("the order invoice dialog sends the file, number and date", async () => {
-	const { frm, dialogs, noon_calls } = await refresh_noon({ noon_state: { actions: ["upload_order_invoice"] } });
+test("the order invoice dialog sends the file, number and date for the Sales Order", async () => {
+	const { frm, dialogs, noon_calls } = await refresh_noon({ invoice_state: { can_upload: true } });
+	global.frappe.marketplace_integrations.noon_invoice.timing.max_wait_ms = 0;
 	frm.buttons.find((b) => b.label === "Upload Order Invoice").action();
 	dialogs[dialogs.length - 1].config.primary_action({ invoice_file: "/private/files/i.pdf", invoice_nr: "INV-1", issued_at: "2026-11-01" });
 	await settle();
-	const call = noon_calls[noon_calls.length - 1];
+	const call = noon_calls.find((c) => c.method.endsWith("upload_order_invoice"));
 	assert.equal(call.method, "marketplace_integrations.api.noon_fulfillment.upload_order_invoice");
-	assert.deepEqual(call.args, { marketplace_order: "MO-NOON", file_url: "/private/files/i.pdf", invoice_nr: "INV-1", issued_at: "2026-11-01" });
+	assert.deepEqual(call.args, { sales_order: "SAL-ORD-1", file_url: "/private/files/i.pdf", invoice_nr: "INV-1", issued_at: "2026-11-01" });
+});
+
+test("the order invoice buttons come from the invoice state and need write on the Sales Order only", async () => {
+	const both = await refresh_noon({ invoice_state: { can_upload: true, can_retry: true }, can_read: false });
+	assert.deepEqual(both.invoice_calls.map((c) => c.args), [{ sales_order: "SAL-ORD-1" }]);
+	assert.deepEqual(both.frm.buttons.map((b) => b.label).sort(), ["Retry Order Invoice", "Upload Order Invoice"]);
+	assert.equal(both.noon_calls.length, 0, "no Marketplace Order read needed");
+	const none = await refresh_noon({ invoice_state: {} });
+	assert.deepEqual(none.frm.buttons, []);
+	const read_only = await refresh_noon({ can_write: false, invoice_state: { can_upload: true } });
+	assert.equal(read_only.invoice_calls.length, 0);
+	assert.deepEqual(read_only.frm.buttons, []);
+});
+
+test("a second order invoice upload asks for confirmation first and says the new one replaces it", async () => {
+	const { frm, confirms, noon_calls } = await refresh_noon({ invoice_state: { can_upload: true, uploaded: true } });
+	frm.buttons.find((b) => b.label === "Upload Order Invoice").action();
+	assert.equal(confirms.length, 1);
+	assert.match(confirms[0].message, /already uploaded/);
+	assert.match(confirms[0].message, /replaces it at Noon/);
+	assert.equal(noon_calls.filter((c) => c.method.endsWith("upload_order_invoice")).length, 0);
+});
+
+test("Retry Order Invoice sends the retry for the Sales Order", async () => {
+	const { frm, noon_calls } = await refresh_noon({ invoice_state: { can_retry: true } });
+	global.frappe.marketplace_integrations.noon_invoice.timing.max_wait_ms = 0;
+	frm.buttons.find((b) => b.label === "Retry Order Invoice").action();
+	await settle();
+	const call = noon_calls.find((c) => c.method.endsWith("retry_order_invoice"));
+	assert.deepEqual(call.args, { sales_order: "SAL-ORD-1" });
 });

@@ -57,6 +57,7 @@
 
 	function refresh(frm) {
 		set_awb_state(frm);
+		show_invoice_intro(frm);
 	}
 
 	// Ticking the box means Noon generates the AWB: a typed AWB is cleared (the server refuses both).
@@ -199,9 +200,51 @@
 		});
 	}
 
+	// "Upload Shipment Invoice": a submitted note whose shipment is Created. The dialog is shared with the order
+	// invoice (noon_invoice.js); the server refuses anything else (and a non-FBPI warehouse). It never blocks
+	// Submit or Cancel.
+	function upload_shipment_invoice(frm) {
+		const invoice = frappe.marketplace_integrations && frappe.marketplace_integrations.noon_invoice;
+		if (!invoice) return;
+		invoice.start({
+			doctype: "Delivery Note",
+			name: frm.doc.name,
+			title: __("Upload Shipment Invoice"),
+			uploaded_on: frm.doc.custom_noon_invoice_uploaded_on,
+			send: (values, key) =>
+				frappe.call({
+					method: "marketplace_integrations.api.noon_fulfillment.upload_delivery_note_invoice",
+					type: "POST",
+					args: {
+						delivery_note: frm.doc.name,
+						file_url: values.invoice_file,
+						invoice_nr: values.invoice_nr,
+						issued_at: values.issued_at,
+						idempotency_key: key || null,
+					},
+					// the refusal is shown by the shared dialog (parsed and escaped), not by frappe.call
+					silent: true,
+				}),
+			reload: () => frm.reload_doc(),
+		});
+	}
+
 	function add_buttons(frm) {
 		if (frm.doc.docstatus === 0 && CANCELLABLE.includes(frm.doc.custom_integration_status || "")) {
 			frm.add_custom_button(__("Cancel Noon Shipment"), () => cancel_shipment(frm));
+		}
+		if (frm.doc.docstatus === 1 && frm.doc.custom_integration_status === "Created") {
+			frm.add_custom_button(__("Upload Shipment Invoice"), () => upload_shipment_invoice(frm));
+		}
+	}
+
+	// Intro under the Shipping section: when the invoice was uploaded.
+	function show_invoice_intro(frm) {
+		if (frm.doc.docstatus === 1 && frm.doc.custom_noon_invoice_uploaded_on && frm.dashboard && frm.dashboard.add_indicator) {
+			frm.dashboard.add_indicator(
+				__("Invoice uploaded on {0}", [frappe.utils.escape_html(String(frm.doc.custom_noon_invoice_uploaded_on))]),
+				"green"
+			);
 		}
 	}
 
@@ -225,6 +268,7 @@
 			before_cancel,
 			cancel_shipment,
 			add_buttons,
+			upload_shipment_invoice,
 		};
 	}
 })();

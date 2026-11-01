@@ -55,6 +55,10 @@ function load(script = () => ({ queued: false })) {
 		confirm: (message, proceed) => confirms.push({ message, proceed }),
 		show_alert: (alert) => alerts.push(alert),
 	};
+	// the shared invoice dialog is its own doctype_js file (hooks.py), loaded with the form script
+	const invoice_path = require.resolve("./noon_invoice.js");
+	delete require.cache[invoice_path];
+	require(invoice_path);
 	const path = require.resolve("./noon_fulfillment.js");
 	delete require.cache[path];
 	const module_exports = require(path);
@@ -211,7 +215,7 @@ test("a wait that outlasts the limit tells the user the job keeps running", asyn
 });
 
 test("the order invoice: a queued answer that was deduplicated says the action is already queued", async () => {
-	const { module_exports, dialogs, alerts } = load(() => ({ queued: false }));
+	const { module_exports, dialogs, alerts, calls } = load(() => ({ queued: false }));
 	module_exports.show_noon_upload_order_invoice_dialog(ctx());
 	dialogs[dialogs.length - 1].config.primary_action({
 		invoice_file: "/private/files/i.pdf",
@@ -220,6 +224,29 @@ test("the order invoice: a queued answer that was deduplicated says the action i
 	});
 	await settle();
 	assert.equal(alerts[0].message, "A Noon fulfillment action for this order is already queued or running.");
+	assert.deepEqual(by_method(calls, "upload_order_invoice")[0].args, {
+		sales_order: "SO-1",
+		file_url: "/private/files/i.pdf",
+		invoice_nr: "INV-1",
+		issued_at: "2026-11-01",
+	});
+});
+
+test("Retry Order Invoice passes only the Sales Order and waits for the same press", async () => {
+	const { module_exports, calls, dialogs } = load((opts) => {
+		if (opts.method === API + "retry_order_invoice") return { queued: true, idempotency_key: "key-1" };
+		if (opts.method === API + "check_invoice_upload") return { state: "done" };
+		return {};
+	});
+	module_exports.run_noon_retry_order_invoice(ctx());
+	await settle();
+	assert.deepEqual(by_method(calls, "retry_order_invoice")[0].args, { sales_order: "SO-1" });
+	assert.deepEqual(by_method(calls, "check_invoice_upload")[0].args, {
+		document_type: "Sales Order",
+		document_name: "SO-1",
+		idempotency_key: "key-1",
+	});
+	assert.equal(dialogs[0].hidden, true);
 });
 
 test("the Sales Order lists the offered rows with write on the Sales Order only", async () => {

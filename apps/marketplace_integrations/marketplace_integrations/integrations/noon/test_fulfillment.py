@@ -8,6 +8,7 @@ and never makes real HTTP calls, same convention as integrations/noon/test_order
 only the documented Noon API shapes (``docs/noon-integration/noon_api_full.md``).
 """
 
+import json
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -186,20 +187,28 @@ class IntegrationTestNoonAvailableActions(IntegrationTestNoonFulfillmentBase):
 				fulfillment.get_available_actions(order), {"actions": [], "cancelled_on_noon": True}
 			)
 
-	def test_a_created_note_offers_the_order_invoice_and_its_retry_follows_the_status(self):
+	def test_the_order_invoice_state_follows_the_created_note_and_the_status(self):
 		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
+		order.noon_order_invoice_file = "/private/files/i.pdf"
 		with patch(_HAS_CREATED_NOTE, return_value=True), patch(_STARTED, return_value={"1"}):
-			result = fulfillment.get_available_actions(order)
-			self.assertEqual(result["actions"], ["upload_order_invoice"])
-			self.assertFalse(result["cancelled_on_noon"])
-
+			self.assertEqual(
+				fulfillment.order_invoice_state(order), {"can_upload": True, "can_retry": False, "uploaded": False}
+			)
+			self.assertEqual(fulfillment.get_available_actions(order)["actions"], [])
 			order.noon_order_invoice_status = "Pending"
-			self.assertEqual(fulfillment.get_available_actions(order)["actions"], ["retry_order_invoice"])
+			self.assertEqual(
+				fulfillment.order_invoice_state(order), {"can_upload": False, "can_retry": True, "uploaded": False}
+			)
 			order.noon_order_invoice_status = "Error"
 			self.assertEqual(
-				fulfillment.get_available_actions(order)["actions"],
-				["upload_order_invoice", "retry_order_invoice"],
+				fulfillment.order_invoice_state(order), {"can_upload": True, "can_retry": True, "uploaded": False}
 			)
+			order.noon_order_invoice_status = "Uploaded"
+			self.assertEqual(
+				fulfillment.order_invoice_state(order), {"can_upload": True, "can_retry": False, "uploaded": True}
+			)
+		with patch(_HAS_CREATED_NOTE, return_value=False):
+			self.assertFalse(fulfillment.order_invoice_state(order)["can_upload"])
 
 	def test_pending_oos_reservation_offers_release(self):
 		order = _make_fulfillment_order(self.account, self.fbpi_order_nr, [_confirmed_acknowledged(1)])
@@ -229,9 +238,14 @@ class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):
 		patcher = patch(_HAS_CREATED_NOTE, return_value=True)
 		self.has_created_note = patcher.start()
 		self.addCleanup(patcher.stop)
+		# the warehouse is FBPI-ready (the refusal is tested below)
+		fbpi = patch("marketplace_integrations.integrations.noon.fulfillment.fbpi_ready", return_value=(True, ""))
+		self.fbpi_ready = fbpi.start()
+		self.addCleanup(fbpi.stop)
 
 	def tearDown(self):
 		frappe.db.delete("File", filters={"attached_to_name": self.order.name})
+		frappe.db.delete("Integration Request", filters={"custom_operation_type": "Invoice", "reference_docname": self.order.name})
 		super().tearDown()
 
 	def _make_file(self, content):
@@ -289,12 +303,14 @@ class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):
 		file_doc = self._make_file(b"%PDF-1.4\nmock invoice content\n%%EOF")
 		with self._patch_get_content(), self.assertRaises(frappe.ValidationError):
 			fulfillment.upload_order_invoice(self.order.name, file_doc.file_url, "INV-1", nowdate())
-		self.assertNotIn("upload_order_invoice", fulfillment.get_available_actions(self.order)["actions"])
+		self.assertFalse(fulfillment.order_invoice_state(self.order)["can_upload"])
 
 	def test_success_sends_order_level_payload_and_marks_uploaded(self):
 		file_doc = self._make_file(b"%PDF-1.4\nmock invoice content\n%%EOF")
-		self.assertEqual(self._upload(file_doc), {"queued": True})
+		result = self._upload(file_doc)
 		key = self.order.noon_order_invoice_idempotency_key
+		self.assertEqual(result, {"queued": True, "idempotency_key": key})
+		self.assertEqual(fulfillment.invoice_result(key)["state"], "pending")
 		self.assertEqual(self.order.noon_order_invoice_status, "Pending")
 
 		request = self._run_worker(key)
@@ -305,6 +321,7 @@ class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):
 		self.assertEqual(kwargs["json"]["invoice_nr"], "INV-1")
 		self.assertEqual(self.order.noon_order_invoice_status, "Uploaded")
 		self.assertFalse(self.order.noon_order_invoice_last_error)
+		self.assertEqual(fulfillment.invoice_result(key), {"state": "done", "message": ""})
 		logs = frappe.get_all(
 			"Marketplace Sync Log",
 			filters={"marketplace_order": self.order.name, "sync_type": "Fulfillment", "status": "Success"},
@@ -312,6 +329,62 @@ class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):
 		)
 		self.assertEqual(len(logs), 1)
 		self.assertNotIn(kwargs["json"]["invoice"], (logs[0].request_data or "") + (logs[0].response_data or ""))
+		# the call is also an Integration Request (operation Invoice) on the document: no file bytes, no secrets
+		rows = frappe.get_all(
+			"Integration Request",
+			filters={"custom_operation_type": "Invoice", "reference_doctype": "Marketplace Order", "reference_docname": self.order.name},
+			fields=["*"],
+		)
+		self.assertEqual(len(rows), 1)
+		self.assertEqual((rows[0].custom_result, rows[0].custom_correlation_id), ("Success", key))
+		self.assertNotIn(kwargs["json"]["invoice"], json.dumps(rows[0], default=str))
+		self.assertNotIn("test-key-id", json.dumps(rows[0], default=str))
+
+	def test_the_pdf_becomes_a_private_file_attached_to_the_sales_order_it_was_used_on(self):
+		loose = frappe.get_doc(
+			{"doctype": "File", "file_name": "loose-invoice.pdf", "content": _MINIMAL_VALID_PDF, "is_private": 1}
+		).insert()
+		self.addCleanup(frappe.db.delete, "File", {"attached_to_doctype": "Sales Order", "attached_to_name": "SO-TEST-ATTACH"})
+		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
+			enqueue.return_value = MagicMock()
+			fulfillment.upload_order_invoice(
+				self.order.name, loose.file_url, "INV-1", nowdate(), sales_order="SO-TEST-ATTACH"
+			)
+		self.order.reload()
+		attached = frappe.get_all(
+			"File",
+			filters={"attached_to_doctype": "Sales Order", "attached_to_name": "SO-TEST-ATTACH"},
+			fields=["file_url", "is_private"],
+		)
+		self.assertEqual(len(attached), 1)
+		self.assertEqual(attached[0].is_private, 1)
+		self.assertEqual(self.order.noon_order_invoice_file, attached[0].file_url)
+		self.assertEqual(enqueue.call_args.kwargs["sales_order"], "SO-TEST-ATTACH")
+
+	def test_a_warehouse_that_is_not_fbpi_ready_refuses_the_upload_and_the_retry(self):
+		file_doc = self._make_file(b"%PDF-1.4\nmock invoice content\n%%EOF")
+		self.fbpi_ready.return_value = (False, "The warehouse is not FBPI.")
+		with self._patch_get_content(), self.assertRaisesRegex(frappe.ValidationError, "not FBPI"):
+			fulfillment.upload_order_invoice(self.order.name, file_doc.file_url, "INV-1", nowdate())
+		self.order.reload()
+		self.assertFalse(self.order.noon_order_invoice_status)
+		self.order.noon_order_invoice_status = "Error"
+		self.order.noon_order_invoice_file = file_doc.file_url
+		self.order.save()
+		with self.assertRaisesRegex(frappe.ValidationError, "not FBPI"):
+			fulfillment.retry_order_invoice(self.order.name)
+
+	def test_a_failure_goes_to_the_dialog_result_and_never_blocks_anything(self):
+		self._upload(self._make_file(b"%PDF-1.4\nmock invoice content\n%%EOF"))
+		key = self.order.noon_order_invoice_idempotency_key
+		self._run_worker(key, status_code=500)
+		self.assertEqual(fulfillment.invoice_result(key), {"state": "failed", "message": "boom"})
+		rows = frappe.get_all(
+			"Integration Request",
+			filters={"custom_operation_type": "Invoice", "reference_docname": self.order.name},
+			fields=["custom_result", "custom_http_status"],
+		)
+		self.assertEqual([(row.custom_result, int(row.custom_http_status)) for row in rows], [("Unknown", 500)])
 
 	def test_idempotent_retry_reuses_the_same_key(self):
 		self._upload(self._make_file(b"%PDF-1.4\nmock invoice content\n%%EOF"))
@@ -322,8 +395,11 @@ class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):
 
 		with patch("marketplace_integrations.integrations.noon.fulfillment.frappe.enqueue") as enqueue:
 			enqueue.return_value = MagicMock()
-			self.assertEqual(fulfillment.retry_order_invoice(self.order.name), {"queued": True})
+			self.assertEqual(
+				fulfillment.retry_order_invoice(self.order.name), {"queued": True, "idempotency_key": key}
+			)
 			self.assertEqual(enqueue.call_args.kwargs["invoice_idempotency_key"], key)
+			self.assertEqual(fulfillment.invoice_result(key)["state"], "pending", "Retry starts a new wait")
 		request = self._run_worker(key)
 		self.assertEqual(request.call_args.kwargs["json"]["idempotency_key"], key)
 		self.assertEqual(self.order.noon_order_invoice_status, "Uploaded")
@@ -350,8 +426,10 @@ class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):
 		self._upload(self._make_file(b"%PDF-1.4\nfirst\n%%EOF"))
 		first_key = self.order.noon_order_invoice_idempotency_key
 		self._run_worker(first_key)
-		self.assertEqual(self._upload(self._make_file(b"%PDF-1.4\nsecond\n%%EOF"), "INV-2"), {"queued": True})
+		second = self._upload(self._make_file(b"%PDF-1.4\nsecond\n%%EOF"), "INV-2")
+		self.assertTrue(second["queued"])
 		self.assertNotEqual(self.order.noon_order_invoice_idempotency_key, first_key)
+		self.assertEqual(second["idempotency_key"], self.order.noon_order_invoice_idempotency_key)
 
 	def test_rejects_non_pdf_content(self):
 		file_doc = self._make_file(b"not a pdf")

@@ -711,3 +711,217 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		frappe.db.commit()
 		found = [i for i in attention._collect_carrier_items(attention.CARRIER_CREATION_PROBLEM) if i["reference_name"] == note.name]
 		self.assertEqual(len(found), 1)
+
+	# ---- shipment invoice (#416) ------------------------------------------------------------------
+
+	_PDF = (
+		b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+		b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 3 3]>>endobj\nxref\n0 4\n0000000000 65535 f \n"
+		b"0000000009 00000 n \n0000000052 00000 n \n0000000101 00000 n \ntrailer<</Size 4/Root 1 0 R>>\n"
+		b"startxref\n249\n%%EOF"
+	)
+
+	def _submitted_created_note(self, fixture):
+		"""A Created Noon note marked submitted (the database row only: nothing here posts stock)."""
+		note = self._created_note(fixture)
+		frappe.db.set_value("Delivery Note", note.name, "docstatus", 1, update_modified=False)
+		frappe.db.commit()
+		self.addCleanup(frappe.db.delete, "File", {"attached_to_doctype": "Delivery Note", "attached_to_name": note.name})
+		self.addCleanup(frappe.db.delete, "Integration Request", {"reference_docname": note.name, "custom_operation_type": "Invoice"})
+		return note
+
+	def _loose_pdf(self):
+		return frappe.get_doc(
+			{"doctype": "File", "file_name": "shipment-invoice.pdf", "content": self._PDF, "is_private": 1}
+		).insert()
+
+	def _press(self, note, file_doc, key=None, invoice_nr="INV-1"):
+		with patch("marketplace_integrations.integrations.noon.delivery_note_shipment.frappe.enqueue") as enqueue:
+			enqueue.return_value = MagicMock()
+			result = noon.upload_invoice_for_note(note.name, file_doc.file_url, invoice_nr, "2026-11-01", key)
+		return result, enqueue
+
+	def _run_invoice(self, note, key, status=200, file_url=None):
+		file_url = file_url or frappe.get_all(
+			"File", filters={"attached_to_doctype": "Delivery Note", "attached_to_name": note.name}, pluck="file_url"
+		)[0]
+		with patch(_CLIENT) as client_class:
+			client = client_class.return_value
+			client.request.return_value = _response(status, message="refused <b>x</b>")
+			client.error_message.side_effect = lambda response: response.message
+			noon.run_upload_invoice(note.name, file_url, "INV-1", "2026-11-01", key)
+		return client
+
+	def test_the_invoice_is_a_private_file_on_the_note_and_the_job_uses_the_shipment_number(self):
+		note = self._submitted_created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
+		result, enqueue = self._press(note, self._loose_pdf())
+		self.assertTrue(result["queued"])
+		attached = frappe.get_all(
+			"File",
+			filters={"attached_to_doctype": "Delivery Note", "attached_to_name": note.name},
+			fields=["file_url", "is_private"],
+		)
+		self.assertEqual([(row.is_private, row.file_url) for row in attached], [(1, result["file_url"])])
+		self.assertEqual(enqueue.call_args.kwargs["idempotency_key"], result["idempotency_key"])
+		client = self._run_invoice(note, result["idempotency_key"])
+		args, kwargs = client.request.call_args
+		self.assertEqual(args, ("POST", "/fbpi/v1/shipment/invoice/upload"))
+		self.assertEqual(kwargs["json"]["integration_shipment_nr"], note.name)
+		self.assertEqual(kwargs["json"]["warehouse_code"], self.account.noon_warehouse_code)
+		self.assertEqual(kwargs["json"]["idempotency_key"], result["idempotency_key"])
+		self.assertEqual(kwargs["json"]["issued_at"], "2026-11-01")
+
+	def test_success_records_the_upload_time_and_the_items_fingerprint_and_logs_without_secrets(self):
+		note = self._submitted_created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
+		result, _enqueue = self._press(note, self._loose_pdf())
+		client = self._run_invoice(note, result["idempotency_key"])
+		stored = self._note(note.name)
+		self.assertTrue(stored.custom_noon_invoice_uploaded_on)
+		self.assertEqual(stored.custom_noon_invoice_items_hash, noon.items_hash(stored.items))
+		self.assertEqual(frappe.cache().get_value(f"noon-invoice-result|{result['idempotency_key']}")["state"], "done")
+		rows = frappe.get_all(
+			"Integration Request",
+			filters={"custom_operation_type": "Invoice", "reference_doctype": "Delivery Note", "reference_docname": note.name},
+			fields=["*"],
+		)
+		self.assertEqual(len(rows), 1)
+		dump = json.dumps(rows[0], default=str)
+		self.assertEqual((rows[0].custom_result, rows[0].custom_external_reference), ("Success", note.name))
+		self.assertNotIn(client.request.call_args.kwargs["json"]["invoice"], dump)
+		self.assertNotIn("test-key-id", dump)
+
+	def test_retry_reuses_the_key_and_a_new_press_makes_a_new_key(self):
+		note = self._submitted_created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
+		first, _enqueue = self._press(note, self._loose_pdf())
+		self._run_invoice(note, first["idempotency_key"], status=500)
+		failed = self._note(note.name)
+		self.assertFalse(failed.custom_noon_invoice_uploaded_on, "a failure records no upload")
+		retry, enqueue = self._press(note, frappe._dict(file_url=first["file_url"]), key=first["idempotency_key"])
+		self.assertEqual(retry["idempotency_key"], first["idempotency_key"])
+		self.assertEqual(enqueue.call_args.kwargs["idempotency_key"], first["idempotency_key"])
+		self.assertEqual(
+			frappe.cache().get_value(f"noon-invoice-result|{first['idempotency_key']}")["state"], "pending"
+		)
+		self.assertEqual(
+			len(frappe.get_all("File", filters={"attached_to_doctype": "Delivery Note", "attached_to_name": note.name})), 1
+		)
+		self._run_invoice(note, first["idempotency_key"])
+		second, _enqueue = self._press(note, self._loose_pdf(), invoice_nr="INV-2")
+		self.assertNotEqual(second["idempotency_key"], first["idempotency_key"])
+
+	def test_a_second_upload_replaces_the_time_of_the_first(self):
+		note = self._submitted_created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
+		first, _enqueue = self._press(note, self._loose_pdf())
+		self._run_invoice(note, first["idempotency_key"])
+		frappe.db.set_value("Delivery Note", note.name, "custom_noon_invoice_uploaded_on", "2026-01-01 10:00:00", update_modified=False)
+		second, _enqueue = self._press(note, self._loose_pdf(), invoice_nr="INV-2")
+		self._run_invoice(note, second["idempotency_key"])
+		self.assertGreater(str(self._note(note.name).custom_noon_invoice_uploaded_on), "2026-01-02")
+
+	def test_a_failure_shows_in_the_result_escaped_and_never_changes_the_note(self):
+		note = self._submitted_created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
+		result, _enqueue = self._press(note, self._loose_pdf())
+		self._run_invoice(note, result["idempotency_key"], status=400)
+		outcome = frappe.cache().get_value(f"noon-invoice-result|{result['idempotency_key']}")
+		self.assertEqual(outcome["state"], "failed")
+		self.assertNotIn("<b>", outcome["message"])
+		stored = self._note(note.name)
+		self.assertEqual((stored.docstatus, stored.custom_integration_status), (1, "Created"))
+		# Submit and Cancel stay available: nothing in the invoice path touches the note's status
+		self.assertFalse(stored.custom_noon_invoice_uploaded_on)
+
+	def test_the_press_is_refused_for_what_is_not_a_created_submitted_noon_note(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		draft = self._created_note(fx)  # Created but still a draft
+		with self.assertRaises(frappe.ValidationError):
+			self._press(draft, self._loose_pdf())
+		frappe.db.set_value("Delivery Note", draft.name, {"docstatus": 1, "custom_integration_status": "Cancellation Unknown"}, update_modified=False)
+		with self.assertRaises(frappe.ValidationError):
+			self._press(draft, self._loose_pdf())
+		self.assertFalse(frappe.get_all("File", filters={"attached_to_doctype": "Delivery Note", "attached_to_name": draft.name}))
+
+	def test_the_press_is_refused_unless_the_warehouse_is_fbpi_ready(self):
+		note = self._submitted_created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
+		for overrides, reason in (
+			({"noon_fbpi_code": ""}, "no FBPI Code"),
+			({"noon_fulfillment_system_code": "OTHER"}, "is not its FBPI Code"),
+			({"noon_warehouse_active": 0}, "not active"),
+		):
+			self._fbpi_ready_account(**overrides)
+			with self.assertRaisesRegex(frappe.ValidationError, reason):
+				self._press(note, self._loose_pdf())
+			self._fbpi_ready_account()
+		self.assertFalse(frappe.get_all("File", filters={"attached_to_doctype": "Delivery Note", "attached_to_name": note.name}))
+
+	def test_the_press_refuses_a_missing_number_date_a_bad_key_and_a_non_pdf(self):
+		note = self._submitted_created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
+		with patch("marketplace_integrations.integrations.noon.delivery_note_shipment.frappe.enqueue") as enqueue:
+			with self.assertRaises(frappe.ValidationError):
+				noon.upload_invoice_for_note(note.name, self._loose_pdf().file_url, " ", "2026-11-01")
+			with self.assertRaises(frappe.ValidationError):
+				noon.upload_invoice_for_note(note.name, self._loose_pdf().file_url, "INV-1", "")
+			with self.assertRaises(frappe.ValidationError):
+				noon.upload_invoice_for_note(note.name, self._loose_pdf().file_url, "INV-1", "2026-11-01", "bad key!")
+			not_pdf = frappe.get_doc(
+				{"doctype": "File", "file_name": "x.bin", "content": b"not a pdf", "is_private": 1}
+			).insert()
+			with self.assertRaises(frappe.ValidationError):
+				noon.upload_invoice_for_note(note.name, not_pdf.file_url, "INV-1", "2026-11-01")
+		enqueue.assert_not_called()
+
+	def test_the_endpoint_needs_write_on_the_delivery_note(self):
+		from marketplace_integrations.api import noon_fulfillment
+		from marketplace_integrations.tests.utils import make_role_user
+
+		note = self._submitted_created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
+		writer, _role = make_role_user(self, "Noon Invoice Note Writer", {"Delivery Note": ["read", "write"]})
+		reader, _role = make_role_user(self, "Noon Invoice Note Reader", {"Delivery Note": ["read"]})
+		with patch.object(noon, "upload_invoice_for_note", return_value={"queued": True}) as upload:
+			with self.set_user(writer):
+				noon_fulfillment.upload_delivery_note_invoice(note.name, "/private/files/i.pdf", "INV-1", "2026-11-01")
+			upload.assert_called_once_with(note.name, "/private/files/i.pdf", "INV-1", "2026-11-01", None)
+			with self.set_user(reader), self.assertRaises(frappe.PermissionError):
+				noon_fulfillment.upload_delivery_note_invoice(note.name, "/private/files/i.pdf", "INV-1", "2026-11-01")
+		self.assertEqual(upload.call_count, 1)
+
+	def test_needs_attention_says_the_invoice_may_need_reupload_when_the_items_changed(self):
+		from marketplace_integrations.services import marketplace_attention as attention
+
+		note = self._submitted_created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
+		result, _enqueue = self._press(note, self._loose_pdf())
+		self._run_invoice(note, result["idempotency_key"])
+
+		def rows_for_note():
+			return [
+				item
+				for item in attention._collect_outdated_noon_invoices({self.account.name: self.account})
+				if item["reference_name"] == note.name
+			]
+
+		self.assertEqual(rows_for_note(), [], "unchanged items: nothing to say")
+		frappe.db.set_value("Delivery Note Item", {"parent": note.name}, "qty", 2)
+		frappe.db.commit()
+		found = rows_for_note()
+		self.assertEqual(len(found), 1)
+		self.assertIn("may need re-upload", found[0]["explanation"])
+		self.assertEqual(found[0]["reference_doctype"], "Delivery Note")
+		# nothing was sent again
+		self.assertEqual(
+			frappe.db.count("Integration Request", {"custom_operation_type": "Invoice", "reference_docname": note.name}), 1
+		)
+
+	def test_amending_a_note_does_not_carry_the_invoice_record(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._draft_note(fx, lr_no="TYPED-1")
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{"custom_noon_invoice_uploaded_on": "2026-11-01 10:00:00", "custom_noon_invoice_items_hash": "abc"},
+			update_modified=False,
+		)
+		new = frappe.copy_doc(self._note(note.name), ignore_no_copy=False)  # Amend copies even no_copy fields
+		new.lr_no = None  # the typed AWB belongs to the old note (the duplicate AWB rule is not under test)
+		new.custom_noon_generate_awb = 1
+		noon.guard_changes(new)
+		self.assertFalse(new.custom_noon_invoice_uploaded_on)
+		self.assertFalse(new.custom_noon_invoice_items_hash)
