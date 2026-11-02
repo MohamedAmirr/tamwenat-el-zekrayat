@@ -108,22 +108,40 @@
 		return pill(__(value), STATUS_COLORS[value] || "gray");
 	}
 
-	function static_col(inner) {
-		return `<div class="col grid-static-col"><div class="static-area ellipsis">${inner}</div></div>`;
+	// A cell. `title` (the full value) is shown as a tooltip when the text is ellipsized. `style` is a
+	// column width from COLS; the cell grows with its content (no fixed height).
+	function static_col(inner, style = "", title = "") {
+		const tip = title ? ` title="${escape(title)}"` : "";
+		return `<div class="col grid-static-col"${style ? ` style="${style}"` : ""}><div class="static-area ellipsis"${tip}>${inner}</div></div>`;
 	}
 
-	// The expand column is narrow and the sync column wide; the rest share the width equally.
-	const NARROW_COL = 'style="flex: 0 0 2.5rem"';
-	const WIDE_COL = 'style="flex: 1.6 1 0"';
+	// Column widths (flex shorthand, logical only). The expand column is narrow, the account and
+	// reference columns get the most room, and the sync column keeps its button on one line with
+	// overflow visible so the dropdown menu is never clipped.
+	const COLS = {
+		expand: "flex: 0 0 2.5rem",
+		account: "flex: 2.4 1 0; min-width: 0",
+		reference: "flex: 2 1 0; min-width: 0",
+		enabled: "flex: 1 1 0; min-width: 0",
+		uom: "flex: 1 1 0; min-width: 0",
+		status: "flex: 1.8 1 0; min-width: 0",
+		sync: "flex: 0 0 15rem; overflow: visible; white-space: nowrap",
+	};
+	const NOWRAP = "white-space: nowrap";
+	// Ancestors of the sync dropdown must not clip it.
+	const VISIBLE = 'style="overflow: visible"';
 
-	function heading_row(columns, ctx) {
+	// `columns`: [{labels: [text, ...], style}]. Several labels stack as lines (the two status columns).
+	function heading_row(columns) {
 		const cells = columns
-			.map((label, index) => {
-				const style = index === 0 ? ` ${NARROW_COL}` : ctx.can_write && index === columns.length - 1 ? ` ${WIDE_COL}` : "";
-				return `<div class="col grid-static-col"${style}><div class="static-area ellipsis">${label ? escape(label) : ""}</div></div>`;
+			.map(({ labels, style }) => {
+				const inner = labels
+					.map((label) => `<div class="ellipsis" title="${escape(label)}">${escape(label)}</div>`)
+					.join("");
+				return `<div class="col grid-static-col" style="${style}"><div class="static-area">${inner}</div></div>`;
 			})
 			.join("");
-		return `<div class="grid-heading-row"><div class="grid-row"><div class="data-row row m-0">${cells}</div></div></div>`;
+		return `<div class="grid-heading-row"><div class="grid-row" ${VISIBLE}><div class="data-row row m-0" ${VISIBLE}>${cells}</div></div></div>`;
 	}
 
 	function when(value) {
@@ -190,8 +208,8 @@
 			})
 			.join("");
 		return (
-			`<div class="btn-group mi-sync" role="group">` +
-			`<span${main_title}><button type="button" class="btn btn-default btn-xs" ${item_attrs("both")}>${escape(main_label)}</button></span>` +
+			`<div class="btn-group mi-sync" role="group" style="${NOWRAP}">` +
+			`<span${main_title}><button type="button" class="btn btn-default btn-xs" style="${NOWRAP}" ${item_attrs("both")}>${escape(main_label)}</button></span>` +
 			`<button type="button" class="btn btn-default btn-xs dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false" aria-label="${escape(__("More sync options"))}"${
 				state.busy ? " disabled" : ""
 			}></button>` +
@@ -220,25 +238,32 @@
 
 	function listing_row_html(state, row, ctx) {
 		const open = !!state.expanded[row.name];
+		const account = row.account_name || row.marketplace_account;
+		// A status line carries its own label for assistive tech and as a tooltip, since the two lines
+		// are stacked in one cell and look alike.
+		const status_line = (label, inner) =>
+			`<div role="group" aria-label="${escape(label)}" title="${escape(label)}">${inner}</div>`;
+		const status_cell =
+			status_line(__("Sync Status"), status_pill(row.sync_status)) +
+			status_line(__("Inventory Sync Status"), row.platform === "Talabat" ? "-" : status_pill(row.inventory_sync_status));
 		const cells = [
 			// Expand control. Its own click toggles the detail; a click anywhere else on the row opens the mapping.
-			`<div class="col grid-static-col" ${NARROW_COL}><button type="button" class="btn btn-link btn-xs" data-action="expand" data-name="${escape(row.name)}" aria-expanded="${open}" aria-label="${escape(open ? __("Hide details") : __("Show details"))}">${open ? "&#9652;" : "&#9662;"}</button></div>`,
-			static_col(escape(row.account_name || row.marketplace_account)),
-			static_col(`<bdi dir="ltr">${escape(row.external_reference)}</bdi>`),
-			static_col(`<span class="badge badge-light">${escape(row.platform)}</span>`),
-			static_col(row.enabled ? pill(__("Enabled"), "green") : pill(__("Disabled"), "gray")),
-			static_col(escape(row.sales_uom)),
-			static_col(status_pill(row.sync_status)),
-			static_col(row.platform === "Talabat" ? "-" : status_pill(row.inventory_sync_status)),
+			`<div class="col grid-static-col" style="${COLS.expand}"><button type="button" class="btn btn-link btn-xs" data-action="expand" data-name="${escape(row.name)}" aria-expanded="${open}" aria-label="${escape(open ? __("Hide details") : __("Show details"))}">${open ? "&#9652;" : "&#9662;"}</button></div>`,
+			// Account name (ellipsized, full name as tooltip) with the platform badge beside it.
+			`<div class="col grid-static-col" style="${COLS.account}"><div class="static-area d-flex align-items-center" style="gap: var(--margin-xs)"><span class="ellipsis" style="min-width: 0" title="${escape(account)}">${escape(account)}</span><span class="badge badge-light" style="flex: none">${escape(row.platform)}</span></div></div>`,
+			static_col(`<bdi dir="ltr">${escape(row.external_reference)}</bdi>`, COLS.reference, row.external_reference),
+			static_col(row.enabled ? pill(__("Enabled"), "green") : pill(__("Disabled"), "gray"), COLS.enabled),
+			static_col(escape(row.sales_uom), COLS.uom),
+			`<div class="col grid-static-col" style="${COLS.status}"><div class="static-area">${status_cell}</div></div>`,
 		];
 		if (ctx.can_write) {
 			cells.push(
-				`<div class="col grid-static-col" ${WIDE_COL}>${sync_control(state, "row", row.name, row_states(row, ctx.can_write))}</div>`
+				`<div class="col grid-static-col mi-sync-cell" style="${COLS.sync}">${sync_control(state, "row", row.name, row_states(row, ctx.can_write))}</div>`
 			);
 		}
 		return (
-			`<div class="grid-row mi-listing-row" tabindex="0" data-name="${escape(row.name)}">` +
-			`<div class="data-row row m-0">${cells.join("")}</div>` +
+			`<div class="grid-row mi-listing-row" tabindex="0" data-name="${escape(row.name)}" ${VISIBLE}>` +
+			`<div class="data-row row m-0" style="overflow: visible; align-items: center">${cells.join("")}</div>` +
 			(open ? detail_html(row) : "") +
 			`</div>`
 		);
@@ -246,19 +271,17 @@
 
 	function table_html(state, ctx) {
 		const columns = [
-			"",
-			__("Marketplace Account"),
-			__("External Reference"),
-			__("Platform"),
-			__("Enabled"),
-			__("Sales UOM"),
-			__("Sync Status"),
-			__("Inventory Sync Status"),
+			{ labels: [], style: COLS.expand },
+			{ labels: [__("Marketplace Account")], style: COLS.account },
+			{ labels: [__("External Reference")], style: COLS.reference },
+			{ labels: [__("Enabled")], style: COLS.enabled },
+			{ labels: [__("Sales UOM")], style: COLS.uom },
+			{ labels: [__("Sync Status"), __("Inventory Sync Status")], style: COLS.status },
 		];
-		if (ctx.can_write) columns.push("");
-		const heading = heading_row(columns, ctx);
+		if (ctx.can_write) columns.push({ labels: [], style: COLS.sync });
+		const heading = heading_row(columns);
 		const rows = state.rows.map((row) => listing_row_html(state, row, ctx)).join("");
-		return `<div class="form-grid-container"><div class="form-grid">${heading}<div class="grid-body"><div class="rows">${rows}</div></div></div></div>`;
+		return `<div class="form-grid-container" ${VISIBLE}><div class="form-grid" ${VISIBLE}>${heading}<div class="grid-body" ${VISIBLE}><div class="rows" ${VISIBLE}>${rows}</div></div></div></div>`;
 	}
 
 	function toolbar_html(state, ctx) {
