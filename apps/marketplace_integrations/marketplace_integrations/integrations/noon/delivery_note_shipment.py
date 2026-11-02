@@ -380,8 +380,8 @@ def refuse_sales_order_cancel(order):
 
 
 def check_fbpi_warehouse(doc, account):
-	"""The FBPI warehouse check (sub-issue #416): refuse unless the account's FBPI Code is set, equals the
-	stored Noon fulfillment system code and the warehouse is active (``catalog.fbpi_ready``). Reads stored
+	"""The FBPI warehouse check (sub-issue #416): refuse unless the stored Noon fulfillment system
+	code is the FBPI code and the warehouse is active (``catalog.fbpi_ready``). Reads stored
 	values only; nothing is sent to Noon."""
 	ready, reason = catalog.fbpi_ready(account)
 	if not ready:

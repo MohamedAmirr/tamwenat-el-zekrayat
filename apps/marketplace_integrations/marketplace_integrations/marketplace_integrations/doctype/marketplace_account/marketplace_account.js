@@ -29,7 +29,6 @@ const NOON_FIELDS = [
 	"noon_fulfillment_system_code",
 	"noon_warehouse_active",
 	"noon_warehouse_checked_on",
-	"noon_fbpi_code",
 ];
 const NOON_CHECK_WAREHOUSE_LABEL = "Check Noon Warehouse";
 const NOON_SYNC_LABEL = "Sync Noon Pricing and Stock";

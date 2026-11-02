@@ -19,7 +19,6 @@
   "noon_fulfillment_system_code",
   "noon_warehouse_active",
   "noon_warehouse_checked_on",
-  "noon_fbpi_code",
   "noon_inventory_push_enabled",
   "noon_price_push_enabled",
   "shopify_location_section",
@@ -119,7 +118,7 @@
   },
   {
    "depends_on": "eval:doc.platform==\"Noon\"",
-   "description": "Stored by Check Noon Warehouse. Noon does not document which value means FBPI.",
+   "description": "Stored by Check Noon Warehouse. Noon shipments, Out of Stock and invoices need the value fbpi.",
    "fieldname": "noon_fulfillment_system_code",
    "fieldtype": "Data",
    "label": "Noon Fulfillment System Code",
@@ -141,13 +140,6 @@
    "label": "Noon Warehouse Checked On",
    "no_copy": 1,
    "read_only": 1
-  },
-  {
-   "depends_on": "eval:doc.platform==\"Noon\"",
-   "description": "Type the Fulfillment System Code that means FBPI, once, after looking at the stored code above. Shipments, Out of Stock and invoices are refused unless it equals the stored code and the warehouse is active.",
-   "fieldname": "noon_fbpi_code",
-   "fieldtype": "Data",
-   "label": "FBPI Code"
   },
   {
    "default": "1",

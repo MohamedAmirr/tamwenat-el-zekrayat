@@ -85,7 +85,6 @@ class UnitTestNoonFbpiReady(UnitTestCase):
 	def _account(self, **values):
 		stored = {
 			"name": "MKTACC-1",
-			"noon_fbpi_code": "FBPI",
 			"noon_fulfillment_system_code": "FBPI",
 			"noon_warehouse_active": 1,
 			"noon_warehouse_checked_on": "2026-11-01 10:00:00",
@@ -93,21 +92,15 @@ class UnitTestNoonFbpiReady(UnitTestCase):
 		stored.update(values)
 		return frappe._dict(stored)
 
-	def test_ready_only_when_the_codes_match_and_the_warehouse_is_active(self):
+	def test_ready_only_when_the_code_is_fbpi_and_the_warehouse_is_active(self):
 		self.assertEqual(fbpi_ready(self._account()), (True, ""))
-
-	def test_no_fbpi_code_set_is_refused_and_says_so(self):
-		for empty in ("", None, "  "):
-			ok, reason = fbpi_ready(self._account(noon_fbpi_code=empty))
-			self.assertFalse(ok)
-			self.assertIn("no FBPI Code", reason)
 
 	def test_a_never_checked_warehouse_is_refused(self):
 		ok, reason = fbpi_ready(self._account(noon_fulfillment_system_code="", noon_warehouse_checked_on=None))
 		self.assertFalse(ok)
 		self.assertIn("never checked", reason)
 
-	def test_a_different_code_is_refused_and_shows_both_values_escaped(self):
+	def test_a_different_code_is_refused_and_shows_the_returned_value_escaped(self):
 		ok, reason = fbpi_ready(self._account(noon_fulfillment_system_code="<b>OTHER</b>"))
 		self.assertFalse(ok)
 		self.assertIn("&lt;b&gt;OTHER&lt;/b&gt;", reason)
@@ -119,5 +112,6 @@ class UnitTestNoonFbpiReady(UnitTestCase):
 		self.assertFalse(ok)
 		self.assertIn("not active", reason)
 
-	def test_surrounding_spaces_do_not_make_the_codes_differ(self):
-		self.assertTrue(fbpi_ready(self._account(noon_fbpi_code=" FBPI "))[0])
+	def test_surrounding_spaces_and_letter_case_do_not_make_the_code_differ(self):
+		for code in (" fbpi ", "FBPI", "Fbpi"):
+			self.assertTrue(fbpi_ready(self._account(noon_fulfillment_system_code=code))[0])
