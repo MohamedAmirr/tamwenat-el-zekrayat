@@ -192,6 +192,28 @@ test("the Check button calls the carrier method and reloads the form", async () 
 	assert.equal(frm.reloads, 1);
 });
 
+test("Refresh of an already Cancelled note says there is nothing else to refresh and reloads", async () => {
+	const { handlers, calls, alerts } = load({ call_result: { shipping_status: "Terminated" } });
+	const frm = make_form({ custom_integration_status: "Cancelled", docstatus: 1 });
+	handlers.refresh(frm);
+	const refresh = frm.buttons.find((b) => b.label === "Refresh from Bosta");
+	await refresh.action();
+	assert.equal(calls[0].method, "marketplace_integrations.api.carrier_shipments.refresh_shipment");
+	assert.deepEqual(alerts, [
+		{ message: "The carrier shows this shipment as cancelled. Nothing else to refresh.", indicator: "green" },
+	]);
+	assert.equal(frm.reloads, 1);
+});
+
+test("Refresh of a Created note shows no cancelled alert", async () => {
+	const { handlers, alerts } = load({ call_result: { shipping_status: "Terminated" } });
+	const frm = make_form({ custom_integration_status: "Created", docstatus: 1 });
+	handlers.refresh(frm);
+	await frm.buttons.find((b) => b.label === "Refresh from Bosta").action();
+	assert.deepEqual(alerts, []);
+	assert.equal(frm.reloads, 1);
+});
+
 test("the carrier's answer to Check is escaped before it is shown as an alert", async () => {
 	const { handlers, alerts, shipping } = load();
 	const frm = make_form({ custom_integration_status: "Creation Unknown" });

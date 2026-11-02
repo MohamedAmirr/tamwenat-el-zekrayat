@@ -306,6 +306,57 @@ class IntegrationTestBostaStatuses(BostaFixtureMixin, IntegrationTestCase):
 
 		self.assertFalse(frappe.db.get_value("Delivery Note", note.name, "custom_shipping_status"))
 
+	def _refresh_log(self, note):
+		self.addCleanup(
+			lambda: (
+				frappe.db.delete("Integration Request", {"reference_docname": note.name, "custom_operation_type": "Refresh"}),
+				frappe.db.commit(),
+			)
+		)
+		return frappe.db.get_value(
+			"Integration Request",
+			{"reference_docname": note.name, "custom_operation_type": "Refresh"},
+			["custom_result", "error", "custom_http_status"],
+			as_dict=True,
+		)
+
+	def test_refresh_of_an_already_cancelled_note_reading_not_found_is_a_quiet_success(self):
+		note = self._created_note()
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Cancelled")
+		self.http.queue["get"].append(FakeResponse(400, {"success": False, "message": "Delivery not found.", "errorCode": 1066}))
+
+		with patch(
+			"marketplace_integrations.services.carrier_shipments.cancel_after_carrier_cancelled"
+		) as auto:
+			state = statuses.refresh_note(note.name)
+
+		self.assertEqual(state, "Terminated")
+		auto.assert_not_called()
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "custom_integration_status"), "Cancelled")
+		self.assertEqual(self._refresh_log(note).custom_result, "Success")
+
+	def test_a_refresh_failure_shows_a_plain_sentence_and_keeps_bostas_text_in_the_log(self):
+		note = self._created_note()
+		self.http.queue["get"].append(FakeResponse(400, {"success": False, "message": "Something odd", "errorCode": 1234}))
+
+		with self.assertRaises(frappe.ValidationError) as caught:
+			statuses.refresh_note(note.name)
+
+		self.assertIn("could not return this shipment's status", str(caught.exception))
+		self.assertNotIn("errorCode", str(caught.exception))
+		log = self._refresh_log(note)
+		self.assertEqual(log.custom_result, "Failed")
+		self.assertIn("Something odd", log.error)
+
+	def test_refresh_of_a_note_without_a_tracking_number_says_so(self):
+		note = self._created_note(tracking="")
+
+		with self.assertRaises(frappe.ValidationError) as caught:
+			shipment.refresh(note.name)
+
+		self.assertIn("no Bosta tracking number", str(caught.exception))
+		self.assertEqual(self.http.sent(), [])
+
 	# -- nightly reconciliation --------------------------------------------------------------
 
 	def test_the_nightly_job_resolves_an_unknown_create_by_lookup_and_never_creates(self):

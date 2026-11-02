@@ -432,11 +432,17 @@ def refresh_note(delivery_note, held=None):
 		carrier_log.close_log(log, "Success", http_status=response.status_code)
 		frappe.db.commit()
 		return BOSTA_STATE_NAMES[shipment.TERMINATED_STATE_CODE]
-	if not is_success_response(response):
-		message = client.error_message(response)
-		carrier_log.close_log(log, "Failed", error=message, http_status=response.status_code)
+	if shipment.is_terminated_answer(response) and shipment.status_of(delivery_note) == shipment.CANCELLED:
+		# Already Cancelled here and Bosta reads it back as not found (terminated): nothing to apply. No
+		# ``_write_state``, so the native cancel is not triggered again.
+		carrier_log.close_log(log, "Success", http_status=response.status_code)
 		frappe.db.commit()
-		frappe.throw(escape_html(message))
+		return BOSTA_STATE_NAMES[shipment.TERMINATED_STATE_CODE]
+	if not is_success_response(response):
+		# The raw Bosta answer stays in the log only; the person sees a plain sentence.
+		carrier_log.close_log(log, "Failed", error=client.error_message(response), http_status=response.status_code)
+		frappe.db.commit()
+		frappe.throw(_("Bosta could not return this shipment's status. Try again later or check it in Bosta."))
 	body = response_body(response)
 	state = _polled_state(body)
 	if state is None or state["code"] not in BOSTA_STATE_NAMES:

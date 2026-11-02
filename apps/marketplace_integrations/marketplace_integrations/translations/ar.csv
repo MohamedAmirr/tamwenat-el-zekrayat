@@ -1881,3 +1881,6 @@ Delivery Note {0} was cancelled automatically because {1} cancelled the shipment
 The Delivery Note was already cancelled.,تم إلغاء مذكرة التسليم بالفعل.
 An invoice upload for this Delivery Note is already running. Wait for it to finish.,رفع فاتورة لمذكرة التسليم هذه قيد التنفيذ بالفعل. انتظر حتى ينتهي.
 "The return source ""Returned by Bosta"" is set by the app only. It cannot be set or cleared by hand.","مصدر المرتجع ""Returned by Bosta"" يضبطه التطبيق فقط. لا يمكن ضبطه أو مسحه يدويًا."
+The carrier shows this shipment as cancelled. Nothing else to refresh.,تُظهر شركة الشحن أن هذه الشحنة ملغاة. لا يوجد ما يلزم تحديثه.
+Bosta could not return this shipment's status. Try again later or check it in Bosta.,تعذّر على بوسطة إرجاع حالة هذه الشحنة. حاول لاحقًا أو تحقق منها في بوسطة.
+This Delivery Note has no Bosta tracking number to refresh.,لا تحتوي مذكرة التسليم هذه على رقم تتبع بوسطة للتحديث.
