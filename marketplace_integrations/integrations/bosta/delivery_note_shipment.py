@@ -5,7 +5,8 @@
 
 Delivery Note-first (``docs/marketplace-integrations/delivery-note-first.md``): the Delivery Note
 with transporter "Bosta" is the shipment. Submit starts a background job (``carrier_shipments.request_create``
-then ``run_create``) and the note submits only once the shipment is Created (``require_shipment_created``).
+then ``run_create``); once the shipment is Created the job submits the note as the requester
+(``require_shipment_created`` still refuses any submit before).
 This module holds only the Bosta parts: the contract methods and the Bosta-only helpers (city, COD, label).
 
 Native fields used: ``transporter`` (Supplier "Bosta", created by a patch), ``lr_no`` (the Bosta
@@ -105,6 +106,8 @@ SYSTEM_FIELDS = (
 CLEARED_ON_NEW = (*SYSTEM_FIELDS, "custom_bosta_city", "custom_bosta_city_name")
 #: Fields a person edits that must stay put once the shipment is started.
 LOCKED_FIELDS = ("transporter", "lr_no", "custom_cod_amount", "custom_bosta_city", "custom_bosta_city_name")
+#: Read-only on the form, set by the city dialog: restored from the stored note once the shipment is started.
+CITY_FIELDS = ("custom_bosta_city", "custom_bosta_city_name")
 
 #: What Bosta received as the receiver phone and drop-off address (``build_payload``). After the start only
 #: the Edit Bosta Shipment dialog changes them (``editing.edit_shipment``, which writes with ``db_set``).
@@ -289,6 +292,29 @@ def guard_always(doc):
 		)
 
 
+def _text(value):
+	"""A text value as compared by the guard: Frappe's input sanitizer HTML-escapes a posted Data value while
+	``db_set`` stored the raw one, and None, "" and surrounding spaces are the same "empty"."""
+	return html.unescape(cstr(value)).strip()
+
+
+def changed_locked_fields(before, doc):
+	"""The translated labels of the locked fields (``LOCKED_FIELDS``, the COD amount and its confirmation) whose
+	value really differs between the stored note and ``doc`` (normalized, so None/""/0 and rounding do not count)."""
+	meta = frappe.get_meta("Delivery Note")
+	changed = []
+	for fieldname in (*LOCKED_FIELDS, "custom_cod_confirmed"):
+		if fieldname == "custom_cod_amount":
+			different = flt(before.get(fieldname), 2) != flt(doc.get(fieldname), 2)
+		elif fieldname == "custom_cod_confirmed":
+			different = cint(before.get(fieldname)) != cint(doc.get(fieldname))
+		else:
+			different = _text(before.get(fieldname)) != _text(doc.get(fieldname))
+		if different:
+			changed.append(_(meta.get_label(fieldname) or fieldname))
+	return changed
+
+
 def guard_changes(doc):
 	"""``validate``: set up a new note; keep app-written fields and a started shipment untouched. A cancel
 	changes none of them and must never be blocked by this guard."""
@@ -348,13 +374,16 @@ def guard_changes(doc):
 			_("The returned COD and return source cannot be changed after the Bosta return pickup was started."),
 			title=_("Bosta shipment"),
 		)
-	if (
-		any(cstr(before.get(f)) != cstr(doc.get(f)) for f in LOCKED_FIELDS)
-		or flt(before.get("custom_cod_amount"), 2) != flt(doc.get("custom_cod_amount"), 2)
-		or cint(before.get("custom_cod_confirmed")) != cint(doc.get("custom_cod_confirmed"))
-	):
+	# The city is chosen by the Pick Bosta City dialog (read-only on the form), never typed: put the stored
+	# value back like the app-written fields, so a sanitized or stale copy can never refuse the Submit.
+	for fieldname in CITY_FIELDS:
+		doc.set(fieldname, before.get(fieldname))
+	changed = changed_locked_fields(before, doc)
+	if changed:
 		frappe.throw(
-			_("The carrier, tracking number, COD amount and city cannot be changed after the Bosta shipment was started."),
+			_("The carrier, tracking number, COD amount and city cannot be changed after the Bosta shipment was started.")
+			+ " "
+			+ _("Changed: {0}").format(", ".join(changed)),
 			title=_("Bosta shipment"),
 		)
 	if any(cstr(before.get(f)) != cstr(doc.get(f)) for f in RECEIVER_FIELDS):
@@ -717,9 +746,10 @@ def log_data(values):
 
 def after_created(delivery_note, data):
 	"""Once a note is Created: the Sales Order summary and the webhook events that arrived before the note
-	could take them. The label job is NOT queued here: the note is still a draft that the person's form is
-	about to submit, and a label job writing to it at that moment raced the submit (MySQL 1020 "Record has
-	changed since last read", a stale ``modified``), leaving the note Draft. ``after_submit`` queues it."""
+	could take them. The label job is NOT queued here: the note is still a draft that is about to be submitted
+	(by the create job itself), and a label job writing to it at that moment raced the submit (MySQL 1020
+	"Record has changed since last read", a stale ``modified``), leaving the note Draft. ``after_submit``
+	queues it."""
 	from marketplace_integrations.integrations.bosta import statuses
 
 	if frappe.db.get_value("Delivery Note", delivery_note, "is_return"):

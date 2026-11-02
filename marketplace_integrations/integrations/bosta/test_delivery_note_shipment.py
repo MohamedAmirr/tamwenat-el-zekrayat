@@ -13,6 +13,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api import bosta_shipments
+from marketplace_integrations.api import carrier_shipments as carrier_api
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as shipment
 from marketplace_integrations.services import carrier_log, carrier_shipments
 from marketplace_integrations.tests.bosta_fixtures import BostaFixtureMixin, FakeResponse, created
@@ -303,6 +304,100 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		self.assertEqual(payload["dropOffAddress"], {"city": "EG-01", "firstLine": "12 Example Street"})
 		self.assertEqual(frappe.db.get_value("Integration Request", log, "custom_result"), "Success")
 
+	# -- the job submits the Created note as the requester (delivery-note-first.md) ---------------
+
+	def _start_as(self, note, email):
+		"""request_shipment as ``email`` (the API passes the session user), then the job body."""
+		frappe.set_user(email)
+		carrier_api.request_shipment(note.name)
+		frappe.set_user("Administrator")
+		kwargs = self.enqueue.call_args.kwargs
+		carrier_shipments.run_create(note.name, kwargs["log"], kwargs["lookup_first"], kwargs["submit_as"])
+		return kwargs
+
+	def test_the_job_submits_the_created_note_as_the_user_who_requested_it(self):
+		note = self.make_note()
+		email = self.make_user("Stock Manager")
+		self.http.queue["create"].append(created("TRK-1", "DELIVERY-1"))
+
+		kwargs = self._start_as(note, email)
+
+		self.assertEqual(kwargs["submit_as"], email)
+		values = stored(note, "docstatus", "custom_integration_status", "custom_last_integration_error")
+		self.assertEqual((values.docstatus, values.custom_integration_status), (1, "Created"))
+		self.assertFalse(values.custom_last_integration_error)
+		# The Version owner is who the system notifies about a later automatic cancel (_submitter).
+		self.assertEqual(carrier_shipments._submitter(frappe.get_doc("Delivery Note", note.name)), email)
+		self.assertEqual(frappe.session.user, "Administrator")
+		# on_submit still queues the label job (after the submit commits)
+		jobs = [call.args[0] for call in self.enqueue.call_args_list if call.args]
+		self.assertIn("marketplace_integrations.integrations.bosta.delivery_note_shipment.run_fetch_label", jobs)
+
+	def test_a_job_without_submit_as_leaves_the_created_note_a_draft(self):
+		note = self.make_note()
+		self.http.queue["create"].append(created("TRK-1", "DELIVERY-1"))
+
+		self._start(note)
+
+		self.assertEqual(stored(note, "docstatus", "custom_integration_status").docstatus, 0)
+		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Created")
+
+	def test_a_failed_submit_leaves_a_created_draft_with_the_reason_and_raises_nothing(self):
+		note = self.make_note()
+		email = self.make_user("Stock Manager")
+		self.http.queue["create"].append(created("TRK-1", "DELIVERY-1"))
+
+		with patch(
+			"erpnext.stock.doctype.delivery_note.delivery_note.DeliveryNote.on_submit",
+			side_effect=frappe.ValidationError("Negative stock for <b>ITEM-1</b>"),
+		):
+			self._start_as(note, email)
+
+		values = stored(note, "docstatus", "custom_integration_status", "custom_last_integration_error")
+		self.assertEqual((values.docstatus, values.custom_integration_status), (0, "Created"))
+		self.assertIn("Shipment created at Bosta; the Delivery Note could not be submitted:", values.custom_last_integration_error)
+		self.assertIn("Negative stock for ITEM-1", values.custom_last_integration_error)
+		self.assertNotIn("<b>", values.custom_last_integration_error)
+		self.assertEqual(frappe.session.user, "Administrator")
+
+	def test_the_job_submits_without_the_system_user_so_a_user_who_cannot_submit_is_refused(self):
+		note = self.make_note()
+		email = self.make_user("Stock User")
+		self.http.queue["create"].append(created("TRK-1", "DELIVERY-1"))
+		# The API would have refused this user; a job started for him still must not submit as the system.
+		carrier_shipments.request_create(note.name, submit_as=email)
+		kwargs = self.enqueue.call_args.kwargs
+
+		with patch.object(frappe.model.document.Document, "check_permission", side_effect=frappe.PermissionError):
+			carrier_shipments.run_create(note.name, kwargs["log"], kwargs["lookup_first"], kwargs["submit_as"])
+
+		values = stored(note, "docstatus", "custom_integration_status", "custom_last_integration_error")
+		self.assertEqual((values.docstatus, values.custom_integration_status), (0, "Created"))
+		self.assertIn("could not be submitted", values.custom_last_integration_error)
+
+	def test_check_never_submits_a_note_it_finds_created(self):
+		note = self.make_note()
+		self.http.queue["create"].append(TimeoutError("lost"))
+		self._start(note)
+		self.http.queue["search"].append(self._found(note))
+
+		result = carrier_shipments.check(note.name)
+
+		self.assertEqual(result["status"], "Created")
+		self.assertEqual(stored(note, "docstatus").docstatus, 0)
+
+	def test_a_retry_request_without_a_user_never_submits(self):
+		note = self.make_note()
+		self.http.queue["create"].append(FakeResponse(400, {"success": False, "message": "bad phone"}))
+		self._start(note)
+		self.http.queue["search"].append(FakeResponse(200, NONE_FOUND))
+		self.http.queue["create"].append(created("TRK-2", "DELIVERY-2"))
+
+		self._start(note)
+
+		self.assertIsNone(self.enqueue.call_args.kwargs["submit_as"])
+		self.assertEqual(stored(note, "docstatus", "custom_integration_status").docstatus, 0)
+
 	def test_a_confirmed_zero_cod_is_sent_as_zero_and_the_differs_hint_does_not_block_it(self):
 		note = self.make_note(self.make_order(rate=100, qty=2), cod=0)
 		# The merchant's 0 differs from the computed 200: the form says so, the shipment still goes.
@@ -524,7 +619,6 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		changes = {
 			"custom_cod_amount": 5,
 			"custom_cod_confirmed": 0,
-			"custom_bosta_city": "EG-02",
 			"lr_no": "SNEAKY",
 			"transporter": None,
 		}
@@ -538,6 +632,31 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		doc.items[0].qty = doc.items[0].qty + 1
 		with self.assertRaises(frappe.ValidationError):
 			doc.save()
+
+	def test_a_created_draft_submits_unchanged_after_the_worker_wrote_its_fields(self):
+		note = self.make_note()
+		self._start(note)
+		# The sanitizer HTML-escapes a posted Data value that db_set stored raw.
+		frappe.db.set_value("Delivery Note", note.name, "custom_bosta_city_name", "Dokki & Giza")
+		doc = frappe.get_doc("Delivery Note", note.name)
+		doc.custom_bosta_city_name = "Dokki &amp; Giza"
+		doc.custom_cod_amount = frappe.utils.flt(doc.custom_cod_amount) + 0.001
+
+		doc.submit()
+
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "docstatus"), 1)
+		self.assertEqual(stored(note, "custom_bosta_city_name").custom_bosta_city_name, "Dokki & Giza")
+
+	def test_a_refused_change_to_a_started_shipment_names_the_field(self):
+		note = self.make_note()
+		self._start(note)
+		doc = frappe.get_doc("Delivery Note", note.name)
+		doc.lr_no = "SNEAKY"
+
+		with self.assertRaises(frappe.ValidationError) as caught:
+			doc.submit()
+
+		self.assertIn(frappe._(frappe.get_meta("Delivery Note").get_label("lr_no")), str(caught.exception))
 
 	def test_started_shipment_locks_the_receiver_phone_and_address_but_db_set_still_writes(self):
 		note = self.make_note()

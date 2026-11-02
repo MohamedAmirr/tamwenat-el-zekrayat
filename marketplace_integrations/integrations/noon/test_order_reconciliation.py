@@ -25,6 +25,7 @@ from marketplace_integrations.services.sales_order_reconciliation import (
 	NEEDS_ATTENTION,
 	NO_ACTION,
 	UNSUPPORTED_COMPENSATING_TRANSACTION,
+	UPDATE_SUBMITTED_ORDER,
 	plan,
 )
 
@@ -276,6 +277,24 @@ class UnitTestNoonEvidenceThroughThePlanner(UnitTestCase):
 		result = plan(self._snapshot(2), self._snapshot(2), evidence, self._erp_state())
 
 		self.assertEqual(result["outcome"], CANCEL_ORDER)
+
+	def test_after_a_cancelled_noon_shipment_every_unit_cancelled_cancels_the_order(self):
+		# Unverified at Noon: its docs say CancelShipment also cancels the shipment's items. If it does, no live
+		# Delivery Note holds the units any more (started is empty) and the sync cancels the Sales Order.
+		evidence = build_evidence(_order([_unit("1", mp_status=CANCELLED), _unit("2", mp_status=CANCELLED)], started=()))
+
+		result = plan(self._snapshot(2), self._snapshot(2), evidence, self._erp_state())
+
+		self.assertEqual(result["outcome"], CANCEL_ORDER)
+
+	def test_after_a_cancelled_noon_shipment_some_units_cancelled_shrinks_the_order(self):
+		# Same assumption, partial: one unit cancelled, one still CONFIRMED -> the snapshot drops to 1 unit and
+		# the sync updates the submitted Sales Order (the lines are reduced).
+		evidence = build_evidence(_order([_unit("1", mp_status=CANCELLED), _unit("2")], started=()))
+
+		result = plan(self._snapshot(2), self._snapshot(1), evidence, self._erp_state())
+
+		self.assertEqual(result["outcome"], UPDATE_SUBMITTED_ORDER)
 
 	def test_cancellation_after_fulfillment_with_delivery_is_a_compensating_transaction(self):
 		evidence = build_evidence(_order([_unit("1", mp_status=CANCELLED, integration_status=SHIPPED)]))

@@ -5,7 +5,8 @@
 
 Delivery Note-first (``docs/marketplace-integrations/delivery-note-first.md``): the Delivery Note of a
 Noon Sales Order is the shipment. Submit starts a background job (``carrier_shipments.request_create`` then
-``run_create``) and the note submits only once the shipment is Created (``require_shipment_created``). This
+``run_create``); once the shipment is Created the job submits the note as the requester
+(``require_shipment_created`` still refuses any submit before). This
 module holds only the Noon parts: the contract methods and the Noon-only helpers (AWB step, unit picking).
 
 Native fields used: ``transporter`` (Supplier "Noon", created by a patch), ``lr_no`` (the AWB) and
@@ -38,6 +39,7 @@ refuses Submit-time creation unless ``catalog.fbpi_ready(account)`` says the sto
 """
 
 import base64
+import html
 import json
 import re
 
@@ -295,11 +297,20 @@ def guard_changes(doc):
 			_prepare(doc)
 			_check_awb_choice(doc, before)
 		return
-	if any(cstr(before.get(f)) != cstr(doc.get(f)) for f in LOCKED_FIELDS) or cint(
-		before.get("custom_noon_generate_awb")
-	) != cint(doc.get("custom_noon_generate_awb")):
+	# Normalized: the input sanitizer HTML-escapes a posted value that db_set stored raw, and None/"" are equal.
+	meta = frappe.get_meta("Delivery Note")
+	changed = [
+		_(meta.get_label(f) or f)
+		for f in LOCKED_FIELDS
+		if html.unescape(cstr(before.get(f))).strip() != html.unescape(cstr(doc.get(f))).strip()
+	]
+	if cint(before.get("custom_noon_generate_awb")) != cint(doc.get("custom_noon_generate_awb")):
+		changed.append(_(meta.get_label("custom_noon_generate_awb") or "custom_noon_generate_awb"))
+	if changed:
 		frappe.throw(
-			_("The carrier, AWB and Generate AWB cannot be changed after the Noon shipment was started."),
+			_("The carrier, AWB and Generate AWB cannot be changed after the Noon shipment was started.")
+			+ " "
+			+ _("Changed: {0}").format(", ".join(changed)),
 			title=_("Noon shipment"),
 		)
 	if _rows(before) != _rows(doc):

@@ -26,7 +26,8 @@ def _carrier_note(delivery_note, ptype):
 def request_shipment(delivery_note: str, modified: str | None = None):
 	"""Start the carrier create of a draft Delivery Note (needs submit permission on it)."""
 	_carrier_note(delivery_note, "submit")
-	return carrier_shipments.request_create(delivery_note, modified)
+	# The job submits the note as this user once the carrier confirms Created (a return pickup is not submitted).
+	return carrier_shipments.request_create(delivery_note, modified, submit_as=frappe.session.user)
 
 
 @frappe.whitelist(methods=["POST"])

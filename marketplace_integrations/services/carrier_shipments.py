@@ -215,10 +215,14 @@ def boot_session(bootinfo):
 # ---------------------------------------------------------------------------
 
 
-def request_create(delivery_note, modified=None):
+def request_create(delivery_note, modified=None, submit_as=None):
 	"""Start the create of a draft note (the API has checked the submit permission). Idempotent: a note that
 	is already Creating or Created only returns its status. When the adapter answers that it needs the
-	person's input first, nothing is sent and that answer is returned."""
+	person's input first, nothing is sent and that answer is returned.
+
+	``submit_as`` is the user who pressed Submit: only ``request_shipment`` for a delivery sets it. The job
+	then submits the note as that user once the carrier confirms Created (delivery-note-first.md). Retries,
+	checks, the nightly job and return pickups never pass it, so they never submit."""
 	doc = frappe.get_doc("Delivery Note", delivery_note)
 	adapter = adapter_for(doc)
 	if not adapter:
@@ -282,6 +286,7 @@ def request_create(delivery_note, modified=None):
 		delivery_note=delivery_note,
 		log=log,
 		lookup_first=bool(previous) or bool(getattr(adapter, "LOOKUP_FIRST", False)),
+		submit_as=None if doc.get("is_return") else submit_as,
 	)
 	frappe.db.commit()
 	return {"status": CREATING, "queued": True}
@@ -292,9 +297,10 @@ def request_create(delivery_note, modified=None):
 # ---------------------------------------------------------------------------
 
 
-def run_create(delivery_note, log=None, lookup_first=True):
+def run_create(delivery_note, log=None, lookup_first=True, submit_as=None):
 	"""Create (or find) the shipment of one Creating note and write the result back. ``lookup_first`` is
-	False only for the very first attempt of a note (``request_create`` decides it)."""
+	False only for the very first attempt of a note (``request_create`` decides it). ``submit_as`` (the user
+	who pressed Submit) makes the job submit the note, as that user, once the carrier confirmed Created."""
 	frappe.set_user("Administrator")
 	if status_of(delivery_note) != CREATING:
 		frappe.db.commit()
@@ -318,6 +324,8 @@ def run_create(delivery_note, log=None, lookup_first=True):
 			delivery_id=values.get("custom_carrier_delivery_id"),
 		):
 			adapter.after_created(delivery_note, data)
+			if submit_as:
+				_submit_created(delivery_note, submit_as, adapter.SERVICE_NAME)
 	except Failed as failure:
 		_finish(delivery_note, FAILED, {"custom_last_integration_error": cstr(failure)}, log, "Failed", error=cstr(failure))
 	except Unknown as unknown:
@@ -330,6 +338,37 @@ def run_create(delivery_note, log=None, lookup_first=True):
 			"Unexpected error while sending the shipment to {0}; see the Error Log. It may or may not have reached {0}."
 		).format(service)
 		_finish(delivery_note, UNKNOWN, {"custom_last_integration_error": message}, log, "Unknown", error=message)
+
+
+def _submit_created(delivery_note, submit_as, service):
+	"""Submit a note whose shipment is Created, as the user who pressed Submit (never as the system: the
+	Authorization Control and credit limit rules judge the requester). Never raises: a failure leaves a Draft
+	note that is Created, with the reason in ``custom_last_integration_error`` (Needs Attention); the person
+	can submit it by hand."""
+	# Commit, then lock as the very next statement (MariaDB snapshot isolation).
+	frappe.db.commit()
+	locked = frappe.db.get_value(
+		"Delivery Note", delivery_note, ["docstatus", "custom_integration_status"], as_dict=True, for_update=True
+	)
+	if not locked or locked.docstatus != 0 or cstr(locked.custom_integration_status) != CREATED:
+		frappe.db.commit()
+		return
+	try:
+		frappe.set_user(submit_as)
+		frappe.get_doc("Delivery Note", delivery_note).submit()
+		frappe.db.commit()
+	except Exception as exc:
+		frappe.db.rollback()
+		if not isinstance(exc, frappe.ValidationError):
+			frappe.log_error(title="Automatic submit of a Delivery Note failed", message=f"{delivery_note}\n{frappe.get_traceback()}")
+		frappe.clear_messages()
+		reason = strip_html_tags(cstr(exc)).strip()[:300] or exc.__class__.__name__
+		message = _("Shipment created at {0}; the Delivery Note could not be submitted: {1}").format(service, reason)
+		frappe.set_user("Administrator")
+		frappe.db.set_value("Delivery Note", delivery_note, "custom_last_integration_error", message, update_modified=False)
+		frappe.db.commit()
+	finally:
+		frappe.set_user("Administrator")
 
 
 def _finish(delivery_note, status, values, log, result, expected=CREATING, **log_values):

@@ -384,6 +384,16 @@ test("changing the COD confirms it while the note is editable, and only then", (
 	assert.deepEqual(other.values, {});
 });
 
+test("a reload or refresh of a Created note writes no field value, so the posted copy equals the stored one", () => {
+	const { mod } = load();
+	const frm = cod_form({ custom_integration_status: "Created", custom_cod_confirmed: 0, custom_cod_amount: 100 });
+	mod.hooks.refresh(frm);
+	mod.custom_cod_amount(frm);
+	assert.deepEqual(frm.values, {});
+	assert.equal(frm.doc.custom_cod_confirmed, 0);
+	assert.equal(frm.doc.custom_cod_amount, 100);
+});
+
 test("the submit gate asks to confirm an unconfirmed COD and passes a confirmed one", () => {
 	const { mod, msgprints } = load();
 	assert.equal(mod.before_send(cod_form({ custom_cod_confirmed: 0 })), false);
