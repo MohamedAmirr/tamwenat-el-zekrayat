@@ -60,7 +60,12 @@ from marketplace_integrations.integrations.shopify.order_reconciliation import r
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_order.marketplace_order import (
 	compute_order_identity_key,
 )
-from marketplace_integrations.services.sales_order_sync import sync_sales_order
+from marketplace_integrations.services.sales_order_sync import _shopify_transactions, sync_sales_order
+from marketplace_integrations.services.shopify_payments import (
+	ELIGIBLE_KINDS,
+	ELIGIBLE_STATUS,
+	manual_payment_totals,
+)
 from marketplace_integrations.services.sync_status import CANCELLED, NEEDS_ACTION, SYNC_ERROR, SYNCED, SYNCING
 
 ORDER_DOCTYPE = "Marketplace Order"
@@ -338,6 +343,14 @@ def _payment_retry_candidates():
 	without a time limit, ending at the first non-Error row) starts within the retry window, ends
 	with a transient failure and holds no more than the original run plus ``PAYMENT_RETRY_ATTEMPTS``
 	retries.  After that the last Error row stays for a person.
+
+	A transaction whose latest Payment row is a duplicate-guard Invalid row also qualifies, with no
+	time limit, once the guard no longer blocks (the covering manual entry was cancelled or no
+	longer covers; same rule as Needs Attention, from the row's ``guard_sales_order`` and
+	``guard_required``) and the transaction is still pending.  The retry then writes a Success or
+	a new row, so the row stops being the latest and the candidate state ends.
+
+	Orders whose Sales Order is not submitted (or missing) are dropped.
 	"""
 	window_start = get_datetime(add_to_date(now_datetime(), minutes=-PAYMENT_RETRY_WINDOW_MINUTES))
 	recent = frappe.get_all(
@@ -350,7 +363,17 @@ def _payment_retry_candidates():
 		fields=["marketplace_order"],
 		limit_page_length=0,
 	)
-	orders = sorted({row.marketplace_order for row in recent if row.marketplace_order})
+	guarded = frappe.get_all(
+		"Marketplace Sync Log",
+		filters={
+			"sync_type": "Payment",
+			"status": "Invalid",
+			"response_data": ["like", '%"guard_sales_order"%'],
+		},
+		fields=["marketplace_order"],
+		limit_page_length=0,
+	)
+	orders = sorted({row.marketplace_order for row in [*recent, *guarded] if row.marketplace_order})
 	if not orders:
 		return {}
 	# One query for every Payment row of these orders; newest first, grouped in Python.
@@ -364,7 +387,19 @@ def _payment_retry_candidates():
 	):
 		history.setdefault((row.marketplace_order, row.request_data), []).append(row)
 	candidates = {}
+	guard_rows = []
 	for (order, request_data), rows in history.items():
+		if rows[0].status == "Invalid":
+			try:
+				guard = json.loads(rows[0].response_data or "{}") or {}
+				transaction_id = cstr((json.loads(request_data or "{}") or {}).get("transaction_id")).strip()
+			except ValueError:
+				continue
+			if isinstance(guard, dict) and guard.get("guard_sales_order") and transaction_id:
+				guard_rows.append(
+					(order, transaction_id, guard["guard_sales_order"], guard.get("guard_required"))
+				)
+			continue
 		run = []
 		for row in rows:
 			if row.status != "Error":
@@ -382,7 +417,83 @@ def _payment_retry_candidates():
 			continue
 		if transient and transaction_id:
 			candidates.setdefault(order, []).append(transaction_id)
-	return {order: sorted(ids) for order, ids in sorted(candidates.items())}
+	for order, transaction_id in _unblocked_guard_transactions(guard_rows):
+		candidates.setdefault(order, []).append(transaction_id)
+	if not candidates:
+		return {}
+	# Only orders with a submitted Sales Order can record a payment; skip the rest.
+	sales_orders = {
+		row.name: row.erpnext_sales_order
+		for row in frappe.get_all(
+			ORDER_DOCTYPE,
+			filters={"name": ["in", list(candidates)]},
+			fields=["name", "erpnext_sales_order"],
+			limit_page_length=0,
+		)
+	}
+	submitted = set(
+		frappe.get_all(
+			"Sales Order",
+			filters={"name": ["in", [name for name in sales_orders.values() if name]], "docstatus": 1},
+			pluck="name",
+			limit_page_length=0,
+		)
+	)
+	return {
+		order: sorted(ids)
+		for order, ids in sorted(candidates.items())
+		if sales_orders.get(order) in submitted
+	}
+
+
+def _unblocked_guard_transactions(guard_rows):
+	"""``[(order, transaction_id)]`` of duplicate-guard rows worth re-running.
+
+	``guard_rows`` are ``(order, transaction_id, guard_sales_order, guard_required)`` of the rows
+	that are the latest for their transaction.  A row qualifies when the guard no longer blocks
+	(the manual total of its Sales Order is zero or below the required amount, as in Needs
+	Attention) and the transaction is still pending: a successful SALE/CAPTURE of the order
+	without a Payment Entry.  Without the second test the re-run could neither record a payment
+	nor write a row, and would be queued every minute.
+	"""
+	if not guard_rows:
+		return []
+	totals = manual_payment_totals({row[2] for row in guard_rows})
+	open_rows = []
+	for order, transaction_id, sales_order, required in guard_rows:
+		total = flt(totals.get(sales_order), 2)
+		if total <= 0 or total < flt(required, 2):
+			open_rows.append((order, transaction_id))
+	if not open_rows:
+		return []
+	transactions = {
+		row.name: _shopify_transactions(row)
+		for row in frappe.get_all(
+			ORDER_DOCTYPE,
+			filters={"name": ["in", sorted({order for order, _id in open_rows})]},
+			fields=["name", "payment_transactions"],
+			limit_page_length=0,
+		)
+	}
+	recorded = set(
+		frappe.get_all(
+			"Payment Entry",
+			filters={"custom_marketplace_transaction_id": ["in", sorted({tid for _o, tid in open_rows})]},
+			pluck="custom_marketplace_transaction_id",
+			limit_page_length=0,
+		)
+	)
+	return [
+		(order, transaction_id)
+		for order, transaction_id in open_rows
+		if transaction_id not in recorded
+		and any(
+			cstr(txn.get("id")).strip() == transaction_id
+			and txn.get("kind") in ELIGIBLE_KINDS
+			and txn.get("status") == ELIGIBLE_STATUS
+			for txn in transactions.get(order, [])
+		)
+	]
 
 
 def _enqueue_payment_retries():

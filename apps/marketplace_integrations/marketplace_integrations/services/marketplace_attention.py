@@ -1045,23 +1045,34 @@ def _cancelled_entry_cover(entry):
 def _collect_cancelled_payment_entries(accounts, order_accounts):
 	if not order_accounts:
 		return []
-	entries = _payment_entries(
-		order_accounts,
-		{"docstatus": 2, "custom_marketplace_transaction_id": ["is", "set"]},
-		[
-			"name",
-			"custom_marketplace_order",
-			"custom_marketplace_transaction_id",
-			"paid_amount",
-			"total_allocated_amount",
-			"modified",
-		],
-	)
+	cancelled_filters = {"docstatus": 2, "custom_marketplace_transaction_id": ["is", "set"]}
+	fields = [
+		"name",
+		"custom_marketplace_order",
+		"custom_marketplace_transaction_id",
+		"paid_amount",
+		"total_allocated_amount",
+		"modified",
+	]
+	entries = _payment_entries(order_accounts, cancelled_filters, fields)
 	if not entries:
 		return []
+	# What a manual entry must cover is a fact about the order, not about who is looking: the sum is
+	# read without permission scoping over the same filters and only sums and ids leave this function
+	# (the rows shown stay the scoped ones above).
+	all_entries = []
+	for chunk in _chunks(order_accounts):
+		all_entries.extend(
+			frappe.get_all(
+				"Payment Entry",
+				filters={**cancelled_filters, "custom_marketplace_order": ["in", chunk]},
+				fields=fields,
+				limit_page_length=0,
+			)
+		)
 	# Another submitted Payment Entry covering the order for at least that amount resolves it (#425).
 	sales_order_of = {}
-	for chunk in _chunks({entry.custom_marketplace_order for entry in entries}):
+	for chunk in _chunks({entry.custom_marketplace_order for entry in all_entries}):
 		sales_order_of.update(
 			{
 				row.name: row.erpnext_sales_order
@@ -1079,10 +1090,10 @@ def _collect_cancelled_payment_entries(accounts, order_accounts):
 		covered.update(manual_payment_totals(chunk))
 	# A submitted amendment of a cancelled entry resolves it (#231).
 	amended = set()
-	for chunk in _chunks(entry.name for entry in entries):
+	for chunk in _chunks(entry.name for entry in all_entries):
 		amended.update(
 			row.amended_from
-			for row in frappe.get_list(
+			for row in frappe.get_all(
 				"Payment Entry",
 				filters={"docstatus": 1, "amended_from": ["in", chunk]},
 				fields=["amended_from"],
@@ -1092,7 +1103,7 @@ def _collect_cancelled_payment_entries(accounts, order_accounts):
 	# Per Sales Order, the manual total must cover the SUM of its still-open cancelled entries, so
 	# one manual entry for part of a split payment never hides the part that was not recorded.
 	required = {}
-	for entry in entries:
+	for entry in all_entries:
 		sales_order = sales_order_of.get(entry.custom_marketplace_order)
 		if sales_order and entry.name not in amended:
 			required[sales_order] = required.get(sales_order, 0) + _cancelled_entry_cover(entry)
