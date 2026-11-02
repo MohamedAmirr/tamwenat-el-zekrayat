@@ -31,8 +31,11 @@ The Delivery Note of a Noon Sales Order is the shipment. The Noon adapter
 (`integrations/noon/delivery_note_shipment.py`) plugs into the neutral carrier contract
 (`services/carrier_shipments.py`); see `docs/marketplace-integrations/delivery-note-first.md`.
 
-- **Create on Submit.** The form waits for a background job ("Sending to Noon...") and submits only once
-  the Integration Status is Created. The job asks Noon first (`GetShipment`) on every attempt, the first
+- **Create on Submit.** The form waits for a background job ("Sending to Noon..."); once the Integration
+  Status is Created the job itself submits the note as the user who pressed Submit (decided 2026-11-02,
+  `docs/marketplace-integrations/delivery-note-first.md`; the browser only reloads). If that submit fails the
+  note stays a Created draft with the reason in Last Integration Error, Needs Attention flags it (Carrier
+  Exception, also any Created draft older than 15 minutes) and a person submits it natively. The job asks Noon first (`GetShipment`) on every attempt, the first
   included; only a confirmed "No shipment found" allows `CreateShipment`. A timeout, 5xx, 408/429 or an
   unrecognised answer is Creation Unknown (Check Noon, then Submit again); a definite 4xx is Creation Failed.
   Nothing is retried automatically.
@@ -50,6 +53,10 @@ The Delivery Note of a Noon Sales Order is the shipment. The Noon adapter
   with no cancel call. Otherwise `CancelShipment`: 200 cancels, a definite 4xx leaves the note submitted with
   Noon's reason, anything else is Cancellation Unknown (Retry asks Noon first again). The ERPNext cancel
   follows only after Noon confirms. Changing the AWB or items of a created shipment is cancel and amend.
+  Noon documents (CancelShipment in `noon_api_full.md`): "Cancels an existing shipment. All items included in
+  that shipment will also be canceled". So the order sync may then cancel or shrink the Sales Order by itself
+  and the units may not be shippable again; the Cancel confirmation says so. UNVERIFIED against real Noon (see
+  business-spec section 12).
 - **Status and refresh.** `refresh` (Refresh from Noon button, synchronous: HTTP first, then lock and write)
   calls `GetShipment` and `GetFbpiOrder` and derives Shipping Status from the units in the request snapshot:
   all units agree = Acknowledged / Shipped / Out of Stock, all cancelled = Cancelled (terminal), units differ

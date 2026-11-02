@@ -481,6 +481,63 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		client.request.assert_not_called()
 		self.assertEqual(retry["status"], "Cancelled")
 
+	def test_cancelling_a_note_never_calls_an_order_level_path_including_the_auto_cancel(self):
+		# Noon documents that CancelShipment also cancels the shipment's items; ERPNext only ever calls the
+		# shipment cancel, never UpdateOrder or another order-level path (the Sales Order follows by sync).
+		update_path = fulfillment.FBPI_ORDER_UPDATE_PATH.rsplit("/", 1)[-1]
+		cancel_path = noon.SHIPMENT_CANCEL_PATH.rsplit("/", 1)[-1]
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		draft = self._created_note(fx)
+		_result, client, _get = self._cancel(draft, _response(200))
+		self.assertEqual(_paths(client), [cancel_path])
+		self.assertNotIn(update_path, _paths(client))
+
+		fx = self._order([("SKU-B", 1)], ["SKU-B"])
+		submitted = self._created_note(fx)
+		self._submit_flags(submitted)
+		with (
+			patch(_CLIENT) as client_class,
+			patch(_GET_ORDER, return_value={"items": [{"mp_item_nr": "1", "mp_status": "MP_ITEM_STATUS_CONFIRMED"}]}),
+			patch("frappe.model.document.Document.cancel"),
+			patch.object(carrier_shipments, "_check_native_cancel_not_blocked"),
+			patch.object(carrier_shipments, "_notify"),
+		):
+			client = client_class.return_value
+			client.request.side_effect = [_response(200)]
+			client.error_message.side_effect = lambda response: response.message
+			carrier_shipments.cancel(submitted.name)
+			carrier_shipments._auto_cancel(submitted.name)  # the job queued after a refresh found the cancel
+		self.assertEqual(_paths(client), [cancel_path])
+		frappe.db.set_value("Delivery Note", submitted.name, "docstatus", 0, update_modified=False)
+		frappe.db.set_value("Delivery Note Item", {"parent": submitted.name}, "docstatus", 0, update_modified=False)
+		frappe.db.commit()
+
+	def test_after_a_cancel_shipment_200_the_same_units_are_shippable_again_by_a_new_note(self):
+		# Assumes Noon keeps the units CONFIRMED + ACKNOWLEDGED after CancelShipment (UNVERIFIED: the docs say the
+		# items are cancelled too). Documents what ERPNext does under that payload.
+		fx = self._order([("SKU-A", 2)], ["SKU-A", "SKU-A"])
+		first = self._draft_note(fx, lr_no="AWB-ONE")
+		frappe.db.set_value("Delivery Note Item", {"parent": first.name}, "qty", 1)
+		frappe.db.set_value(
+			"Delivery Note",
+			first.name,
+			{
+				"custom_integration_status": "Created",
+				"custom_carrier_reference": first.name,
+				"custom_carrier_request_snapshot": json.dumps({"mp_item_nrs": ["1"]}),
+			},
+			update_modified=False,
+		)
+		second = self._draft_note(fx, lr_no="AWB-TWO")
+		frappe.db.set_value("Delivery Note Item", {"parent": second.name}, "qty", 1)
+		frappe.db.commit()
+		self.assertEqual([unit["mp_item_nr"] for unit in noon._pick_units(self._note(second.name))], ["2"])
+		self.assertEqual(noon.started_units_of_order(fx.marketplace_order.name), {"1"})
+		result, _client, _get = self._cancel(first, _response(200))
+		self.assertEqual(result["status"], "Cancelled")
+		self.assertEqual(noon.started_units_of_order(fx.marketplace_order.name), set())
+		self.assertEqual([unit["mp_item_nr"] for unit in noon._pick_units(self._note(second.name))], ["1"])
+
 	def test_a_failed_order_read_never_sends_a_blind_cancel(self):
 		fx = self._order([("SKU-A", 1)], ["SKU-A"])
 		note = self._created_note(fx)
@@ -622,6 +679,19 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		self.assertEqual(result, "Cancelled")
 		self.assertEqual(self._note(note.name).custom_integration_status, "Cancelled")
 		client.request.assert_not_called()  # no GetShipment, never a cancel call
+
+	def test_a_cancellation_unknown_note_whose_units_stay_confirmed_is_never_marked_cancelled(self):
+		# The stuck state: if Noon cancelled the shipment but kept the units CONFIRMED (UNVERIFIED), a refresh
+		# cannot prove the cancel, so the note stays Cancellation Unknown (the person retries or checks).
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Cancellation Unknown", update_modified=False)
+		frappe.db.commit()
+		with patch.object(noon, "_cancel_note_natively") as native:
+			_result, client, _get = self._refresh(note, None, [self._unit("1", "ACKNOWLEDGED")])
+		self.assertEqual(self._note(note.name).custom_integration_status, "Cancellation Unknown")
+		native.assert_not_called()
+		client.request.assert_not_called()
 
 	def _submit_flags(self, note):
 		frappe.db.set_value("Delivery Note", note.name, "docstatus", 1, update_modified=False)

@@ -327,11 +327,33 @@ test("a Check that finds the note already cancelled automatically does not let t
 	assert.equal(alerts[0].indicator, "green");
 });
 
+test("the submitted-note cancel asks once, warning that Noon also cancels the items", async () => {
+	const { mod, confirms, calls } = load({ responses: { cancel_shipment: { status: "Cancelled", outcome: "cancelled", message: "" } } });
+	const frm = make_form({ docstatus: 1, custom_integration_status: "Created" });
+	await mod.before_cancel(frm);
+	assert.equal(confirms.length, 1);
+	assert.match(confirms[0], /also cancels its items at Noon/);
+	assert.match(confirms[0], /Sales Order lines may be cancelled or reduced/);
+	assert.match(confirms[0], /may not be shippable again/);
+	assert.equal(calls.length, 1);
+	assert.equal(frappe.validated, true);
+});
+
+test("declining the warning sends nothing and stops the native cancel", async () => {
+	const { mod, calls } = load();
+	frappe.confirm = (message, yes, no) => no();
+	const frm = make_form({ docstatus: 1, custom_integration_status: "Created" });
+	await mod.before_cancel(frm);
+	assert.equal(frappe.validated, false);
+	assert.deepEqual(calls, []);
+});
+
 test("the draft Cancel Noon Shipment button confirms, cancels and reloads", async () => {
 	const { mod, confirms, alerts } = load({ responses: { cancel_shipment: { status: "Cancelled", outcome: "cancelled", message: "" } } });
 	const frm = make_form({ custom_integration_status: "Created" });
 	await mod.cancel_shipment(frm);
 	assert.equal(confirms.length, 1);
+	assert.match(confirms[0], /also cancels its items at Noon/);
 	assert.equal(frm.reloads, 1);
 	assert.equal(alerts[0].indicator, "green");
 });

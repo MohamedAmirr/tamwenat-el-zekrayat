@@ -100,6 +100,8 @@ PAYMENT_EXCESS = "Payment Excess"
 PAYMENT_ENTRY_CANCELLED = "Payment Entry Cancelled"
 CARRIER_STALE_DAYS = 5
 CARRIER_MAX_AGE_DAYS = 60
+#: A Created draft note older than this was not submitted by the background job (it failed or died).
+CARRIER_DRAFT_STUCK_MINUTES = 15
 #: A "Carrier Cancelled" item clears after this many days (or at once when the Delivery Note is
 #: cancelled in ERPNext: the list reads docstatus < 2 only).
 CARRIER_CANCELLED_DAYS = 14
@@ -502,6 +504,7 @@ def _collect_carrier_items(problem_type=None):
 	stale_cutoff = add_to_date(now_datetime(), days=-CARRIER_STALE_DAYS)
 	recent = add_to_date(now_datetime(), days=-CARRIER_MAX_AGE_DAYS)
 	cancelled_cutoff = add_to_date(now_datetime(), days=-CARRIER_CANCELLED_DAYS)
+	draft_cutoff = add_to_date(now_datetime(), minutes=-CARRIER_DRAFT_STUCK_MINUTES)
 	by_name = {}
 
 	def collect(filters, **kw):
@@ -541,6 +544,15 @@ def _collect_carrier_items(problem_type=None):
 		# A live shipment whose last refresh/call left an error (the carrier's answer could not be applied):
 		# an exception whatever its status says.
 		collect({"custom_integration_status": carrier_log.CREATED, "custom_last_integration_error": ["is", "set"]})
+		# A draft whose shipment is Created but that was never submitted (the job's submit died before it could
+		# record why): stuck until a person submits it.
+		collect(
+			{
+				"custom_integration_status": carrier_log.CREATED,
+				"docstatus": 0,
+				"modified": ["<=", draft_cutoff],
+			}
+		)
 		# A submitted note the carrier cancelled whose automatic native cancel was blocked (the reason is the error).
 		collect(
 			{
@@ -666,15 +678,22 @@ def _collect_carrier_items(problem_type=None):
 			and problem_type in (None, CARRIER_CANCELLED)
 		):
 			add(CARRIER_CANCELLED, carrier, row, _("{0} cancelled this delivery.").format(name), seen)
+		created_draft = status == carrier_log.CREATED and row.docstatus == 0
 		if (
 			(
 				(shipping_status in states[carrier].get(CARRIER_EXCEPTION, []) and status != carrier_log.CANCELLED)
 				or (status == carrier_log.CREATED and error)
+				or (created_draft and get_datetime(row.modified) <= draft_cutoff)
 			)
 			and problem_type in (None, CARRIER_EXCEPTION)
 		):
-			error = row.custom_last_integration_error or shipping_status
-			add(CARRIER_EXCEPTION, carrier, row, f"{name}: {error}", seen)
+			if created_draft and error:
+				explanation = _("{0}: shipment created, Delivery Note not submitted. {1}").format(name, error)
+			elif created_draft:
+				explanation = _("{0}: shipment created, but the Delivery Note is still a draft. Submit it.").format(name)
+			else:
+				explanation = f"{name}: {error or shipping_status}"
+			add(CARRIER_EXCEPTION, carrier, row, explanation, seen)
 		if (
 			shipping_status in states[carrier].get(CARRIER_RETURN, [])
 			and not row.is_return  # a pickup return's returned state is its success, not a problem
