@@ -10,7 +10,7 @@ from erpnext.accounts.doctype.payment_entry.payment_entry import PaymentEntry
 from erpnext.accounts.party import get_party_account
 from erpnext.selling.doctype.sales_order.sales_order import make_sales_invoice
 from frappe.tests import IntegrationTestCase
-from frappe.utils import flt
+from frappe.utils import add_to_date, flt, now_datetime
 
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_account.marketplace_account import (
 	clearing_account_problem,
@@ -21,7 +21,7 @@ from marketplace_integrations.services.marketplace_attention import (
 	_shopify_order_accounts,
 )
 from marketplace_integrations.services.sales_order_sync import sync_sales_order
-from marketplace_integrations.services.shopify_payments import mirror_shopify_payments
+from marketplace_integrations.services.shopify_payments import manual_payment_totals, mirror_shopify_payments
 from marketplace_integrations.tests.utils import make_role_user
 
 KASHIER = "Pay with Card, Wallet and Installment via Kashier"
@@ -533,6 +533,395 @@ class IntegrationTestShopifyPayments(IntegrationTestCase):
 		self.assertEqual([r["status"] for r in results], ["Error", "Success"])
 		self.assertIn("already rolled back", results[0]["message"])
 		self.assertEqual(len(self._logs(order)), 2)
+
+	# --- duplicate guard, PermissionError row and retry (#425) ----------------------------------
+
+	def _manual_payment_entry(self, order, amount):
+		"""A submitted Receive Payment Entry allocated to the order's Sales Order, with no transaction id."""
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		total = flt(sales_order.rounded_total or sales_order.grand_total)
+		entry = frappe.get_doc(
+			{
+				"doctype": "Payment Entry",
+				"payment_type": "Receive",
+				"company": sales_order.company,
+				"party_type": "Customer",
+				"party": sales_order.customer,
+				"mode_of_payment": self.mode_of_payment,
+				"paid_from": get_party_account("Customer", sales_order.customer, sales_order.company),
+				"paid_to": self.cash,
+				"paid_amount": amount,
+				"received_amount": amount,
+				"references": [
+					{
+						"reference_doctype": "Sales Order",
+						"reference_name": sales_order.name,
+						"total_amount": total,
+						"outstanding_amount": total,
+						"allocated_amount": amount,
+					}
+				],
+			}
+		)
+		entry.insert()
+		entry.submit()
+		return entry
+
+	def test_a_manual_payment_entry_covering_the_amount_blocks_a_second_entry(self):
+		account, order = self._make_synced_order([transaction(self.tid(1), amount=495)])
+		manual = self._manual_payment_entry(order, 495)
+
+		results = mirror_shopify_payments(order.name, "Manual")
+
+		self.assertEqual([r["status"] for r in results], ["Invalid"])
+		self.assertIn("No second Payment Entry was created", results[0]["message"])
+		self.assertEqual(self._payment_entries(order), [])
+		self.assertEqual([log.status for log in self._logs(order)], ["Invalid"])
+		accounts = {account.name: account}
+		attention = _collect_payment_errors(accounts, _shopify_order_accounts(accounts))
+		self.assertEqual([row["problem_type"] for row in attention], ["Payment Error"])
+
+		# A later sync repeats the same problem without a second log row.
+		mirror_shopify_payments(order.name, "Manual")
+		self.assertEqual(len(self._logs(order)), 1)
+		self.assertEqual(frappe.db.get_value("Payment Entry", manual.name, "docstatus"), 1)
+
+	def test_a_manual_entry_covering_the_rounded_total_blocks_the_unrounded_shopify_amount(self):
+		"""Shopify 494.21 against a Sales Order rounded to 494: a manual entry can never allocate more than 494."""
+		_account, order = self._make_synced_order(
+			[transaction(self.tid(1), amount=494.21)], transaction_amount=74.99, shipping_total=419.22
+		)
+		self._manual_payment_entry(order, 494)
+
+		results = mirror_shopify_payments(order.name, "Manual")
+
+		self.assertEqual([r["status"] for r in results], ["Invalid"], results)
+		self.assertIn("No second Payment Entry was created", results[0]["message"])
+		self.assertEqual(self._payment_entries(order), [])
+		self.assertEqual(results[0]["guard_required"], 494)
+
+	def test_manual_payment_totals_counts_an_entry_allocated_to_a_sales_invoice(self):
+		_account, order = self._make_synced_order([transaction(self.tid(1), amount=495)])
+		invoice = make_sales_invoice(order.erpnext_sales_order)
+		invoice.insert()
+		invoice.submit()
+		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
+		entry = frappe.get_doc(
+			{
+				"doctype": "Payment Entry",
+				"payment_type": "Receive",
+				"company": sales_order.company,
+				"party_type": "Customer",
+				"party": sales_order.customer,
+				"mode_of_payment": self.mode_of_payment,
+				"paid_from": invoice.debit_to,
+				"paid_to": self.cash,
+				"paid_amount": 300,
+				"received_amount": 300,
+				"references": [
+					{
+						"reference_doctype": "Sales Invoice",
+						"reference_name": invoice.name,
+						"total_amount": invoice.grand_total,
+						"outstanding_amount": invoice.outstanding_amount,
+						"allocated_amount": 300,
+					}
+				],
+			}
+		)
+		entry.insert()
+		entry.submit()
+
+		self.assertEqual(manual_payment_totals([sales_order.name]), {sales_order.name: 300})
+
+	def test_a_smaller_manual_payment_entry_does_not_block_the_mirrored_entry(self):
+		_account, order = self._make_synced_order([transaction(self.tid(1), amount=495)])
+		self._manual_payment_entry(order, 100)
+
+		results = mirror_shopify_payments(order.name, "Manual")
+
+		self.assertEqual([r["status"] for r in results], ["Success"])
+		self.assertEqual(len(self._payment_entries(order)), 1)
+
+	def test_mirrored_entries_of_other_transactions_never_block_each_other(self):
+		_account, order = self._make_synced_order(
+			[transaction(self.tid(1), amount=100), transaction(self.tid(2), amount=100)]
+		)
+
+		results = mirror_shopify_payments(order.name, "Manual")
+
+		self.assertEqual([r["status"] for r in results], ["Success", "Success"])
+
+	def test_a_permission_error_is_logged_before_it_is_raised(self):
+		account, order = self._make_synced_order([transaction(self.tid(1), amount=100)])
+
+		def deny(entry):
+			raise frappe.PermissionError("denied")
+
+		with patch.object(PaymentEntry, "submit", deny), self.assertRaises(frappe.PermissionError):
+			mirror_shopify_payments(order.name, "Manual")
+
+		logs = self._logs(order)
+		self.assertEqual([log.status for log in logs], ["Invalid"])
+		self.assertIn("Permission was denied", logs[0].response_data)
+		self.assertEqual(self._payment_entries(order), [])
+		accounts = {account.name: account}
+		attention = _collect_payment_errors(accounts, _shopify_order_accounts(accounts))
+		self.assertEqual([row["problem_type"] for row in attention], ["Payment Error"])
+
+		# The same failure again does not add a second row.
+		with patch.object(PaymentEntry, "submit", deny), self.assertRaises(frappe.PermissionError):
+			mirror_shopify_payments(order.name, "Manual")
+		self.assertEqual(len(self._logs(order)), 1)
+
+	def test_the_automatic_wrapper_swallows_a_permission_error_but_the_row_is_kept(self):
+		from marketplace_integrations.services.sales_order_sync import _mirror_shopify_payments_independently
+
+		_account, order = self._make_synced_order([transaction(self.tid(1), amount=100)])
+
+		def deny(entry):
+			raise frappe.PermissionError("denied")
+
+		with patch.object(PaymentEntry, "submit", deny):
+			_mirror_shopify_payments_independently(order.name, "Manual")
+
+		self.assertEqual([log.status for log in self._logs(order)], ["Invalid"])
+
+	def _failing_submit(self, error=frappe.QueryDeadlockError):
+		def explode(entry):
+			raise error("deadlock")
+
+		return patch.object(PaymentEntry, "submit", explode)
+
+	def test_a_failed_payment_is_retried_by_the_sweep_without_touching_the_sales_order_sync(self):
+		from marketplace_integrations.services import sales_order_sync_debounce as debounce
+
+		_account, order = self._make_synced_order([transaction(self.tid(1), amount=100)])
+		before = frappe.db.get_value(
+			"Marketplace Order",
+			order.name,
+			["erpnext_sync_status", "sync_debounce_until", "sync_retry_count", "last_sync_error"],
+			as_dict=True,
+		)
+		with self._failing_submit():
+			self.assertEqual(mirror_shopify_payments(order.name, "Manual")[0]["status"], "Error")
+		self.assertIn(order.name, debounce._payment_retry_candidates())
+
+		with patch.object(debounce.frappe, "enqueue") as enqueue:
+			debounce._enqueue_payment_retries()
+		jobs = [call.kwargs["marketplace_order"] for call in enqueue.call_args_list]
+		self.assertIn(order.name, jobs)
+
+		debounce._retry_payment_mirroring(order.name)
+
+		self.assertEqual([e.reference_no for e in self._payment_entries(order)], [self.tid(1)])
+		self.assertEqual([log.status for log in self._logs(order)], ["Error", "Success"])
+		self.assertNotIn(order.name, debounce._payment_retry_candidates())
+		after = frappe.db.get_value(
+			"Marketplace Order",
+			order.name,
+			["erpnext_sync_status", "sync_debounce_until", "sync_retry_count", "last_sync_error"],
+			as_dict=True,
+		)
+		self.assertEqual(after, before)
+
+	def test_payment_retries_stop_after_three_attempts_and_the_error_row_stays(self):
+		from marketplace_integrations.services import sales_order_sync_debounce as debounce
+
+		account, order = self._make_synced_order([transaction(self.tid(1), amount=100)])
+		with self._failing_submit():
+			mirror_shopify_payments(order.name, "Manual")
+			for _attempt in range(debounce.PAYMENT_RETRY_ATTEMPTS):
+				self.assertIn(order.name, debounce._payment_retry_candidates())
+				debounce._retry_payment_mirroring(order.name)
+
+		self.assertEqual([log.status for log in self._logs(order)], ["Error"] * 4)
+		self.assertNotIn(order.name, debounce._payment_retry_candidates())
+		accounts = {account.name: account}
+		attention = _collect_payment_errors(accounts, _shopify_order_accounts(accounts))
+		self.assertEqual([row["problem_type"] for row in attention], ["Payment Error"])
+
+	def test_payment_retries_do_not_restart_when_old_error_rows_leave_the_window(self):
+		from marketplace_integrations.services import sales_order_sync_debounce as debounce
+
+		_account, order = self._make_synced_order([transaction(self.tid(1), amount=100)])
+		with self._failing_submit():
+			mirror_shopify_payments(order.name, "Manual")
+			for _attempt in range(debounce.PAYMENT_RETRY_ATTEMPTS):
+				debounce._retry_payment_mirroring(order.name)
+		logs = frappe.get_all(
+			"Marketplace Sync Log",
+			filters={"marketplace_order": order.name, "sync_type": "Payment"},
+			pluck="name",
+			order_by="creation asc",
+		)
+		self.assertEqual(len(logs), 4)
+		# The 60-minute window slides past the first failures; the run is still 4 consecutive Errors.
+		old = add_to_date(now_datetime(), minutes=-(debounce.PAYMENT_RETRY_WINDOW_MINUTES + 30))
+		frappe.db.set_value("Marketplace Sync Log", logs[0], "attempted_at", old)
+		frappe.db.set_value("Marketplace Sync Log", logs[1], "attempted_at", old)
+
+		self.assertNotIn(order.name, debounce._payment_retry_candidates())
+
+	def test_a_run_of_errors_that_started_over_an_hour_ago_is_not_retried(self):
+		from marketplace_integrations.services import sales_order_sync_debounce as debounce
+
+		_account, order = self._make_synced_order([transaction(self.tid(1), amount=100)])
+		with self._failing_submit():
+			mirror_shopify_payments(order.name, "Manual")
+		logs = frappe.get_all("Marketplace Sync Log", filters={"marketplace_order": order.name}, pluck="name")
+		log = logs[0]
+		old = add_to_date(now_datetime(), minutes=-(debounce.PAYMENT_RETRY_WINDOW_MINUTES + 30))
+		frappe.db.set_value("Marketplace Sync Log", log, "attempted_at", old)
+
+		self.assertNotIn(order.name, debounce._payment_retry_candidates())
+
+	def test_a_run_whose_first_error_is_old_is_not_retried_although_the_last_is_recent(self):
+		from marketplace_integrations.services import sales_order_sync_debounce as debounce
+
+		_account, order = self._make_synced_order([transaction(self.tid(1), amount=100)])
+		with self._failing_submit():
+			mirror_shopify_payments(order.name, "Manual")
+			mirror_shopify_payments(order.name, "Manual")
+		logs = frappe.get_all(
+			"Marketplace Sync Log",
+			filters={"marketplace_order": order.name, "sync_type": "Payment"},
+			pluck="name",
+			order_by="creation asc",
+		)
+		self.assertEqual(len(logs), 2)
+		frappe.db.set_value(
+			"Marketplace Sync Log", logs[0], "attempted_at", add_to_date(now_datetime(), minutes=-90)
+		)
+		frappe.db.set_value(
+			"Marketplace Sync Log", logs[1], "attempted_at", add_to_date(now_datetime(), minutes=-5)
+		)
+
+		self.assertNotIn(order.name, debounce._payment_retry_candidates())
+
+	def test_an_order_without_a_submitted_sales_order_is_not_a_retry_candidate(self):
+		from marketplace_integrations.services import sales_order_sync_debounce as debounce
+
+		_account, order = self._make_synced_order([transaction(self.tid(1), amount=100)])
+		with self._failing_submit():
+			mirror_shopify_payments(order.name, "Manual")
+		self.assertIn(order.name, debounce._payment_retry_candidates())
+
+		frappe.db.set_value("Sales Order", order.erpnext_sales_order, "docstatus", 2)
+		self.assertNotIn(order.name, debounce._payment_retry_candidates())
+
+		frappe.db.set_value("Marketplace Order", order.name, "erpnext_sales_order", None)
+		self.assertNotIn(order.name, debounce._payment_retry_candidates())
+
+	def test_a_duplicate_guard_row_is_retried_once_the_covering_entry_is_cancelled(self):
+		from marketplace_integrations.services import sales_order_sync_debounce as debounce
+
+		_account, order = self._make_synced_order([transaction(self.tid(1), amount=495)])
+		manual = self._manual_payment_entry(order, 495)
+		self.assertEqual(mirror_shopify_payments(order.name, "Manual")[0]["status"], "Invalid")
+		# The guard still blocks: not a candidate.
+		self.assertNotIn(order.name, debounce._payment_retry_candidates())
+
+		manual.cancel()
+		self.assertEqual(debounce._payment_retry_candidates(), {order.name: [self.tid(1)]})
+		with patch.object(debounce.frappe, "enqueue") as enqueue:
+			debounce._enqueue_payment_retries()
+		self.assertEqual(enqueue.call_args.kwargs["marketplace_order"], order.name)
+		self.assertEqual(enqueue.call_args.kwargs["transaction_ids"], [self.tid(1)])
+
+		debounce._retry_payment_mirroring(order.name, [self.tid(1)])
+
+		self.assertEqual([e.reference_no for e in self._payment_entries(order)], [self.tid(1)])
+		self.assertEqual([log.status for log in self._logs(order)], ["Invalid", "Success"])
+		# The run has ended: a second sweep finds nothing.
+		self.assertEqual(debounce._payment_retry_candidates(), {})
+
+	def test_a_guard_row_that_is_blocked_again_is_not_a_candidate_and_adds_no_row(self):
+		from marketplace_integrations.services import sales_order_sync_debounce as debounce
+
+		_account, order = self._make_synced_order([transaction(self.tid(1), amount=495)])
+		first = self._manual_payment_entry(order, 495)
+		mirror_shopify_payments(order.name, "Manual")
+		first.cancel()
+		self.assertIn(order.name, debounce._payment_retry_candidates())
+
+		# Covered again before the retry runs: the re-run is blocked with the same message.
+		self._manual_payment_entry(order, 495)
+		debounce._retry_payment_mirroring(order.name, [self.tid(1)])
+
+		self.assertEqual([log.status for log in self._logs(order)], ["Invalid"])
+		self.assertEqual(self._payment_entries(order), [])
+		self.assertNotIn(order.name, debounce._payment_retry_candidates())
+
+	def test_a_guard_row_of_a_transaction_that_is_no_longer_pending_is_not_a_candidate(self):
+		from marketplace_integrations.services import sales_order_sync_debounce as debounce
+
+		_account, order = self._make_synced_order([transaction(self.tid(1), amount=495)])
+		manual = self._manual_payment_entry(order, 495)
+		mirror_shopify_payments(order.name, "Manual")
+		manual.cancel()
+		self.assertIn(order.name, debounce._payment_retry_candidates())
+
+		# A re-run could neither record it nor write a row, so it must not be queued every minute.
+		frappe.db.set_value("Marketplace Order", order.name, "payment_transactions", frappe.as_json([]))
+		self.assertEqual(debounce._payment_retry_candidates(), {})
+
+	def test_only_a_transient_failure_is_retried(self):
+		from marketplace_integrations.services import sales_order_sync_debounce as debounce
+
+		_account, order = self._make_synced_order([transaction(self.tid(1), amount=100)])
+		with self._failing_submit(RuntimeError):
+			result = mirror_shopify_payments(order.name, "Manual")[0]
+
+		self.assertEqual(result["status"], "Error")
+		self.assertFalse(result["transient"])
+		self.assertNotIn(order.name, debounce._payment_retry_candidates())
+
+	def test_a_retry_attempts_only_the_failing_transactions(self):
+		from marketplace_integrations.services import sales_order_sync_debounce as debounce
+
+		_account, order = self._make_synced_order(
+			[transaction(self.tid(1), amount=100), transaction(self.tid(2), amount=50)]
+		)
+		real_submit = PaymentEntry.submit
+		calls = []
+
+		def submit_failing_once(entry):
+			calls.append(1)
+			if len(calls) == 1:
+				raise frappe.QueryDeadlockError("deadlock")
+			return real_submit(entry)
+
+		with patch.object(PaymentEntry, "submit", submit_failing_once):
+			results = mirror_shopify_payments(order.name, "Manual")
+		self.assertEqual([r["status"] for r in results], ["Error", "Success"])
+		self.assertEqual(debounce._payment_retry_candidates(), {order.name: [self.tid(1)]})
+
+		with (
+			patch.object(debounce, "_payment_retry_candidates", return_value={order.name: [self.tid(1)]}),
+			patch.object(debounce.frappe, "enqueue") as enqueue,
+		):
+			debounce._enqueue_payment_retries()
+		self.assertEqual(enqueue.call_args.kwargs["transaction_ids"], [self.tid(1)])
+
+		results = mirror_shopify_payments(order.name, "Manual", [self.tid(1)])
+		self.assertEqual([(r["transaction_id"], r["status"]) for r in results], [(self.tid(1), "Success")])
+
+	def test_a_repeated_invalid_result_adds_only_one_log_row(self):
+		_account, order = self._make_synced_order([transaction(self.tid(1), amount=100, gateway="Unmapped")])
+
+		for _attempt in range(3):
+			self.assertEqual(mirror_shopify_payments(order.name, "Manual")[0]["status"], "Invalid")
+
+		self.assertEqual([log.status for log in self._logs(order)], ["Invalid"])
+
+	def test_an_invalid_payment_row_is_not_retried(self):
+		from marketplace_integrations.services import sales_order_sync_debounce as debounce
+
+		_account, order = self._make_synced_order([transaction(self.tid(1), amount=100, gateway="Unmapped")])
+		self.assertEqual(mirror_shopify_payments(order.name, "Manual")[0]["status"], "Invalid")
+
+		self.assertNotIn(order.name, debounce._payment_retry_candidates())
 
 	# --- other guards -----------------------------------------------------------------------
 

@@ -20,7 +20,11 @@ from frappe.utils.data import convert_utc_to_system_timezone
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_account.marketplace_account import (
 	clearing_account_problem,
 )
-from marketplace_integrations.services.sales_order_sync import SyncBlocker, _shopify_transactions
+from marketplace_integrations.services.sales_order_sync import (
+	SyncBlocker,
+	_shopify_transactions,
+	is_transient_failure,
+)
 
 ELIGIBLE_KINDS = ("SALE", "CAPTURE")
 ELIGIBLE_STATUS = "SUCCESS"
@@ -28,10 +32,11 @@ ELIGIBLE_STATUS = "SUCCESS"
 _PAYMENT_SAVEPOINT = "marketplace_shopify_payment"
 
 
-def mirror_shopify_payments(marketplace_order, trigger_source):
+def mirror_shopify_payments(marketplace_order, trigger_source, transaction_ids=None):
 	"""Create the missing Payment Entries of one Shopify Marketplace Order.
 
-	Returns one result dict per attempted transaction (``transaction_id``, ``status`` of
+	``transaction_ids`` limits the run to those transactions (the retry sweep passes only the
+	failing ones); ``None`` attempts every pending transaction.  Returns one result dict per attempted transaction (``transaction_id``, ``status`` of
 	Success / Invalid / Error, and ``payment_entry`` or ``message``); [] when nothing needed
 	attempting.  Every attempt also writes one ``Marketplace Sync Log`` row (sync_type
 	``Payment``).  A transaction that already has a Payment Entry in any docstatus is
@@ -48,6 +53,7 @@ def mirror_shopify_payments(marketplace_order, trigger_source):
 		for txn in _shopify_transactions(order)
 		if txn.get("kind") in ELIGIBLE_KINDS
 		and txn.get("status") == ELIGIBLE_STATUS
+		and (transaction_ids is None or cstr(txn.get("id")).strip() in transaction_ids)
 		and not frappe.db.exists(
 			"Payment Entry", {"custom_marketplace_transaction_id": cstr(txn.get("id")).strip()}
 		)
@@ -93,8 +99,24 @@ def mirror_shopify_payments(marketplace_order, trigger_source):
 		except SyncBlocker as exc:
 			_rollback_payment_savepoint()
 			result.update(status="Invalid", message=str(exc))
+			if isinstance(exc, DuplicatePaymentBlocker):
+				# Needs Attention lists the row only while this guard would still block.
+				result.update(guard_sales_order=exc.sales_order, guard_required=exc.required)
 		except frappe.PermissionError:
 			_rollback_payment_savepoint()
+			# Record it before re-raising: the automatic-mirroring wrapper swallows the exception,
+			# and without a row the order would not show in Needs Attention (#425).
+			frappe.clear_messages()
+			result.pop("payment_entry", None)
+			result.update(
+				status="Invalid",
+				message=_(
+					"Permission was denied while creating the Payment Entry. Check the user's permissions "
+					"on Payment Entry and the documents it links to."
+				),
+			)
+			if not _same_as_latest_payment_log(order, result):
+				_create_payment_log(order, trigger_source, result)
 			raise
 		except frappe.ValidationError as exc:
 			rolled_back = _rollback_payment_savepoint()
@@ -105,12 +127,14 @@ def mirror_shopify_payments(marketplace_order, trigger_source):
 			)
 			if not rolled_back:
 				result["message"] += " " + _rolled_back_note()
-		except Exception:
+		except Exception as exc:
 			rolled_back = _rollback_payment_savepoint()
 			frappe.log_error(title=_("Shopify payment mirroring"))
 			result.pop("payment_entry", None)
 			result.update(
 				status="Error",
+				# Only a transient failure (deadlock, lock wait, timeout, 5xx) is retried by the sweep.
+				transient=is_transient_failure(exc),
 				message=_(
 					"Creating the Payment Entry failed. Review the ERPNext configuration and try again."
 				),
@@ -119,7 +143,9 @@ def mirror_shopify_payments(marketplace_order, trigger_source):
 			if not rolled_back:
 				result["message"] += " " + _rolled_back_note()
 		frappe.clear_messages()
-		_create_payment_log(order, trigger_source, result)
+		# Every later sync would add the same Invalid row again; keep one per problem.
+		if result["status"] != "Invalid" or not _same_as_latest_payment_log(order, result):
+			_create_payment_log(order, trigger_source, result)
 		results.append({key: value for key, value in result.items() if key != "traceback"})
 	return results
 
@@ -196,6 +222,30 @@ def _mirror_transaction(order, account, txn, transaction_id):
 	amount = flt(money.get("amount"), precision)
 	if amount <= 0:
 		raise SyncBlocker(_("The transaction amount must be greater than zero."))
+
+	covered = manual_payment_totals([sales_order.name]).get(sales_order.name, 0)
+	# A rounded-down Sales Order total (Shopify 494.21, order 494) can never be covered by more than
+	# its rounded total, so the rounding difference is not required of the manual entry.
+	rounding_down = (
+		max(flt(sales_order.grand_total) - flt(sales_order.rounded_total), 0)
+		if sales_order.rounded_total
+		else 0
+	)
+	required = flt(amount - rounding_down, precision)
+	if flt(covered, precision) > 0 and flt(covered, precision) >= required:
+		raise DuplicatePaymentBlocker(
+			_(
+				"A submitted Payment Entry already covers {0} of Sales Order {1}, which is at least the amount "
+				"of Shopify transaction {2} ({3}). No second Payment Entry was created; review it in ERPNext."
+			).format(
+				fmt_money(covered, currency=company_currency),
+				sales_order.name,
+				transaction_id,
+				fmt_money(amount, currency=company_currency),
+			),
+			sales_order=sales_order.name,
+			required=required,
+		)
 
 	posting_date = _transaction_date(txn)
 	reference = _allocation_target(sales_order)
@@ -298,6 +348,80 @@ def _mirror_transaction(order, account, txn, transaction_id):
 			fmt_money(payment_entry.unallocated_amount, currency=company_currency)
 		)
 	return payment_entry.name, message
+
+
+class DuplicatePaymentBlocker(SyncBlocker):
+	"""A manual Payment Entry already covers the transaction's amount (#425).
+
+	``sales_order`` and ``required`` are kept in the log row so Needs Attention can tell whether
+	the guard would still block.
+	"""
+
+	def __init__(self, message, *, sales_order, required):
+		super().__init__(message)
+		self.sales_order = sales_order
+		self.required = required
+
+
+def manual_payment_totals(sales_orders):
+	"""``{sales_order: total}`` allocated by submitted manual Receive Payment Entries (#425).
+
+	A Payment Entry counts toward a Sales Order when it is allocated to the order itself or to
+	one of its submitted Sales Invoices.  Entries mirrored from a Shopify transaction (with a
+	``custom_marketplace_transaction_id``) are not counted, so the separate transactions of a
+	split payment never block each other.  One entry's allocations to the Sales Order and to
+	its Sales Invoices are added up: an entry that allocates part to the order and part to an
+	invoice paid both parts (the allocations of one entry never overlap).  Batched: two queries per call, whatever the size.
+	"""
+	sales_orders = sorted(set(sales_orders))
+	if not sales_orders:
+		return {}
+	# An invoice spanning two Sales Orders is credited to one of them (the last row wins); an edge
+	# case for Shopify, where one order makes one Sales Order.
+	invoice_to_order = {}
+	for row in frappe.get_all(
+		"Sales Invoice Item",
+		filters={"sales_order": ["in", sales_orders], "docstatus": 1},
+		fields=["parent", "sales_order"],
+		distinct=True,
+	):
+		invoice_to_order[row.parent] = row.sales_order
+
+	entry = frappe.qb.DocType("Payment Entry")
+	reference = frappe.qb.DocType("Payment Entry Reference")
+	targets = (reference.reference_doctype == "Sales Order") & reference.reference_name.isin(sales_orders)
+	if invoice_to_order:
+		targets = targets | (
+			(reference.reference_doctype == "Sales Invoice")
+			& reference.reference_name.isin(list(invoice_to_order))
+		)
+	rows = (
+		frappe.qb.from_(reference)
+		.join(entry)
+		.on(reference.parent == entry.name)
+		.select(
+			reference.parent,
+			reference.reference_doctype,
+			reference.reference_name,
+			reference.allocated_amount,
+		)
+		.where(entry.docstatus == 1)
+		.where(entry.payment_type == "Receive")
+		.where(
+			entry.custom_marketplace_transaction_id.isnull() | (entry.custom_marketplace_transaction_id == "")
+		)
+		.where(targets)
+		.run(as_dict=True)
+	)
+	totals = {}
+	for row in rows:
+		order = (
+			row.reference_name
+			if row.reference_doctype == "Sales Order"
+			else invoice_to_order[row.reference_name]
+		)
+		totals[order] = totals.get(order, 0) + flt(row.allocated_amount)
+	return totals
 
 
 def _allocation_target(sales_order):

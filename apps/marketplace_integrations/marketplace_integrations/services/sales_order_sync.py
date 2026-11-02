@@ -408,8 +408,10 @@ def _handle_transient_failure(order, trigger_source, snapshot):
 	return result
 
 
-def _mirror_shopify_payments_independently(marketplace_order, trigger_source):
-	"""Attempt eligible Shopify Payment Entries without changing Sales Order sync status."""
+def _mirror_shopify_payments_independently(marketplace_order, trigger_source, transaction_ids=None):
+	"""Attempt eligible Shopify Payment Entries without changing Sales Order sync status.
+
+	``transaction_ids`` limits the attempt to those transactions (the payment retry sweep)."""
 	try:
 		state = frappe.db.get_value(
 			"Marketplace Order", marketplace_order, ["platform", "erpnext_sales_order"], as_dict=True
@@ -420,7 +422,7 @@ def _mirror_shopify_payments_independently(marketplace_order, trigger_source):
 			return
 		from marketplace_integrations.services.shopify_payments import mirror_shopify_payments
 
-		mirror_shopify_payments(marketplace_order, trigger_source)
+		mirror_shopify_payments(marketplace_order, trigger_source, transaction_ids)
 	except Exception:
 		try:
 			frappe.log_error(title=_("Automatic Shopify payment mirroring"))
