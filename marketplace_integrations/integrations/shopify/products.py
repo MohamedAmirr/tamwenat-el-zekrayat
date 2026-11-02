@@ -65,11 +65,8 @@ as a mapping row until a user picks an Item for it via ``upsert_mapping()``.
 
 Progress is reported as "N processed so far" (an indeterminate running
 count), not a percentage - Shopify's ``productVariants(first, after)``
-cursor connection never exposes a total count up front, unlike
-``services/item_import_jobs.py``'s XLSX-row-count-based percentage (gap-check
-#1). The job/status/realtime-progress shape below is adapted from that
-module (queue/status/cache/realtime), not reused directly, precisely because
-of that percentage-vs-count difference.
+cursor connection never exposes a total count up front, so there is no
+total to compute a percentage from (gap-check #1).
 """
 
 import re
@@ -86,9 +83,27 @@ from marketplace_integrations.integrations.shopify.constants import (
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_product_mapping.marketplace_product_mapping import (
 	compute_mapping_identity_key,
 )
-from marketplace_integrations.services import mapping_import
 
 MAPPING_DOCTYPE = "Marketplace Product Mapping"
+
+# Columns of the catalog reference sheet (export_catalog). There is no upload-back any more
+# (#373): mappings are edited on the mapping form or through Item Data Import.
+CATALOG_COLUMNS = [
+	"marketplace_account",
+	"item",
+	"external_reference",
+	"external_product_id",
+	"external_sku",
+	"external_barcode",
+	"external_variant_id",
+	"sales_uom",
+	"enabled",
+	"__modified",
+	"product_title",
+]
+# "Data Export" is a deliberate Frappe xlsxutils exemption that keeps opaque IDs containing < or >
+# instead of passing them through html2text.
+XLSX_SHEET_NAME = "Data Export"
 
 _VARIANT_GID_RE = re.compile(r"^gid://shopify/ProductVariant/\d+$")
 
@@ -261,8 +276,7 @@ def upsert_mapping(
 def queue_catalog_sweep(account_name):
 	"""Authorize and enqueue a Shopify catalog sweep for one Marketplace
 	Account. No Shopify HTTP call happens in this request - the sweep itself
-	runs in the background, mirroring services/item_import_jobs.py's queue
-	shape.
+	runs in the background.
 
 	Permission shape (gap-check #4): a per-document ``read`` check on the
 	Marketplace Account (via get_account(), same as
@@ -326,11 +340,10 @@ def export_catalog(account_name):
 	Marketplace Account, independent of any sweep (so not subject to
 	MAX_EXCEPTIONS_RETURNED). Streams the file as a browser download.
 
-	The columns are exactly the mapping importer's (services/mapping_import.py
-	HEADER_ROW) so the sheet can be filled in (``item`` column) and uploaded
-	straight back; variants already mapped carry their saved values (including
-	``__modified``, needed by the importer's stale check). ``product_title``
-	is an extra reference column the importer ignores.
+	A reference sheet only (CATALOG_COLUMNS): there is no round-trip upload any
+	more, so mappings are created on the mapping form, in the catalog page or
+	through Item Data Import. Variants already mapped carry their saved values;
+	``__modified`` and ``product_title`` are plain reference columns.
 
 	Read-only: ``read`` on the account (get_account()) plus ``read`` on
 	Marketplace Product Mapping."""
@@ -348,7 +361,7 @@ def export_catalog(account_name):
 	}
 
 	client = ShopifyClient(connection.name)
-	rows = [[*mapping_import.HEADER_ROW, "product_title"]]
+	rows = [list(CATALOG_COLUMNS)]
 	cursor = None
 	while True:
 		data = client.execute(_VARIANTS_QUERY, {"first": SHOPIFY_VARIANTS_PAGE_SIZE, "after": cursor})
@@ -379,9 +392,7 @@ def export_catalog(account_name):
 		if not page_info.get("hasNextPage") or not cursor:
 			break
 
-	# "Data Export" sheet name: Frappe's xlsxutils exemption that keeps opaque
-	# IDs intact (same choice as mapping_import.export_mappings_xlsx()).
-	xlsx_file = make_xlsx(rows, mapping_import.XLSX_SHEET_NAME)
+	xlsx_file = make_xlsx(rows, XLSX_SHEET_NAME)
 	frappe.response["filename"] = f"shopify-catalog-{account.name}.xlsx"
 	frappe.response["filecontent"] = xlsx_file.getvalue()
 	frappe.response["type"] = "binary"
@@ -629,14 +640,8 @@ def _refresh_mapping_descriptive_fields(row, node):
 		# Review finding #1: unlike Talabat's sync-bookkeeping fields
 		# (integrations/talabat/catalog_sync.py's _mark_queued()/_mark_error(),
 		# which legitimately use update_modified=False), these three fields are
-		# services/mapping_import.py's MANAGED_COLUMNS - that importer's ONLY
-		# concurrency guard is comparing an exported __modified timestamp
-		# against the row's current `modified` (_check_not_stale()). Passing
-		# update_modified=False here would let a sweep silently rewrite a
-		# MANAGED_COLUMNS value without moving `modified`, so a stale,
-		# unedited re-upload of a since-refreshed workbook would pass the
-		# staleness check and revert this refresh. Let `modified` update
-		# normally (the default) so that guard actually catches this case.
+		# user-visible mapping data, so let `modified` update normally (the
+		# default) rather than rewriting them silently.
 		frappe.db.set_value(
 			MAPPING_DOCTYPE,
 			row.name,

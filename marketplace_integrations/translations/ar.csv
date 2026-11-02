@@ -16,7 +16,6 @@ Noon Orders,طلبات Noon
 All Marketplace Orders,جميع طلبات السوق
 Marketplace Product Mapping,ربط منتجات السوق
 Marketplace Products,منتجات السوق
-Marketplace Product Management,إدارة منتجات السوق
 Marketplace Sync Log,سجل مزامنة السوق
 Shopify Webhook Delivery,تسليم Webhook لـ Shopify
 Noon Return,مرتجع Noon
@@ -274,7 +273,6 @@ Noon Returns,مرتجعات Noon
 Products & Inventory,المنتجات والمخزون
 Needs Mapping,يحتاج إلى ربط
 Product Mappings,روابط المنتجات
-Import / Export,استيراد / تصدير
 Talabat Catalog,كتالوج Talabat
 Shopify Catalog,كتالوج Shopify
 Accounts & Connections,الحسابات والاتصالات
@@ -514,7 +512,6 @@ Catalog Webhook,Webhook الكتالوج
 Catalog Webhook Secret,سر Webhook الكتالوج
 Catalog Webhook URL,رابط Webhook الكتالوج
 Legacy Migration Source,مصدر الترحيل القديم
-(empty),(فارغ)
 A Bosta business reference is required.,مرجع Bosta التجاري مطلوب.
 A Bosta tracking number is required.,رقم تتبع Bosta مطلوب.
 A Marketplace Account for platform {0} and external account {1} already exists ({2}).,يوجد بالفعل حساب سوق للمنصة {0} والحساب الخارجي {1} ({2}).
@@ -554,16 +551,8 @@ Also cancel this order on {0}? This cannot be undone.,هل تريد أيضًا �
 Also send the current webhook key,إرسال مفتاح Webhook الحالي أيضًا
 An inventory sync is already running for this Marketplace Account.,توجد مزامنة مخزون قيد التشغيل بالفعل لحساب السوق هذا.
 An item's pricing type cannot be changed.,لا يمكن تغيير نوع تسعير العنصر.
-Applied {0} row(s).,تم تطبيق {0} صف.
-Applied.,تم التطبيق.
-Apply result,نتيجة التطبيق
-Apply reviewed changes,تطبيق التغييرات التي تمت مراجعتها
-Applying the workbook failed.,فشل تطبيق ملف Excel.
-Applying workbook changes...,جارٍ تطبيق تغييرات ملف Excel...
 At least one Bosta tracking number is required.,مطلوب رقم تتبع Bosta واحد على الأقل.
 At least one unit must be selected.,يجب تحديد وحدة واحدة على الأقل.
-Background job queued...,تمت إضافة مهمة في الخلفية إلى قائمة الانتظار...
-Background job: {0}% complete.,مهمة الخلفية: اكتمل {0}%.
 Bank or Cash account of the account's Company that receives the payment.,حساب البنك أو النقدية لشركة الحساب الذي يستلم الدفعة.
 Bosta,Bosta
 Bosta Cancel,إلغاء Bosta
@@ -612,7 +601,6 @@ Catalog vs List Price Diff,الفرق بين سعر الكتالوج وسعر ا
 Catalog webhook URL copied.,تم نسخ رابط Webhook الكتالوج.
 Catalog webhook URL refreshed. Update it in Talabat's portal.,تم تحديث رابط Webhook الكتالوج. حدّثه في بوابة Talabat.
 Catalog webhook secret copied.,تم نسخ سر Webhook الكتالوج.
-Changed,تم التغيير
 Changing the Noon destination's active state,تغيير حالة تفعيل وجهة Noon
 Clearing Account {0} does not belong to Company {1}.,حساب التسوية {0} لا ينتمي إلى الشركة {1}.
 Clearing Account {0} does not exist.,حساب التسوية {0} غير موجود.
@@ -644,11 +632,9 @@ Could not match the delivery row on {0}.,تعذّرت مطابقة صف التو
 Could not match the invoice row on {0}.,تعذّرت مطابقة صف الفاتورة على {0}.
 Could not reach Noon.,تعذّر الوصول إلى Noon.
 Could not read the current Shopify quantity at the bound Location.,تعذّرت قراءة كمية Shopify الحالية في الموقع المرتبط.
-Could not retrieve the background job status.,تعذّر جلب حالة مهمة الخلفية.
 Could not retrieve the catalog push status.,تعذّر جلب حالة إرسال الكتالوج.
 Could not retrieve the inventory sync status.,تعذّر جلب حالة مزامنة المخزون.
 Could not retrieve the order import status.,تعذّر جلب حالة استيراد الطلبات.
-Could not start the background job.,تعذّر بدء مهمة الخلفية.
 Could not verify Shopify Connection {0}'s own shop - no shop id was returned.,تعذّر التحقق من متجر اتصال Shopify {0} - لم يُرجَع معرّف المتجر.
 Create Credit Note,إنشاء إشعار دائن
 Create Sales Return,إنشاء مرتجع مبيعات
@@ -671,11 +657,8 @@ Draft Credit Note created.,تم إنشاء إشعار دائن مسودة.
 Draft Sales Return created.,تم إنشاء مرتجع مبيعات مسودة.
 Draft or submitted return Delivery Note created from a Sellable outcome.,"مذكرة تسليم مرتجعة (مسودة أو معتمدة) أُنشئت من نتيجة ""قابل للبيع""."
 Draft or submitted return Sales Invoice (Credit Note) for this returned item.,فاتورة مبيعات مرتجعة (إشعار دائن) مسودة أو معتمدة لهذا العنصر المرتجع.
-Duplicate Marketplace Account and external_reference pair appears in more than one row of this workbook.,زوج حساب السوق وexternal_reference نفسه مكرّر في أكثر من صف في ملف Excel هذا.
-Duplicate item_code '{0}' appears in more than one row of this workbook.,item_code المكرّر '{0}' يظهر في أكثر من صف في ملف Excel هذا.
 ERPNext Customer {0} configured on Marketplace Account {1} does not exist.,عميل ERPNext {0} المضبوط في حساب السوق {1} غير موجود.
 ERPNext Customer {0}'s default currency ({1}) must match Company {2}'s default currency ({3}) before synchronizing orders. Multi-currency Sales Order synchronization is not supported.,يجب أن تطابق العملة الافتراضية لعميل ERPNext {0} ({1}) العملة الافتراضية للشركة {2} ({3}) قبل مزامنة الطلبات. مزامنة أوامر البيع متعددة العملات غير مدعومة.
-ERPNext Items,عناصر ERPNext
 ERPNext Sales Order synchronization failed.,فشلت مزامنة أمر البيع في ERPNext.
 ERPNext Sales Order synchronization failed. Please review the ERPNext configuration and try again.,فشلت مزامنة أمر البيع في ERPNext. يرجى مراجعة إعدادات ERPNext والمحاولة مرة أخرى.
 "ERPNext Sales Order synchronization is only available for Talabat, Shopify and Noon orders. Marketplace Order {0} is a {1} order.",مزامنة أمر البيع في ERPNext متاحة فقط لطلبات Talabat وShopify وNoon. طلب السوق {0} هو طلب {1}.
@@ -698,14 +681,15 @@ ERPNext: {0},ERPNext: {0}
 Each REPLACED item must have exactly one replacement.,يجب أن يكون لكل عنصر مستبدَل (REPLACED) بديل واحد بالضبط.
 Echo guard (#181): when ERPNext successfully asked this platform to cancel the order. Durable marker the reconciliation planner reads so the platform cancellation echo does not reopen a Closed Sales Order. Set only by services/marketplace_outbound.py.,حماية الصدى (#181): وقت نجاح ERPNext في طلب إلغاء الطلب من هذه المنصة. علامة دائمة يقرؤها مخطط التسوية حتى لا يعيد صدى الإلغاء من المنصة فتح أمر بيع مغلق. تُضبط فقط بواسطة services/marketplace_outbound.py.
 Enter your normal local date and time. Talabat receives the server-converted UTC time.,أدخل التاريخ والوقت المحليين المعتادين. يستلم Talabat الوقت بتوقيت UTC بعد تحويله على الخادم.
+Every Marketplace Listing row needs a Marketplace Account and an External Reference.,يحتاج كل صف من صفوف قائمة السوق إلى حساب سوق ومرجع خارجي.
 Every order item must have a valid update status.,يجب أن يكون لكل عنصر في الطلب حالة تحديث صالحة.
 Every order item must include an ID or SKU.,يجب أن يتضمن كل عنصر في الطلب معرّفًا أو رمز منتج (SKU).
 Every order item must include pricing information.,يجب أن يتضمن كل عنصر في الطلب معلومات التسعير.
 Exact match of Order Nr against this account's Marketplace Orders (External Order ID or Platform Order Reference). Blank when no exact match was found - never a fuzzy/best-guess link.,مطابقة تامة لرقم الطلب مع طلبات السوق لهذا الحساب (معرّف الطلب الخارجي أو مرجع طلب المنصة). يبقى فارغًا عند عدم العثور على مطابقة تامة - ولا يُربط أبدًا بتخمين تقريبي.
 Expected exactly one submitted {0} row for Item {1} on Sales Order {2}; found: {3}.,كان متوقعًا صف {0} معتمد واحد بالضبط للعنصر {1} في أمر البيع {2}؛ الموجود: {3}.
-Export Items,تصدير العناصر
-Export Mappings,تصدير الربط
-"Export a workbook, edit it, upload it for review, then apply the reviewed changes.",صدّر ملف Excel وعدّله، ثم ارفعه للمراجعة، ثم طبّق التغييرات التي تمت مراجعتها.
+External reference {0} of Marketplace Account {1} appears more than once in this file (rows {2}).,المرجع الخارجي {0} لحساب السوق {1} يظهر أكثر من مرة في هذا الملف (الصفوف {2}).
+External reference {0} of Marketplace Account {1} is already mapped to Item {2}. Change it on the mapping form.,المرجع الخارجي {0} لحساب السوق {1} مربوط بالفعل بالعنصر {2}. غيّره من نموذج الربط.
+External reference {0} of Marketplace Account {1} is already mapped to a different Item. Change it on the mapping form.,المرجع الخارجي {0} لحساب السوق {1} مربوط بالفعل بعنصر آخر. غيّره من نموذج الربط.
 External Account ID must exactly match the selected Noon Connection's project code.,يجب أن يطابق معرّف الحساب الخارجي رمز المشروع لاتصال Noon المحدد تمامًا.
 Failed to authenticate with {0}: unexpected response ({1}),فشلت المصادقة مع {0}: استجابة غير متوقعة ({1})
 Failed to authenticate with {0}: {1},فشلت المصادقة مع {0}: {1}
@@ -733,9 +717,6 @@ Generated automatically when empty. Configure this value in Bosta Dashboard as t
 Generated automatically when empty. The receiver requires this value on every inbound request's X-Api-Key header. Paste the same value into Noon's Partner Center webhook destination (header X-Api-Key).,يُنشأ تلقائيًا عندما يكون فارغًا. يشترط المستقبِل هذه القيمة في ترويسة X-Api-Key لكل طلب وارد. الصق القيمة نفسها في وجهة Webhook في Partner Center الخاص بـ Noon (الترويسة X-Api-Key).
 INTEGRATION_ITEM_STATUS_UNSPECIFIED,INTEGRATION_ITEM_STATUS_UNSPECIFIED
 IN_CART,في السلة
-Identifier,المعرّف
-Import Items,استيراد العناصر
-Import Mappings,استيراد الربط
 Import Noon orders for this account now?,هل تريد استيراد طلبات Noon لهذا الحساب الآن؟
 Income account that receives the shipping charge of synced Shopify orders. Required once an order with a shipping charge is synced. Not used for merchandise.,حساب الإيرادات الذي يستلم رسوم الشحن لطلبات Shopify المتزامنة. مطلوب بمجرد مزامنة طلب له رسوم شحن. لا يُستخدم للبضائع.
 Incomplete,غير مكتمل
@@ -759,7 +740,6 @@ Invoice file exceeds the 5 MiB limit.,ملف الفاتورة يتجاوز ال�
 "Invoice file must be private, not public.",يجب أن يكون ملف الفاتورة خاصًا، لا عامًا.
 Invoice must be a PDF file.,يجب أن تكون الفاتورة ملف PDF.
 Issued At,تاريخ الإصدار
-Item import job not found.,لم يتم العثور على مهمة استيراد العناصر.
 Item is a template (has variants).,العنصر قالب (له متغيرات).
 Item is disabled.,العنصر معطّل.
 Item is not a stock Item.,العنصر ليس عنصر مخزون.
@@ -768,7 +748,6 @@ Item {0} has no current Item Price for listing UOM {1} in Price List {2}.,الع
 Item {0} has no current Item Price in Price List {1}.,العنصر {0} ليس له سعر عنصر حالي في قائمة الأسعار {1}.
 Item {0} requires a positive conversion factor for listing UOM {1}.,العنصر {0} يحتاج إلى معامل تحويل موجب لوحدة القياس المعروضة {1}.
 Item {0} requires a stock UOM.,العنصر {0} يحتاج إلى وحدة قياس للمخزون.
-Item {0} was modified after this file was exported; re-export and re-apply your edit.,تم تعديل العنصر {0} بعد تصدير هذا الملف؛ أعد التصدير وأعد تطبيق تعديلك.
 KG,كجم
 KG items require a non-negative weight.,عناصر الكيلوجرام تحتاج إلى وزن غير سالب.
 LOGISTICS_DELIVERY,توصيل لوجستي
@@ -779,8 +758,6 @@ Loading Noon Warehouses...,جارٍ تحميل مستودعات Noon...
 Loading active Shopify Locations...,جارٍ تحميل مواقع Shopify النشطة...
 Look Up,بحث
 MP_ITEM_STATUS_UNSPECIFIED,MP_ITEM_STATUS_UNSPECIFIED
-Manage Item master fields and one primary barcode per Item. Mapping fields are not included in this workbook.,إدارة حقول بيانات العنصر الرئيسية وباركود أساسي واحد لكل عنصر. حقول الربط غير مضمّنة في ملف Excel هذا.
-Manage marketplace listings and their ERPNext Item mappings. Item master fields are not included in this workbook.,إدارة قوائم السوق وربطها بعناصر ERPNext. حقول بيانات العنصر الرئيسية غير مضمّنة في ملف Excel هذا.
 Manual,يدوي
 Manual Lookup,بحث يدوي
 Manual Resync,إعادة مزامنة يدوية
@@ -821,8 +798,8 @@ Marketplace Account {0} requires an ERPNext Selling Price List.,يتطلب حس�
 Marketplace Account {0}'s Warehouse {1} does not exist.,مستودع حساب السوق {0} ({1}) غير موجود.
 Marketplace Account {0}'s Warehouse {1} is disabled.,مستودع حساب السوق {0} ({1}) معطّل.
 Marketplace Accounts skipped,حسابات السوق التي تم تخطيها
+Marketplace Listing,قائمة السوق
 Marketplace Integrations,تكاملات الأسواق
-Marketplace Mappings,ربط منتجات السوق
 Marketplace Order is mandatory when Sync Type is Sales Order Sync,طلب السوق إلزامي عندما يكون نوع المزامنة هو مزامنة أمر البيع
 Marketplace Order {0} has no Noon FBPI order number to refresh.,طلب السوق {0} ليس له رقم طلب Noon FBPI للتحديث.
 Marketplace Order {0} is not a Noon order.,طلب السوق {0} ليس طلب Noon.
@@ -834,7 +811,6 @@ Marketplace Product Mapping {0} could not be priced from its ERPNext Item config
 Marketplace Product Mapping {0} does not have a valid Shopify product GID.,ربط منتجات السوق {0} ليس له معرّف منتج Shopify (GID) صالح.
 Marketplace Product Mapping {0} does not have a valid Shopify product variant GID.,ربط منتجات السوق {0} ليس له معرّف متغيّر منتج Shopify (GID) صالح.
 Marketplace Product Mapping {0} requires a Talabat SKU.,يتطلب ربط منتجات السوق {0} رمز منتج Talabat (SKU).
-Marketplace Product Mapping {0}/{1} was modified after this file was exported; re-export and re-apply your edit.,تم تعديل ربط منتجات السوق {0}/{1} بعد تصدير هذا الملف؛ أعد التصدير وأعد تطبيق تعديلك.
 Marketplace Product Mappings must be valid JSON.,يجب أن تكون روابط منتجات السوق بصيغة JSON صالحة.
 Marketplace Product Mappings must be valid names.,يجب أن تكون روابط منتجات السوق أسماءً صالحة.
 Marketplace Sales Order reconciliation,تسوية أوامر البيع للأسواق
@@ -842,9 +818,6 @@ Marketplace Sales Order synchronization,مزامنة أوامر البيع لل�
 Marketplace Transaction ID,معرّف معاملة السوق
 Marketplace outbound cancel: failed to write failure log,إلغاء صادر للسوق: فشلت كتابة سجل الفشل
 Marketplace outbound cancel: refreshing the returned order failed,إلغاء صادر للسوق: فشل تحديث الطلب المُرجَع
-Missing expected column '{0}' in the uploaded file.,العمود المتوقع '{0}' مفقود في الملف المرفوع.
-Missing {0} value for Marketplace Product Mapping {1}/{2}; re-export before editing.,القيمة {0} مفقودة لربط منتجات السوق {1}/{2}؛ أعد التصدير قبل التعديل.
-Missing {0} value for existing Item {1}; re-export before editing.,القيمة {0} مفقودة للعنصر الموجود {1}؛ أعد التصدير قبل التعديل.
 Must be uploaded as Private - a public file is rejected.,يجب رفعه كملف خاص - الملف العام مرفوض.
 NOT_FOUND,غير موجود
 NOT_FOUND and REPLACED items cannot include fulfilled quantity or weight.,العناصر غير الموجودة (NOT_FOUND) والمستبدلة (REPLACED) لا يمكن أن تتضمن كمية أو وزنًا منفّذًا.
@@ -853,13 +826,12 @@ New Item SKU,رمز منتج (SKU) العنصر الجديد
 New Item Status,حالة العنصر الجديدة
 New Quantity,الكمية الجديدة
 New order items require a SKU and IN_CART or ADDITION status.,عناصر الطلب الجديدة تحتاج إلى رمز منتج (SKU) وحالة IN_CART أو ADDITION.
-No ERPNext Item is mapped to this Talabat listing.,لا يوجد عنصر ERPNext مرتبط بقائمة Talabat هذه.
+No ERPNext Item is mapped to this Talabat listing.,لا يوجد عنصر ERPNext مرتبط بإدراج Talabat هذا.
 No Shopify Location configured.,لم يتم ضبط موقع Shopify.
 No Shopify variant,لا يوجد متغيّر Shopify
 No Warehouse configured.,لم يتم ضبط مستودع.
 No active Locations were returned by Shopify.,لم يُرجع Shopify أي مواقع نشطة.
 No active Noon Warehouses were returned.,لم تُرجَع أي مستودعات Noon نشطة.
-No changes.,لا توجد تغييرات.
 No eligible Noon order lines are available to synchronize.,لا توجد بنود طلب Noon مؤهلة للمزامنة.
 No eligible Shopify order lines are available to synchronize.,لا توجد بنود طلب Shopify مؤهلة للمزامنة.
 No enabled Marketplace Product Mapping exists for Noon SKU {0}.,لا يوجد ربط منتجات سوق مفعّل لرمز منتج Noon {0}.
@@ -872,7 +844,6 @@ No payment transactions were received.,لم تُستلم أي معاملات د�
 No promotion applied,لم يُطبَّق أي عرض
 No units are currently eligible to mark Out of Stock.,لا توجد وحدات مؤهلة حاليًا لوضع علامة نفاد من المخزون.
 No units are currently shippable for this order.,لا توجد وحدات قابلة للشحن حاليًا لهذا الطلب.
-None.,لا شيء.
 Noon,Noon
 Noon Connection has no signing key.,اتصال Noon ليس له مفتاح توقيع.
 Noon Connection signing key is invalid.,مفتاح توقيع اتصال Noon غير صالح.
@@ -939,11 +910,6 @@ Normalized marketplace order must include the latest payload.,يجب أن يتض
 Not Checked,لم يتم الفحص
 Not Uploaded,لم يتم الرفع
 Not now,ليس الآن
-Not permitted to create Item {0}.,غير مسموح بإنشاء العنصر {0}.
-Not permitted to create Marketplace Product Mapping.,غير مسموح بإنشاء ربط منتجات السوق.
-Not permitted to read Marketplace Product Mappings.,غير مسموح بقراءة روابط منتجات السوق.
-Not permitted to update Item {0}.,غير مسموح بتحديث العنصر {0}.
-Not permitted to update Marketplace Product Mapping {0}.,غير مسموح بتحديث ربط منتجات السوق {0}.
 Nothing to push.,لا يوجد ما يُرسَل.
 Nothing to retrieve.,لا يوجد ما يُجلب.
 Nothing to sync.,لا يوجد ما تتم مزامنته.
@@ -970,7 +936,6 @@ Payment Entry {0} recorded {1}; nothing was allocated because {2} {3} has nothin
 Pending Noon Out of Stock Units is invalid.,"قيمة ""وحدات Noon المعلّقة النافدة من المخزون"" غير صالحة."
 Platform and External Account ID are required to compute the account identity key.,المنصة ومعرّف الحساب الخارجي مطلوبان لحساب مفتاح هوية الحساب.
 Populate during a secret-rotation window - Shopify signs webhook deliveries with the oldest unrevoked secret until rotation completes. Clear once rotation is done.,املأه خلال فترة تدوير السر - يوقّع Shopify إرسالات Webhook بأقدم سر غير ملغى حتى يكتمل التدوير. امسحه بعد انتهاء التدوير.
-Preview result,نتيجة المعاينة
 Price List {0} currency {1} does not match Noon country {2} currency {3}.,عملة قائمة الأسعار {0} ({1}) لا تطابق عملة دولة Noon {2} ({3}).
 Price List {0} has no currency configured.,قائمة الأسعار {0} ليس لها عملة مضبوطة.
 Price List {0} is disabled.,قائمة الأسعار {0} معطّلة.
@@ -1040,8 +1005,6 @@ Retry Selected Errors,إعادة محاولة الأخطاء المحددة
 Return Lookup,البحث عن مرتجع
 Return receipt acknowledged internally.,تم الإقرار باستلام المرتجع داخليًا.
 Return receipt was already acknowledged.,تم الإقرار باستلام المرتجع مسبقًا.
-Reviewing the workbook failed.,فشلت مراجعة ملف Excel.
-Reviewing workbook changes...,جارٍ مراجعة تغييرات ملف Excel...
 Rounding difference of Sales Order {0},فرق التقريب لأمر البيع {0}
 Row #{0}: Shopify Gateway is required.,الصف #{0}: بوابة Shopify مطلوبة.
 Row #{0}: Shopify Gateway {1} is listed more than once.,الصف #{0}: بوابة Shopify {1} مدرجة أكثر من مرة.
@@ -1186,7 +1149,7 @@ Talabat catalog feedback payload is missing job_id.,بيانات ملاحظات 
 Talabat catalog update queued.,تمت إضافة تحديث كتالوج Talabat إلى قائمة الانتظار.
 Talabat could not confirm the outlet status. The last confirmed status remains unchanged.,تعذّر على Talabat تأكيد حالة المنفذ. آخر حالة مؤكدة تبقى دون تغيير.
 Talabat did not accept the catalog update.,لم يقبل Talabat تحديث الكتالوج.
-Talabat did not confirm success for this listing.,لم يؤكد Talabat النجاح لهذه القائمة.
+Talabat did not confirm success for this listing.,لم يؤكد Talabat النجاح لهذا الإدراج.
 Talabat did not return a successful outlet status response.,لم يُرجع Talabat استجابة ناجحة لحالة المنفذ.
 Talabat line {0} ({1}) has a negative fulfilled total price and cannot be synchronized.,بند Talabat {0} ({1}) له سعر إجمالي منفّذ سالب ولا يمكن مزامنته.
 "Talabat line {0} ({1}) has a nonzero unit price but a zero fulfilled total - this looks like missing pricing data, not a free item. Verify the Talabat order data before synchronizing.",بند Talabat {0} ({1}) له سعر وحدة غير صفري لكن إجمالي منفّذ صفري - يبدو هذا كبيانات تسعير مفقودة وليس عنصرًا مجانيًا. تحقق من بيانات طلب Talabat قبل المزامنة.
@@ -1223,7 +1186,6 @@ The Talabat order is already {0}; a later change to it cannot be applied to the 
 The Talabat order is {0} and can no longer be cancelled from ERPNext; handle it with Talabat.,طلب Talabat في حالة {0} ولم يعد ممكنًا إلغاؤه من ERPNext؛ تعامل معه عبر Talabat.
 The Talabat order is {0}; it can only be cancelled while it is RECEIVED or UPDATE_CART.,طلب Talabat في حالة {0}؛ لا يمكن إلغاؤه إلا وهو في حالة RECEIVED أو UPDATE_CART.
 "The Talabat order status ({0}) is not recognized, so it is unknown whether the order can still change.",حالة طلب Talabat ({0}) غير معروفة، لذا لا يُعرف ما إذا كان الطلب لا يزال قابلًا للتغيير.
-The background job failed.,فشلت مهمة الخلفية.
 The database transaction was already rolled back; verify in ERPNext whether a Payment Entry exists.,تم التراجع عن معاملة قاعدة البيانات بالفعل؛ تحقق في ERPNext من وجود قيد دفع.
 The database transaction was already rolled back; verify the Sales Order state in ERPNext.,تم التراجع عن معاملة قاعدة البيانات بالفعل؛ تحقق من حالة أمر البيع في ERPNext.
 "The destination was created, but",تم إنشاء الوجهة، لكن
@@ -1237,17 +1199,13 @@ The one Bosta business pickup location used for this site. Pick it with Fetch Lo
 The order is already cancelled on Talabat.,الطلب ملغى بالفعل على Talabat.
 "The receivable account {0} is in {1}, not the Company currency {2}.",حساب المدينين {0} بعملة {1}، وليس بعملة الشركة {2}.
 The selected Noon Connection must have a project code.,يجب أن يكون لاتصال Noon المحدد رمز مشروع.
-The server returned an invalid import preview.,أرجع الخادم معاينة استيراد غير صالحة.
 The step failed:,فشلت الخطوة:
 The transaction amount must be greater than zero.,يجب أن يكون مبلغ المعاملة أكبر من صفر.
-The uploaded file is empty.,الملف المرفوع فارغ.
 The webhook URL and key are missing. Save the Noon Connection again.,رابط Webhook والمفتاح مفقودان. احفظ اتصال Noon مرة أخرى.
-The workbook upload did not return a file.,لم يُرجع رفع ملف Excel أي ملف.
 There is no pending Out of Stock reservation on this order.,لا يوجد حجز نفاد من المخزون معلّق في Noon على هذا الطلب.
 This Site,هذا الموقع
 "This asks Noon which reserved units are already Out of Stock and frees the rest, in case a worker died before releasing them. It runs in the background. Continue?",يسأل هذا Noon عن الوحدات المحجوزة التي هي بالفعل نفدت من المخزون ويحرر الباقي، في حال توقف عامل قبل تحريرها. يعمل في الخلفية. هل تريد المتابعة؟
 This fulfillment update is not valid from the current order status.,تحديث التنفيذ هذا غير صالح من حالة الطلب الحالية.
-"This importer requires Stock Settings > Item Naming By to be set to 'Item Code'. Naming Series-based item codes are not supported, because ERPNext overwrites item_code with the generated series name on save, which would silently break this importer's item_code-based identity.",يتطلب هذا المستورِد ضبط إعدادات المخزون > تسمية العنصر حسب على 'Item Code'. رموز العناصر المعتمدة على سلسلة التسمية غير مدعومة، لأن ERPNext يستبدل item_code باسم السلسلة المُنشأ عند الحفظ، مما سيُفسد بصمت هوية هذا المستورِد المعتمدة على item_code.
 "This log row has no Marketplace Order to resync - Order Import failures must be resolved by re-importing the order, not by resyncing.",صف السجل هذا ليس له طلب سوق لإعادة مزامنته - يجب حل حالات فشل استيراد الطلبات بإعادة استيراد الطلب، لا بإعادة المزامنة.
 This order cannot be updated from its current status.,لا يمكن تحديث هذا الطلب من حالته الحالية.
 "This order is linked to Sales Order {0}. Use the Cancel Order button on the Marketplace Order form to cancel it on Talabat, or call marketplace_integrations.api.marketplace_outbound.request_platform_cancel.","هذا الطلب مرتبط بأمر البيع {0}. استخدم زر ""إلغاء الطلب"" في نموذج طلب السوق لإلغائه على Talabat، أو استدعِ marketplace_integrations.api.marketplace_outbound.request_platform_cancel."
@@ -1268,7 +1226,6 @@ Units reserved while a queued Noon UpdateOrder request marks them out of stock. 
 "Units {0} are not shippable (already shipped, cancelled, or not yet acknowledged).",الوحدات {0} غير قابلة للشحن (شُحنت بالفعل، أو أُلغيت، أو لم يتم الإقرار بها بعد).
 Units {0} cannot be marked Out of Stock.,لا يمكن وضع علامة نفاد من المخزون على الوحدات {0}.
 Unknown Bosta city. Refresh the Bosta lists and choose the city again.,مدينة Bosta غير معروفة. حدّث قوائم Bosta واختر المدينة مرة أخرى.
-Unknown row error.,خطأ غير معروف في الصف.
 Unmapped,غير مربوط
 Unnamed item,عنصر بلا اسم
 Unsupported Talabat order update status.,حالة تحديث طلب Talabat غير مدعومة.
@@ -1279,9 +1236,6 @@ Update Talabat Cart,تحديث سلة Talabat
 Updating cart on Talabat...,جارٍ تحديث السلة على Talabat...
 Updating order on Talabat...,جارٍ تحديث الطلب على Talabat...
 Updating the Noon destination,جارٍ تحديث وجهة Noon
-Upload Items workbook,رفع ملف Excel للعناصر
-Upload Marketplace Mappings workbook,رفع ملف Excel لربط منتجات السوق
-Upload one .xlsx workbook.,ارفع ملف Excel واحدًا بصيغة .xlsx.
 Uploaded,تم الرفع
 Use Location,استخدام الموقع
 Use Warehouse,استخدام المستودع
@@ -1297,24 +1251,19 @@ Webhook status: {0},حالة Webhook: {0}
 Weighted pieces,القطع الموزونة
 Weighted pieces cannot be negative.,لا يمكن أن تكون القطع الموزونة سالبة.
 Whether/how much cash Talabat says should be collected at delivery - not evidence that it was actually collected (Collection) or of what the marketplace ultimately owes the merchant (Settlement).,ما إذا كان Talabat يذكر وجوب تحصيل نقد عند التسليم ومقداره - وليس دليلًا على تحصيله فعلًا (التحصيل) ولا على ما يدين به السوق للتاجر في النهاية (التسوية).
-Will be created.,سيتم إنشاؤه.
 You do not have permission to change the linked Sales Order in ERPNext.,ليس لديك صلاحية لتغيير أمر البيع المرتبط في ERPNext.
 ae,ae
 blank,فارغ
 catalog sync,مزامنة الكتالوج
 cities,المدن
-"disabled value '{0}' is not recognized; use 1/0, yes/no, or true/false.",القيمة '{0}' لـ disabled غير معروفة؛ استخدم 1/0 أو yes/no أو true/false.
 eg,eg
-"enabled value '{0}' is not recognized; use 1/0, yes/no, or true/false.",القيمة '{0}' لـ enabled غير معروفة؛ استخدم 1/0 أو yes/no أو true/false.
 in an unknown status,في حالة غير معروفة
-item_code is required.,item_code مطلوب.
 no SKU,لا يوجد رمز منتج (SKU)
 none,لا شيء
 sa,sa
 unknown status,حالة غير معروفة
 update,تحديث
 worst,الأسوأ
-{0} '{1}' does not exist as a {2}.,{0} '{1}' غير موجود كـ {2}.
 {0} exceeds the outstanding amount and is left unallocated.,{0} يتجاوز المبلغ المستحق ويُترك دون تخصيص.
 {0} is mandatory.,{0} إلزامي.
 {0} is missing required field {1}.,{0} ينقصه الحقل المطلوب {1}.
@@ -1393,7 +1342,6 @@ Payment,الدفع
 Open Marketplace Order,فتح طلب السوق
 Marketplace Order summary unavailable.,ملخص طلب السوق غير متاح.
 Sales Order {0} was not found. It may have been deleted.,لم يتم العثور على أمر البيع {0}. ربما تم حذفه.
-Marketplace Account '{0}' does not exist or is not permitted.,حساب السوق '{0}' غير موجود أو غير مسموح به.
 Marketplaces,الأسواق
 Orders,الطلبات
 Home,الرئيسية
@@ -1803,9 +1751,7 @@ This draft holds a Noon shipment ({0}). Check it in Noon before sending or delet
 Noon Fulfillment System Code,رمز نظام التنفيذ في Noon
 Noon Warehouse Active,مستودع Noon نشط
 Noon Warehouse Checked On,تاريخ فحص مستودع Noon
-FBPI Code,رمز FBPI
-Stored by Check Noon Warehouse. Noon does not document which value means FBPI.,تُحفَظ بزر فحص مستودع Noon. لا توثّق Noon أي قيمة تعني FBPI.
-"Type the Fulfillment System Code that means FBPI, once, after looking at the stored code above. Shipments, Out of Stock and invoices are refused unless it equals the stored code and the warehouse is active.",اكتب رمز نظام التنفيذ الذي يعني FBPI مرة واحدة بعد الاطلاع على الرمز المخزَّن أعلاه. تُرفض الشحنات وإنفاد المخزون والفواتير ما لم يطابق الرمز المخزَّن وكان المستودع نشطًا.
+Stored by Check Noon Warehouse. Noon shipments, Out of Stock and invoices need the value fbpi.,تُحفَظ بزر فحص مستودع Noon. تحتاج شحنات Noon وإنفاد المخزون والفواتير إلى القيمة fbpi.
 Check Noon Warehouse,فحص مستودع Noon
 Save the Marketplace Account first.,احفظ حساب السوق أولًا.
 Checking the Noon warehouse...,جارٍ فحص مستودع Noon...
@@ -1813,9 +1759,8 @@ Noon warehouse checked.,تم فحص مستودع Noon.
 Noon Warehouse,مستودع Noon
 Noon has no warehouse with code {0}.,ليس لدى Noon مستودع بالرمز {0}.
 Noon did not answer the warehouse request. Try again.,لم ترد Noon على طلب المستودع. حاول مرة أخرى.
-"Marketplace Account {0} has no FBPI Code. Press Check Noon Warehouse, then type the code that means FBPI.",ليس لحساب السوق {0} رمز FBPI. اضغط فحص مستودع Noon ثم اكتب الرمز الذي يعني FBPI.
 The Noon warehouse of Marketplace Account {0} was never checked. Press Check Noon Warehouse.,لم يُفحص مستودع Noon لحساب السوق {0} قط. اضغط فحص مستودع Noon.
-"The Noon fulfillment system code of Marketplace Account {0} ({1}) is not its FBPI Code ({2}). Press Check Noon Warehouse again, or correct the FBPI Code.",رمز نظام التنفيذ في Noon لحساب السوق {0} ({1}) ليس رمز FBPI الخاص به ({2}). اضغط فحص مستودع Noon مرة أخرى أو صحّح رمز FBPI.
+"The Noon fulfillment system code of Marketplace Account {0} is {1}, not FBPI ({2}). Press Check Noon Warehouse again, or use a Noon warehouse that fulfils through FBPI.",رمز نظام التنفيذ في Noon لحساب السوق {0} هو {1} وليس FBPI ({2}). اضغط فحص مستودع Noon مرة أخرى أو استخدم مستودع Noon يعمل بنظام FBPI.
 The Noon warehouse of Marketplace Account {0} is not active at Noon.,مستودع Noon لحساب السوق {0} غير نشط لدى Noon.
 Sales Order {0} is not a submitted Noon order.,أمر البيع {0} ليس طلب Noon معتمدًا.
 Row {0} is not an item of Sales Order {1}.,الصف {0} ليس صنفًا في أمر البيع {1}.
@@ -1884,3 +1829,53 @@ Delivery Note {0} was cancelled automatically because {1} cancelled the shipment
 The Delivery Note was already cancelled.,تم إلغاء مذكرة التسليم بالفعل.
 An invoice upload for this Delivery Note is already running. Wait for it to finish.,رفع فاتورة لمذكرة التسليم هذه قيد التنفيذ بالفعل. انتظر حتى ينتهي.
 "The return source ""Returned by Bosta"" is set by the app only. It cannot be set or cleared by hand.","مصدر المرتجع ""Returned by Bosta"" يضبطه التطبيق فقط. لا يمكن ضبطه أو مسحه يدويًا."
+The carrier shows this shipment as cancelled. Nothing else to refresh.,تُظهر شركة الشحن أن هذه الشحنة ملغاة. لا يوجد ما يلزم تحديثه.
+Bosta could not return this shipment's status. Try again later or check it in Bosta.,تعذّر على Bosta إرجاع حالة هذه الشحنة. حاول لاحقًا أو تحقق منها في Bosta.
+This Delivery Note has no Bosta tracking number to refresh.,لا تحتوي مذكرة التسليم هذه على رقم تتبع Bosta للتحديث.
+Marketplace Listings,إدراجات السوق
+Last Synced On,تاريخ آخر مزامنة
+Add Listing,إضافة إدراج
+View all,عرض الكل
+Queuing...,جارٍ الإضافة إلى قائمة الانتظار...
+Price only,السعر فقط
+Stock only,المخزون فقط
+Sync price and stock,مزامنة السعر والمخزون
+More sync options,خيارات مزامنة إضافية
+Show details,عرض التفاصيل
+Hide details,إخفاء التفاصيل
+Sync all listings,مزامنة كل الإدراجات
+No marketplace listings for this Item,لا توجد إدراجات سوق لهذا العنصر
+This platform has no manual sync.,لا تتوفر مزامنة يدوية لهذه المنصة.
+You do not have permission to sync this listing.,ليس لديك صلاحية مزامنة هذا الإدراج.
+Talabat updates price and stock together. Use Sync price and stock.,يحدّث Talabat السعر والمخزون معًا. استخدم مزامنة السعر والمخزون.
+This listing is disabled.,هذا الإدراج معطّل.
+Send the current price and stock of {0} to {1}?,هل تريد إرسال السعر والمخزون الحاليين لـ {0} إلى {1}؟
+Send the current price of {0} to {1}?,هل تريد إرسال السعر الحالي لـ {0} إلى {1}؟
+Send the current stock of {0} to {1}?,هل تريد إرسال المخزون الحالي لـ {0} إلى {1}؟
+Send the current price and stock of {0} listings of this Item to their marketplaces?,هل تريد إرسال السعر والمخزون الحاليين لـ {0} من إدراجات هذا العنصر إلى أسواقها؟
+Send the current price of {0} listings of this Item to their marketplaces?,هل تريد إرسال السعر الحالي لـ {0} من إدراجات هذا العنصر إلى أسواقها؟
+Send the current stock of {0} listings of this Item to their marketplaces?,هل تريد إرسال المخزون الحالي لـ {0} من إدراجات هذا العنصر إلى أسواقها؟
+This runs once even though automatic push is off for {0}.,سيعمل هذا مرة واحدة رغم أن الإرسال التلقائي متوقف لـ {0}.
+This sends the listing to Talabat as inactive with stock 0.,سيرسل هذا الإدراج إلى Talabat كغير نشط بمخزون 0.
+Could not load the sync actions. Reload the page and try again.,تعذر تحميل إجراءات المزامنة. أعد تحميل الصفحة وحاول مرة أخرى.
+Talabat confirms later. Refresh to see the result.,يؤكد Talabat لاحقًا. حدّث الصفحة لرؤية النتيجة.
+Queuing Noon price updates...,جارٍ إضافة تحديثات أسعار Noon إلى قائمة الانتظار...
+pricing queued as a manual run.,تمت إضافة التسعير إلى قائمة الانتظار كتشغيل يدوي.
+pricing queued.,تمت إضافة التسعير إلى قائمة الانتظار.
+pricing already queued.,التسعير موجود مسبقًا في قائمة الانتظار.
+The account of the platform this listing belongs to. The platform is filled in automatically. A disabled account stops all its listings from matching orders.,حساب المنصة الذي ينتمي إليه هذا الإدراج. تتم تعبئة المنصة تلقائيًا. تعطيل الحساب يوقف مطابقة جميع إدراجاته مع الطلبات.
+"The listing's identity on the platform. Talabat: the Talabat SKU. Noon: your Partner SKU from Seller Lab > Catalog > Partner Catalog (not the generated PSKU code). Shopify: the product variant ID written as gid://shopify/ProductVariant/<number>, where <number> is the number after /variants/ in the Shopify admin URL. Unique per account and case-sensitive. A changed value creates a new listing.","هوية الإدراج على المنصة. Talabat: رمز SKU في Talabat. Noon: رمز Partner SKU الخاص بك من Seller Lab > Catalog > Partner Catalog (وليس رمز PSKU المُنشأ تلقائيًا). Shopify: معرّف متغير المنتج بصيغة gid://shopify/ProductVariant/<number>، حيث <number> هو الرقم الذي يلي /variants/ في رابط لوحة إدارة Shopify. فريد لكل حساب ويراعي حالة الأحرف. تغيير القيمة ينشئ إدراجًا جديدًا."
+"Shopify only: the product ID written as gid://shopify/Product/<number>, where <number> is the number after /products/ in the Shopify admin URL. Price push needs it. Leave blank for Talabat and Noon.","Shopify فقط: معرّف المنتج بصيغة gid://shopify/Product/<number>، حيث <number> هو الرقم الذي يلي /products/ في رابط لوحة إدارة Shopify. مطلوب لإرسال الأسعار. اتركه فارغًا لـ Talabat وNoon."
+"Informational. Talabat: if filled, it is sent to Talabat instead of External Reference, so keep it blank or equal to External Reference.","للمعلومات فقط. Talabat: إذا تمت تعبئته فيُرسل إلى Talabat بدلًا من المرجع الخارجي، لذا اتركه فارغًا أو مساويًا للمرجع الخارجي."
+Informational. Not used by Talabat or Noon. Shopify refreshes it from the store.,للمعلومات فقط. لا تستخدمه Talabat ولا Noon. يُحدَّث من متجر Shopify.
+Shopify only: the same value as External Reference. Needed to add a variant when editing an order. Leave blank for Talabat and Noon.,Shopify فقط: نفس قيمة المرجع الخارجي. مطلوب لإضافة متغير عند تعديل الطلب. اتركه فارغًا لـ Talabat وNoon.
+Talabat and Noon: the unit the listing is sold in. Stock and price are converted to it. Blank means the Item's stock UOM. Shopify: leave blank.,Talabat وNoon: الوحدة التي يُباع بها الإدراج. يُحوَّل المخزون والسعر إليها. إذا تُرك فارغًا تُستخدم وحدة قياس المخزون للصنف. Shopify: اتركه فارغًا.
+Unchecked listings are ignored when matching orders and are not pushed.,الإدراجات غير المفعّلة تُتجاهل عند مطابقة الطلبات ولا تُرسل إلى المنصة.
+External Reference {0} must look like gid://shopify/ProductVariant/<number>.,يجب أن يكون المرجع الخارجي {0} بالشكل gid://shopify/ProductVariant/<رقم>.
+External Product ID {0} must look like gid://shopify/Product/<number>.,يجب أن يكون معرّف المنتج الخارجي {0} بالشكل gid://shopify/Product/<رقم>.
+External Product ID is required for a new Shopify listing.,معرّف المنتج الخارجي مطلوب لإدراج Shopify جديد.
+External Variant ID is required for a new Shopify listing.,معرّف المتغيّر الخارجي مطلوب لإدراج Shopify جديد.
+"External SKU {0} differs from External Reference {1}. Talabat catalog pushes send the SKU, but orders are matched by the reference.","رمز الصنف الخارجي {0} يختلف عن المرجع الخارجي {1}. تُرسل تحديثات كتالوج Talabat رمز الصنف، لكن الطلبات تُطابَق بالمرجع."
+Saving this listing can re-sync this account's failed orders and push stock automatically.,قد يؤدي حفظ هذا الإدراج إلى إعادة مزامنة الطلبات الفاشلة لهذا الحساب ودفع المخزون تلقائيًا.
+"A submitted Payment Entry already covers {0} of Sales Order {1}, which is at least the amount of Shopify transaction {2} ({3}). No second Payment Entry was created; review it in ERPNext.","يغطي قيد دفع مُرسَل بالفعل {0} من أمر البيع {1}، وهو لا يقل عن مبلغ معاملة Shopify {2} ({3}). لم يتم إنشاء قيد دفع ثانٍ؛ راجعه في ERPNext."
+"Permission was denied while creating the Payment Entry. Check the user's permissions on Payment Entry and the documents it links to.","تم رفض الصلاحية أثناء إنشاء قيد الدفع. راجع صلاحيات المستخدم على قيد الدفع والمستندات المرتبطة به."

@@ -4,6 +4,40 @@ if (typeof frappe !== "undefined") {
 			if (frm.is_new()) return;
 			add_platform_push_button(frm);
 		},
+		after_save(frm) {
+			show_save_notices(frm);
+		},
+	});
+}
+
+// Desk form only: the Item Data Import never runs this script.
+function show_save_notices(frm) {
+	if (frappe.user.has_role("Item Manager")) {
+		frappe.show_alert({
+			message: __(
+				"Saving this listing can re-sync this account's failed orders and push stock automatically."
+			),
+			indicator: "green",
+		});
+	}
+	return warn_talabat_sku_differs(frm);
+}
+
+// Talabat catalog pushes send External SKU, but orders are matched by External Reference.
+function warn_talabat_sku_differs(frm) {
+	const sku = (frm.doc.external_sku || "").trim();
+	const reference = (frm.doc.external_reference || "").trim();
+	if (!sku || sku === reference) return;
+
+	return frappe.db.get_value("Marketplace Account", frm.doc.marketplace_account, "platform").then((r) => {
+		if (!(r && r.message && r.message.platform === "Talabat")) return;
+		frappe.show_alert({
+			message: __(
+				"External SKU {0} differs from External Reference {1}. Talabat catalog pushes send the SKU, but orders are matched by the reference.",
+				[frappe.utils.escape_html(sku), frappe.utils.escape_html(reference)]
+			),
+			indicator: "orange",
+		});
 	});
 }
 
@@ -143,5 +177,6 @@ if (typeof module !== "undefined") {
 		sync_shopify_inventory,
 		sync_noon_mapping,
 		add_platform_push_button,
+		show_save_notices,
 	};
 }

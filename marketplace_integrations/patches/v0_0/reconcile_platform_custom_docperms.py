@@ -60,14 +60,14 @@ def execute():
 	reconcile(doctypes)
 
 
-def reconcile(doctypes):
-	"""Reconcile ``doctypes`` (names); returns ``{doctype: [change description, ...]}``
+def reconcile(doctypes, roles=RECONCILED_ROLES):
+	"""Reconcile ``doctypes`` (names) for ``roles``; returns ``{doctype: [change description, ...]}``
 	for the doctypes that changed."""
 	changed = {}
 	for doctype in doctypes:
 		if not frappe.db.exists("Custom DocPerm", {"parent": doctype}):
 			continue
-		changes = _reconcile_doctype(doctype)
+		changes = _reconcile_doctype(doctype, roles)
 		if changes:
 			frappe.clear_cache(doctype=doctype)
 			changed[doctype] = changes
@@ -88,13 +88,13 @@ def _shipped_permissions(doctype):
 		return []
 
 
-def _reconcile_doctype(doctype):
+def _reconcile_doctype(doctype, roles=RECONCILED_ROLES):
 	changes = []
 	for shipped in _shipped_permissions(doctype):
 		role = shipped.get("role")
 		permlevel = shipped.get("permlevel") or 0
 		wanted = [ptype for ptype in PTYPES if shipped.get(ptype)]
-		if role not in RECONCILED_ROLES or not wanted:
+		if role not in roles or not wanted:
 			continue
 
 		existing = frappe.get_all(

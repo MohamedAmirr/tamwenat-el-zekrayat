@@ -788,7 +788,11 @@ def refresh(delivery_note):
 	"""The contract's ``refresh``: read Bosta's state and apply it; returns the Bosta state name."""
 	from marketplace_integrations.integrations.bosta import statuses
 
-	return statuses.refresh_note(delivery_note)
+	state = statuses.refresh_note(delivery_note)
+	if state is None:
+		# Without ``held`` the only silent ``None`` is a note with no tracking number.
+		frappe.throw(_("This Delivery Note has no Bosta tracking number to refresh."))
+	return state
 
 
 def reconcile():

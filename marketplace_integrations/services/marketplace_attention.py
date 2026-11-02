@@ -53,11 +53,13 @@ Problem sources (``problem_type``):
   Marketplace Account, so these rows have the carrier name as platform and no account; they appear when no
   account filter is set and the platform filter is blank or a carrier in ``CARRIERS``.
 - Payment Error: Shopify Payment Sync Log Error/Invalid rows keyed by order and
-  transaction, hidden by a later Success for the same pair.
+  transaction, hidden by a later Success for the same pair; a duplicate-guard row is also
+  hidden once no manual Payment Entry covers the required amount any more (#425).
 - Payment Excess: submitted mirrored Payment Entries with a positive
   unallocated amount.
 - Payment Entry Cancelled: cancelled mirrored Payment Entries without a
-  submitted amendment.
+  submitted amendment and without another submitted manual Payment Entry covering the order
+  for at least the amount the cancelled entry allocated (#425).
 """
 
 import json
@@ -78,6 +80,7 @@ from marketplace_integrations.services.sales_order_sync import (
 	NOON_ELIGIBLE_EXTERNAL_STATUS,
 	NOON_INELIGIBLE_INTEGRATION_STATUS,
 )
+from marketplace_integrations.services.shopify_payments import manual_payment_totals
 from marketplace_integrations.services.sync_status import CANCELLED, NEEDS_ACTION, SYNC_ERROR, SYNCED
 
 UNMAPPED_ITEMS = "Unmapped Items"
@@ -942,6 +945,13 @@ def _collect_payment_errors(accounts, order_accounts):
 			stamp = get_datetime(log.attempted_at or log.creation)
 			if transaction_id and (key not in resolving or stamp > resolving[key]):
 				resolving[key] = stamp
+	# A duplicate-guard row stays only while a manual Payment Entry still covers the amount (#425).
+	guard_orders = {
+		cstr(_parse_request_data(log.response_data).get("guard_sales_order")) for log in errors
+	} - {""}
+	covered = {}
+	for chunk in _chunks(guard_orders):
+		covered.update(manual_payment_totals(chunk))
 	items = []
 	seen = set()
 	for log in errors:
@@ -955,6 +965,11 @@ def _collect_payment_errors(accounts, order_accounts):
 		if resolving.get(key) and resolving[key] > stamp:
 			continue
 		response = _parse_request_data(log.response_data)
+		guard_order = cstr(response.get("guard_sales_order"))
+		if guard_order:
+			total = flt(covered.get(guard_order), 2)
+			if total <= 0 or total < flt(response.get("guard_required"), 2):
+				continue
 		message = cstr(response.get("message")).strip()[:EXPLANATION_MAX_LENGTH]
 		items.append(
 			_item(
@@ -1017,28 +1032,81 @@ def _collect_payment_excess(accounts, order_accounts):
 	]
 
 
+def _cancelled_entry_cover(entry):
+	"""What a manual Payment Entry must cover to replace the cancelled mirrored one.
+
+	The amount the cancelled entry allocated to the order (its rounding write-off is already
+	inside the allocation: Shopify 494.21 against a rounded 494 order allocates 494), not its
+	``paid_amount``.  An entry that allocated nothing falls back to ``paid_amount``.
+	"""
+	return flt(entry.total_allocated_amount or entry.paid_amount, 2)
+
+
 def _collect_cancelled_payment_entries(accounts, order_accounts):
 	if not order_accounts:
 		return []
-	entries = _payment_entries(
-		order_accounts,
-		{"docstatus": 2, "custom_marketplace_transaction_id": ["is", "set"]},
-		["name", "custom_marketplace_order", "custom_marketplace_transaction_id", "modified"],
-	)
+	cancelled_filters = {"docstatus": 2, "custom_marketplace_transaction_id": ["is", "set"]}
+	fields = [
+		"name",
+		"custom_marketplace_order",
+		"custom_marketplace_transaction_id",
+		"paid_amount",
+		"total_allocated_amount",
+		"modified",
+	]
+	entries = _payment_entries(order_accounts, cancelled_filters, fields)
 	if not entries:
 		return []
+	# What a manual entry must cover is a fact about the order, not about who is looking: the sum is
+	# read without permission scoping over the same filters and only sums and ids leave this function
+	# (the rows shown stay the scoped ones above).
+	all_entries = []
+	for chunk in _chunks(order_accounts):
+		all_entries.extend(
+			frappe.get_all(
+				"Payment Entry",
+				filters={**cancelled_filters, "custom_marketplace_order": ["in", chunk]},
+				fields=fields,
+				limit_page_length=0,
+			)
+		)
+	# Another submitted Payment Entry covering the order for at least that amount resolves it (#425).
+	sales_order_of = {}
+	for chunk in _chunks({entry.custom_marketplace_order for entry in all_entries}):
+		sales_order_of.update(
+			{
+				row.name: row.erpnext_sales_order
+				for row in frappe.get_list(
+					"Marketplace Order",
+					filters={"name": ["in", chunk]},
+					fields=["name", "erpnext_sales_order"],
+					limit_page_length=0,
+				)
+				if row.erpnext_sales_order
+			}
+		)
+	covered = {}
+	for chunk in _chunks(set(sales_order_of.values())):
+		covered.update(manual_payment_totals(chunk))
 	# A submitted amendment of a cancelled entry resolves it (#231).
 	amended = set()
-	for chunk in _chunks(entry.name for entry in entries):
+	for chunk in _chunks(entry.name for entry in all_entries):
 		amended.update(
 			row.amended_from
-			for row in frappe.get_list(
+			for row in frappe.get_all(
 				"Payment Entry",
 				filters={"docstatus": 1, "amended_from": ["in", chunk]},
 				fields=["amended_from"],
 				limit_page_length=0,
 			)
 		)
+	# Per Sales Order, the manual total must cover the SUM of its still-open cancelled entries, so
+	# one manual entry for part of a split payment never hides the part that was not recorded.
+	required = {}
+	for entry in all_entries:
+		sales_order = sales_order_of.get(entry.custom_marketplace_order)
+		if sales_order and entry.name not in amended:
+			required[sales_order] = required.get(sales_order, 0) + _cancelled_entry_cover(entry)
 	return [
 		_item(
 			PAYMENT_ENTRY_CANCELLED,
@@ -1055,7 +1123,13 @@ def _collect_cancelled_payment_entries(accounts, order_accounts):
 			NEXT_OPEN_PAYMENT,
 		)
 		for entry in entries
-		if entry.custom_marketplace_order in order_accounts and entry.name not in amended
+		if entry.custom_marketplace_order in order_accounts
+		and entry.name not in amended
+		and not (
+			entry.custom_marketplace_order in sales_order_of
+			and flt(covered.get(sales_order_of[entry.custom_marketplace_order]), 2)
+			>= flt(required[sales_order_of[entry.custom_marketplace_order]], 2)
+		)
 	]
 
 

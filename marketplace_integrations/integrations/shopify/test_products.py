@@ -556,12 +556,10 @@ class IntegrationTestExportCatalog(IntegrationTestCase):
 			"Shopify Connection", self.account.connection, ignore_permissions=True, force=True
 		)
 
-	def test_exports_all_pages_with_importer_columns(self):
+	def test_exports_all_pages_as_a_reference_sheet(self):
 		from io import BytesIO
 
 		from openpyxl import load_workbook
-
-		from marketplace_integrations.services import mapping_import
 
 		upsert_mapping(self.account.name, "gid://shopify/ProductVariant/1", self.item)
 
@@ -582,7 +580,7 @@ class IntegrationTestExportCatalog(IntegrationTestCase):
 
 		sheet = load_workbook(BytesIO(frappe.response["filecontent"])).active
 		rows = list(sheet.iter_rows(values_only=True))
-		self.assertEqual(list(rows[0][: len(mapping_import.HEADER_ROW)]), mapping_import.HEADER_ROW)
+		self.assertEqual(list(rows[0]), products.CATALOG_COLUMNS)
 		by_ref = {row[2]: row for row in rows[1:]}
 		self.assertEqual(set(by_ref), {"gid://shopify/ProductVariant/1", "gid://shopify/ProductVariant/2"})
 		self.assertEqual(by_ref["gid://shopify/ProductVariant/1"][1], self.item)

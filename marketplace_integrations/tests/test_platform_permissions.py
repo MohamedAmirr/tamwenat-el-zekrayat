@@ -337,6 +337,72 @@ class IntegrationTestPlatformPermissions(IntegrationTestCase):
 					self.assertFalse(frappe.has_permission(doctype, ptype, user=user))
 		self.assertEqual(permissions.get_user_platforms(user), [])
 
+	def test_item_manager_sees_and_writes_mappings_of_every_platform_only(self):
+		# #373: Item Manager maintains the listings of all platforms, mappings only.
+		user = self.make_user("Item Manager Only", "Item Manager")
+		self.assertEqual(
+			self.visible(user, "Marketplace Product Mapping"), set(self.mappings.values())
+		)
+		for platform in PLATFORMS:
+			with self.subTest(platform=platform):
+				doc = frappe.get_doc("Marketplace Product Mapping", self.mappings[platform])
+				with as_user(user):
+					doc.check_permission("read")
+					doc.check_permission("write")
+					doc.external_sku = f"sku-{platform}"
+					doc.save()
+		for doctype in ("Marketplace Account", "Marketplace Order", "Marketplace Sync Log"):
+			with self.subTest(doctype=doctype):
+				self.assertFalse(frappe.has_permission(doctype, "read", user=user))
+
+	def test_item_manager_can_create_but_not_delete_a_mapping(self):
+		user = self.make_user("Item Manager Only", "Item Manager")
+		new = frappe.get_doc(
+			{
+				"doctype": "Marketplace Product Mapping",
+				"marketplace_account": self.accounts["Noon"],
+				"item": self.item_code,
+				"external_reference": f"ref-im-new-{self.suffix}",
+			}
+		)
+		existing = frappe.get_doc("Marketplace Product Mapping", self.mappings["Talabat"])
+		with as_user(user):
+			new.check_permission("create")
+			self.assertFalse(frappe.has_permission("Marketplace Product Mapping", "delete", user=user))
+			with self.assertRaises(frappe.PermissionError):
+				existing.check_permission("delete")
+			with self.assertRaises(frappe.PermissionError):
+				frappe.delete_doc("Marketplace Product Mapping", existing.name)
+		self.assertTrue(frappe.db.exists("Marketplace Product Mapping", existing.name))
+		# The row filter itself does not grant delete either.
+		self.assertFalse(permissions.marketplace_product_mapping_has_permission(existing, "delete", user))
+		self.assertTrue(permissions.marketplace_product_mapping_has_permission(existing, "write", user))
+
+	def test_item_manager_without_a_platform_role_cannot_queue_catalog_syncs(self):
+		from marketplace_integrations.api import talabat_catalog
+		from marketplace_integrations.services.mapping_push import group_mappings_by_account
+
+		user = self.make_user("Item Manager Only", "Item Manager")
+		with as_user(user):
+			with self.assertRaises(frappe.PermissionError):
+				talabat_catalog.queue_catalog_sync(self.accounts["Talabat"])
+			with self.assertRaises(frappe.PermissionError):
+				group_mappings_by_account([self.mappings["Talabat"]])
+
+	def test_item_manager_with_a_platform_role_gets_the_wider_access(self):
+		user = self.make_user("Item Manager Talabat", "Item Manager", "Talabat User")
+		self.assertEqual(
+			self.visible(user, "Marketplace Product Mapping"), set(self.mappings.values())
+		)
+		# Other doctypes keep the platform filter.
+		self.assertEqual(
+			self.visible(user, "Marketplace Order"), {self.orders["Talabat"]}
+		)
+
+	def test_platform_only_user_stays_filtered_on_mappings(self):
+		user = self.make_user("Noon Only", "Noon User")
+		self.assertEqual(self.visible(user, "Marketplace Product Mapping"), {self.mappings["Noon"]})
+
 	def test_moving_a_row_to_another_platforms_account_is_denied_on_write(self):
 		# The hook checks the document as it will be saved, so pointing an own row at another
 		# platform's account is refused instead of handing the row over.

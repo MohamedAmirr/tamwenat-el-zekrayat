@@ -10,7 +10,57 @@ const {
 	sync_shopify_inventory,
 	sync_noon_mapping,
 	add_platform_push_button,
+	show_save_notices,
 } = require("./marketplace_product_mapping.js");
+
+function save_notice_frappe({ roles = [], platform = "Talabat" } = {}) {
+	const alerts = [];
+	global.frappe = {
+		user: { has_role: (role) => roles.includes(role) },
+		show_alert: (args) => alerts.push(args),
+		utils: { escape_html: (text) => text },
+		db: { get_value: () => Promise.resolve({ message: { platform } }) },
+	};
+	return alerts;
+}
+
+test("saving as an Item Manager shows one green notice about the automatic re-sync", async () => {
+	const alerts = save_notice_frappe({ roles: ["Item Manager"] });
+
+	await show_save_notices({ doc: { marketplace_account: "A", external_reference: "r", external_sku: "" } });
+
+	assert.equal(alerts.length, 1);
+	assert.equal(alerts[0].indicator, "green");
+	assert.match(alerts[0].message, /re-sync this account's failed orders and push stock/);
+});
+
+test("saving without the Item Manager role shows no re-sync notice", async () => {
+	const alerts = save_notice_frappe({ roles: ["System Manager"] });
+
+	await show_save_notices({ doc: { marketplace_account: "A", external_reference: "r", external_sku: "" } });
+
+	assert.deepEqual(alerts, []);
+});
+
+test("saving a Talabat mapping whose SKU differs from the reference shows an orange warning", async () => {
+	const alerts = save_notice_frappe({ platform: "Talabat" });
+
+	await show_save_notices({ doc: { marketplace_account: "A", external_reference: "ref-1", external_sku: "sku-1" } });
+
+	assert.equal(alerts.length, 1);
+	assert.equal(alerts[0].indicator, "orange");
+	assert.match(alerts[0].message, /sku-1 differs from External Reference ref-1/);
+});
+
+test("no SKU warning for a matching or blank SKU, or for another platform", async () => {
+	for (const [platform, sku] of [["Talabat", "ref-1"], ["Talabat", " "], ["Noon", "sku-1"], ["Shopify", "sku-1"]]) {
+		const alerts = save_notice_frappe({ platform });
+
+		await show_save_notices({ doc: { marketplace_account: "A", external_reference: "ref-1", external_sku: sku } });
+
+		assert.deepEqual(alerts, [], `${platform} / ${sku}`);
+	}
+});
 
 test("Push to Talabat queues only the current Marketplace Product Mapping", async () => {
 	let call_options;

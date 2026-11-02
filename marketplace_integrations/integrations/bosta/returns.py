@@ -17,7 +17,10 @@ confirmation and the staff Notification.
 import frappe
 from frappe.utils import flt
 
-from marketplace_integrations.integrations.bosta.delivery_note_shipment import AUTOMATIC_RETURN_FLAG, RETURNED_BY_BOSTA
+from marketplace_integrations.integrations.bosta.delivery_note_shipment import (
+	AUTOMATIC_RETURN_FLAG,
+	RETURNED_BY_BOSTA,
+)
 
 _JOB = "bosta-returned-draft|{}"
 
