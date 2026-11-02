@@ -14,6 +14,9 @@ from marketplace_integrations.services.mappings import upsert_mapping_for_listin
 
 WAREHOUSES_PATH = "/warehouse-platform/v1/warehouses/list"
 MAPPING_DOCTYPE = "Marketplace Product Mapping"
+# The fulfillment system code Noon's ListWarehouses returns for an FBPI warehouse. Observed on the user's
+# account; Noon does not document the value. Compared case-insensitively.
+FBPI_SYSTEM_CODE = "fbpi"
 
 
 def get_account(account_name, permission=None):
@@ -148,26 +151,21 @@ def check_account_warehouse(account_name):
 def fbpi_ready(account):
 	"""``(ok, reason)``: may FBPI work (a shipment, Mark Out of Stock, an invoice) go to Noon for this account?
 
-	``ok`` only when the account's FBPI Code is set, equals the stored Noon fulfillment system code, and the
-	stored warehouse is active. Otherwise ``reason`` is a translated, user-readable sentence (Noon's value is
+	``ok`` only when the stored Noon fulfillment system code equals ``FBPI_SYSTEM_CODE`` (case-insensitive) and
+	the stored warehouse is active. Otherwise ``reason`` is a translated, user-readable sentence (Noon's value is
 	escaped). ``account`` is a Marketplace Account document or its name. Reads stored values only: no call."""
 	if isinstance(account, str):
 		account = frappe.get_doc("Marketplace Account", account)
-	fbpi_code = cstr(account.get("noon_fbpi_code")).strip()
 	stored_code = cstr(account.get("noon_fulfillment_system_code")).strip()
-	if not fbpi_code:
-		return False, _(
-			"Marketplace Account {0} has no FBPI Code. Press Check Noon Warehouse, then type the code that means FBPI."
-		).format(account.name)
 	if not stored_code:
 		return False, _("The Noon warehouse of Marketplace Account {0} was never checked. Press Check Noon Warehouse.").format(
 			account.name
 		)
-	if stored_code != fbpi_code:
+	if stored_code.lower() != FBPI_SYSTEM_CODE:
 		return False, _(
-			"The Noon fulfillment system code of Marketplace Account {0} ({1}) is not its FBPI Code ({2}). "
-			"Press Check Noon Warehouse again, or correct the FBPI Code."
-		).format(account.name, escape_html(stored_code), escape_html(fbpi_code))
+			"The Noon fulfillment system code of Marketplace Account {0} is {1}, not FBPI ({2}). "
+			"Press Check Noon Warehouse again, or use a Noon warehouse that fulfils through FBPI."
+		).format(account.name, escape_html(stored_code), FBPI_SYSTEM_CODE)
 	if not cint(account.get("noon_warehouse_active")):
 		return False, _("The Noon warehouse of Marketplace Account {0} is not active at Noon.").format(account.name)
 	return True, ""

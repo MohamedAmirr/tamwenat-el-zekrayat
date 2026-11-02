@@ -72,7 +72,7 @@ The Shipping section of a Noon Delivery Note holds the AWB, the Noon data, and t
 
 Submit starts a background job that sends the shipment to Noon. The Delivery Note becomes Submitted only if Noon confirms: once the shipment is Created the job submits the note itself, as the user who pressed Submit (decided 2026-11-02). The text below is the original step design; the commit rules and duplicate prevention still hold.
 
-1. **Validate:** Noon is the provider, the warehouse is FBPI, an AWB is present or the checkbox is ticked, and the shipment has at least one item.
+1. **Validate:** Noon is the provider, the warehouse is FBPI (stored fulfillment system code is `fbpi`, warehouse active), an AWB is present or the checkbox is ticked, and the shipment has at least one item.
 2. **Lock** the Delivery Note so a second click or a second user cannot start a parallel attempt. The screen shows `Sending to Noon...`.
 3. **Ask Noon first:** get the shipment by warehouse and shipment number. If it exists, skip to step 6.
 4. **AWB:** if the checkbox is ticked and no AWB is stored yet, request one from Noon and commit it to the Delivery Note at once. A retry reuses this AWB and never requests another.
@@ -215,6 +215,7 @@ The points below are assumptions to test with sandbox orders before release, and
 - Whether a generated AWB expires or can be released if unused, and whether create shipment can generate the AWB itself.
 - What happens to a shipment when Noon cancels one of its items.
 - After the first real CancelShipment (all UNVERIFIED; Noon documents that the shipment's items are cancelled too): `GetFbpiOrder` for the order shows each unit's `mp_status`, `integration_status` and `cancellation_reason_code`; what `GetShipment` answers for the cancelled shipment; whether a new CreateShipment for the same units works; whether a webhook is sent and how long it takes; which shipment states refuse a cancel; whether a repeat cancel of an already cancelled shipment is safe.
+- FBPI warehouse code: the app treats the fulfillment system code `fbpi` (constant `catalog.FBPI_SYSTEM_CODE`, case-insensitive) as FBPI. It is the single value seen on the user's account and Noon does not document it. On the first real shipment confirm that Check Noon Warehouse stores `fbpi` and that Noon accepts the shipment for that warehouse.
 - Invoice endpoints: when upload is allowed (a second upload supersedes the first, known from Noon's documentation).
 - Rate limits, and how the session behaves on expiry or a 401.
 - On the ERPNext side: that an error in `before_submit` rolls back the save, that the over-delivery check catches an item removed by Update Items, and that Update Items releases the stock reservation.

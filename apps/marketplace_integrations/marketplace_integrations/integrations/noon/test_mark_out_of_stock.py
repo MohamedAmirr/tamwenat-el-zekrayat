@@ -72,8 +72,7 @@ class IntegrationTestNoonMarkOutOfStock(IntegrationTestNoonFulfillmentBase):
 
 	def _fbpi_ready_account(self, **overrides):
 		values = {
-			"noon_fbpi_code": "FBPI",
-			"noon_fulfillment_system_code": "FBPI",
+			"noon_fulfillment_system_code": "fbpi",
 			"noon_warehouse_active": 1,
 			"noon_warehouse_checked_on": frappe.utils.now_datetime(),
 		}
@@ -213,7 +212,7 @@ class IntegrationTestNoonMarkOutOfStock(IntegrationTestNoonFulfillmentBase):
 
 	def test_refused_unless_the_warehouse_is_fbpi(self):
 		fixture = self._order([("SKU-A", 1)], ["SKU-A"])
-		for overrides in ({"noon_fbpi_code": ""}, {"noon_fulfillment_system_code": "OTHER"}, {"noon_warehouse_active": 0}):
+		for overrides in ({"noon_fulfillment_system_code": ""}, {"noon_fulfillment_system_code": "OTHER"},{"noon_warehouse_active": 0}):
 			self._fbpi_ready_account(**overrides)
 			with patch(_ENQUEUE) as enqueue, self.assertRaises(frappe.ValidationError):
 				fulfillment.mark_row_out_of_stock(fixture.name, fixture.row_for("SKU-A").name)

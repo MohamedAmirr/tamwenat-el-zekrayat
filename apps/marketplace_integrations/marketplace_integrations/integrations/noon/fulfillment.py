@@ -732,7 +732,9 @@ def run_mark_out_of_stock(marketplace_order_name, mp_item_nrs, sales_order, requ
 				keep_reservation = False
 				_set_result(sales_order, request_id, "failed", _("Units are no longer eligible to mark Out of Stock."))
 				return
-			from marketplace_integrations.integrations.noon.delivery_note_shipment import has_unresolved_create
+			from marketplace_integrations.integrations.noon.delivery_note_shipment import (
+				has_unresolved_create,
+			)
 
 			if has_unresolved_create(order.name):
 				frappe.db.commit()

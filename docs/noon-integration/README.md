@@ -77,10 +77,11 @@ The Delivery Note of a Noon Sales Order is the shipment. The Noon adapter
   Noon filters only by fulfillment system code, so the account's `noon_warehouse_code` is picked from the list)
   and stores `noon_fulfillment_system_code`, `noon_warehouse_active` and `noon_warehouse_checked_on`
   (read-only). The call is logged as an Integration Request (operation Warehouse, reference the account).
-  Noon does not document which code means FBPI, so the user looks at the stored code and types it once into
-  the FBPI Code field (`noon_fbpi_code`). `catalog.fbpi_ready(account) -> (ok, reason)` is true only when the
-  FBPI Code is set, equals the stored code and the warehouse is active; it reads stored values and never calls
-  Noon. `check_fbpi_warehouse` (in `validate_ready`) refuses Create/Submit with its reason. Changing the
+  Noon does not document which code means FBPI. The code is the constant `catalog.FBPI_SYSTEM_CODE = "fbpi"`
+  (no account field): it is the single value observed on the user's account, not documented by Noon, so verify it
+  on the first real shipment. `catalog.fbpi_ready(account) -> (ok, reason)` is true only when the stored code
+  equals it (case-insensitive) and the warehouse is active; any other code is refused with a message showing the
+  code Noon returned. It reads stored values and never calls Noon. `check_fbpi_warehouse` (in `validate_ready`) refuses Create/Submit with its reason. Changing the
   account's warehouse code or connection clears the stored answer (check again). Mark Out of Stock and the
   invoice actions reuse `fbpi_ready` in the next sub-issue #416 runs.
 - **Mark as Out of Stock (#416).** A "Mark as Out of Stock" Button (Custom Field `custom_noon_mark_out_of_stock`) in the

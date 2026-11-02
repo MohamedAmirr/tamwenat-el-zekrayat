@@ -523,10 +523,10 @@ test("the warehouse check fields are shown only for Noon", () => {
 		"noon_fulfillment_system_code",
 		"noon_warehouse_active",
 		"noon_warehouse_checked_on",
-		"noon_fbpi_code",
 	]) {
 		assert.ok(NOON_FIELDS.includes(fieldname));
 	}
+	assert.ok(!NOON_FIELDS.includes("noon_fbpi_code"));
 });
 
 test("check_noon_warehouse calls the endpoint with the account and reloads the form", async () => {
