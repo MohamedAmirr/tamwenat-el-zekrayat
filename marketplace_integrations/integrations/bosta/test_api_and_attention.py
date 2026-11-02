@@ -6,7 +6,7 @@
 
 import frappe
 from frappe.tests import IntegrationTestCase
-from frappe.utils import add_days, now_datetime
+from frappe.utils import add_days, add_to_date, now_datetime
 
 from marketplace_integrations.api import bosta_shipments
 from marketplace_integrations.api import carrier_shipments as carrier_api
@@ -105,6 +105,30 @@ class IntegrationTestBostaAttention(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual(len(self._items(note, attention.CARRIER_EXCEPTION)), 1)
 		self._set(note, custom_integration_status="Cancelled")
 		self.assertEqual(self._items(note, attention.CARRIER_EXCEPTION), [])
+
+	def test_a_created_draft_with_a_submit_error_says_the_note_was_not_submitted(self):
+		note = self.make_note()
+		self._set(
+			note,
+			custom_integration_status="Created",
+			custom_last_integration_error="Shipment created at Bosta; the Delivery Note could not be submitted: negative stock",
+		)
+		items = self._items(note, attention.CARRIER_EXCEPTION)
+		self.assertEqual(len(items), 1)
+		self.assertIn("shipment created, Delivery Note not submitted.", items[0]["explanation"])
+		self.assertIn("negative stock", items[0]["explanation"])
+
+	def test_a_created_draft_older_than_15_minutes_is_flagged_but_a_fresh_one_or_a_submitted_one_is_not(self):
+		note = self.make_note()
+		self._set(note, custom_integration_status="Created", custom_carrier_delivery_id="D-1")
+		self.assertEqual(self._items(note, attention.CARRIER_EXCEPTION), [])
+		self._set(note, modified=add_to_date(now_datetime(), minutes=-16))
+		items = self._items(note, attention.CARRIER_EXCEPTION)
+		self.assertEqual(len(items), 1)
+		self.assertIn("still a draft", items[0]["explanation"])
+		self._set(note, docstatus=1)
+		self.assertEqual(self._items(note, attention.CARRIER_EXCEPTION), [])
+		self._set(note, docstatus=0)
 
 	def test_a_return_state_without_a_return_note_is_listed(self):
 		note = self.make_note()

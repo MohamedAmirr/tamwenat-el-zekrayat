@@ -144,12 +144,14 @@ class IntegrationTestBostaReturnPickup(BostaFixtureMixin, IntegrationTestCase):
 	def test_the_request_creates_the_pickup_as_a_return_pickup_operation(self):
 		draft = self._return(returned_cod=300)
 
-		result = carrier_shipments.request_create(draft.name)
+		result = carrier_shipments.request_create(draft.name, submit_as="Administrator")
 
 		self.assertEqual(result, {"status": "Creating", "queued": True})
 		kwargs = self.enqueue.call_args.kwargs
 		self.assertEqual(kwargs["job_id"], f"bosta-create|{draft.name}")
 		self.assertFalse(kwargs["lookup_first"])
+		# A return pickup is never submitted by the job, even when the caller passed a user.
+		self.assertIsNone(kwargs["submit_as"])
 		self.http.queue["create"].append(created(tracking="TRK-PICKUP", delivery_id="PICK-1"))
 
 		carrier_shipments.run_create(draft.name, log=kwargs["log"], lookup_first=False)

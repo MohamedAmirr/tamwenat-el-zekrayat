@@ -281,9 +281,13 @@ test("submit of an unsaved form asks to save first and does not call the carrier
 	assert.equal(msgprints.length, 1);
 });
 
-test("submit waits for Created, reloads the form, then lets the submit continue", async () => {
+test("submit waits for the job to submit the note, reloads, and never lets Frappe save again", async () => {
 	const { handlers, calls, dialogs } = load({
-		statuses: [{ custom_integration_status: "Creating" }, { custom_integration_status: "Created" }],
+		statuses: [
+			{ custom_integration_status: "Creating", docstatus: 0 },
+			{ custom_integration_status: "Created", docstatus: 0 },
+			{ custom_integration_status: "Created", docstatus: 1 },
+		],
 	});
 	const frm = make_form({ custom_integration_status: "Not Created" });
 	await handlers.before_submit(frm);
@@ -292,7 +296,35 @@ test("submit waits for Created, reloads the form, then lets the submit continue"
 	assert.equal(dialogs[0].config.title, "Sending to Bosta...");
 	assert.equal(dialogs[0].hidden, true);
 	assert.equal(frm.reloads, 1);
-	assert.equal(global.frappe.validated, true);
+	assert.equal(global.frappe.validated, false);
+});
+
+test("Created but still a draft with an error: the wait stops, shows the escaped reason and reloads", async () => {
+	const { handlers, msgprints } = load({
+		statuses: [
+			{
+				custom_integration_status: "Created",
+				docstatus: 0,
+				custom_last_integration_error: "Shipment created at Bosta; the Delivery Note could not be submitted: <b>negative</b> stock",
+			},
+		],
+	});
+	const frm = make_form({ custom_integration_status: "Not Created" });
+	await handlers.before_submit(frm);
+	assert.equal(global.frappe.validated, false);
+	assert.equal(frm.reloads, 1);
+	assert.match(msgprints[0].message, /could not be submitted: &lt;b>negative&lt;\/b> stock/);
+	assert.match(msgprints[0].message, /The shipment exists at Bosta/);
+	assert.equal(msgprints[0].primary_action, undefined);
+});
+
+test("Created but still a draft without an error keeps waiting for the job, then points to the note", async () => {
+	const { handlers, msgprints } = load({ statuses: [{ custom_integration_status: "Created", docstatus: 0 }] });
+	const frm = make_form({ custom_integration_status: "Not Created" });
+	await handlers.before_submit(frm);
+	assert.equal(global.frappe.validated, false);
+	assert.equal(frm.reloads, 0);
+	assert.match(msgprints[0].message, /submitted automatically once the shipment is created/);
 });
 
 test("submit stops and opens the city picker when the server found no city for the address", async () => {
@@ -491,7 +523,7 @@ test("Refresh and Check share one lock per note, other notes are not blocked", a
 });
 
 test("a second submit while a request is in flight does not start another and stops the submit", async () => {
-	const { handlers, calls } = load({ statuses: [{ custom_integration_status: "Created" }] });
+	const { handlers, calls } = load({ statuses: [{ custom_integration_status: "Created", docstatus: 1 }] });
 	const frm = make_form({ custom_integration_status: "Not Created" });
 	const first = handlers.before_submit(frm);
 	frappe.validated = true;

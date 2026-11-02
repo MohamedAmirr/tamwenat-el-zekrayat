@@ -17,6 +17,13 @@
 	// Integration Statuses with a Noon shipment that must be cancelled at Noon before ERPNext cancels.
 	const CANCELLABLE = ["Created", "Cancellation Pending", "Cancellation Unknown"];
 
+	// Unverified at Noon: its API docs say CancelShipment cancels all items of the shipment too, and the order sync
+	// then cancels or shrinks the Sales Order by itself.
+	const cancel_warning = () =>
+		__(
+			"Cancel the Noon shipment of this Delivery Note? Noon documents that cancelling the shipment also cancels its items at Noon: the Sales Order lines may be cancelled or reduced, and the units may not be shippable again. This cannot be undone."
+		);
+
 	function escape(text) {
 		return frappe.utils.escape_html(text || "");
 	}
@@ -191,23 +198,31 @@
 	function before_cancel(frm) {
 		if (frm.doc.transporter_name !== CARRIER || !CANCELLABLE.includes(frm.doc.custom_integration_status || "")) return;
 		return new Promise((resolve) => {
-			cancel_at_noon(frm, {
-				// the server changed the note: load it before the native cancel saves it
-				done: () =>
-					Promise.resolve(frm.reload_doc()).then(() => {
-						// The note was already cancelled automatically (a Check read found Noon's cancel): the
-						// native cancel must not go on over a cancelled document.
-						if (frm.doc.docstatus === 2) {
-							frappe.validated = false;
-							frappe.show_alert({ message: __("The Delivery Note was already cancelled."), indicator: "green" });
-						}
-						resolve();
+			const stop = () => {
+				frappe.validated = false;
+				resolve();
+			};
+			// Our own warning, asked once here (the native confirmation says nothing about Noon): Noon documents
+			// that cancelling the shipment also cancels its items. Declining ends the cancel.
+			frappe.confirm(
+				cancel_warning(),
+				() =>
+					cancel_at_noon(frm, {
+						// the server changed the note: load it before the native cancel saves it
+						done: () =>
+							Promise.resolve(frm.reload_doc()).then(() => {
+								// The note was already cancelled automatically (a Check read found Noon's cancel): the
+								// native cancel must not go on over a cancelled document.
+								if (frm.doc.docstatus === 2) {
+									frappe.validated = false;
+									frappe.show_alert({ message: __("The Delivery Note was already cancelled."), indicator: "green" });
+								}
+								resolve();
+							}),
+						stop,
 					}),
-				stop: () => {
-					frappe.validated = false;
-					resolve();
-				},
-			});
+				stop
+			);
 		});
 	}
 
@@ -215,7 +230,7 @@
 	function cancel_shipment(frm) {
 		return new Promise((resolve) => {
 			frappe.confirm(
-				__("Cancel the Noon shipment of this Delivery Note? This cannot be undone."),
+				cancel_warning(),
 				() =>
 					cancel_at_noon(frm, {
 						done: () =>
