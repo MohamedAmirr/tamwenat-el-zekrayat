@@ -70,7 +70,7 @@ The Shipping section of a Noon Delivery Note holds the AWB, the Noon data, and t
 
 ## 5. Create the Noon Shipment on Submit
 
-Submit sends the shipment to Noon inside `before_submit`, and the Delivery Note becomes Submitted only if Noon confirms.
+Submit starts a background job that sends the shipment to Noon. The Delivery Note becomes Submitted only if Noon confirms: once the shipment is Created the job submits the note itself, as the user who pressed Submit (decided 2026-11-02). The text below is the original step design; the commit rules and duplicate prevention still hold.
 
 1. **Validate:** Noon is the provider, the warehouse is FBPI, an AWB is present or the checkbox is ticked, and the shipment has at least one item.
 2. **Lock** the Delivery Note so a second click or a second user cannot start a parallel attempt. The screen shows `Sending to Noon...`.
@@ -84,7 +84,7 @@ A shipment that already exists at Noon skips straight to committing its data, so
 
 Why the commit in step 6 matters: an error raised in `before_submit` rolls back the whole save, which would erase the AWB and shipment data that Noon already holds. This is the standard Frappe behavior and must be confirmed on the development bench.
 
-If Noon succeeded but the local Submit fails afterwards, the Delivery Note stays Draft with the Noon data kept. The next Submit finds the shipment at step 3 and does not create a second one, and the nightly reconciliation flags the case if nobody retries.
+If Noon succeeded but the job's local submit fails afterwards (negative stock, credit limit, authorization), the Delivery Note stays a Created Draft with the Noon data kept and the reason in Last Integration Error. Needs Attention shows it as a Carrier Exception ("shipment created, Delivery Note not submitted"), and so does any Created draft older than 15 minutes (built). A person submits it natively (Created is all `before_submit` needs), so no second shipment is created.
 
 **Shipping label:** Noon documents no label endpoint, so no label is fetched or stored.
 
@@ -147,7 +147,8 @@ The system sends the cancellation in `before_cancel`, after asking Noon for the 
 | Noon cancels, but the local cancellation fails | Needs Attention. Retry only the local cancellation and never resend the cancel to Noon |
 
 - **Which states allow cancellation** is learned from the Noon sandbox, and the Cancel action shows the rejection reason whenever Noon refuses.
-- **Cancelled by Noon or in Seller Lab:** the Delivery Note stays Submitted, Shipping Status is updated, and the employee receives a Notification and a Needs Attention item. The employee decides what to do. Nothing is cancelled automatically.
+- **Cancelling the shipment also cancels its items at Noon (documented, UNVERIFIED).** Noon's API reference (`docs/noon-integration/noon_api_full.md`, CancelShipment) says: "Cancels an existing shipment. All items included in that shipment will also be canceled". If that holds, the order sync then sees the units as `MP_ITEM_STATUS_CANCELLED` and cancels the Sales Order (all units) or shrinks it (some units) by itself, and the units may not be shippable again. ERPNext never calls UpdateOrder or any order-level path for a note cancel. The Cancel confirmation (submitted note and the draft Cancel Noon Shipment button) warns about this in plain words. If Noon cancels the shipment but keeps the units `CONFIRMED`, a Cancellation Unknown note cannot be proven cancelled by a refresh and stays Cancellation Unknown (a known stuck state; Retry or a person decides).
+- **Cancelled by Noon or in Seller Lab:** the Delivery Note stays Submitted, Shipping Status is updated, and the employee receives a Notification and a Needs Attention item. A submitted note is cancelled automatically (decided 2026-11-01) once a read (webhook, Refresh, nightly) shows every unit cancelled at Noon, with no Noon call; a linked submitted document that blocks it leaves the note submitted with the reason in Needs Attention for the employee to resolve.
 - The existing handling of orders cancelled by Noon is unchanged.
 
 ## 9. Invoices
@@ -213,6 +214,7 @@ The points below are assumptions to test with sandbox orders before release, and
 - Webhook details: authentication, event identifiers, the list of statuses and their order.
 - Whether a generated AWB expires or can be released if unused, and whether create shipment can generate the AWB itself.
 - What happens to a shipment when Noon cancels one of its items.
+- After the first real CancelShipment (all UNVERIFIED; Noon documents that the shipment's items are cancelled too): `GetFbpiOrder` for the order shows each unit's `mp_status`, `integration_status` and `cancellation_reason_code`; what `GetShipment` answers for the cancelled shipment; whether a new CreateShipment for the same units works; whether a webhook is sent and how long it takes; which shipment states refuse a cancel; whether a repeat cancel of an already cancelled shipment is safe.
 - Invoice endpoints: when upload is allowed (a second upload supersedes the first, known from Noon's documentation).
 - Rate limits, and how the session behaves on expiry or a 401.
 - On the ERPNext side: that an error in `before_submit` rolls back the save, that the over-delivery check catches an item removed by Update Items, and that Update Items releases the stock reservation.
