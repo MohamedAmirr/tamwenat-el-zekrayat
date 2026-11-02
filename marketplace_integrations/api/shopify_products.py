@@ -36,7 +36,7 @@ def export_catalog(account: str):
 @frappe.whitelist()
 def get_catalog_sweep_status(job_id: str):
 	"""Poll a previously queued catalog sweep job's status/progress/result.
-	Owner-scoped, same as services/item_import_jobs.py::get_status()."""
+	Owner-scoped: only the user who queued the sweep may read its status."""
 	return products.get_sweep_status(job_id)
 
 

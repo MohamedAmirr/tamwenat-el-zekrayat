@@ -72,10 +72,9 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 	# ---- helpers -------------------------------------------------------------------------
 
 	def _fbpi_ready_account(self, **overrides):
-		"""The account as after Check Noon Warehouse and the one-time FBPI Code confirmation (#416)."""
+		"""The account as after Check Noon Warehouse (#416)."""
 		values = {
-			"noon_fbpi_code": "FBPI",
-			"noon_fulfillment_system_code": "FBPI",
+			"noon_fulfillment_system_code": "fbpi",
 			"noon_warehouse_active": 1,
 			"noon_warehouse_checked_on": frappe.utils.now_datetime(),
 		}
@@ -227,9 +226,8 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		fx = self._order([("SKU-A", 1)], ["SKU-A"])
 		note = self._draft_note(fx, lr_no="TYPED-1")
 		cases = (
-			({"noon_fbpi_code": ""}, "no FBPI Code"),
 			({"noon_fulfillment_system_code": "", "noon_warehouse_checked_on": None}, "never checked"),
-			({"noon_fulfillment_system_code": "OTHER"}, "is not its FBPI Code"),
+			({"noon_fulfillment_system_code": "OTHER"}, "OTHER, not FBPI"),
 			({"noon_warehouse_active": 0}, "not active"),
 		)
 		for overrides, reason in cases:
@@ -1084,8 +1082,7 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 	def test_the_press_is_refused_unless_the_warehouse_is_fbpi_ready(self):
 		note = self._submitted_created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
 		for overrides, reason in (
-			({"noon_fbpi_code": ""}, "no FBPI Code"),
-			({"noon_fulfillment_system_code": "OTHER"}, "is not its FBPI Code"),
+			({"noon_fulfillment_system_code": "OTHER"}, "OTHER, not FBPI"),
 			({"noon_warehouse_active": 0}, "not active"),
 		):
 			self._fbpi_ready_account(**overrides)

@@ -88,7 +88,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			) as mirror,
 		):
 			sales_order_sync_service._mirror_shopify_payments_independently("MKTORD-1", "Shopify Webhook")
-		mirror.assert_called_once_with("MKTORD-1", "Shopify Webhook")
+		mirror.assert_called_once_with("MKTORD-1", "Shopify Webhook", None)
 
 		with (
 			patch.object(

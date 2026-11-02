@@ -41,6 +41,8 @@ boot_session = "marketplace_integrations.services.carrier_shipments.boot_session
 
 # include js in doctype views
 doctype_js = {
+	# #374: Marketplace Listings tab (and manual price/stock sync) on the Item form.
+	"Item": "public/js/item.js",
 	"Sales Order": ["public/js/noon_invoice.js", "public/js/sales_order.js"],
 	"Delivery Note": [
 		"public/js/delivery_note_shipping.js",
@@ -150,6 +152,15 @@ has_permission = {
 	"Marketplace Order": "marketplace_integrations.permissions.marketplace_order_has_permission",
 	"Marketplace Product Mapping": "marketplace_integrations.permissions.marketplace_product_mapping_has_permission",
 	"Marketplace Sync Log": "marketplace_integrations.permissions.marketplace_sync_log_has_permission",
+}
+
+# Data Import (#373)
+# ------------------
+# Item Data Import and Export gain a "Marketplace Listing" table backed by Marketplace Product
+# Mapping (services/item_listing_import.py). Frappe uses only the LAST provider registered for a
+# doctype, and ERPNext registers none for Item (guarded in services/test_item_listing_import.py).
+data_import_providers = {
+	"Item": "marketplace_integrations.services.item_listing_import.ItemImportProvider",
 }
 
 # Document Events
@@ -292,9 +303,10 @@ scheduler_events["cron"].setdefault(NOON_INVENTORY_SWEEP_CRON, []).append(
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,
 # along with any modifications made in other Frappe apps
-# override_doctype_dashboards = {
-# 	"Task": "marketplace_integrations.task.get_dashboard_data"
-# }
+override_doctype_dashboards = {
+	# #374: adds a "Marketplace" group (Marketplace Product Mapping, linked by `item`) to Item's Connections.
+	"Item": "marketplace_integrations.services.item_dashboard.get_data",
+}
 
 # exempt linked doctypes from being automatically cancelled
 #
@@ -387,6 +399,9 @@ fixtures = [
 					"Sales Order-custom_shipping_status_summary",
 					"Payment Entry-custom_marketplace_order",
 					"Payment Entry-custom_marketplace_transaction_id",
+					# #374: the Item form's Marketplace Listings tab (stores nothing on Item)
+					"Item-custom_marketplace_listings_tab",
+					"Item-custom_marketplace_listings_html",
 					"Delivery Note-custom_more_section",
 					"Delivery Note-custom_shipping_section",
 					"Delivery Note-custom_integration_status",

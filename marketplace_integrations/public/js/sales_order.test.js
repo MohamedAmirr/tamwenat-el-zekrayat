@@ -68,6 +68,10 @@ function load({
 				constructor(config) {
 					this.config = config;
 					this.hidden = false;
+					// Like Frappe, expose each field's wrapper (noon_invoice.js writes into fields_dict.body.$wrapper).
+					this.fields_dict = Object.fromEntries(
+						(config.fields || []).map((f) => [f.fieldname, { $wrapper: { html() {} } }])
+					);
 					dialogs.push(this);
 				}
 				show() {
