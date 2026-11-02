@@ -6,8 +6,9 @@
 // constructor options (`labels.title` included), the Shopify inventory sync (#107 decision 12).
 // Every option defaults to the original price-push behavior/wording. Loaded
 // on demand via frappe.require() from marketplace_product_mapping.js
-// (single-mapping buttons), marketplace_product_mapping_list.js (bulk
-// actions) and marketplace_account.js (Reconcile), so the
+// (single-mapping buttons), mapping_sync_actions.js (bulk routing, shared by
+// the mapping list and the Item form's Marketplace Listings tab) and
+// marketplace_account.js (Reconcile), so the
 // polling/rendering logic exists in exactly one place - Desk loads each
 // doctype's own .js file independently, so it can't be shared by ordinary
 // module import the way the two Node test files share a require().

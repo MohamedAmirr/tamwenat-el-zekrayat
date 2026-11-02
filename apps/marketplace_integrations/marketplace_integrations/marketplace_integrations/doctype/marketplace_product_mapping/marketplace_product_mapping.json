@@ -28,6 +28,7 @@
  ],
  "fields": [
   {
+   "description": "The account of the platform this listing belongs to. The platform is filled in automatically. A disabled account stops all its listings from matching orders.",
    "fieldname": "marketplace_account",
    "fieldtype": "Link",
    "in_list_view": 1,
@@ -56,6 +57,7 @@
    "search_index": 1
   },
   {
+   "description": "The listing's identity on the platform. Talabat: the Talabat SKU. Noon: your Partner SKU from Seller Lab > Catalog > Partner Catalog (not the generated PSKU code). Shopify: the product variant ID written as gid://shopify/ProductVariant/<number>, where <number> is the number after /variants/ in the Shopify admin URL. Unique per account and case-sensitive. A changed value creates a new listing.",
    "fieldname": "external_reference",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
@@ -73,30 +75,35 @@
    "unique": 1
   },
   {
+   "description": "Shopify only: the product ID written as gid://shopify/Product/<number>, where <number> is the number after /products/ in the Shopify admin URL. Price push needs it. Leave blank for Talabat and Noon.",
    "fieldname": "external_product_id",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
    "label": "External Product ID"
   },
   {
+   "description": "Informational. Talabat: if filled, it is sent to Talabat instead of External Reference, so keep it blank or equal to External Reference.",
    "fieldname": "external_sku",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
    "label": "External SKU"
   },
   {
+   "description": "Informational. Not used by Talabat or Noon. Shopify refreshes it from the store.",
    "fieldname": "external_barcode",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
    "label": "External Barcode"
   },
   {
+   "description": "Shopify only: the same value as External Reference. Needed to add a variant when editing an order. Leave blank for Talabat and Noon.",
    "fieldname": "external_variant_id",
    "fieldtype": "Data",
    "ignore_xss_filter": 1,
    "label": "External Variant ID"
   },
   {
+   "description": "Talabat and Noon: the unit the listing is sold in. Stock and price are converted to it. Blank means the Item's stock UOM. Shopify: leave blank.",
    "fieldname": "sales_uom",
    "fieldtype": "Link",
    "label": "Sales UOM",
@@ -104,6 +111,7 @@
   },
   {
    "default": "1",
+   "description": "Unchecked listings are ignored when matching orders and are not pushed.",
    "fieldname": "enabled",
    "fieldtype": "Check",
    "in_list_view": 1,
@@ -167,7 +175,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-10-22 20:00:00.000000",
+ "modified": "2026-11-02 21:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Marketplace Product Mapping",
@@ -207,6 +215,13 @@
    "read": 1,
    "report": 1,
    "role": "Shopify User",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Item Manager",
    "write": 1
   }
  ],

@@ -7,7 +7,9 @@ for Marketplace Order, Marketplace Product Mapping and Marketplace Sync Log it i
 platform of the linked ``marketplace_account``. A row with no account is therefore
 invisible to platform users (a Sync Log without an account is System Manager only).
 
-System Manager and Administrator are never filtered. A user with none of the platform roles
+System Manager and Administrator are never filtered. On Marketplace Product Mapping only,
+``Item Manager`` is not filtered either for read, write, create and report (all platforms,
+also when the user holds a platform role); it has no delete. A user with none of the platform roles
 and not a System Manager gets nothing here; DocPerm already denies them, the condition is
 a second layer. Bosta is a carrier with no Marketplace Account and no role of its own.
 
@@ -26,8 +28,13 @@ PLATFORM_ROLES = {
 NO_ROWS = "1=0"
 
 
-def _unrestricted(user, roles):
-	return user == "Administrator" or "System Manager" in roles
+ITEM_MANAGER_ROLE = "Item Manager"
+# What the Item Manager DocPerm row on Marketplace Product Mapping grants: no delete.
+ITEM_MANAGER_PTYPES = ("read", "write", "create", "report")
+
+
+def _unrestricted(user, roles, extra_roles=()):
+	return user == "Administrator" or "System Manager" in roles or any(role in roles for role in extra_roles)
 
 
 def get_user_platforms(user=None):
@@ -41,9 +48,9 @@ def _platform_list(platforms):
 	return ", ".join(frappe.db.escape(platform) for platform in platforms)
 
 
-def _condition(user, doctype, account_field):
+def _condition(user, doctype, account_field, extra_roles=()):
 	user = user or frappe.session.user
-	if _unrestricted(user, frappe.get_roles(user)):
+	if _unrestricted(user, frappe.get_roles(user), extra_roles):
 		return ""
 	platforms = get_user_platforms(user)
 	if not platforms:
@@ -57,9 +64,9 @@ def _condition(user, doctype, account_field):
 	)
 
 
-def _allowed(user, platform):
+def _allowed(user, platform, extra_roles=()):
 	user = user or frappe.session.user
-	if _unrestricted(user, frappe.get_roles(user)):
+	if _unrestricted(user, frappe.get_roles(user), extra_roles):
 		return True
 	return bool(platform) and platform in get_user_platforms(user)
 
@@ -80,7 +87,8 @@ def marketplace_order_query_conditions(user=None, doctype=None):
 
 
 def marketplace_product_mapping_query_conditions(user=None, doctype=None):
-	return _condition(user, "Marketplace Product Mapping", "marketplace_account")
+	# Item Manager maintains the listings of every platform (Item Data Import, #373).
+	return _condition(user, "Marketplace Product Mapping", "marketplace_account", (ITEM_MANAGER_ROLE,))
 
 
 def marketplace_sync_log_query_conditions(user=None, doctype=None):
@@ -96,7 +104,10 @@ def marketplace_order_has_permission(doc, ptype=None, user=None, debug=False):
 
 
 def marketplace_product_mapping_has_permission(doc, ptype=None, user=None, debug=False):
-	return _allowed(user, _account_platform(doc))
+	# Item Manager is exempt only for the ptypes its DocPerm row grants; delete (and the rest)
+	# stays on the platform check.
+	extra_roles = (ITEM_MANAGER_ROLE,) if ptype is None or ptype in ITEM_MANAGER_PTYPES else ()
+	return _allowed(user, _account_platform(doc), extra_roles)
 
 
 def marketplace_sync_log_has_permission(doc, ptype=None, user=None, debug=False):

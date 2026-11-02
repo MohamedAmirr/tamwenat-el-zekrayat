@@ -66,14 +66,11 @@ def import_vendor_orders(account: str, start: str, end: str):
 	local-timezone conversion is applied to them here.
 
 	Runs synchronously in the request (unbounded paging, still inside the
-	whitelisted call) - queuing this as a background job, following the
-	job/progress/errors pattern already established in
-	services/item_import_jobs.py, is deferred to a follow-up issue rather
-	than done here.
+	whitelisted call) - queuing this as a background job is deferred to a
+	follow-up issue rather than done here.
 
 	Each order is normalized and upserted inside its own DB savepoint
-	(same pattern as api/item_import.py's _apply_items_import() - see
-	docs/frappe-conventions.md's "Bulk-write loops..." note): a failure on
+	(see docs/frappe-conventions.md's "Bulk-write loops..." note): a failure on
 	one order (caught as ValidationError/PermissionError/
 	DuplicateEntryError) is rolled back to that order's savepoint and
 	reported in the returned ``errors`` list, without discarding orders

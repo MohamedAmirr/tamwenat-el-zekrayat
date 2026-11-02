@@ -1,5 +1,7 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const test = require("node:test");
+const vm = require("node:vm");
 
 global.__ = (message, values) =>
 	values ? message.replace("{0}", values[0]).replace("{1}", values[1]) : message;
@@ -11,11 +13,6 @@ const {
 	show_sync_summary,
 	push_selected,
 	route_selected,
-	push_selected_to_talabat,
-	push_selected_to_shopify,
-	push_selected_to_noon,
-	push_selected_noon_stock,
-	sync_selected_inventory,
 	sync_all,
 } = require("./marketplace_product_mapping_list.js");
 
@@ -342,50 +339,6 @@ test("route_selected sends each Noon account once with its own mapping names", a
 	]);
 });
 
-test("Noon push reports already-queued pricing or stock as skipped, not as queued", async () => {
-	install_frappe({
-		call() {
-			return Promise.resolve({ message: { pricing: { queued: false }, stock: { queued: true } } });
-		},
-	});
-
-	const items = await push_selected_to_noon("NOON-A", ["MPM-1"]);
-
-	assert.deepEqual(items, [
-		{ category: "skipped", platform: "Noon", text: "NOON-A: pricing already queued." },
-		{ category: "queued", platform: "Noon", text: "NOON-A: stock queued." },
-	]);
-});
-
-test("Noon push reports a manual run queued while the account switch is off", async () => {
-	install_frappe({
-		call() {
-			return Promise.resolve({
-				message: { pricing: { queued: true, switch_off: true }, stock: { queued: true, switch_off: false } },
-			});
-		},
-	});
-
-	const items = await push_selected_to_noon("NOON-A", ["MPM-1"]);
-
-	assert.deepEqual(items, [
-		{ category: "queued", platform: "Noon", text: "NOON-A: pricing queued as a manual run." },
-		{ category: "queued", platform: "Noon", text: "NOON-A: stock queued." },
-	]);
-});
-
-test("Noon stock push reports a manual run queued while the account switch is off", async () => {
-	install_frappe({
-		call() {
-			return Promise.resolve({ message: { queued: true, switch_off: true } });
-		},
-	});
-
-	const items = await push_selected_noon_stock("NOON-A", ["MPM-1"]);
-
-	assert.deepEqual(items, [{ category: "queued", platform: "Noon", text: "NOON-A: stock queued as a manual run." }]);
-});
-
 test("the inventory action reads INVENTORY_OPTIONS only after the status-dialog script has loaded", async () => {
 	// Fresh page load: the dialog class and INVENTORY_OPTIONS do not exist until
 	// frappe.require() resolves and the script defines them.
@@ -406,11 +359,139 @@ test("the inventory action reads INVENTORY_OPTIONS only after the status-dialog 
 		},
 	});
 
-	await sync_selected_inventory(["MPM-1"]);
+	await route_selected(make_listview([]), [{ name: "MPM-1", marketplace_account: "SHOP" }], { SHOP: "Shopify" }, "inventory");
 	await settle();
 
 	assert.ok(dialog_args, "the status dialog should open once the script has loaded");
 	assert.equal(dialog_args.status_method, "inventory.status");
+});
+
+test("Noon pushes through route_selected report already-queued and manual runs in the summary", async () => {
+	let summary;
+	install_frappe({
+		call(options) {
+			if (options.method.endsWith("queue_stock_push")) {
+				return Promise.resolve({ message: { queued: true, switch_off: true } });
+			}
+			return Promise.resolve({ message: { pricing: { queued: false }, stock: { queued: true } } });
+		},
+		msgprint(args) {
+			summary = args;
+		},
+	});
+	const rows = [{ name: "MPM-1", marketplace_account: "NOON-A" }];
+
+	await route_selected(make_listview([]), rows, { "NOON-A": "Noon" });
+	assert.match(summary.message, /NOON-A: pricing already queued\./);
+	assert.match(summary.message, /NOON-A: stock queued\./);
+
+	await route_selected(make_listview([]), rows, { "NOON-A": "Noon" }, "inventory");
+	assert.match(summary.message, /NOON-A: stock queued as a manual run\./);
+});
+
+test("a rejecting frappe.require (defensive path for a future Frappe) shows an error and makes no call", async () => {
+	// Run the list script as the browser does (no `module`), so the helper comes from frappe.require().
+	const shown = [];
+	let calls = 0;
+	const sandbox = {
+		__: (message) => message,
+		console: { error() {} },
+		frappe: {
+			listview_settings: {},
+			call() {
+				calls += 1;
+				return Promise.resolve({});
+			},
+			msgprint(args) {
+				shown.push(args);
+			},
+			require: () => Promise.reject(new Error("404")),
+			model: { can_write: () => true },
+		},
+	};
+	vm.createContext(sandbox);
+	vm.runInContext(fs.readFileSync(require.resolve("./marketplace_product_mapping_list.js"), "utf8"), sandbox);
+	const listview = { get_checked_items: () => ["MPM-1"] };
+
+	await vm.runInContext("push_selected", sandbox)(listview);
+	await vm.runInContext("push_selected", sandbox)(listview, "inventory");
+	await vm.runInContext("sync_all", sandbox)(listview, "ACC");
+
+	assert.equal(calls, 0);
+	assert.equal(shown.length, 3);
+	assert.equal(shown[0].indicator, "red");
+	assert.equal(shown[0].message, "Could not load the sync actions. Reload the page and try again.");
+});
+
+test("frappe.require resolving without registering the helper (Frappe 16 failed load) shows the error and makes no call", async () => {
+	const shown = [];
+	let calls = 0;
+	const sandbox = {
+		__: (message) => message,
+		console: { error() {} },
+		frappe: {
+			listview_settings: {},
+			call() {
+				calls += 1;
+				return Promise.resolve({});
+			},
+			msgprint(args) {
+				shown.push(args);
+			},
+			require: () => Promise.resolve(),
+			model: { can_write: () => true },
+		},
+	};
+	vm.createContext(sandbox);
+	vm.runInContext(fs.readFileSync(require.resolve("./marketplace_product_mapping_list.js"), "utf8"), sandbox);
+	const listview = { get_checked_items: () => ["MPM-1"] };
+
+	await vm.runInContext("push_selected", sandbox)(listview);
+	await vm.runInContext("push_selected", sandbox)(listview, "inventory");
+	await vm.runInContext("sync_all", sandbox)(listview, "ACC");
+
+	assert.equal(calls, 0);
+	assert.equal(shown.length, 3);
+	shown.forEach((args) => {
+		assert.equal(args.indicator, "red");
+		assert.equal(args.message, "Could not load the sync actions. Reload the page and try again.");
+	});
+});
+
+test("a rejected get_list in Push selected is swallowed (Frappe shows its own dialog) and nothing is routed", async () => {
+	const errors = [];
+	const shown = [];
+	install_frappe({
+		call: () => Promise.reject(new Error("server said no")),
+		msgprint: (args) => shown.push(args),
+	});
+	const original = console.error;
+	console.error = (...args) => errors.push(args);
+	try {
+		await push_selected(make_listview(["MPM-1"]));
+	} finally {
+		console.error = original;
+	}
+
+	assert.equal(shown.length, 0);
+	assert.equal(errors.length, 1);
+});
+
+test("a rejected get_value in Sync All is swallowed and shows no second message", async () => {
+	const shown = [];
+	install_frappe({
+		call: () => Promise.reject(new Error("server said no")),
+		msgprint: (args) => shown.push(args),
+	});
+	const original = console.error;
+	console.error = () => {};
+	try {
+		await sync_all(make_listview([]), "ACC");
+	} finally {
+		console.error = original;
+	}
+
+	assert.equal(shown.length, 0);
 });
 
 test("Sync All for Shopify opens the price dialog first and the inventory dialog only after it finishes", async () => {
@@ -542,18 +623,6 @@ test("a failed leg reports the server's own message, with its entities decoded o
 	assert.doesNotMatch(msgprint_args.message, /request failed/);
 });
 
-test("Noon stock push reports queued or already-queued", async () => {
-	install_frappe({
-		call() {
-			return Promise.resolve({ message: { queued: false } });
-		},
-	});
-
-	const items = await push_selected_noon_stock("NOON-A", ["MPM-1"]);
-
-	assert.deepEqual(items, [{ category: "skipped", platform: "Noon", text: "NOON-A: stock already queued." }]);
-});
-
 test("the inventory action routes Shopify to queue_inventory_sync and Noon to queue_stock_push per account", async () => {
 	const calls = [];
 	install_frappe({
@@ -675,124 +744,6 @@ test("show_sync_summary escapes every line before rendering it", () => {
 	assert.equal(msgprint_args.indicator, "red");
 	assert.match(msgprint_args.message, /&lt;script&gt;x&lt;\/script&gt;/);
 	assert.doesNotMatch(msgprint_args.message, /<script>/);
-});
-
-test("push_selected_to_talabat calls the Talabat bulk endpoint and returns a queued summary item", async () => {
-	let call_options;
-	install_frappe({
-		call(options) {
-			call_options = options;
-			return Promise.resolve({ message: { queued: 2, jobs: 1 } });
-		},
-	});
-
-	const items = await push_selected_to_talabat(["MPM-00001", "MPM-00002"]);
-
-	assert.equal(call_options.method, "marketplace_integrations.api.talabat_catalog.queue_mappings_catalog_sync");
-	assert.deepEqual(call_options.args, { mapping_names: ["MPM-00001", "MPM-00002"] });
-	assert.deepEqual(items, [{ category: "queued", platform: "Talabat", text: "Queued 2 mapping(s) in 1 job(s)." }]);
-});
-
-test("push_selected_to_shopify calls the Shopify push endpoint and opens the job-status dialog", async () => {
-	let call_options;
-	let dialog_args;
-	install_frappe({
-		call(options) {
-			call_options = options;
-			return Promise.resolve({
-				message: { jobs: [{ account: "MKTACC-SHOPIFY", job_id: "job-1", mapping_count: 1 }] },
-			});
-		},
-		ui: {
-			ShopifyCatalogPushStatus: class {
-				constructor(args) {
-					dialog_args = args;
-				}
-			},
-		},
-	});
-
-	await push_selected_to_shopify(["MPM-00002"]);
-	await settle();
-
-	assert.equal(call_options.method, "marketplace_integrations.api.shopify_catalog_push.queue_catalog_push");
-	assert.deepEqual(call_options.args, { mapping_names: ["MPM-00002"] });
-	assert.deepEqual(dialog_args.jobs, [{ account: "MKTACC-SHOPIFY", job_id: "job-1", mapping_count: 1 }]);
-});
-
-test("push_selected_to_shopify returns skipped items and does not open the dialog when nothing was queued", async () => {
-	let dialog_opened = false;
-	install_frappe({
-		call() {
-			return Promise.resolve({
-				message: { jobs: [], skipped_accounts: [{ account: "MKTACC-SHOPIFY", reason: "already running" }] },
-			});
-		},
-		require() {
-			dialog_opened = true;
-			return Promise.resolve();
-		},
-	});
-
-	const items = await push_selected_to_shopify(["MPM-00002"]);
-
-	assert.deepEqual(items, [{ category: "skipped", platform: "Shopify", text: "MKTACC-SHOPIFY: already running" }]);
-	assert.equal(dialog_opened, false);
-});
-
-test("push_selected_to_shopify lists each skipped account's real reason", async () => {
-	install_frappe({
-		call() {
-			return Promise.resolve({
-				message: {
-					jobs: [],
-					skipped_accounts: [
-						{ account: "ACC-A", reason: "Marketplace Account ACC-A requires an ERPNext Selling Price List." },
-						{ account: "ACC-B", reason: "A catalog push is already running for this Marketplace Account." },
-					],
-				},
-			});
-		},
-	});
-
-	const items = await push_selected_to_shopify(["MPM-1"]);
-
-	assert.deepEqual(
-		items.map((item) => item.text),
-		[
-			"ACC-A: Marketplace Account ACC-A requires an ERPNext Selling Price List.",
-			"ACC-B: A catalog push is already running for this Marketplace Account.",
-		]
-	);
-});
-
-test("sync_selected_inventory returns each skipped account's reason and opens the dialog with inventory options", async () => {
-	let dialog_args;
-	install_frappe({
-		call() {
-			return Promise.resolve({
-				message: {
-					jobs: [{ account: "A", job_id: "j", mapping_count: 1 }],
-					skipped_accounts: [{ account: "B", reason: "Warehouse missing" }],
-				},
-			});
-		},
-		ui: {
-			ShopifyCatalogPushStatus: class {
-				static INVENTORY_OPTIONS = { status_method: "inventory.status" };
-				constructor(args) {
-					dialog_args = args;
-				}
-			},
-		},
-	});
-
-	const items = await sync_selected_inventory(["MPM-1"]);
-	await settle();
-
-	assert.deepEqual(items.map((item) => item.text), ["Queued 1 job(s).", "B: Warehouse missing"]);
-	assert.equal(dialog_args.status_method, "inventory.status");
-	assert.deepEqual(dialog_args.jobs, [{ account: "A", job_id: "j", mapping_count: 1 }]);
 });
 
 test("the mapping list hides the docname column and wires the shared row tooltip helper (#324)", async () => {
