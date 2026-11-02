@@ -24,6 +24,8 @@
 	const CANCEL_STATUSES = ["Cancellation Pending", "Cancellation Unknown", "Cancelled"];
 	const EDITABLE = ["", NOT_CREATED, FAILED];
 	const RETURN_PICKUP = "Customer Return Pickup";
+	// Not a stored status: the wait ended because the shipment is Created but the job could not submit the note.
+	const SUBMIT_FAILED = "Submit Failed";
 
 	const API = "marketplace_integrations.api.carrier_shipments.";
 	const carriers = {};
@@ -207,11 +209,16 @@
 			// the error is stored raw (it can hold carrier text): escaped here
 			return `<p>${__("{0} did not create the shipment: {1}", [carrier, escape(error || "")])}</p><p class="text-muted">${__("The Delivery Note was not submitted.")}</p>`;
 		}
-		return `<p>${__("{0} is taking longer than expected. The Delivery Note was not submitted.", [carrier])}</p><p class="text-muted">${__("Open the Delivery Note later: if the shipment is Created, submit it again.")}</p>`;
+		if (status === SUBMIT_FAILED) {
+			// the shipment exists; the job's own submit failed. The stored text names the reason (raw: escaped here).
+			return `<p>${escape(error || "")}</p><p class="text-muted">${__("The shipment exists at {0}. Fix the problem, then submit the Delivery Note again.", [carrier])}</p>`;
+		}
+		return `<p>${__("{0} is taking longer than expected.", [carrier])}</p><p class="text-muted">${__("The Delivery Note is submitted automatically once the shipment is created. Open the Delivery Note later: if the shipment is Created and it is still a draft, submit it again.")}</p>`;
 	}
 
-	// Resolves once the shipment is Created (form reloaded, native submit continues); otherwise sets
-	// frappe.validated = false and shows why.
+	// The server (the background job) submits the note once the carrier confirms Created, so this only waits
+	// and reloads. It always sets frappe.validated = false so Frappe's own save never runs a second time on a
+	// stale copy; when the shipment was not created it shows why.
 	function before_submit(frm) {
 		const carrier = carrier_name(frm);
 		// A return is submitted without waiting: submitting it is the receipt; its pickup is its own button.
@@ -252,17 +259,27 @@
 				settled = true;
 				if (timer) clearTimeout(timer);
 				if (dialog) dialog.hide();
+				// The job submitted the note (or the person only requested a pickup): Frappe's own save must not
+				// run a second time on this stale copy.
+				frappe.validated = false;
 				if (ok) {
-					// the worker changed the document: load it before the native submit saves it
 					Promise.resolve(frm.reload_doc()).then(() => resolve());
 					return;
 				}
-				frappe.validated = false;
+				if (status === SUBMIT_FAILED) {
+					frappe.msgprint({
+						message: failure_html(carrier, status, error, submitting),
+						indicator: "orange",
+						title: __("{0} shipment", [carrier]),
+					});
+					Promise.resolve(frm.reload_doc()).then(() => resolve());
+					return;
+				}
 				if (keep_sending) {
 					frappe.show_alert({
 						message: frappe.utils.escape_html(
 							submitting
-								? __("Still sending to {0}. Open the Delivery Note later: if the shipment is Created, submit it again.", [carrier])
+								? __("Still sending to {0}. The Delivery Note is submitted automatically once the shipment is created.", [carrier])
 								: __("Still sending to {0}. Open the Delivery Note later and check its Integration Status.", [carrier])
 						),
 						indicator: "blue",
@@ -302,20 +319,27 @@
 			dialog.fields_dict.body.$wrapper.html(
 				`<p>${frappe.utils.escape_html(
 						submitting
-							? __("Please wait. The Delivery Note is submitted once {0} has created the shipment.", [carrier])
+							? __("Please wait. The Delivery Note is submitted automatically once {0} has created the shipment.", [carrier])
 							: __("Please wait. Sending the return pickup request to {0}.", [carrier])
 					)}</p>`
 			);
 			const started = Date.now();
 			const poll = () =>
 				frappe.db
-					.get_value("Delivery Note", frm.doc.name, ["custom_integration_status", "custom_last_integration_error"])
+					.get_value("Delivery Note", frm.doc.name, ["docstatus", "custom_integration_status", "custom_last_integration_error"])
 					.then(
 						(r) => {
 							if (settled) return;
-								const row = (r && r.message) || {};
+							const row = (r && r.message) || {};
 							const status = row.custom_integration_status || NOT_CREATED;
-							if (status === CREATED) return finish(true);
+							if (status === CREATED) {
+								// a pickup request ends at Created; a delivery ends when the job has submitted the note
+								if (!submitting || row.docstatus === 1) return finish(true);
+								// Created but still a draft with an error: the job's submit failed
+								if (row.custom_last_integration_error) {
+									return finish(false, SUBMIT_FAILED, row.custom_last_integration_error);
+								}
+							}
 							if (status === FAILED || status === UNKNOWN) return finish(false, status, row.custom_last_integration_error);
 							if (Date.now() - started >= api.max_wait_ms) return finish(false, CREATING);
 							timer = setTimeout(poll, api.poll_ms);

@@ -217,8 +217,12 @@ Noon is the second adapter (#415): the old `custom_carrier_status` / `custom_car
 - **Create on Submit.** The browser's `before_submit` (`public/js/delivery_note_shipping.js`) calls
   `api.carrier_shipments.request_shipment`, which commits, takes a row lock, sets
   `Creating`, opens an Integration Request log row and enqueues `carrier_shipments.run_create` (job id
-  `{carrier}-create|<note>`); the form shows "Sending to Bosta..." and polls every 2 seconds for up to 60.
-  The note submits only after `Created`; the server `before_submit` (`carrier_shipments.require_shipment_created`) reads the
+  `{carrier}-create|<note>`, kwarg `submit_as` = the session user for a delivery only); the form shows
+  "Sending to Bosta..." and polls every 2 seconds for up to 60. After `Created` the job itself submits the
+  note as `submit_as` (`_submit_created`, decided 2026-11-02: no `ignore_permissions`; a failure leaves a
+  Created draft with the reason in `custom_last_integration_error`, flagged by Needs Attention as a Carrier
+  Exception, also when a Created draft is older than 15 minutes); the form only reloads and never saves again.
+  The server `before_submit` (`carrier_shipments.require_shipment_created`) reads the
   stored status and refuses otherwise. Nothing holds a DB lock across the HTTP call.
 - **Unknown is not Failed.** Bosta has no idempotency key. A timeout, connection error, 5xx/429 or a
   malformed 2xx ends `Creation Unknown`; only a 4xx (not 408/429) is `Creation Failed`. There is no
