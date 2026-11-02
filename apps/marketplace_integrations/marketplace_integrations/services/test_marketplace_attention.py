@@ -135,12 +135,14 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 
 		cancelled_entry = frappe._dict(
 			name="PE-CANCELLED", custom_marketplace_order="MKTORD-1",
-			custom_marketplace_transaction_id="TX-1", modified=now_datetime(),
+			custom_marketplace_transaction_id="TX-1", paid_amount=100, total_allocated_amount=100,
+			modified=now_datetime(),
 		)
 		accounts, order_accounts = {account.name: account}, {"MKTORD-1": account.name}
-		# Reads: the cancelled entries, then any submitted amendments of them.
+		order_row = frappe._dict(name="MKTORD-1", erpnext_sales_order="SO-1")
+		# Reads, in order: the cancelled entries, the orders' Sales Orders, then any submitted amendments.
 		with patch.object(
-			marketplace_attention.frappe, "get_list", side_effect=[[cancelled_entry], []]
+			marketplace_attention.frappe, "get_list", side_effect=[[cancelled_entry], [], []]
 		):
 			cancelled = marketplace_attention._collect_cancelled_payment_entries(accounts, order_accounts)
 		self.assertEqual(cancelled[0]["problem_type"], PAYMENT_ENTRY_CANCELLED)
@@ -150,11 +152,97 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 		with patch.object(
 			marketplace_attention.frappe,
 			"get_list",
-			side_effect=[[cancelled_entry], [frappe._dict(amended_from="PE-CANCELLED")]],
+			side_effect=[[cancelled_entry], [], [frappe._dict(amended_from="PE-CANCELLED")]],
 		):
 			self.assertEqual(
 				marketplace_attention._collect_cancelled_payment_entries(accounts, order_accounts), []
 			)
+
+		# Another submitted Payment Entry covering the order for at least the cancelled amount clears
+		# the row (#425); a smaller one does not.
+		for covered, listed in ((100, 0), (150, 0), (99.99, 1)):
+			with (
+				patch.object(
+					marketplace_attention.frappe, "get_list", side_effect=[[cancelled_entry], [order_row], []]
+				),
+				patch.object(marketplace_attention, "manual_payment_totals", return_value={"SO-1": covered}),
+			):
+				cancelled = marketplace_attention._collect_cancelled_payment_entries(accounts, order_accounts)
+			self.assertEqual(len(cancelled), listed, covered)
+
+		# Split payment: two cancelled entries (100 and 395) need 495 together. A manual 395 clears
+		# neither row; 495 clears both. An amended one no longer counts toward the sum.
+		small_entry = frappe._dict(
+			name="PE-SMALL", custom_marketplace_order="MKTORD-1",
+			custom_marketplace_transaction_id="TX-A", paid_amount=100, total_allocated_amount=100,
+			modified=now_datetime(),
+		)
+		big_entry = frappe._dict(
+			name="PE-BIG", custom_marketplace_order="MKTORD-1",
+			custom_marketplace_transaction_id="TX-B", paid_amount=395, total_allocated_amount=395,
+			modified=now_datetime(),
+		)
+		for covered, listed in ((395, 2), (494.99, 2), (495, 0)):
+			with (
+				patch.object(
+					marketplace_attention.frappe, "get_list", side_effect=[[small_entry, big_entry], [order_row], []]
+				),
+				patch.object(marketplace_attention, "manual_payment_totals", return_value={"SO-1": covered}),
+			):
+				cancelled = marketplace_attention._collect_cancelled_payment_entries(accounts, order_accounts)
+			self.assertEqual(len(cancelled), listed, covered)
+		with (
+			patch.object(
+				marketplace_attention.frappe,
+				"get_list",
+				side_effect=[
+					[small_entry, big_entry],
+					[order_row],
+					[frappe._dict(amended_from="PE-SMALL")],
+				],
+			),
+			patch.object(marketplace_attention, "manual_payment_totals", return_value={"SO-1": 395}),
+		):
+			cancelled = marketplace_attention._collect_cancelled_payment_entries(accounts, order_accounts)
+		self.assertEqual(cancelled, [])
+
+		# A rounded Sales Order: the cancelled entry paid 494.21 but allocated 494, so a manual entry of
+		# 494 clears it; the comparison uses the allocation, not paid_amount.
+		rounded_entry = frappe._dict(
+			name="PE-ROUNDED", custom_marketplace_order="MKTORD-1",
+			custom_marketplace_transaction_id="TX-2", paid_amount=494.21, total_allocated_amount=494,
+			modified=now_datetime(),
+		)
+		for covered, listed in ((494, 0), (493.99, 1)):
+			with (
+				patch.object(
+					marketplace_attention.frappe, "get_list", side_effect=[[rounded_entry], [order_row], []]
+				),
+				patch.object(marketplace_attention, "manual_payment_totals", return_value={"SO-1": covered}),
+			):
+				cancelled = marketplace_attention._collect_cancelled_payment_entries(accounts, order_accounts)
+			self.assertEqual(len(cancelled), listed, covered)
+
+	def test_a_duplicate_guard_row_is_listed_only_while_the_guard_still_blocks(self):
+		account = frappe._dict(name="MKTACC-SHOPIFY", platform="Shopify")
+		stamp = now_datetime()
+		guard_row = frappe._dict(
+			name="LOG-GUARD", marketplace_account=account.name, marketplace_order="MKTORD-1",
+			request_data=frappe.as_json({"transaction_id": "TX-9"}),
+			response_data=frappe.as_json(
+				{"message": "covered", "guard_sales_order": "SO-1", "guard_required": 494}
+			),
+			attempted_at=stamp, creation=stamp, status="Invalid",
+		)
+		for covered, listed in (({"SO-1": 494}, 1), ({"SO-1": 493.99}, 0), ({}, 0)):
+			with (
+				patch.object(marketplace_attention.frappe, "get_list", side_effect=[[guard_row], [], []]),
+				patch.object(marketplace_attention, "manual_payment_totals", return_value=covered),
+			):
+				items = marketplace_attention._collect_payment_errors(
+					{account.name: account}, {"MKTORD-1": account.name}
+				)
+			self.assertEqual(len(items), listed, covered)
 
 	def test_shopify_order_accounts_are_read_once_for_all_payment_collectors(self):
 		account = frappe._dict(name="MKTACC-ONCE", platform="Shopify")

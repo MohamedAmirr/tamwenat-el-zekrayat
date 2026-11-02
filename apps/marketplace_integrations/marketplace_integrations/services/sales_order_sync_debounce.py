@@ -78,6 +78,12 @@ TRANSIENT_RETRY_DELAYS_SECONDS = (60, 300, 900)
 
 _SYNC_RQ_JOB_ID_PREFIX = "marketplace-sync"
 
+# Shopify payment mirroring failures (Payment Sync Log status Error, e.g. a deadlock) are retried by
+# the minute sweep, at most this many times, only while the failures are this recent (#425).
+PAYMENT_RETRY_ATTEMPTS = 3
+PAYMENT_RETRY_WINDOW_MINUTES = 60
+_PAYMENT_RETRY_RQ_JOB_ID_PREFIX = "marketplace-payment-retry"
+
 
 def bump_sync_debounce(
 	marketplace_order, trigger_source, delay_seconds=SYNC_DEBOUNCE_SECONDS, extra_values=None
@@ -322,6 +328,85 @@ def sweep_due_sales_order_syncs():
 			marketplace_order=order.name,
 			expected_debounce_until=order.sync_debounce_until,
 		)
+	_enqueue_payment_retries()
+
+
+def _payment_retry_candidates():
+	"""``{marketplace_order: [transaction_id, ...]}`` of the Shopify payments worth retrying.
+
+	A transaction qualifies when its trailing run of consecutive Error Payment log rows (counted
+	without a time limit, ending at the first non-Error row) starts within the retry window, ends
+	with a transient failure and holds no more than the original run plus ``PAYMENT_RETRY_ATTEMPTS``
+	retries.  After that the last Error row stays for a person.
+	"""
+	window_start = get_datetime(add_to_date(now_datetime(), minutes=-PAYMENT_RETRY_WINDOW_MINUTES))
+	recent = frappe.get_all(
+		"Marketplace Sync Log",
+		filters={
+			"sync_type": "Payment",
+			"status": "Error",
+			"attempted_at": [">=", window_start],
+		},
+		fields=["marketplace_order"],
+		limit_page_length=0,
+	)
+	orders = sorted({row.marketplace_order for row in recent if row.marketplace_order})
+	if not orders:
+		return {}
+	# One query for every Payment row of these orders; newest first, grouped in Python.
+	history = {}
+	for row in frappe.get_all(
+		"Marketplace Sync Log",
+		filters={"sync_type": "Payment", "marketplace_order": ["in", orders]},
+		fields=["marketplace_order", "request_data", "status", "response_data", "attempted_at", "creation"],
+		order_by="attempted_at desc, creation desc",
+		limit_page_length=0,
+	):
+		history.setdefault((row.marketplace_order, row.request_data), []).append(row)
+	candidates = {}
+	for (order, request_data), rows in history.items():
+		run = []
+		for row in rows:
+			if row.status != "Error":
+				break
+			run.append(row)
+		# The original failure plus PAYMENT_RETRY_ATTEMPTS retries.
+		if not run or len(run) > PAYMENT_RETRY_ATTEMPTS:
+			continue
+		if get_datetime(run[-1].attempted_at or run[-1].creation) < window_start:
+			continue
+		try:
+			transient = (json.loads(run[0].response_data or "{}") or {}).get("transient")
+			transaction_id = cstr((json.loads(request_data or "{}") or {}).get("transaction_id")).strip()
+		except ValueError:
+			continue
+		if transient and transaction_id:
+			candidates.setdefault(order, []).append(transaction_id)
+	return {order: sorted(ids) for order, ids in sorted(candidates.items())}
+
+
+def _enqueue_payment_retries():
+	"""Retry transient payment-mirroring failures, one attempt per sweep run (#425).
+
+	Payment mirroring runs separately from the Sales Order sync, so the retry calls only the
+	payment step and never touches the order's sync status, debounce or retry counter.
+	"""
+	for order, transaction_ids in _payment_retry_candidates().items():
+		frappe.enqueue(
+			_retry_payment_mirroring,
+			queue="default",
+			timeout=300,
+			job_id=f"{_PAYMENT_RETRY_RQ_JOB_ID_PREFIX}-{order}",
+			deduplicate=True,
+			marketplace_order=order,
+			transaction_ids=transaction_ids,
+		)
+
+
+def _retry_payment_mirroring(marketplace_order, transaction_ids=None):
+	from marketplace_integrations.services.sales_order_sync import _mirror_shopify_payments_independently
+
+	_mirror_shopify_payments_independently(marketplace_order, "Scheduled Sweep", transaction_ids)
 
 
 def _run_debounced_sync(marketplace_order, expected_debounce_until):
