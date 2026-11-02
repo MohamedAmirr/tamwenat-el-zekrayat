@@ -205,6 +205,15 @@ test("Refresh of an already Cancelled note says there is nothing else to refresh
 	assert.equal(frm.reloads, 1);
 });
 
+test("Refresh of a Cancelled note whose answer is the stored status (not asked) shows no alert", async () => {
+	const { handlers, alerts } = load({ call_result: { shipping_status: "Cancelled" } });
+	const frm = make_form({ custom_integration_status: "Cancelled", docstatus: 1 });
+	handlers.refresh(frm);
+	await frm.buttons.find((b) => b.label === "Refresh from Bosta").action();
+	assert.deepEqual(alerts, []);
+	assert.equal(frm.reloads, 1);
+});
+
 test("Refresh of a Created note shows no cancelled alert", async () => {
 	const { handlers, alerts } = load({ call_result: { shipping_status: "Terminated" } });
 	const frm = make_form({ custom_integration_status: "Created", docstatus: 1 });

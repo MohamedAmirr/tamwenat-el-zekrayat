@@ -176,8 +176,10 @@
 		if ([CREATED, ...CANCEL_STATUSES].includes(status)) {
 			frm.add_custom_button(__("Refresh from {0}", [carrier]), () =>
 				call_and_reload(frm, API + "refresh_shipment", __("Reading the status from {0}...", [carrier]), (result) => {
-					// Already Cancelled here and the carrier still shows it cancelled: nothing changed, say so.
-					if (status === "Cancelled" && ["Cancelled", "Terminated"].includes(result.shipping_status)) {
+					// Already Cancelled here and the carrier was asked and still shows it cancelled: nothing changed,
+					// say so. Only "Terminated" means that: Noon's refresh of a Cancelled note returns the stored
+					// status ("Cancelled") without asking Noon.
+					if (status === "Cancelled" && result.shipping_status === "Terminated") {
 						frappe.show_alert({
 							message: frappe.utils.escape_html(
 								__("The carrier shows this shipment as cancelled. Nothing else to refresh.")

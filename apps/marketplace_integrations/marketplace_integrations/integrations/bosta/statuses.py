@@ -18,7 +18,7 @@ from numbers import Real
 
 import frappe
 from frappe import _
-from frappe.utils import add_days, cstr, escape_html, now_datetime
+from frappe.utils import add_days, cstr, now_datetime
 
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as shipment
 from marketplace_integrations.integrations.bosta.client import (
@@ -389,6 +389,9 @@ def refresh_note(delivery_note, held=None):
 
 	A submitted note that is already Cancelled with an error left by a blocked automatic cancel makes no
 	Bosta call (a terminated delivery reads back as not found): the automatic cancel is tried again.
+
+	A note that is already Cancelled and reads back "Delivery not found" (1066) is a quiet success: nothing is written
+	and the native cancel is not triggered again.
 
 	``held`` (the nightly run passes a list): a "Delivery not found" answer for a Created note is not applied;
 	the note is appended to the list and the run decides (``MASS_1066_LIMIT``). Returns ``None`` then."""
