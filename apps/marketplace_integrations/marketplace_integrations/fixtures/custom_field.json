@@ -22,6 +22,26 @@
   "name": "Sales Order-custom_marketplace_order_html"
  },
  {
+  "doctype": "Custom Field",
+  "dt": "Item",
+  "fieldname": "custom_marketplace_listings_tab",
+  "fieldtype": "Tab Break",
+  "hidden": 0,
+  "insert_after": "dashboard_tab",
+  "label": "Marketplace Listings",
+  "name": "Item-custom_marketplace_listings_tab"
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Item",
+  "fieldname": "custom_marketplace_listings_html",
+  "fieldtype": "HTML",
+  "hidden": 0,
+  "insert_after": "custom_marketplace_listings_tab",
+  "label": "Marketplace Listings",
+  "name": "Item-custom_marketplace_listings_html"
+ },
+ {
   "alignment": "",
   "allow_bulk_edit": 0,
   "allow_in_quick_entry": 0,

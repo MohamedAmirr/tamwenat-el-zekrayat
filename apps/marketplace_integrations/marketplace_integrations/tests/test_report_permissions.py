@@ -65,7 +65,6 @@ PAGE_ROLES = {
 	"marketplace_talabat_catalog_mapping": ("System Manager", "Talabat User"),
 	"marketplace_shopify_catalog_mapping": ("System Manager", "Shopify User"),
 	"marketplace_products": ("System Manager", *PLATFORM_ROLES),
-	"marketplace_product_management": ("System Manager", *PLATFORM_ROLES),
 }
 
 
