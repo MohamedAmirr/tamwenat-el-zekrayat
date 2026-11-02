@@ -10,6 +10,7 @@ from frappe.utils import add_days, add_to_date, now_datetime
 
 from marketplace_integrations.api import bosta_shipments
 from marketplace_integrations.api import carrier_shipments as carrier_api
+from marketplace_integrations.integrations.bosta.statuses import BOSTA_STATE_NAMES
 from marketplace_integrations.services import marketplace_attention as attention
 from marketplace_integrations.tests.bosta_fixtures import BostaFixtureMixin
 from marketplace_integrations.tests.utils import make_role_user
@@ -62,7 +63,7 @@ class IntegrationTestBostaAttention(BostaFixtureMixin, IntegrationTestCase):
 		self._set(note, custom_integration_status="Creation Failed", custom_last_integration_error="bad phone")
 		items = self._items(note, attention.CARRIER_CREATION_PROBLEM)
 		self.assertEqual(len(items), 1)
-		self.assertEqual(items[0]["explanation"], "bad phone")
+		self.assertEqual(items[0]["explanation"], "Bosta: bad phone")
 		self._set(note, custom_integration_status="Creation Unknown", custom_last_integration_error="")
 		self.assertEqual(len(self._items(note, attention.CARRIER_CREATION_PROBLEM)), 1)
 		self._set(note, custom_integration_status="Created")
@@ -92,7 +93,7 @@ class IntegrationTestBostaAttention(BostaFixtureMixin, IntegrationTestCase):
 		note = self.make_note()
 		self._set(note, custom_integration_status="Creation Failed", custom_last_integration_error="bad <b>phone</b> & more")
 		items = self._items(note, attention.CARRIER_CREATION_PROBLEM)
-		self.assertEqual(items[0]["explanation"], "bad <b>phone</b> & more")
+		self.assertEqual(items[0]["explanation"], "Bosta: bad <b>phone</b> & more")
 
 	def test_an_exception_state_is_listed_but_a_cancelled_note_is_not(self):
 		note = self.make_note()
@@ -100,7 +101,7 @@ class IntegrationTestBostaAttention(BostaFixtureMixin, IntegrationTestCase):
 			note,
 			custom_integration_status="Created",
 			custom_carrier_delivery_id="D-1",
-			custom_shipping_status=attention.BOSTA_STATE_NAMES[47],
+			custom_shipping_status=BOSTA_STATE_NAMES[47],
 		)
 		self.assertEqual(len(self._items(note, attention.CARRIER_EXCEPTION)), 1)
 		self._set(note, custom_integration_status="Cancelled")
@@ -136,7 +137,7 @@ class IntegrationTestBostaAttention(BostaFixtureMixin, IntegrationTestCase):
 			note,
 			custom_integration_status="Created",
 			custom_carrier_delivery_id="D-1",
-			custom_shipping_status=attention.BOSTA_STATE_NAMES[46],
+			custom_shipping_status=BOSTA_STATE_NAMES[46],
 		)
 		self.assertEqual(len(self._items(note, attention.CARRIER_RETURN)), 1)
 

@@ -104,6 +104,14 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		note.custom_noon_generate_awb = generate_awb
 		note.insert()
 		frappe.db.commit()
+		# Deleting the newest note gives its name back to the series, so a later test (or run) gets the same
+		# name: the name-keyed cache flags (invoice upload running, refresh again) and the Integration Request
+		# log rows (a "Cancel / Success" row hides a Carrier Cancelled item) must not carry over.
+		logs = {"reference_doctype": "Delivery Note", "reference_docname": note.name}
+		frappe.db.delete("Integration Request", logs)
+		self.addCleanup(frappe.db.delete, "Integration Request", logs)
+		for flag in (noon._INVOICE_INFLIGHT, noon._REFRESH_AGAIN):
+			self.addCleanup(frappe.cache().delete_value, flag.format(note.name))
 		return note
 
 	def _note(self, name):
@@ -717,8 +725,9 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		self.assertEqual((kwargs["job_id"], kwargs["queue"], kwargs["deduplicate"]), ("noon-reconcile", "long", True))
 
 	def test_the_nightly_reconcile_survives_one_notes_failure(self):
+		# One SKU per order: a mapping is unique per account and SKU.
 		fx_one = self._order([("SKU-A", 1)], ["SKU-A"])
-		fx_two = self._order([("SKU-A", 1)], ["SKU-A"])
+		fx_two = self._order([("SKU-B", 1)], ["SKU-B"])
 		one, two = self._created_note(fx_one), self._created_note(fx_two)
 		seen = []
 
@@ -735,7 +744,8 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 	def test_the_nightly_reconcile_stops_at_shipped_or_cancelled_and_after_60_days(self):
 		notes = {}
 		for key in ("acknowledged", "shipped", "cancelled", "old", "cancelled_submitted"):
-			notes[key] = self._created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
+			sku = f"SKU-{key}"  # one SKU per order: a mapping is unique per account and SKU
+			notes[key] = self._created_note(self._order([(sku, 1)], [sku]))
 		for key, status in (
 			("acknowledged", "Acknowledged"),
 			("shipped", "Shipped"),
@@ -810,7 +820,7 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		self.assertEqual(len(found), 1)
 
 	def test_a_clean_refresh_clears_only_the_error_a_refresh_wrote(self):
-		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		fx = self._order([("SKU-A", 1)], ["SKU-A", "SKU-A"])
 		note = self._created_note(fx)
 		# a refusal written by the cancel stays through a clean refresh
 		frappe.db.set_value("Delivery Note", note.name, "custom_last_integration_error", "Noon refused the cancel", update_modified=False)
@@ -818,8 +828,9 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		self._refresh(note, self._found(fx), [self._unit("1")])
 		self.assertEqual(self._note(note.name).custom_last_integration_error, "Noon refused the cancel")
 		# the refresh's own error is written, then cleared by the next clean refresh
-		self._refresh(note, self._found(fx, units=("1", "9")), [self._unit("1")])
-		self.assertIn("differ", self._note(note.name).custom_last_integration_error)
+		# (unit 2 is on the Noon order, so the shipment is ours; it is not one of the units the note sent)
+		self._refresh(note, self._found(fx, units=("1", "2")), [self._unit("1")])
+		self.assertIn("differ",self._note(note.name).custom_last_integration_error)
 		self._refresh(note, self._found(fx), [self._unit("1")])
 		self.assertFalse(self._note(note.name).custom_last_integration_error)
 
@@ -1039,7 +1050,7 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 	def test_a_key_is_bound_to_its_document(self):
 		fx = self._order([("SKU-A", 1)], ["SKU-A"])
 		note = self._submitted_created_note(fx)
-		other = self._submitted_created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
+		other = self._submitted_created_note(self._order([("SKU-B", 1)], ["SKU-B"]))
 		first, _enqueue = self._press(note, self._loose_pdf())
 		fulfillment.set_invoice_result(first["idempotency_key"], "failed", "Noon said no")
 		self.assertEqual(fulfillment.invoice_result(first["idempotency_key"], "Delivery Note", note.name)["state"], "failed")

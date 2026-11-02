@@ -14,6 +14,7 @@ from marketplace_integrations.integrations.shopify.client import (
 	MAX_THROTTLE_BACKOFF_SECONDS,
 	ShopifyClient,
 )
+from marketplace_integrations.integrations.shopify.constants import SHOPIFY_API_VERSION
 
 
 def _mock_token_response(access_token, expires_in=86399):
@@ -232,7 +233,7 @@ class IntegrationTestShopifyClient(IntegrationTestCase):
 		args, kwargs = mock_request.call_args
 		self.assertEqual(args[0], "POST")
 		self.assertEqual(
-			args[1], f"https://{self.connection.shop_domain}/admin/api/2026-07/graphql.json"
+			args[1], f"https://{self.connection.shop_domain}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
 		)
 		self.assertEqual(kwargs["headers"]["X-Shopify-Access-Token"], "token-abc")
 		self.assertEqual(kwargs["json"]["query"], "query { shop { name } }")

@@ -251,10 +251,13 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		self.assertTrue(result.get("needs_city"))
 		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Not Created")
 
-	def test_the_validation_still_refuses_an_empty_city_when_it_is_called_directly(self):
+	def test_the_validation_asks_for_a_city_instead_of_throwing_when_it_is_called_directly(self):
+		frappe.db.set_value("Address", self.address.name, "city", "Nowhere Land")
 		note = self.make_note(city="")
-		with self.assertRaises(frappe.ValidationError):
-			shipment.validate_ready(frappe.get_doc("Delivery Note", note.name))
+
+		result = shipment.validate_ready(frappe.get_doc("Delivery Note", note.name))
+
+		self.assertEqual(result, {"needs_city": True})
 
 	def test_request_refuses_a_stale_form(self):
 		note = self.make_note()
@@ -268,7 +271,7 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		frappe.set_user(email)
 
 		with self.assertRaises(frappe.PermissionError):
-			bosta_shipments.request_shipment(note.name)
+			carrier_api.request_shipment(note.name)
 		frappe.set_user("Administrator")
 
 		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Not Created")
@@ -278,7 +281,7 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		email, _role = make_role_user(self, "Bosta Submitter", {"Delivery Note": ["read", "write", "submit"]})
 		frappe.set_user(email)
 
-		result = bosta_shipments.request_shipment(note.name)
+		result = carrier_api.request_shipment(note.name)
 		frappe.set_user("Administrator")
 
 		self.assertEqual(result["status"], "Creating")
@@ -317,10 +320,20 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 
 	def test_the_job_submits_the_created_note_as_the_user_who_requested_it(self):
 		note = self.make_note()
-		email = self.make_user("Stock Manager")
+		# Sales User too: ERPNext reads the customer's Address on every Delivery Note save, and Stock roles cannot.
+		email = self.make_user("Stock Manager", "Sales User")
 		self.http.queue["create"].append(created("TRK-1", "DELIVERY-1"))
 
-		kwargs = self._start_as(note, email)
+		# Frappe writes no Version row while ``frappe.in_test`` unless a save asks for it (``_save`` sets
+		# ``ignore_version = frappe.in_test``); the job's own ``.submit()`` cannot be told, so ask for it here.
+		real_save = frappe.model.document.Document._save
+
+		def save_with_version(doc, *args, **kwargs):
+			kwargs.setdefault("ignore_version", False)
+			return real_save(doc, *args, **kwargs)
+
+		with patch.object(frappe.model.document.Document, "_save", autospec=True, side_effect=save_with_version):
+			kwargs = self._start_as(note, email)
 
 		self.assertEqual(kwargs["submit_as"], email)
 		values = stored(note, "docstatus", "custom_integration_status", "custom_last_integration_error")
@@ -344,7 +357,7 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 
 	def test_a_failed_submit_leaves_a_created_draft_with_the_reason_and_raises_nothing(self):
 		note = self.make_note()
-		email = self.make_user("Stock Manager")
+		email = self.make_user("Stock Manager", "Sales User")
 		self.http.queue["create"].append(created("TRK-1", "DELIVERY-1"))
 
 		with patch(
@@ -368,7 +381,17 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		carrier_shipments.request_create(note.name, submit_as=email)
 		kwargs = self.enqueue.call_args.kwargs
 
-		with patch.object(frappe.model.document.Document, "check_permission", side_effect=frappe.PermissionError):
+		real_check = frappe.model.document.Document.check_permission
+
+		def refuse_delivery_notes(doc, *args, **kwargs):
+			# Only the note: the job's own Error Log insert must keep working.
+			if doc.doctype == "Delivery Note":
+				raise frappe.PermissionError
+			return real_check(doc, *args, **kwargs)
+
+		with patch.object(
+			frappe.model.document.Document, "check_permission", autospec=True, side_effect=refuse_delivery_notes
+		):
 			carrier_shipments.run_create(note.name, kwargs["log"], kwargs["lookup_first"], kwargs["submit_as"])
 
 		values = stored(note, "docstatus", "custom_integration_status", "custom_last_integration_error")
@@ -635,6 +658,7 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 
 	def test_a_created_draft_submits_unchanged_after_the_worker_wrote_its_fields(self):
 		note = self.make_note()
+		self.http.queue["create"].append(created("TRK-1", "DELIVERY-1"))
 		self._start(note)
 		# The sanitizer HTML-escapes a posted Data value that db_set stored raw.
 		frappe.db.set_value("Delivery Note", note.name, "custom_bosta_city_name", "Dokki & Giza")

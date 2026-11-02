@@ -579,8 +579,6 @@ def validate_ready(doc, action="create"):
 		frappe.throw(_("Bosta shipments cannot be created for {0} orders: {0} fulfils its own orders.").format(platform))
 	if not doc.get("items"):
 		frappe.throw(_("The Delivery Note has no items."))
-	if not cstr(doc.get("custom_bosta_city")).strip():
-		frappe.throw(_("Choose the Bosta city before sending the shipment."))
 	if doc.get("is_return"):
 		_check_returned_cod(doc.get("custom_returned_cod"))
 	else:
