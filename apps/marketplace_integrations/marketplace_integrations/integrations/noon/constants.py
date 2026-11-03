@@ -9,6 +9,9 @@
 COUNTRY_CURRENCY = {"ae": "AED", "sa": "SAR", "eg": "EGP"}
 PRICING_CHUNK_SIZE = 100
 STOCK_CHUNK_SIZE = 100
+# A 100-item stock/price chunk outlasts the shared 10 s transport timeout; we
+# disconnected and Noon logged 499 "context canceled". Used only by those two pushes.
+PUSH_TIMEOUT_SECONDS = 60
 
 # ListFbpiOrders documents up to 50 orders per page
 # (docs/noon-integration/noon_api_full.md, #145's facts table).

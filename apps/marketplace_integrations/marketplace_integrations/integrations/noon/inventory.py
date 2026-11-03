@@ -21,7 +21,7 @@ from marketplace_integrations.integrations.noon.catalog import (
 	validate_warehouse_code,
 )
 from marketplace_integrations.integrations.noon.client import NoonClient
-from marketplace_integrations.integrations.noon.constants import STOCK_CHUNK_SIZE
+from marketplace_integrations.integrations.noon.constants import PUSH_TIMEOUT_SECONDS, STOCK_CHUNK_SIZE
 from marketplace_integrations.integrations.noon.sync import (
 	authorize_selection,
 	chunks,
@@ -108,7 +108,10 @@ def push_stock(account_name, mapping_names=None, manual=False):
 			return {"synced": synced, "failed": failed, "paused": True}
 		try:
 			response = client.request(
-				"POST", STOCK_PATH, json={"items": [payload for _, payload in batch]}
+				"POST",
+				STOCK_PATH,
+				timeout=PUSH_TIMEOUT_SECONDS,
+				json={"items": [payload for _, payload in batch]},
 			)
 			results = response_by_key(
 				require_items_response(response, client), ("warehouse_code", "partner_sku")

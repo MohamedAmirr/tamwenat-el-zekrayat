@@ -90,6 +90,7 @@ class UnitTestNoonInventory(UnitTestCase):
 										outcome = push_stock("ACC")
 		self.assertEqual(outcome, {"synced": 1, "failed": 0, "paused": True})
 		self.assertEqual(client.request.call_count, 1)
+		self.assertEqual(client.request.call_args.kwargs["timeout"], 60)
 		persist.assert_called_once()
 		self.assertIn("M1", persist.call_args.args[0])
 		self.assertNotIn("M2", persist.call_args.args[0])

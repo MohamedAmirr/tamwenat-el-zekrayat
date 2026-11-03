@@ -82,6 +82,7 @@ class UnitTestNoonPricing(UnitTestCase):
 									outcome = push_pricing("ACC")
 		self.assertEqual(outcome, {"synced": 1, "failed": 0, "paused": True})
 		self.assertEqual(client.request.call_count, 1)
+		self.assertEqual(client.request.call_args.kwargs["timeout"], 60)
 		persist.assert_called_once()
 
 	def test_manual_price_run_pushes_with_the_switch_off_and_never_rechecks_it(self):
