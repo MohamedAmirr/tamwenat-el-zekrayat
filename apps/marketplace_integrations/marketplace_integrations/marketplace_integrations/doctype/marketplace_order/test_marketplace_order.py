@@ -14,8 +14,10 @@ from marketplace_integrations.services.marketplace_orders import upsert_marketpl
 
 # Marketplace Account has a required Dynamic Link that generic test-record
 # generation cannot satisfy. Sales Order is intentionally only a future Link
-# target; this issue must never create one.
-IGNORE_TEST_RECORD_DEPENDENCIES = ["Marketplace Account", "Sales Order"]
+# target; this issue must never create one. User (receipt_confirmed_by) is
+# ignored because its chain User -> Company -> Fiscal Year makes ERPNext's test
+# bootstrap create a Fiscal Year that overlaps one already on the site.
+IGNORE_TEST_RECORD_DEPENDENCIES = ["Marketplace Account", "Sales Order", "User"]
 
 
 class IntegrationTestMarketplaceOrder(IntegrationTestCase):

@@ -97,6 +97,7 @@ class FakeBosta:
 			"update": [],
 		}
 		self.calls = []
+		self.urls = []
 
 	def __call__(self, method, url, **kwargs):
 		if url.endswith("/cities"):
@@ -112,6 +113,7 @@ class FakeBosta:
 		self.calls.append(
 			(kind, url if kind in ("cities", "all_districts", "terminate") else kwargs.get("json"))
 		)
+		self.urls.append((kind, url))
 		if kind in LOOKUP_DEFAULTS and not self.queue[kind]:
 			return FakeResponse(200, LOOKUP_DEFAULTS[kind])
 		item = self.queue[kind].pop(0)
@@ -121,6 +123,11 @@ class FakeBosta:
 
 	def calls_of(self, kind):
 		return [payload for call_kind, payload in self.calls if call_kind == kind]
+
+	def urls_of(self, kind):
+		"""The URLs called for one kind. ``calls`` keeps no URL for a GET, so use this to tell which
+		shipment a GET asked about."""
+		return [url for call_kind, url in self.urls if call_kind == kind]
 
 	def sent(self):
 		"""Every call except the read-only city list and directory lookups (GET /cities and
@@ -229,7 +236,10 @@ class BostaFixtureMixin:
 		notes = frappe.get_all(
 			"Delivery Note Item", filters={"against_sales_order": ["in", list(orders)]}, pluck="parent"
 		)
-		for note in set(notes):
+		# Return notes first: an original note is linked from its return (return_against) and cannot
+		# be cancelled or deleted while the return exists.
+		returns = set(frappe.get_all("Delivery Note", filters={"name": ["in", notes], "is_return": 1}, pluck="name"))
+		for note in sorted(set(notes), key=lambda name: (name not in returns, name)):
 			frappe.db.set_value("Delivery Note", note, "custom_integration_status", "")
 			frappe.db.delete(
 				"Integration Request", {"reference_doctype": "Delivery Note", "reference_docname": note}
