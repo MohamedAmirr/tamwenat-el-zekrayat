@@ -151,7 +151,6 @@ test("the table lists the columns in the specified order, with references in a l
 	const order = [
 		"Marketplace Account",
 		"External Reference",
-		"Platform",
 		"Enabled",
 		"Sales UOM",
 		"Sync Status",
@@ -163,6 +162,71 @@ test("the table lists the columns in the specified order, with references in a l
 	assert.match(html, /badge[^>]*>Shopify</);
 	assert.match(html, /grid-heading-row/);
 	assert.match(html, /indicator-pill green/);
+});
+
+function row_cells(html, name) {
+	const start = html.indexOf(`data-name="${name}"`);
+	return html.slice(start);
+}
+
+test("account and platform share one cell; the platform has no column of its own", async () => {
+	const { frm } = await loaded_frm([make_row()]);
+	const html = frm.wrapper.last;
+
+	assert.doesNotMatch(html, />Platform</);
+	assert.match(
+		html,
+		/<span class="ellipsis"[^>]*title="Shop A">Shop A<\/span><span class="badge badge-light"[^>]*>Shopify<\/span>/
+	);
+});
+
+test("sync status and inventory sync status are two labelled lines of one cell", async () => {
+	const { frm } = await loaded_frm([make_row({ sync_status: "Error", inventory_sync_status: "Queued" })]);
+	const body = row_cells(frm.wrapper.last, "MPM-1");
+
+	const cell = body.match(
+		/<div role="group" aria-label="Sync Status"[^>]*>(.*?)<\/div><div role="group" aria-label="Inventory Sync Status"[^>]*>(.*?)<\/div>/
+	);
+	assert.ok(cell, "both lines sit side by side in one cell");
+	assert.match(cell[1], /indicator-pill red[^>]*><span>Error</);
+	assert.match(cell[2], /indicator-pill blue[^>]*><span>Queued</);
+	// The heading stacks the same two labels in one column.
+	assert.match(frm.wrapper.last, />Sync Status<\/div><div class="ellipsis"[^>]*>Inventory Sync Status</);
+});
+
+test("a Talabat row keeps the labelled inventory line with a dash", async () => {
+	const { frm } = await loaded_frm([make_row({ platform: "Talabat", inventory_sync_status: "Error" })]);
+
+	assert.match(row_cells(frm.wrapper.last, "MPM-1"), /aria-label="Inventory Sync Status"[^>]*>-<\/div>/);
+});
+
+test("a long external reference keeps its ltr bdi and carries the full value as tooltip", async () => {
+	const long_ref = "X".repeat(120);
+	const { frm } = await loaded_frm([make_row({ external_reference: long_ref })]);
+
+	assert.match(frm.wrapper.last, new RegExp(`class="static-area ellipsis" title="${long_ref}"><bdi dir="ltr">${long_ref}</bdi>`));
+});
+
+test("the sync button stays on one line in an overflow-visible cell so the menu is not clipped", async () => {
+	const { frm } = await loaded_frm([make_row()]);
+	const html = frm.wrapper.last;
+
+	assert.match(html, /<div class="btn-group mi-sync" role="group" style="white-space: nowrap">/);
+	assert.match(html, /<button type="button" class="btn btn-default btn-xs" style="white-space: nowrap"[^>]*>Sync price and stock</);
+	const cell = html.match(/<div class="col grid-static-col mi-sync-cell" style="([^"]*)">/);
+	assert.ok(cell, "the sync control has its own cell");
+	assert.match(cell[1], /overflow: visible/);
+	assert.doesNotMatch(cell[1], /ellipsis/);
+	// It is not wrapped in the clipping static-area.
+	assert.doesNotMatch(html, /static-area ellipsis"[^>]*><div class="btn-group/);
+	// Ancestors of the menu do not clip either.
+	assert.match(html, /<div class="grid-row mi-listing-row"[^>]*style="overflow: visible"/);
+});
+
+test("only logical CSS properties are used for layout", async () => {
+	const { frm } = await loaded_frm([make_row()]);
+
+	assert.doesNotMatch(frm.wrapper.last, /(?:margin|padding)-(?:left|right)|(?:^|[\s;"])(?:left|right):|text-align: *(?:left|right)/);
 });
 
 test("Talabat shows a dash for the inventory sync status", async () => {
