@@ -8,7 +8,11 @@ from frappe import _
 
 from marketplace_integrations.integrations.noon.catalog import get_account, validate_connection_enabled
 from marketplace_integrations.integrations.noon.client import NoonClient
-from marketplace_integrations.integrations.noon.constants import COUNTRY_CURRENCY, PRICING_CHUNK_SIZE
+from marketplace_integrations.integrations.noon.constants import (
+	COUNTRY_CURRENCY,
+	PRICING_CHUNK_SIZE,
+	PUSH_TIMEOUT_SECONDS,
+)
 from marketplace_integrations.integrations.noon.sync import (
 	authorize_selection,
 	chunks,
@@ -110,7 +114,12 @@ def push_pricing(account_name, mapping_names=None, manual=False):
 		if not manual and is_push_paused(account.name, "pricing"):
 			return {"synced": synced, "failed": failed, "paused": True}
 		try:
-			response = client.request("POST", PRICING_PATH, json={"items": [payload for _, payload in batch]})
+			response = client.request(
+				"POST",
+				PRICING_PATH,
+				timeout=PUSH_TIMEOUT_SECONDS,
+				json={"items": [payload for _, payload in batch]},
+			)
 			results = response_by_key(
 				require_items_response(response, client), ("partner_sku", "country_code")
 			)

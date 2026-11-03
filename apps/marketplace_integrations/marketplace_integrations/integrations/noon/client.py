@@ -82,8 +82,11 @@ class NoonClient:
 			frappe.throw(frappe._("Noon authentication succeeded without a session cookie."))
 		self._authenticated = True
 
-	def request(self, method, path, **kwargs):
+	def request(self, method, path, timeout=REQUEST_TIMEOUT_SECONDS, **kwargs):
 		"""Send one documented API request; return its raw HTTP response.
+
+		``timeout`` is the only transport option a caller may set (bulk pushes pass
+		a longer one); login always uses the default.
 
 		401 and 429 responses are returned unchanged. In particular, this
 		method does not automatically replay a request that may have side
@@ -93,7 +96,7 @@ class NoonClient:
 		parsed_path = urlsplit(path)
 		if not path.startswith("/") or path.startswith("//") or parsed_path.scheme or parsed_path.netloc:
 			frappe.throw(frappe._("Noon request path must be relative to the API host."))
-		if "timeout" in kwargs or "session" in kwargs or "allow_redirects" in kwargs:
+		if "session" in kwargs or "allow_redirects" in kwargs:
 			frappe.throw(frappe._("Noon request transport options are managed by the client."))
 		headers = kwargs.pop("headers", {}) or {}
 		if any(key.lower() == "cookie" for key in headers):
@@ -115,7 +118,7 @@ class NoonClient:
 			service_name=SERVICE_NAME,
 			include_exception_details=False,
 			allow_redirects=False,
-			timeout=REQUEST_TIMEOUT_SECONDS,
+			timeout=timeout,
 			headers=headers,
 			**kwargs,
 		)
