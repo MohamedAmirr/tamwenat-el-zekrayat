@@ -371,7 +371,14 @@ class IntegrationTestBostaStatuses(BostaFixtureMixin, IntegrationTestCase):
 		statuses.run_reconcile()
 
 		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "custom_integration_status"), "Created")
-		self.assertEqual([kind for kind, _ in self.http.sent()], ["search"])
+		# The run polls every open note on the site, so a Created note an older run left behind is
+		# read too (a GET of its own tracking number). This note is only searched, never created or read.
+		kinds = [
+			kind
+			for kind, url in self.http.urls
+			if not url.endswith(("/cities", "/getAllDistricts")) and (kind != "get" or url.endswith("/T-7"))
+		]
+		self.assertEqual(kinds, ["search"])
 
 	def test_one_failing_note_does_not_stop_the_run(self):
 		first = self._created_note(tracking="TRK-A", delivery_id="DELIVERY-A")
@@ -400,7 +407,9 @@ class IntegrationTestBostaStatuses(BostaFixtureMixin, IntegrationTestCase):
 
 		statuses.run_reconcile()
 
-		self.assertEqual(self.http.calls_of("get"), [])
+		# The run polls every open note on the site, so a Created note an older run left behind is
+		# read too; only this note's tracking number must stay unread.
+		self.assertEqual([url for url in self.http.urls_of("get") if url.endswith("/TRK-1")], [])
 		self.assertNotIn(note.name, statuses._open_notes())
 
 	def test_the_nightly_entry_is_registered_and_the_half_hour_poll_is_gone(self):

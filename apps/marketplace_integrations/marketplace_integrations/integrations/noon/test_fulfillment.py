@@ -363,10 +363,14 @@ class IntegrationTestNoonOrderInvoice(IntegrationTestNoonFulfillmentBase):
 	def test_a_warehouse_that_is_not_fbpi_ready_refuses_the_upload_and_the_retry(self):
 		file_doc = self._make_file(b"%PDF-1.4\nmock invoice content\n%%EOF")
 		self.fbpi_ready.return_value = (False, "The warehouse is not FBPI.")
+		before = self.order.noon_order_invoice_status
+		self.assertEqual(before, "Not Uploaded")  # the doctype default: no upload was ever requested
 		with self._patch_get_content(), self.assertRaisesRegex(frappe.ValidationError, "not FBPI"):
 			fulfillment.upload_order_invoice(self.order.name, file_doc.file_url, "INV-1", nowdate())
 		self.order.reload()
-		self.assertFalse(self.order.noon_order_invoice_status)
+		# the refusal comes before any write: the state is untouched and no file was attached
+		self.assertEqual(self.order.noon_order_invoice_status, before)
+		self.assertFalse(self.order.noon_order_invoice_file)
 		self.order.noon_order_invoice_status = "Error"
 		self.order.noon_order_invoice_file = file_doc.file_url
 		self.order.save()

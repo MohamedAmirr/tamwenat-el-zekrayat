@@ -1616,6 +1616,10 @@ class IntegrationTestScheduledTriggers(InventoryFixtureMixin, IntegrationTestCas
 		self._make_mapping(item)
 		tick_time = now_datetime()
 		inventory_sync._advance_watermark(self.account.name, tick_time)
+		# _make_item just wrote the item's Bin in the account's own warehouse, so it is inside the
+		# overlap window and is a real change for this account. Age it out; only the other
+		# warehouse's Bin may be fresh.
+		self._set_bin_modified(item, add_to_date(tick_time, hours=-1))
 		bin_name = frappe.db.get_value("Bin", {"item_code": item, "warehouse": other_warehouse[0]}, "name")
 		if not bin_name:
 			frappe.get_doc(
