@@ -25,6 +25,14 @@ Each rule says what to do. "Justify" means a short comment or PR note naming the
 - Preserve atomicity: one logical change per transaction, row locks (`for_update`) where concurrent writers exist, idempotent writes. A commit inside a function commits the caller's whole transaction (this also defeats test rollback, see the Tests section of `docs/frappe-conventions.md`).
 - Never write around stock or accounting invariants (Stock Ledger, GL, outstanding amounts). Go through the ERPNext document that owns them.
 
+## Database indexes
+
+- Add an index only for a named, hot query (file:line in the PR). The index must match the predicate: equality columns first, then the range or ORDER BY column. A low-cardinality column (a Select with a few values) is useful only as the second column of a composite behind an equality column.
+- Single column: `search_index: 1` in the doctype JSON, and bump the JSON `modified` so migrate re-syncs it. Composite: a module-level `on_doctype_update()` in the controller calling `frappe.db.add_index(doctype, [cols])` (it checks for the index first, so calling it twice is safe; the auto name is `<col1>_<col2>_index`). Frappe calls `on_doctype_update` only on install or when the JSON `modified` changed, so a composite also needs the `modified` bump, and a hand-dropped index is not rebuilt until the JSON changes again.
+- Check redundancy before adding: a composite makes a single index on its first column a duplicate. Check every query that filters on that column alone, then remove the single index's `search_index` in the same PR (migrate drops it before it adds the composite, a short gap with no index on that column). If you cannot check them all, report the duplicate and leave it.
+- Weigh the write cost: every update that changes an indexed column pays index maintenance (InnoDB indexes NULLs too, so a mostly-NULL column is not free). Skip an index whose read benefit does not outweigh how often the column is written.
+- Prove it with `EXPLAIN` before and after on a realistic table. A tiny table (the test site) often ignores indexes; `FORCE INDEX` only shows usability.
+
 ## UI customization
 
 - Prefer, in order: standard fields and settings, workspaces and sidebars, reports, existing components in this app, fixtures (Custom Field, Property Setter, Client Script), then supported extension hooks (`doctype_js`, `doctype_list_js`, `override_*` last).
