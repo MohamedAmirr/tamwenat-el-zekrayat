@@ -243,13 +243,23 @@ doc_events = {
 # only doc_events are the #364 Marketplace Order re-check handlers, the #368 Noon Sales
 # Order Item row check and the #391/#393 Delivery Note and Sales Order carrier handlers above.
 scheduler_events = {
-	"hourly": [
-		"marketplace_integrations.integrations.shopify.webhooks.retry_errored_webhook_deliveries",
-		"marketplace_integrations.integrations.noon.sweep.sweep_all_accounts",
-		"marketplace_integrations.integrations.noon.orders.poll_all_accounts",
-		"marketplace_integrations.services.sales_order_sync_debounce.sweep_stuck_sales_order_reconciliations",
-	],
+	# #367: the four hourly jobs run at staggered minutes instead of all at :00, where
+	# Frappe's own hourly jobs also start; prod hit "(1040) Too many connections" there.
+	# Each is still once an hour. :05/:15/:25/:35 are odd minutes, so none lands on the
+	# every-2-minute inventory sweep tick either.
 	"cron": {
+		"5 * * * *": [
+			"marketplace_integrations.integrations.shopify.webhooks.retry_errored_webhook_deliveries",
+		],
+		"15 * * * *": [
+			"marketplace_integrations.integrations.noon.sweep.sweep_all_accounts",
+		],
+		"25 * * * *": [
+			"marketplace_integrations.integrations.noon.orders.poll_all_accounts",
+		],
+		"35 * * * *": [
+			"marketplace_integrations.services.sales_order_sync_debounce.sweep_stuck_sales_order_reconciliations",
+		],
 		"59 23 * * *": [
 			"marketplace_integrations.services.marketplace_order_reconciliation.enqueue_nightly_order_reconciliation",
 			"marketplace_integrations.services.carrier_shipments.reconcile_open_notes",
