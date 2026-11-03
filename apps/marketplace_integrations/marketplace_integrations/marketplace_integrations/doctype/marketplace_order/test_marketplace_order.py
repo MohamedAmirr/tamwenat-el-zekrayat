@@ -607,3 +607,17 @@ class IntegrationTestMarketplaceOrder(IntegrationTestCase):
         order.reload()
 
         self.assertEqual(order.platform_order_reference, "platform-order-001")
+
+    def test_query_indexes_exist(self):
+        """#367: the indexes behind the debounce sweep (sync_debounce_until) and the Sales
+        Order hover card (erpnext_sales_order); marketplace_account keeps its own index."""
+        columns_by_index = {}
+        for row in frappe.db.sql("SHOW INDEX FROM `tabMarketplace Order`", as_dict=True):
+            columns_by_index.setdefault(row.Key_name, {})[row.Seq_in_index] = row.Column_name
+        index_columns = [
+            [columns[position] for position in sorted(columns)] for columns in columns_by_index.values()
+        ]
+
+        self.assertIn(["sync_debounce_until"], index_columns)
+        self.assertIn(["erpnext_sales_order"], index_columns)
+        self.assertIn(["marketplace_account"], index_columns)
