@@ -220,6 +220,11 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 
 		statuses.refresh_note(note.name)
 
+		# The native cancel is a queued job (cancel_after_carrier_cancelled); run it as the worker would.
+		jobs = [c for c in self.enqueue.call_args_list if "run_auto_cancel" in str(c)]
+		self.assertEqual(len(jobs), 1)
+		carrier_shipments.run_auto_cancel(note.name)
+
 		self.assertEqual(stored(note, "docstatus").docstatus, 2)
 		self.assertEqual(self._sent_kinds(), ["get"])
 
@@ -510,8 +515,13 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 		order = doc.items[0].against_sales_order
 		frappe.db.set_value("Sales Order", order, "status", "Closed")
 
-		with self.assertRaises(frappe.ValidationError):
-			carrier_shipments.cancel(note.name)
+		try:
+			with self.assertRaises(frappe.ValidationError):
+				carrier_shipments.cancel(note.name)
+		finally:
+			# tearDown cancels the note, which ERPNext refuses against a Closed Sales Order.
+			frappe.db.set_value("Sales Order", order, "status", "To Deliver and Bill")
+			frappe.db.commit()  # tearDown rolls back first
 
 		self.assertEqual(self._sent_kinds(), [])
 		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Created")
@@ -783,17 +793,20 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 
 	def test_a_returned_event_queues_the_draft_once(self):
 		note = self._submitted()
+		# Ids of this test only: the webhook matches a note by delivery id or tracking number and ignores an
+		# ambiguous match, so a leftover "DELIVERY-1" row in the shared test site must not be able to hide it.
+		delivery_id, tracking = f"DELIVERY-{self.suffix}", f"TRK-{self.suffix}"
+		frappe.db.set_value("Delivery Note", note.name, {"custom_carrier_delivery_id": delivery_id, "lr_no": tracking})
+		frappe.db.commit()
 		statuses.process_webhook_event(
-			{"_id": "DELIVERY-1", "trackingNumber": "TRK-1", "state": 46, "type": "SEND", "timeStamp": 9000}
+			{"_id": delivery_id, "trackingNumber": tracking, "state": 46, "type": "SEND", "timeStamp": 9000}
 		)
-		key = frappe.get_all(
-			"Integration Request", filters={"custom_delivery_id": "DELIVERY-1"}, pluck="name"
-		)[0]
+		key = frappe.get_all("Integration Request", filters={"custom_delivery_id": delivery_id}, pluck="name")[0]
 		statuses.apply_event(key)
 
 		jobs = [c.kwargs.get("job_id") for c in self.enqueue.call_args_list]
 		self.assertIn(f"bosta-returned-draft|{note.name}", jobs)
-		frappe.db.delete("Integration Request", {"custom_delivery_id": "DELIVERY-1"})
+		frappe.db.delete("Integration Request", {"custom_delivery_id": delivery_id})
 		frappe.db.commit()
 
 	def test_a_received_fee_is_stamped_and_a_real_zero_is_told_apart(self):
