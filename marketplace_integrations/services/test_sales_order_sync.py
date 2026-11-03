@@ -4510,6 +4510,11 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 	def test_a_cancelled_draft_document_no_longer_holds_the_cancel(self):
 		_account, order, sales_order = self._synced_shipping_order()
 		invoice = self._draft_sales_invoice(sales_order)
+		# A deleted newest document gives its name back to the naming series, so rows an earlier run
+		# left for a same-named invoice (Payment Ledger / GL Entry) would block delete_doc. A draft has
+		# none of its own; drop the strays by name inside this test's transaction.
+		for ledger in ("Payment Ledger Entry", "GL Entry"):
+			frappe.db.delete(ledger, {"voucher_type": "Sales Invoice", "voucher_no": invoice.name})
 		frappe.delete_doc("Sales Invoice", invoice.name)
 		self._fully_refund(order)
 

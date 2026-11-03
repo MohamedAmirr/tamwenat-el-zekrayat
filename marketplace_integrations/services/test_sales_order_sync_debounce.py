@@ -774,5 +774,22 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 
 	def test_stuck_sweep_is_registered_hourly_and_resolves(self):
 		path = "marketplace_integrations.services.sales_order_sync_debounce.sweep_stuck_sales_order_reconciliations"
-		self.assertIn(path, frappe.get_hooks("scheduler_events")["hourly"])
+		# #367: registered once an hour at minute 35 (cron), no longer in the "hourly" bucket.
+		self.assertIn(path, frappe.get_hooks("scheduler_events")["cron"]["35 * * * *"])
+		self.assertNotIn(path, frappe.get_hooks("scheduler_events").get("hourly", []))
+
+	def test_the_four_hourly_jobs_run_at_staggered_minutes_not_all_at_the_hour(self):
+		# #367: all four used to start at :00 with Frappe's own hourly jobs and hit
+		# "Too many connections" on prod.
+		expected = {
+			"5 * * * *": "marketplace_integrations.integrations.shopify.webhooks.retry_errored_webhook_deliveries",
+			"15 * * * *": "marketplace_integrations.integrations.noon.sweep.sweep_all_accounts",
+			"25 * * * *": "marketplace_integrations.integrations.noon.orders.poll_all_accounts",
+			"35 * * * *": "marketplace_integrations.services.sales_order_sync_debounce.sweep_stuck_sales_order_reconciliations",
+		}
+		events = frappe.get_hooks("scheduler_events")
+		for cron, path in expected.items():
+			self.assertIn(path, events["cron"][cron])
+			self.assertNotIn(path, events.get("hourly", []))
+			self.assertTrue(callable(frappe.get_attr(path)))
 		self.assertIs(frappe.get_attr(path), debounce.sweep_stuck_sales_order_reconciliations)
