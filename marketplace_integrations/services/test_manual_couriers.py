@@ -1,8 +1,8 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-"""Manual couriers (inDrive, Uber, Own driver): Suppliers with no adapter. A Delivery Note shipped with one
-is a plain ERPNext Delivery Note: the carrier flow leaves it alone."""
+"""Manual delivery: a transporter Supplier with no adapter. A Delivery Note shipped with it is a plain
+ERPNext Delivery Note: the carrier flow leaves it alone."""
 
 import frappe
 from frappe.tests import IntegrationTestCase
@@ -65,7 +65,7 @@ class IntegrationTestManualCouriers(BostaFixtureMixin, IntegrationTestCase):
 			)
 
 	def test_a_manual_courier_note_never_shows_in_needs_attention(self):
-		note = self._note("inDrive")
+		note = self._note("Manual delivery")
 		self.assertEqual(self._items(note), [])
 		# Even with the fields a carrier failure writes, nobody owns the note, so no carrier problem is raised.
 		frappe.db.set_value(
@@ -77,7 +77,7 @@ class IntegrationTestManualCouriers(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual(self._items(note), [])
 
 	def test_the_api_refuses_a_manual_courier_note(self):
-		note = self._note("Uber")
+		note = self._note("Manual delivery", driver_name="inDrive")
 		with self.assertRaises(frappe.ValidationError):
 			carrier_shipments.request_create(note.name)
 		self.enqueue.assert_not_called()

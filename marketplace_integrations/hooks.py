@@ -226,8 +226,15 @@ doc_events = {
 		"on_update_after_submit": _RECHECK_HANDLER,
 		"on_cancel": _RECHECK_HANDLER,
 		# #413: the Bosta count summary is written by the app only; an older form copy must not overwrite it.
-		"validate": "marketplace_integrations.integrations.bosta.statuses.keep_stored_summary",
-		"before_update_after_submit": "marketplace_integrations.integrations.bosta.statuses.keep_stored_summary",
+		"validate": [
+			"marketplace_integrations.integrations.bosta.statuses.keep_stored_summary",
+			"marketplace_integrations.services.sales_order_delivery.sync_earliest_delivery_date",
+		],
+		# The countdown date follows the item delivery dates (marketplace orders only), for staff and system edits.
+		"before_update_after_submit": [
+			"marketplace_integrations.integrations.bosta.statuses.keep_stored_summary",
+			"marketplace_integrations.services.sales_order_delivery.sync_earliest_delivery_date",
+		],
 	},
 }
 

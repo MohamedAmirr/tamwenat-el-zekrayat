@@ -1,11 +1,16 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-"""Create the Suppliers "inDrive", "Uber" and "Own driver" used as the Delivery Note ``transporter`` of a
-manual courier. Idempotent.
+"""Create the Supplier "Manual delivery" used as the Delivery Note ``transporter`` of a manual courier.
+Idempotent.
 
-A manual courier has no adapter in ``services/carrier_shipments.CARRIERS``: a Delivery Note with one of
-these transporters is a plain ERPNext Delivery Note and no carrier API is called.
+Staff say who delivered (inDrive, Uber, own driver) in the native Driver Name / Vehicle No fields.
+"Manual delivery" has no adapter in ``services/carrier_shipments.CARRIERS``: a Delivery Note with this
+transporter is a plain ERPNext Delivery Note and no carrier API is called.
+
+History: this patch first created three Suppliers (inDrive, Uber, Own driver). On sites where it already
+ran, those are disabled and "Manual delivery" is created by hand (see docs/user-actions.md); a fresh site
+only gets "Manual delivery".
 
 Each Supplier is found by ``supplier_name`` (its document name depends on Buying Settings
 ``supp_master_name``). An existing one is left untouched: if it is not flagged ``is_transporter``
@@ -14,7 +19,7 @@ that is only reported, never changed silently.
 
 import frappe
 
-SUPPLIER_NAMES = ("inDrive", "Uber", "Own driver")
+SUPPLIER_NAMES = ("Manual delivery",)
 SUPPLIER_GROUP = "All Supplier Groups"
 
 
