@@ -8,6 +8,7 @@ upgrade changes them, the card silently stops appearing. Dev was verified at Fra
 (recheck on any Frappe upgrade and when prod's version changes).
 """
 
+import json
 import re
 
 import frappe
@@ -110,5 +111,55 @@ class UnitTestOrderHoverCardJsWiring(UnitTestCase):
 			("Delivery Note", "delivery_note_list.js"),
 		):
 			registered = hooks[doctype]
-			self.assertEqual(registered[0], "public/js/carrier_status.js", doctype)
-			self.assertIn(f"public/js/{script}", registered)
+			self.assertIn("public/js/carrier_status.js", registered, doctype)
+			self.assertLess(
+				registered.index("public/js/carrier_status.js"),
+				registered.index(f"public/js/{script}"),
+				doctype,
+			)
+
+	def test_platform_badge_helper_is_registered_for_all_platform_lists(self):
+		hooks = frappe.get_hooks("doctype_list_js")
+		# The core Sales Order list loads the helper before its list script. Marketplace Order and
+		# Marketplace Account own their list scripts, which Frappe loads before hook files, so they
+		# look the helper up per row instead.
+		sales_order = hooks["Sales Order"]
+		self.assertLess(
+			sales_order.index("public/js/platform_badge.js"),
+			sales_order.index("public/js/sales_order_list.js"),
+		)
+		for doctype in ("Marketplace Order", "Marketplace Account"):
+			self.assertIn("public/js/platform_badge.js", hooks[doctype], doctype)
+		for doctype, script, formatter in (
+			("Marketplace Order", "marketplace_order/marketplace_order_list.js", "format_order_platform"),
+			("Marketplace Account", "marketplace_account/marketplace_account_list.js", "format_account_platform"),
+		):
+			source = _read("marketplace_integrations", "marketplace_integrations/doctype", script)
+			self.assertIn("platform_badge", source, doctype)
+			# the platform column's formatter is registered in settings.formatters and calls the helper
+			self.assertRegex(source, rf"formatters:\s*\{{[^}}]*platform:\s*{formatter}\b", doctype)
+			self.assertRegex(
+				source,
+				rf"function {formatter}\([^)]*\)\s*\{{[^}}]*platform_badge[^}}]*\.formatter\(",
+				doctype,
+			)
+
+	def test_delivery_note_list_loads_badge_helper_and_carrier_column(self):
+		registered = frappe.get_hooks("doctype_list_js")["Delivery Note"]
+		for helper in ("public/js/carrier_status.js", "public/js/platform_badge.js"):
+			self.assertLess(
+				registered.index(helper), registered.index("public/js/delivery_note_list.js"), helper
+			)
+		source = _read("marketplace_integrations", "public/js/delivery_note_list.js")
+		self.assertRegex(source, r"\[CARRIER_FIELD\]:\s*format_carrier")
+		self.assertIn('CARRIER_FIELD = "transporter"', source)
+		self.assertIn("carrier_formatter(", source)
+		# transporter is a standard field: it is a list column only through this Property Setter
+		name = "Delivery Note-transporter-in_list_view"
+		rows = [r for r in json.loads(_read("marketplace_integrations", "fixtures/property_setter.json")) if r["name"] == name]
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(
+			(rows[0]["doc_type"], rows[0]["field_name"], rows[0]["property"], rows[0]["value"]),
+			("Delivery Note", "transporter", "in_list_view", "1"),
+		)
+		self.assertIn(f'"{name}"', _read("marketplace_integrations", "hooks.py"))

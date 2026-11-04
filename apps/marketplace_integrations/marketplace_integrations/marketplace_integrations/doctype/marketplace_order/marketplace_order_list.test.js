@@ -23,6 +23,7 @@ const {
 	build_utc_range,
 	format_import_result,
 	format_noon_import_result,
+	format_order_platform,
 	format_retry_summary,
 	get_order_indicator,
 	platform_status_text,
@@ -32,6 +33,26 @@ const {
 	show_refunded_orders,
 	summarize_retry_results,
 } = require("./marketplace_order_list.js");
+
+test("the platform column is the shared pill, and falls back to escaped text without the helper", () => {
+	assert.equal(global.frappe.listview_settings["Marketplace Order"].formatters.platform, format_order_platform);
+	assert.equal(format_order_platform("<b>", { fieldname: "platform" }), "&lt;b&gt;");
+	global.frappe.marketplace_integrations = { platform_badge: require("../../../public/js/platform_badge.js") };
+	const original_escape = global.frappe.utils.escape_html;
+	// Frappe's real escape_html mapping (frappe/public/js/frappe/utils/utils.js): ' ` = are encoded too.
+	const mapping = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "`": "&#x60;", "=": "&#x3D;" };
+	global.frappe.utils.escape_html = (value) =>
+		value == null ? "" : String(value).replace(/[&<>"'`=]/g, (char) => mapping[char] || char);
+	try {
+		assert.match(
+			format_order_platform("Talabat", { fieldname: "platform", label: "Platform" }),
+			/data-filter="platform,&#x3D;,Talabat" title="Platform: Talabat"><span class="indicator-pill orange">Talabat<\/span>/
+		);
+	} finally {
+		global.frappe.utils.escape_html = original_escape;
+		delete global.frappe.marketplace_integrations;
+	}
+});
 
 test("Talabat retrieval result summarizes successful imports", () => {
 	assert.deepEqual(format_import_result({ count: 3, errors: [] }), {

@@ -28,11 +28,19 @@ if (typeof frappe !== "undefined") {
 		hide_name_column: true,
 		get_indicator: marketplace_account_get_indicator,
 		onload: show_row_name_on_hover,
+		// The platform pill (public/js/platform_badge.js, a doctype_list_js file loaded after this one,
+		// so it is looked up per row).
+		formatters: { platform: format_account_platform },
 	};
 }
 
 if (typeof module !== "undefined") {
-	module.exports = { marketplace_account_get_indicator, show_row_name_on_hover };
+	module.exports = { format_account_platform, marketplace_account_get_indicator, show_row_name_on_hover };
+}
+
+function format_account_platform(value, df) {
+	const badge = frappe.marketplace_integrations && frappe.marketplace_integrations.platform_badge;
+	return badge ? badge.formatter(value, df) : frappe.utils.escape_html(value || "");
 }
 
 // #324: loads the shared row tooltip helper (public/js/list_row_name.js). The tooltip is a
