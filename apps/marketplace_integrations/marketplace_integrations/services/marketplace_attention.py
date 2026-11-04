@@ -803,7 +803,8 @@ def get_resolved_import_failures(logs):
 	``creation``. A failure is resolved when a Marketplace Order with its
 	external id was created after the failed attempt (a first import that
 	succeeded later), or was updated after it (platform time, falling back to
-	``modified``). Creation is checked separately because some platforms,
+	``modified``), or was imported again after it (``last_imported_on``, which a
+	clean re-import stamps even when nothing changed). Creation is checked separately because some platforms,
 	Shopify among them, stamp ``last_platform_update_on`` with the platform's
 	own update time, which can predate the failed attempt even though the
 	order was only imported afterwards. An order that existed before the
@@ -816,18 +817,21 @@ def get_resolved_import_failures(logs):
 		if order_id:
 			ids_by_account.setdefault(log.marketplace_account, set()).add(order_id)
 	# (account, external id) -> (when the Marketplace Order was created,
-	# when it was last updated).
+	# when it was last updated, when it was last imported).
 	imported = {}
 	for account_name, order_ids in ids_by_account.items():
 		for chunk in _chunks(order_ids):
 			for row in _get_orders(
 				[account_name],
 				{"external_order_id": ["in", chunk]},
-				["external_order_id", "creation", "last_platform_update_on", "modified"],
+				["external_order_id", "creation", "last_platform_update_on", "last_imported_on", "modified"],
 			):
 				imported[(account_name, cstr(row.external_order_id).strip())] = (
 					get_datetime(row.creation),
 					get_datetime(row.last_platform_update_on or row.modified),
+					# Stamped by every successful import, also one that changed nothing (and so
+					# did not move ``modified``).
+					get_datetime(row.last_imported_on or row.creation),
 				)
 
 	resolved = set()

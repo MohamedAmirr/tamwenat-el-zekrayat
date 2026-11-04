@@ -742,6 +742,33 @@ class IntegrationTestNoonOrderImport(IntegrationTestCase):
 		self.assertEqual(by_status_3["SHIPPED"].current_quantity, 1)
 		self.assertEqual(sum(row.current_quantity for row in order3.items), 1)
 
+	def test_identical_repoll_after_a_status_transition_does_not_save(self):
+		"""The stale-group zero-out is already stored after the transition poll, so the next
+		identical poll compares equal and leaves the order untouched."""
+
+		def payload(integration_status):
+			return _order_payload(
+				fbpi_order_nr="ORD-NOOP-REPOLL",
+				items=[
+					{
+						"mp_item_nr": 1,
+						"partner_sku": "SKU-MAPPED",
+						"mp_status": "MP_ITEM_STATUS_CONFIRMED",
+						"integration_status": integration_status,
+						"delivered_invoice_price": 50.0,
+					}
+				],
+			)
+
+		import_order(self.account, payload("INTEGRATION_ITEM_STATUS_ACKNOWLEDGED"))
+		order, _ = import_order(self.account, payload("INTEGRATION_ITEM_STATUS_SHIPPED"))
+		old_modified = "2026-01-01 00:00:00"
+		frappe.db.set_value("Marketplace Order", order.name, "modified", old_modified, update_modified=False)
+
+		import_order(self.account, payload("INTEGRATION_ITEM_STATUS_SHIPPED"))
+
+		self.assertEqual(str(frappe.db.get_value("Marketplace Order", order.name, "modified")), old_modified)
+
 	def test_import_order_zeroes_stale_row_for_disabled_mapping_not_resolvable(self):
 		"""The stale-row zeroing diff is a pure literal-key comparison against
 		THIS poll's own computed groups - it does not re-check whether the

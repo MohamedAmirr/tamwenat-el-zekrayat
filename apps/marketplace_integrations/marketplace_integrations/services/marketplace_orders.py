@@ -10,7 +10,7 @@ product mapping or creates ERPNext commercial documents.
 
 import frappe
 from frappe import _
-from frappe.utils import cint, cstr, flt
+from frappe.utils import cint, cstr, flt, get_datetime, getdate, now_datetime
 
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_order.marketplace_order import (
 	compute_order_identity_key,
@@ -135,6 +135,7 @@ def upsert_marketplace_order(
 	doc = frappe.get_doc("Marketplace Order", name) if name else frappe.new_doc("Marketplace Order")
 	if name and is_stale and is_stale(doc):
 		return doc
+	stored_values = _comparable_values(doc) if name else None
 	# A Shopify cancellation resolved before any ERPNext order exists is terminal
 	# across later imports. A linked order remains governed by normal sync.
 	keep_shopify_cancelled = bool(
@@ -156,6 +157,8 @@ def upsert_marketplace_order(
 			doc.erpnext_sync_status = CANCELLED
 			doc.last_sync_error = None
 
+	imported_on = now_datetime()
+	doc.last_imported_on = imported_on
 	if doc.is_new():
 		try:
 			doc.insert()
@@ -179,10 +182,97 @@ def upsert_marketplace_order(
 				doc.flags.skip_sync_status_update = True
 			_apply_order_fields(doc, normalized_order)
 			_upsert_order_items(doc, normalized_order.get("items") or [])
+			doc.last_imported_on = imported_on
 			doc.save()
 	else:
-		doc.save()
+		if not doc.flags.skip_sync_status_update:
+			# The re-plan ``before_save`` would run, in memory only: a pull that moves the
+			# planned status (a fixed mapping, say) still has to save.
+			from marketplace_integrations.services.sales_order_sync import (
+				set_sync_status_from_current_snapshot,
+			)
+
+			set_sync_status_from_current_snapshot(doc)
+		if _comparable_values(doc) != stored_values:
+			doc.save()
+		else:
+			# Nothing changed, so no save (it would only move ``modified``, and every pull would
+			# show the order as just updated, without a Version row). The import time is still
+			# recorded: it is how a clean re-import resolves an earlier Order Import failure.
+			frappe.db.set_value(
+				"Marketplace Order", doc.name, "last_imported_on", imported_on, update_modified=False
+			)
 	return doc
+
+
+# Not in ORDER_FIELDS: written by the Shopify cancelled-before-sync branch above, or by the
+# in-memory status re-plan (``set_sync_status_from_current_snapshot`` and what it calls).
+_COMPARED_EXTRA_FIELDS = (
+	"marketplace_account",
+	"external_order_id",
+	"erpnext_sync_status",
+	"last_sync_error",
+	"last_synced_hash",
+	"last_synced_snapshot",
+	"last_erpnext_sync_on",
+	"sync_reason_code",
+	"sync_action_state",
+	"sync_action_type",
+	"sync_remediation_mode",
+	"sync_debounce_until",
+	"sync_blocking_doctype",
+	"sync_blocking_document",
+	"sync_prepared_doctype",
+	"sync_prepared_document",
+	"pending_sync_trigger_source",
+	"sync_retry_count",
+	"receipt_confirmed_by",
+	"receipt_confirmed_on",
+	"outbound_edit_fingerprint",
+	"outbound_edit_state",
+)
+
+
+def _comparable_values(doc):
+	"""The payload-driven values of an order and its lines in a type-normalized shape, so a stored
+	``403.0`` or datetime equals the freshly assigned ``403`` or ISO string. Anything that cannot be
+	shown equal compares as different, which only costs a save."""
+	meta = frappe.get_meta("Marketplace Order")
+	item_meta = frappe.get_meta("Marketplace Order Item")
+	order_values = (
+		*(
+			_normalize(meta.get_field(fieldname), doc.get(fieldname))
+			for fieldname in (*ORDER_FIELDS, *JSON_ORDER_FIELDS, *_COMPARED_EXTRA_FIELDS)
+			if fieldname != "platform_order_reference"
+		),
+		# ``before_save`` fills an empty reference with the External Order ID (#324), so an empty
+		# payload value is the same as that fallback.
+		cstr(doc.platform_order_reference).strip() or cstr(doc.external_order_id).strip(),
+	)
+	rows = sorted(
+		(
+			cstr(row.external_item_id).strip(),
+			tuple(
+				_normalize(item_meta.get_field(fieldname), row.get(fieldname))
+				for fieldname in (*ITEM_FIELDS, *JSON_ITEM_FIELDS)
+			),
+		)
+		for row in doc.items or []
+	)
+	return order_values, rows
+
+
+def _normalize(field, value):
+	fieldtype = field.fieldtype if field else None
+	if fieldtype in ("Float", "Currency", "Percent"):
+		return flt(value, 9)
+	if fieldtype in ("Int", "Check"):
+		return cint(value)
+	if fieldtype == "Datetime":
+		return cstr(get_datetime(value)) if value else ""
+	if fieldtype == "Date":
+		return cstr(getdate(value)) if value else ""
+	return cstr(value)
 
 
 def _apply_order_fields(doc, normalized_order):

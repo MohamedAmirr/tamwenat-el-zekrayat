@@ -3839,6 +3839,94 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.reload()
 		self.assertEqual(order.erpnext_sales_order, so_name)
 
+	AGED = "2026-01-01 00:00:00"
+
+	def _age_marketplace_order(self, name):
+		frappe.db.set_value("Marketplace Order", name, "modified", self.AGED, update_modified=False)
+
+	def _modified(self, name):
+		return str(frappe.db.get_value("Marketplace Order", name, "modified"))
+
+	def _sync_status(self, name):
+		return frappe.db.get_value("Marketplace Order", name, "erpnext_sync_status")
+
+	def test_unchanged_pull_replans_a_linked_sync_error_order_once(self):
+		"""An identical pull skips the save, but the in-memory re-plan still runs: a linked order
+		left in Sync Error whose cause is gone returns to Synced, and the next identical pull
+		has nothing left to change."""
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(account)
+		first = sync_sales_order(order.name)
+		self.assertTrue(first["ok"], first.get("error"))
+		order.reload()
+		payload = {
+			"external_order_id": order.external_order_id,
+			"received_on": nowdate(),
+			"latest_payload": {"fbpi_order_nr": "ORD-NOON"},
+			"items": [
+				{
+					"external_item_id": "sku:SKU-NOON:MP_ITEM_STATUS_CONFIRMED:INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+					"external_sku": "SKU-NOON",
+					"external_status": "CONFIRMED",
+					"integration_status": "ACKNOWLEDGED",
+					"current_quantity": 2,
+					"transaction_amount": 200.0,
+				}
+			],
+		}
+		frappe.db.set_value(
+			"Marketplace Order",
+			order.name,
+			{"erpnext_sync_status": "Sync Error", "last_sync_error": "Item was not mapped."},
+			update_modified=False,
+		)
+		self._age_marketplace_order(order.name)
+
+		upsert_marketplace_order(account.name, payload)
+
+		self.assertEqual(self._sync_status(order.name), "Synced")
+		self.assertFalse(frappe.db.get_value("Marketplace Order", order.name, "last_sync_error"))
+		self._age_marketplace_order(order.name)
+
+		upsert_marketplace_order(account.name, payload)
+
+		self.assertEqual(self._modified(order.name), self.AGED)
+
+	def test_unchanged_pull_that_moves_a_linked_order_to_syncing_saves_once(self):
+		"""A linked order whose rows no longer match the synced baseline becomes Syncing on the
+		pull; Syncing keeps its debounce window, so a second identical pull does not save."""
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(account)
+		self.assertTrue(sync_sales_order(order.name)["ok"])
+		order.reload()
+		frappe.db.set_value("Marketplace Order Item", order.items[0].name, "current_quantity", 3)
+		payload = {
+			"external_order_id": order.external_order_id,
+			"received_on": nowdate(),
+			"latest_payload": {"fbpi_order_nr": "ORD-NOON"},
+			"items": [
+				{
+					"external_item_id": "sku:SKU-NOON:MP_ITEM_STATUS_CONFIRMED:INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+					"external_sku": "SKU-NOON",
+					"external_status": "CONFIRMED",
+					"integration_status": "ACKNOWLEDGED",
+					"current_quantity": 3,
+					"transaction_amount": 200.0,
+				}
+			],
+		}
+		self._age_marketplace_order(order.name)
+
+		upsert_marketplace_order(account.name, payload)
+
+		self.assertNotEqual(self._modified(order.name), self.AGED)
+		self.assertNotEqual(self._sync_status(order.name), "Synced")
+		self._age_marketplace_order(order.name)
+
+		upsert_marketplace_order(account.name, payload)
+
+		self.assertEqual(self._modified(order.name), self.AGED)
+
 	def test_noon_unmapped_sku_blocks_sync(self):
 		account = self._make_noon_account()
 		order, _mapping = self._make_noon_order(account, create_mapping=False)
