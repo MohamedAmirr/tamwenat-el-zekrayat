@@ -6,11 +6,22 @@ global.__ = (message, args) => {
 	return message.replace(/\{(\d+)\}/g, (_, index) => args[index]);
 };
 
+const ESCAPE_MAPPING = {
+	"&": "&amp;",
+	"<": "&lt;",
+	">": "&gt;",
+	'"': "&quot;",
+	"'": "&#39;",
+	"`": "&#x60;",
+	"=": "&#x3D;",
+};
+
 function load({ original_onload = null, original_formatters = {} } = {}) {
 	const created_cards = [];
 	const attached = [];
 	global.frappe = {
-		utils: { escape_html: (value) => String(value).replace(/</g, "&lt;") },
+		// Frappe's real escape_html mapping (frappe/public/js/frappe/utils/utils.js).
+		utils: { escape_html: (value) => String(value).replace(/[&<>"'`=]/g, (char) => ESCAPE_MAPPING[char] || char) },
 		listview_settings: {
 			"Sales Order": {
 				...(original_onload ? { onload: original_onload } : {}),
@@ -30,10 +41,12 @@ function load({ original_onload = null, original_formatters = {} } = {}) {
 			return Promise.resolve();
 		},
 	};
-	// hooks.py loads carrier_status.js before the list script
-	const helper = require.resolve("./carrier_status.js");
-	delete require.cache[helper];
-	require(helper);
+	// hooks.py loads platform_badge.js and carrier_status.js before the list script
+	for (const name of ["./platform_badge.js", "./carrier_status.js"]) {
+		const helper = require.resolve(name);
+		delete require.cache[helper];
+		require(helper);
+	}
 	const path = require.resolve("./sales_order_list.js");
 	delete require.cache[path];
 	const module_exports = require(path);
@@ -109,7 +122,7 @@ test("the shipping summary renders translated, escaped pills with counts and kee
 	);
 	assert.equal(
 		format({ "<unsafe>": 1 }),
-		'<span class="indicator-pill grey">&lt;unsafe> <bdi dir="ltr">1</bdi></span>'
+		'<span class="indicator-pill grey">&lt;unsafe&gt; <bdi dir="ltr">1</bdi></span>'
 	);
 });
 
@@ -119,6 +132,62 @@ test("the shipping summary ignores empty, malformed and non-count values", () =>
 	for (const value of ["", null, undefined, "not json", "[1,2]", "5", '{"Delivered": 0}', '{"Delivered": "2"}', '{"Delivered": -1}']) {
 		assert.equal(format(value), "", String(value));
 	}
+});
+
+// -- platform column and carrier-status placeholder -----------------------------------------
+
+test("the platform column renders a colored filterable pill for each platform", () => {
+	const { settings } = load();
+	const format = settings.formatters.custom_marketplace_platform;
+	const df = { fieldname: "custom_marketplace_platform", label: "Marketplace Platform" };
+	assert.equal(
+		format("Noon", df),
+		'<a class="filterable ellipsis" data-filter="custom_marketplace_platform,&#x3D;,Noon" title="Marketplace Platform: Noon"><span class="indicator-pill yellow">Noon</span></a>'
+	);
+	assert.match(format("Shopify", df), /indicator-pill green">Shopify/);
+	assert.match(format("Talabat", df), /indicator-pill orange">Talabat/);
+	assert.match(format("Bosta", df), /indicator-pill grey">Bosta/);
+	assert.equal(format("", df), "");
+	assert.ok(!format("<b>", df).includes("<b>"));
+});
+
+test("a submitted marketplace order with no carrier status shows one grey placeholder pill", () => {
+	const { settings } = load();
+	const format = settings.formatters.custom_shipping_status_summary;
+	const expected = '<span class="indicator-pill grey">No shipment yet</span>';
+	for (const value of ["", null, undefined, "not json", '{"Delivered": 0}']) {
+		assert.equal(format(value, {}, marketplace_order(value)), expected, String(value));
+	}
+	for (const status of ["To Deliver", "To Deliver and Bill"]) {
+		assert.equal(format("", {}, marketplace_order("", { status })), expected, status);
+	}
+});
+
+test("the placeholder is only for To Deliver and To Deliver and Bill, not Closed, Completed, On Hold, To Bill", () => {
+	const { settings } = load();
+	const format = settings.formatters.custom_shipping_status_summary;
+	for (const status of ["Closed", "Completed", "On Hold", "To Bill", "Draft", "Cancelled", undefined]) {
+		assert.equal(format("", {}, marketplace_order("", { status })), "", String(status));
+	}
+});
+
+test("the placeholder is not shown for drafts, cancelled, non-marketplace orders or without a doc", () => {
+	const { settings } = load();
+	const format = settings.formatters.custom_shipping_status_summary;
+	assert.equal(format("", {}, marketplace_order("", { docstatus: 0 })), "");
+	assert.equal(format("", {}, marketplace_order("", { docstatus: 2, status: "Cancelled" })), "");
+	assert.equal(format("", {}, marketplace_order("", { custom_marketplace_platform: null })), "");
+	assert.equal(format("", {}, marketplace_order("", { custom_marketplace_platform: "" })), "");
+	assert.equal(format(""), "");
+});
+
+test("a real summary wins over the placeholder", () => {
+	const { settings } = load();
+	const format = settings.formatters.custom_shipping_status_summary;
+	assert.equal(
+		format('{"Delivered": 2}', {}, marketplace_order('{"Delivered": 2}')),
+		'<span class="indicator-pill green">Delivered <bdi dir="ltr">2</bdi></span>'
+	);
 });
 
 // -- indicator ---------------------------------------------------------------------------

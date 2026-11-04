@@ -16,8 +16,12 @@
 	const CARD_METHOD = "marketplace_integrations.api.order_hover_card.get_sales_order_card";
 	const CARD_ASSET = "/assets/marketplace_integrations/js/order_hover_card.js";
 	const SUMMARY_FIELD = "custom_shipping_status_summary";
+	const PLATFORM_FIELD = "custom_marketplace_platform";
+	const NO_SHIPMENT = "No shipment yet";
 	// Orders ERPNext itself marks Closed / On Hold / unpaid-advance, drafts and cancelled keep their own indicator.
 	const NATIVE_ONLY_STATUSES = ["Closed", "On Hold", "Cancelled", "Draft"];
+	// The "No shipment yet" placeholder shows only while the order is still waiting to be delivered.
+	const AWAITING_DELIVERY_STATUSES = ["To Deliver", "To Deliver and Bill"];
 
 	// carrier_status.js is loaded before this file (hooks.py doctype_list_js).
 	function shared() {
@@ -28,8 +32,27 @@
 		return shared() ? shared().parse_summary(value) : [];
 	}
 
-	function format_shipping_status_summary(value) {
-		return shared() ? shared().summary_html(shared().parse_summary(value)) : "";
+	// platform_badge.js is loaded before this file too; looked up on use like carrier_status.
+	function format_platform(value, df) {
+		const badge = (frappe.marketplace_integrations || {}).platform_badge;
+		return badge ? badge.formatter(value, df) : frappe.utils.escape_html(value || "");
+	}
+
+	// The summary pills; for a submitted marketplace order still To Deliver / To Deliver and Bill with no carrier
+	// status yet, one grey placeholder pill so the column explains the empty state. Every other status and
+	// non-marketplace orders show nothing.
+	function format_shipping_status_summary(value, df, doc) {
+		if (!shared()) return "";
+		const entries = shared().parse_summary(value);
+		if (entries.length) return shared().summary_html(entries);
+		if (
+			doc &&
+			doc.custom_marketplace_platform &&
+			doc.docstatus === 1 &&
+			AWAITING_DELIVERY_STATUSES.includes(doc.status)
+		)
+			return shared().pill(NO_SHIPMENT);
+		return "";
 	}
 
 	// A marketplace order with a carrier summary shows the carrier status instead of ERPNext's
@@ -57,10 +80,11 @@
 	// Add to ERPNext's own Sales Order list settings instead of replacing them.
 	if (typeof frappe !== "undefined" && frappe.listview_settings) {
 		const settings = (frappe.listview_settings["Sales Order"] = frappe.listview_settings["Sales Order"] || {});
-		settings.add_fields = [...new Set([...(settings.add_fields || []), "custom_marketplace_platform", SUMMARY_FIELD])];
+		settings.add_fields = [...new Set([...(settings.add_fields || []), PLATFORM_FIELD, SUMMARY_FIELD])];
 		settings.formatters = {
 			...(settings.formatters || {}),
 			[SUMMARY_FIELD]: format_shipping_status_summary,
+			[PLATFORM_FIELD]: format_platform,
 		};
 		// Marks the settings as already extended, so loading this file again (route revisit, asset
 		// reload) never wraps onload twice.
@@ -79,6 +103,12 @@
 	}
 
 	if (typeof module !== "undefined") {
-		module.exports = { add_hover_card, external_indicator, format_shipping_status_summary, parse_summary };
+		module.exports = {
+			add_hover_card,
+			external_indicator,
+			format_platform,
+			format_shipping_status_summary,
+			parse_summary,
+		};
 	}
 })();

@@ -8,6 +8,9 @@ if (typeof frappe !== "undefined") {
 		hide_name_column: true,
 		get_indicator: get_order_indicator,
 		formatters: {
+			// The platform pill (public/js/platform_badge.js, a doctype_list_js file loaded after this
+			// one, so it is looked up per row).
+			platform: format_order_platform,
 			external_status(value, df, doc) {
 				const text = frappe.utils.escape_html(platform_status_text(doc));
 				return `<span class="ellipsis" title="${text}">${text}</span>`;
@@ -50,6 +53,11 @@ function show_row_name_on_hover(listview) {
 			if (helper) helper.attach_to_list(listview);
 		})
 		.catch((error) => console.error("List row name helper failed to load (#324).", error));
+}
+
+function format_order_platform(value, df) {
+	const badge = frappe.marketplace_integrations && frappe.marketplace_integrations.platform_badge;
+	return badge ? badge.formatter(value, df) : frappe.utils.escape_html(value || "");
 }
 
 // #169: one colour per ERPNext sync state so a merchant can scan the list for
@@ -376,6 +384,7 @@ if (typeof module !== "undefined") {
 		build_utc_range,
 		format_import_result,
 		format_noon_import_result,
+		format_order_platform,
 		format_retry_summary,
 		get_order_indicator,
 		platform_status_text,

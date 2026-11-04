@@ -4,7 +4,31 @@ const test = require("node:test");
 global.__ = (message) => message;
 global.frappe = { listview_settings: {} };
 
-const { marketplace_account_get_indicator, show_row_name_on_hover } = require("./marketplace_account_list.js");
+const {
+	format_account_platform,
+	marketplace_account_get_indicator,
+	show_row_name_on_hover,
+} = require("./marketplace_account_list.js");
+
+test("the platform column is the shared pill, and falls back to escaped text without the helper", () => {
+	// Frappe's real escape_html mapping (frappe/public/js/frappe/utils/utils.js): ' ` = are encoded too.
+	const mapping = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "`": "&#x60;", "=": "&#x3D;" };
+	global.frappe.utils = {
+		escape_html: (value) =>
+			value == null ? "" : String(value).replace(/[&<>"'`=]/g, (char) => mapping[char] || char),
+	};
+	assert.equal(global.frappe.listview_settings["Marketplace Account"].formatters.platform, format_account_platform);
+	assert.equal(format_account_platform("<b>", { fieldname: "platform" }), "&lt;b&gt;");
+	global.frappe.marketplace_integrations = { platform_badge: require("../../../public/js/platform_badge.js") };
+	try {
+		assert.match(
+			format_account_platform("Noon", { fieldname: "platform", label: "Platform" }),
+			/data-filter="platform,&#x3D;,Noon" title="Platform: Noon"><span class="indicator-pill yellow">Noon<\/span>/
+		);
+	} finally {
+		delete global.frappe.marketplace_integrations;
+	}
+});
 
 test("a disabled account is always grey, regardless of platform or status", () => {
 	for (const platform of ["Talabat", "Shopify", "Noon"]) {

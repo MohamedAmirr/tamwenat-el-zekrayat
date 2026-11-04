@@ -1504,6 +1504,8 @@ ERPNext's items do not match the order the marketplace now shows; review the ord
 "The returned goods were booked in ERPNext. ERPNext cannot cancel an order with submitted delivery documents, so the Sales Order is closed.",تم تسجيل البضاعة المرتجعة في ERPNext. لا يستطيع ERPNext إلغاء طلب له مستندات تسليم معتمدة، لذلك أُغلق أمر البيع.
 Expected Change Hash,بصمة التغيير المتوقع
 Expected Change Scope,نطاق التغيير المتوقع
+Last Imported On,آخر استيراد في
+Internal: when a pull last imported this order successfully, even if nothing changed (services/marketplace_orders.py). Recovery signal for Order Import failures.,داخلي: وقت آخر استيراد ناجح لهذا الطلب حتى لو لم يتغير شيء (services/marketplace_orders.py). إشارة تعافي لإخفاقات استيراد الطلبات.
 "This order was never synced to ERPNext before the sync status update, and it is old or not eligible for an automatic sync. Review it, then use Retry Sync if it is still needed.",لم تتم مزامنة هذا الطلب مع ERPNext قبل تحديث حالة المزامنة، وهو قديم أو غير مؤهل للمزامنة التلقائية. راجعه ثم استخدم إعادة محاولة المزامنة إذا كان لا يزال مطلوبا.
 Every unit of the Noon order was cancelled before an ERPNext Sales Order was created; no Sales Order is needed.,تم إلغاء جميع وحدات طلب Noon قبل إنشاء أمر بيع في ERPNext؛ لا حاجة إلى أمر بيع.
 Import Credentials File,استيراد ملف الاعتماد
@@ -1879,3 +1881,4 @@ External Variant ID is required for a new Shopify listing.,معرّف المتغ
 Saving this listing can re-sync this account's failed orders and push stock automatically.,قد يؤدي حفظ هذا الإدراج إلى إعادة مزامنة الطلبات الفاشلة لهذا الحساب ودفع المخزون تلقائيًا.
 "A submitted Payment Entry already covers {0} of Sales Order {1}, which is at least the amount of Shopify transaction {2} ({3}). No second Payment Entry was created; review it in ERPNext.","يغطي قيد دفع مُرسَل بالفعل {0} من أمر البيع {1}، وهو لا يقل عن مبلغ معاملة Shopify {2} ({3}). لم يتم إنشاء قيد دفع ثانٍ؛ راجعه في ERPNext."
 "Permission was denied while creating the Payment Entry. Check the user's permissions on Payment Entry and the documents it links to.","تم رفض الصلاحية أثناء إنشاء قيد الدفع. راجع صلاحيات المستخدم على قيد الدفع والمستندات المرتبطة به."
+No shipment yet,لا توجد شحنة بعد

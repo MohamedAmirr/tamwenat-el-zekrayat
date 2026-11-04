@@ -14,6 +14,7 @@ from frappe.utils import get_datetime
 
 from marketplace_integrations.integrations.shopify.test_products import make_shopify_account
 from marketplace_integrations.services import marketplace_orders as marketplace_orders_module
+from marketplace_integrations.services.marketplace_attention import get_resolved_import_failures
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 
 
@@ -220,3 +221,144 @@ class IntegrationTestUpsertMarketplaceOrderNoopResave(IntegrationTestCase):
 			fields=["data"],
 		)
 		self.assertEqual(versions, [], [v.data for v in versions])
+
+	def test_reimporting_identical_payload_does_not_touch_modified(self):
+		payload = {
+			"external_order_id": f"modified-order-{frappe.generate_hash(length=8)}",
+			"received_on": "2026-11-03 23:01:51",
+			"order_total": 403,
+			"latest_payload": {"id": 1},
+			"items": [{"external_item_id": "sku:A:S:I", "product_name": "A", "current_quantity": 1}],
+		}
+		order = upsert_marketplace_order(self.account.name, payload)
+		self.order_name = order.name
+		old_modified = "2026-01-01 00:00:00"
+		frappe.db.set_value("Marketplace Order", order.name, "modified", old_modified, update_modified=False)
+
+		upsert_marketplace_order(self.account.name, payload)
+
+		stored = frappe.db.get_value("Marketplace Order", order.name, ["modified", "received_on"])
+		self.assertEqual(str(stored[0]), old_modified)
+		self.assertEqual(str(stored[1]), "2026-11-03 23:01:51")
+
+	def test_a_changed_payload_still_saves_and_updates_modified(self):
+		payload = {
+			"external_order_id": f"changed-order-{frappe.generate_hash(length=8)}",
+			"order_total": 403,
+			"latest_payload": {"id": 1},
+			"items": [{"external_item_id": "sku:A:S:I", "product_name": "A", "current_quantity": 1}],
+		}
+		order = upsert_marketplace_order(self.account.name, payload)
+		self.order_name = order.name
+		old_modified = "2026-01-01 00:00:00"
+		frappe.db.set_value("Marketplace Order", order.name, "modified", old_modified, update_modified=False)
+
+		# A changed field, then a new line: each is a real change and must be saved.
+		upsert_marketplace_order(self.account.name, {**payload, "order_total": 450})
+		self.assertNotEqual(
+			str(frappe.db.get_value("Marketplace Order", order.name, "modified")), old_modified
+		)
+		self.assertEqual(frappe.db.get_value("Marketplace Order", order.name, "order_total"), 450)
+
+		frappe.db.set_value("Marketplace Order", order.name, "modified", old_modified, update_modified=False)
+		more_items = [*payload["items"], {"external_item_id": "sku:B:S:I", "product_name": "B"}]
+		upsert_marketplace_order(self.account.name, {**payload, "order_total": 450, "items": more_items})
+		self.assertNotEqual(
+			str(frappe.db.get_value("Marketplace Order", order.name, "modified")), old_modified
+		)
+		self.assertEqual(frappe.db.count("Marketplace Order Item", {"parent": order.name}), 2)
+
+	def _modified(self, name):
+		return str(frappe.db.get_value("Marketplace Order", name, "modified"))
+
+	def _age(self, name):
+		old_modified = "2026-01-01 00:00:00"
+		frappe.db.set_value("Marketplace Order", name, "modified", old_modified, update_modified=False)
+		return old_modified
+
+	def test_empty_platform_reference_equals_the_stored_external_id_fallback(self):
+		# before_save stores the External Order ID when the payload has no reference, so an
+		# empty payload value on the next pull is not a change.
+		payload = {
+			"external_order_id": f"ref-order-{frappe.generate_hash(length=8)}",
+			"platform_order_reference": "",
+			"latest_payload": {"id": 1},
+			"items": [],
+		}
+		order = upsert_marketplace_order(self.account.name, payload)
+		self.order_name = order.name
+		self.assertEqual(order.platform_order_reference, payload["external_order_id"])
+		old_modified = self._age(order.name)
+
+		upsert_marketplace_order(self.account.name, payload)
+
+		self.assertEqual(self._modified(order.name), old_modified)
+
+	def test_cancelled_before_sync_shopify_order_saves_when_its_status_fields_change(self):
+		payload = {
+			"external_order_id": f"cancel-order-{frappe.generate_hash(length=8)}",
+			"latest_payload": {"cancelledAt": "2026-10-24T10:00:00Z"},
+			"cancelled_at": "2026-10-24 10:00:00",
+			"items": [],
+		}
+		order = upsert_marketplace_order(self.account.name, payload)
+		self.order_name = order.name
+		frappe.db.set_value(
+			"Marketplace Order",
+			order.name,
+			{"erpnext_sync_status": "Cancelled", "last_sync_error": "stale"},
+			update_modified=False,
+		)
+		old_modified = self._age(order.name)
+
+		upsert_marketplace_order(self.account.name, payload)
+
+		self.assertNotEqual(self._modified(order.name), old_modified)
+		self.assertFalse(frappe.db.get_value("Marketplace Order", order.name, "last_sync_error"))
+
+	def test_noop_pull_records_the_import_time_without_touching_modified(self):
+		payload = {
+			"external_order_id": f"imported-order-{frappe.generate_hash(length=8)}",
+			"latest_payload": {"id": 1},
+			"items": [],
+		}
+		order = upsert_marketplace_order(self.account.name, payload)
+		self.order_name = order.name
+		old_modified = self._age(order.name)
+		frappe.db.set_value(
+			"Marketplace Order", order.name, "last_imported_on", "2026-01-01 00:00:00", update_modified=False
+		)
+
+		result = upsert_marketplace_order(self.account.name, payload)
+
+		self.assertEqual(self._modified(order.name), old_modified)
+		stored = frappe.db.get_value("Marketplace Order", order.name, "last_imported_on")
+		self.assertGreater(get_datetime(stored), get_datetime("2026-01-01 00:00:00"))
+		self.assertEqual(get_datetime(result.last_imported_on), get_datetime(stored))
+
+	def test_clean_reimport_resolves_an_earlier_order_import_failure(self):
+		external_order_id = f"recovery-order-{frappe.generate_hash(length=8)}"
+		payload = {"external_order_id": external_order_id, "latest_payload": {"id": 1}, "items": []}
+		order = upsert_marketplace_order(self.account.name, payload)
+		self.order_name = order.name
+		# The order predates the failure and nothing about it changes afterwards.
+		self._age(order.name)
+		frappe.db.set_value(
+			"Marketplace Order",
+			order.name,
+			{"creation": "2026-01-01 00:00:00", "last_imported_on": "2026-01-01 00:00:00"},
+			update_modified=False,
+		)
+		log = frappe._dict(
+			name="LOG-1",
+			marketplace_account=self.account.name,
+			request_data=frappe.as_json({"order_gid": external_order_id}),
+			attempted_at="2026-06-01 00:00:00",
+			creation="2026-06-01 00:00:00",
+		)
+		self.assertEqual(get_resolved_import_failures([log]), set())
+
+		upsert_marketplace_order(self.account.name, payload)
+
+		self.assertEqual(get_resolved_import_failures([log]), {"LOG-1"})
+		self.assertEqual(self._modified(order.name), "2026-01-01 00:00:00")
