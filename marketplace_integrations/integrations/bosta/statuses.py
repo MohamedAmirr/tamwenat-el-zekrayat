@@ -620,6 +620,24 @@ def update_sales_order_summary(sales_order):
 		):
 			label = row.custom_shipping_status or row.custom_integration_status or shipment.CREATED
 			counts[label] = counts.get(label, 0) + 1
+	# Noon notes (Created or Cancellation Unknown, no delivery id) count the same way, under Noon's words.
+	from marketplace_integrations.integrations.noon import delivery_note_shipment as noon_shipment
+
+	noon_supplier = noon_shipment.transporter_name()
+	if parents and noon_supplier:
+		for row in frappe.get_all(
+			"Delivery Note",
+			filters={
+				"name": ["in", parents],
+				"docstatus": ["<", 2],
+				"is_return": 0,
+				"transporter": noon_supplier,
+				"custom_integration_status": ["in", [carrier_log.CREATED, carrier_log.CANCELLATION_UNKNOWN]],
+			},
+			fields=["custom_shipping_status", "custom_integration_status"],
+		):
+			label = row.custom_shipping_status or row.custom_integration_status
+			counts[label] = counts.get(label, 0) + 1
 	frappe.db.set_value(
 		"Sales Order",
 		sales_order,

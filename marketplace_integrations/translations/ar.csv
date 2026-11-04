@@ -290,6 +290,7 @@ Picked up,تم الاستلام
 In transit,قيد النقل
 Out for delivery,خرج للتوصيل
 Delivered,تم التسليم
+Partially Delivered,تم التسليم جزئيًا
 Pickup requested,طُلب الاستلام
 Waiting for route,بانتظار المسار
 Route Assigned,تم تعيين المسار

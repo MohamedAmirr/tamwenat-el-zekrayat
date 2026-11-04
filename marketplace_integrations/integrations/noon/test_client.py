@@ -250,6 +250,30 @@ class UnitTestNoonClient(UnitTestCase):
 			"Noon request failed (HTTP 500).",
 		)
 
+	def test_explicit_timeout_applies_to_the_call_but_not_to_login(self):
+		calls = []
+
+		def send(method, url, **kwargs):
+			calls.append((method, kwargs["timeout"]))
+			if method == "POST" and url.endswith(LOGIN_PATH):
+				kwargs["session"].cookies.set("sid", "session-one")
+			return FakeResponse(200, {})
+
+		with patch("marketplace_integrations.integrations.noon.client.jwt.encode", return_value="jwt"):
+			with patch("marketplace_integrations.integrations.noon.client.http_request", side_effect=send):
+				self.client.request("POST", "/stock/v1/stock-update", timeout=60, json={})
+				self.client.whoami()
+		self.assertEqual(
+			calls, [("POST", REQUEST_TIMEOUT_SECONDS), ("POST", 60), ("GET", REQUEST_TIMEOUT_SECONDS)]
+		)
+
+	def test_session_and_redirect_options_stay_rejected(self):
+		with patch("marketplace_integrations.integrations.noon.client.http_request") as send:
+			for option in ({"session": object()}, {"allow_redirects": True}):
+				with self.assertRaises(frappe.ValidationError):
+					self.client.request("GET", WHOAMI_PATH, **option)
+		send.assert_not_called()
+
 	def test_rejects_external_path_and_caller_cookie_before_network(self):
 		with patch("marketplace_integrations.integrations.noon.client.http_request") as send:
 			with self.assertRaises(frappe.ValidationError):

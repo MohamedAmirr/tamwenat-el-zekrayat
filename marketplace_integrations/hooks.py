@@ -51,7 +51,11 @@ doctype_js = {
 		"public/js/delivery_note_noon.js",
 	],
 }
-doctype_list_js = {"Sales Order": "public/js/sales_order_list.js"}
+# carrier_status.js (shared colors and pills) must come first in both lists.
+doctype_list_js = {
+	"Sales Order": ["public/js/carrier_status.js", "public/js/sales_order_list.js"],
+	"Delivery Note": ["public/js/carrier_status.js", "public/js/delivery_note_list.js"],
+}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
 
