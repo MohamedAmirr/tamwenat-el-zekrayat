@@ -673,6 +673,24 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		noon.after_cancelled(note.name)
 		self.assertIsNone(summary())
 
+	def test_a_failed_summary_update_is_logged_and_never_raises_on_create_or_cancel(self):
+		# The summary is display only: a lock wait on the Sales Order must not stop the auto-submit after
+		# create or the native cancel after a carrier cancel, so the error is logged and swallowed.
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		with (
+			patch(
+				"marketplace_integrations.integrations.bosta.statuses.update_sales_order_summary_of",
+				side_effect=frappe.QueryDeadlockError("Lock wait timeout exceeded"),
+			) as update,
+			patch.object(frappe, "log_error") as log_error,
+		):
+			noon.after_created(note.name, {})
+			noon.after_cancelled(note.name)
+		self.assertEqual(update.call_count, 2)
+		self.assertEqual(log_error.call_count, 2)
+		self.assertEqual(log_error.call_args.kwargs["title"], "Noon shipping summary")
+
 	def test_refresh_shows_mixed_and_an_item_difference_sets_the_error(self):
 		fx = self._order([("SKU-A", 2)], ["SKU-A", "SKU-A"])
 		note = self._created_note(fx, units=("1", "2"))

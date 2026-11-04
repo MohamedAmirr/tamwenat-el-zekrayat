@@ -69,3 +69,11 @@ test("a problem state is red next to Partially Delivered; mixed keeps the counts
 	}
 	assert.equal(shared.summary_html([]), "");
 });
+
+test("Awaiting your action and Out of Stock show red beside Partially Delivered", () => {
+	for (const problem of ["Awaiting your action", "Out of Stock"]) {
+		const html = shared.summary_html([["Delivered", 1], [problem, 1]]);
+		assert.match(html, /indicator-pill orange">Partially Delivered</, problem);
+		assert.match(html, new RegExp(`indicator-pill red">${problem} `), problem);
+	}
+});
