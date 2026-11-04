@@ -617,6 +617,35 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(sales_order.items[0].rate, 500)
 		self.assertEqual(order.erpnext_sync_status, "Synced")
 
+	def test_draft_resync_keeps_the_original_earliest_delivery_date_when_the_hash_changed(self):
+		"""`_apply_snapshot` sets `custom_earliest_delivery_date` only while empty, so a changed hash on a Draft
+		re-sync reapplies the snapshot but leaves the countdown date alone."""
+		order = self._make_order()
+		first = sync_sales_order(order.name)
+		frappe.db.set_value("Sales Order", first["sales_order"], "docstatus", 0, update_modified=False)
+		frappe.db.set_value(
+			"Sales Order",
+			first["sales_order"],
+			"custom_earliest_delivery_date",
+			"2020-01-02",
+			update_modified=False,
+		)
+		order.reload()
+		hash_before = order.last_synced_hash
+		order.items[0].fulfilled_quantity = 3
+		order.items[0].fulfilled_total_price = 1500
+		order.save()
+
+		second = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(second["ok"], second.get("error"))
+		self.assertNotEqual(order.last_synced_hash, hash_before)
+		self.assertEqual(
+			str(frappe.db.get_value("Sales Order", first["sales_order"], "custom_earliest_delivery_date")),
+			"2020-01-02",
+		)
+
 	def test_unmapped_final_line_blocks_without_creating_a_sales_order(self):
 		order = self._make_order(sku="UNMAPPED-SKU")
 
@@ -5064,6 +5093,92 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			{line["external_item_id"]: line["delivery_date"] for line in lines},
 			{"sku:SKU-NOON": "2099-01-05", "sku:SKU-NOON-2": "2099-01-09"},
 		)
+
+	# -- Earliest Delivery Date (the list countdown field) ----------------
+
+	def _assert_earliest_kept_out_of_the_hash(self, order, sales_order_name, expected):
+		"""The field holds ``expected``, is not in the stored snapshot, and a re-sync changes neither it nor the hash."""
+		self.assertEqual(
+			str(frappe.db.get_value("Sales Order", sales_order_name, "custom_earliest_delivery_date")),
+			expected,
+		)
+		order.reload()
+		self.assertNotIn("custom_earliest_delivery_date", order.last_synced_snapshot)
+		hash_before = order.last_synced_hash
+		sync_sales_order(order.name)
+		order.reload()
+		self.assertEqual(order.last_synced_hash, hash_before)
+		self.assertEqual(
+			str(frappe.db.get_value("Sales Order", sales_order_name, "custom_earliest_delivery_date")),
+			expected,
+		)
+
+	def test_talabat_sync_sets_the_earliest_delivery_date_from_the_promised_date_plus_lead_days(self):
+		order = self._make_order()
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+		self._assert_earliest_kept_out_of_the_hash(order, sales_order.name, str(sales_order.delivery_date))
+
+	def test_shopify_sync_sets_the_earliest_delivery_date_from_the_order_date(self):
+		_account, order, result = self._sync_shopify()
+		self.assertTrue(result["ok"], result.get("error"))
+		delivery_date = frappe.db.get_value("Sales Order", result["sales_order"], "delivery_date")
+		self._assert_earliest_kept_out_of_the_hash(order, result["sales_order"], str(delivery_date))
+
+	def test_noon_sync_sets_the_earliest_of_the_line_delivery_dates(self):
+		import json
+
+		account = self._make_noon_account()
+		items = [
+			{
+				"external_item_id": f"sku:{sku}:MP_ITEM_STATUS_CONFIRMED:INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+				"external_sku": sku,
+				"external_status": "CONFIRMED",
+				"integration_status": "ACKNOWLEDGED",
+				"current_quantity": 1,
+				"transaction_amount": 100.0,
+			}
+			for sku in ("SKU-NOON", "SKU-NOON-2")
+		]
+		order, _mapping = self._make_noon_order(account, items=items)
+		frappe.get_doc(
+			{
+				"doctype": "Marketplace Product Mapping",
+				"marketplace_account": account.name,
+				"item": self.item.name,
+				"external_reference": "SKU-NOON-2",
+				"sales_uom": "Nos",
+			}
+		).insert()
+		unit = {
+			"mp_status": "MP_ITEM_STATUS_CONFIRMED",
+			"integration_status": "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+		}
+		order.db_set(
+			"latest_payload",
+			json.dumps(
+				{
+					"items": [
+						{**unit, "partner_sku": "SKU-NOON", "estimated_shipping_date": "2099-01-09 10:00:00"},
+						{
+							**unit,
+							"partner_sku": "SKU-NOON-2",
+							"estimated_shipping_date": "2099-01-05 09:00:00",
+						},
+					]
+				}
+			),
+		)
+		order.reload()
+
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+		# ERPNext sets the header to the LATEST item date; the new field keeps the earliest.
+		self.assertEqual(
+			str(frappe.db.get_value("Sales Order", result["sales_order"], "delivery_date")), "2099-01-09"
+		)
+		self._assert_earliest_kept_out_of_the_hash(order, result["sales_order"], "2099-01-05")
 
 	# -- retry after a blocker or error (Finding 7) ----------------------
 

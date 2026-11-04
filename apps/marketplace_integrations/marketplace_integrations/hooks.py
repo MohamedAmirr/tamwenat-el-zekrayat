@@ -425,6 +425,7 @@ fixtures = [
 					"Sales Order-custom_marketplace_order_tab",
 					"Sales Order-custom_marketplace_order_html",
 					"Sales Order-custom_shipping_status_summary",
+					"Sales Order-custom_earliest_delivery_date",
 					"Payment Entry-custom_marketplace_order",
 					"Payment Entry-custom_marketplace_transaction_id",
 					# #374: the Item form's Marketplace Listings tab (stores nothing on Item)

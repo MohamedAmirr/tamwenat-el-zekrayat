@@ -1592,6 +1592,11 @@ def _apply_snapshot(sales_order, snapshot, marketplace_order_name, shipping_acco
 	sales_order.delivery_date = snapshot["delivery_date"]
 	sales_order.ignore_pricing_rule = 1
 	sales_order.custom_marketplace_order = marketplace_order_name
+	# The countdown date (earliest item date; the header above becomes the latest after ERPNext's own
+	# validate_delivery_date).  Set only while empty, so it is frozen like the snapshot's delivery_date, and
+	# deliberately outside the snapshot, so it never feeds the hash.
+	if not sales_order.get("custom_earliest_delivery_date"):
+		sales_order.custom_earliest_delivery_date = snapshot["delivery_date"]
 	# A pre-existing Draft being re-synced may carry header discount/tax/
 	# shipping configuration from a prior manual Desk edit made between
 	# syncs. apply_discount_amount() (erpnext/controllers/taxes_and_totals.py)
