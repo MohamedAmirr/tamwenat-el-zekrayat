@@ -106,7 +106,12 @@ def event_notification():
 	if event_type == NOON_FBPI_ORDER_SYNC_EVENT_TYPE:
 		if not _is_supported_schema_version(body.get("event_schema_version")):
 			_log_invalid_event(
-				account, message_id, event_type, payload, "event_schema_version is missing or not 1"
+				account,
+				message_id,
+				event_type,
+				payload,
+				"event_schema_version is missing or not 1",
+				extra=lambda: _schema_version_diagnostics(body, metadata),
 			)
 			return {"accepted": True}
 		order_nr = _order_nr(payload)
@@ -154,10 +159,44 @@ def _imported_order(account, order_nr):
 	)
 
 
-def _log_invalid_event(account, message_id, event_type, payload, reason):
+def _schema_version_diagnostics(body, metadata):
+	"""Extra log data for a schema-version rejection: what Noon sent in ``event_schema_version``
+	(repr capped at 100 characters, plus its JSON type name) and the envelope/``metadata`` key
+	names. Names only, never values, so no secret or metadata value is stored."""
+	value = body.get("event_schema_version") if "event_schema_version" in body else None
+	if value is None:
+		type_name = "null" if "event_schema_version" in body else "missing"
+	elif isinstance(value, bool):
+		type_name = "boolean"
+	elif isinstance(value, (int, float)):
+		type_name = "number"
+	elif isinstance(value, str):
+		type_name = "string"
+	elif isinstance(value, list):
+		type_name = "array"
+	elif isinstance(value, dict):
+		type_name = "object"
+	else:
+		type_name = type(value).__name__
+	return {
+		"received_event_schema_version": {
+			"repr": repr(value)[:100] if type_name != "missing" else None,
+			"type": type_name,
+		},
+		"envelope_keys": _capped_key_names(body),
+		"metadata_keys": _capped_key_names(metadata),
+	}
+
+
+def _capped_key_names(mapping):
+	return [cstr(key)[:100] for key in list(mapping)[:50]]
+
+
+def _log_invalid_event(account, message_id, event_type, payload, reason, extra=None):
 	"""One committed ``Invalid`` ``Marketplace Sync Log`` row for an authenticated envelope whose
 	content is unusable, with the raw payload, ``message_id`` and ``event_type`` each capped at
-	4096 characters (the #263 pattern).
+	4096 characters (the #263 pattern). ``extra`` is an optional callable returning diagnostic keys for
+	the stored data; it runs inside the guard below, so a failure in it cannot turn the 200 into a 500.
 	Never raises outward: the caller still answers 200."""
 	try:
 		now = frappe.utils.now_datetime()
@@ -176,6 +215,7 @@ def _log_invalid_event(account, message_id, event_type, payload, reason):
 						"event_type": _capped_text(event_type),
 						"reason": reason,
 						"payload": _capped_payload(payload),
+						**(extra() if extra else {}),
 					}
 				),
 			}
