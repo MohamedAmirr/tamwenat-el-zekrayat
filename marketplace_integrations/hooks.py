@@ -51,10 +51,22 @@ doctype_js = {
 		"public/js/delivery_note_noon.js",
 	],
 }
-# carrier_status.js (shared colors and pills) must come first in both lists.
+# carrier_status.js / platform_badge.js (shared colors and pills) come before the list script of
+# the core doctypes. Marketplace Order and Marketplace Account have their own list scripts, which
+# Frappe loads before hook files, so those look platform_badge up when a row renders.
 doctype_list_js = {
-	"Sales Order": ["public/js/carrier_status.js", "public/js/sales_order_list.js"],
-	"Delivery Note": ["public/js/carrier_status.js", "public/js/delivery_note_list.js"],
+	"Sales Order": [
+		"public/js/platform_badge.js",
+		"public/js/carrier_status.js",
+		"public/js/sales_order_list.js",
+	],
+	"Delivery Note": [
+		"public/js/carrier_status.js",
+		"public/js/platform_badge.js",
+		"public/js/delivery_note_list.js",
+	],
+	"Marketplace Order": ["public/js/platform_badge.js"],
+	"Marketplace Account": ["public/js/platform_badge.js"],
 }
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
@@ -385,6 +397,8 @@ fixtures = [
 					# "saved only" depends_on so a new note and a saved note show the same fields.
 					"Delivery Note-lr_no-label",
 					"Delivery Note-transporter-label",
+					# Carrier as a list column (coloured pill, public/js/delivery_note_list.js)
+					"Delivery Note-transporter-in_list_view",
 					"Delivery Note-main-field_order",
 					"Delivery Note-per_installed-depends_on",
 					"Delivery Note-per_returned-depends_on",
