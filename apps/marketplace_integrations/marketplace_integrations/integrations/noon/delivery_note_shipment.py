@@ -780,7 +780,22 @@ def log_data(values):
 
 
 def after_created(delivery_note, data):
-	"""Noon has nothing to do after the Created write (no label, no summary)."""
+	"""Once the note is Created: the Sales Order summary (no label)."""
+	_update_summary(delivery_note)
+
+
+def _update_summary(delivery_note):
+	"""Refresh ``Sales Order.custom_shipping_status_summary`` (the shared Bosta/Noon counter).
+
+	The summary is display only, so it never raises: a lock wait on the Sales Order row must not skip
+	the automatic submit after create or the native cancel after a carrier cancel. A failure is logged and
+	the next refresh recounts."""
+	from marketplace_integrations.integrations.bosta import statuses
+
+	try:
+		statuses.update_sales_order_summary_of(delivery_note)
+	except Exception:
+		frappe.log_error(title="Noon shipping summary", message=frappe.get_traceback())
 
 
 # ---------------------------------------------------------------------------
@@ -832,7 +847,8 @@ def cancel_remote(doc):
 
 
 def after_cancelled(delivery_note):
-	"""Noon has nothing to do after the Cancelled write."""
+	"""Once the note is Cancelled: the Sales Order summary."""
+	_update_summary(delivery_note)
 
 
 # ---------------------------------------------------------------------------
@@ -1088,6 +1104,7 @@ def refresh(delivery_note):
 				custom_integration_status=CANCELLED, custom_shipping_status=SHIPPING_CANCELLED, custom_last_integration_error=None
 			)
 		note.db_set(values, update_modified=False, notify=True, commit=True)
+		_update_summary(delivery_note)
 		if values.get("custom_integration_status") == CANCELLED:
 			_cancel_note_natively(delivery_note)
 		return frappe.db.get_value("Delivery Note", delivery_note, "custom_shipping_status")
@@ -1123,6 +1140,7 @@ def refresh(delivery_note):
 			if derived.rows.get(row.name):
 				row.db_set("custom_noon_item_status", derived.rows[row.name], update_modified=False)
 	note.db_set(values, update_modified=False, notify=True, commit=True)
+	_update_summary(delivery_note)
 	if values.get("custom_integration_status") == CANCELLED:
 		_cancel_note_natively(delivery_note)
 	return frappe.db.get_value("Delivery Note", delivery_note, "custom_shipping_status")

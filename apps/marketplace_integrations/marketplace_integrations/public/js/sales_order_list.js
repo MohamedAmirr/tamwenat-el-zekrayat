@@ -5,62 +5,42 @@
 //
 // - The order details hover card on every row (#325, order_hover_card.js): the helper is loaded with
 //   frappe.require, the card is a convenience and failing to load it changes nothing else.
-// - The Bosta delivery counts column (epic #413, #409): custom_shipping_status_summary holds
-//   {"Delivered": 2, "In transit between Hubs": 1}, stored by the Bosta status job, and is shown as
-//   translated status pills with counts.
+// - The carrier delivery counts column (epic #413, #409): custom_shipping_status_summary holds
+//   {"Delivered": 2, "In transit between Hubs": 1}, stored by the Bosta and Noon status code, and is shown as
+//   translated status pills (colors and the Partially Delivered rule: carrier_status.js).
+// - For a marketplace order with a summary, the carrier status replaces the native To Deliver / Delivered
+//   indicator (get_indicator); ERPNext's own indicator stays for every other order.
 //
 // Wrapped in a function: doctype_list_js files share one scope with ERPNext's own list script.
 (function () {
 	const CARD_METHOD = "marketplace_integrations.api.order_hover_card.get_sales_order_card";
 	const CARD_ASSET = "/assets/marketplace_integrations/js/order_hover_card.js";
 	const SUMMARY_FIELD = "custom_shipping_status_summary";
-	const STATUS_COLORS = {
-		Delivered: "green",
-		Fulfilled: "green",
-		Created: "blue",
-		"Pickup requested": "blue",
-		"Waiting for route": "orange",
-		"Route Assigned": "blue",
-		"Picked up": "blue",
-		"Picked up from business": "blue",
-		"Received at warehouse": "blue",
-		"In transit between Hubs": "blue",
-		"Returned to business": "orange",
-		"Returned to stock": "orange",
-		"On hold": "orange",
-		Exception: "red",
-		Lost: "red",
-		Damaged: "red",
-		Investigation: "red",
-		"Awaiting your action": "red",
-		Terminated: "red",
-		Canceled: "grey",
-		Archived: "grey",
-	};
+	// Orders ERPNext itself marks Closed / On Hold / unpaid-advance, drafts and cancelled keep their own indicator.
+	const NATIVE_ONLY_STATUSES = ["Closed", "On Hold", "Cancelled", "Draft"];
 
-	// The stored value is JSON written by the server; parse it defensively and keep only
-	// {text: positive integer} entries.
+	// carrier_status.js is loaded before this file (hooks.py doctype_list_js).
+	function shared() {
+		return (frappe.marketplace_integrations || {}).carrier_status;
+	}
+
 	function parse_summary(value) {
-		let data = value;
-		if (typeof value === "string") {
-			try {
-				data = JSON.parse(value);
-			} catch (error) {
-				return [];
-			}
-		}
-		if (!data || typeof data !== "object" || Array.isArray(data)) return [];
-		return Object.entries(data).filter(([, count]) => Number.isInteger(count) && count > 0);
+		return shared() ? shared().parse_summary(value) : [];
 	}
 
 	function format_shipping_status_summary(value) {
-		const escape = frappe.utils.escape_html;
-		return parse_summary(value)
-			.map(([status, count]) => {
-				const color = STATUS_COLORS[status] || "grey";
-				return `<span class="indicator-pill ${color}">${escape(__(status))} <bdi dir="ltr">${escape(count)}</bdi></span>`;
-			})
-			.join(" ");
+		return shared() ? shared().summary_html(shared().parse_summary(value)) : "";
+	}
+
+	// A marketplace order with a carrier summary shows the carrier status instead of ERPNext's
+	// To Deliver / Delivered indicator; every other order, and an empty summary, keeps ERPNext's own.
+	function external_indicator(doc) {
+		if (!shared() || !doc || !doc.custom_marketplace_platform) return null;
+		if (doc.docstatus !== 1 || NATIVE_ONLY_STATUSES.includes(doc.status)) return null;
+		if (doc.advance_payment_status === "Requested") return null;
+		const indicator = shared().indicator_for(shared().parse_summary(doc[SUMMARY_FIELD]));
+		if (!indicator) return null;
+		return [indicator[0], indicator[1], `custom_marketplace_platform,=,${doc.custom_marketplace_platform}`];
 	}
 
 	function add_hover_card(listview) {
@@ -85,6 +65,10 @@
 		// Marks the settings as already extended, so loading this file again (route revisit, asset
 		// reload) never wraps onload twice.
 		if (!settings.__mi_list_extended) {
+			const original_get_indicator = settings.get_indicator;
+			settings.get_indicator = function (doc) {
+				return external_indicator(doc) || (original_get_indicator ? original_get_indicator.call(this, doc) : undefined);
+			};
 			const original_onload = settings.onload;
 			settings.onload = function (listview) {
 				if (original_onload) original_onload.call(this, listview);
@@ -95,6 +79,6 @@
 	}
 
 	if (typeof module !== "undefined") {
-		module.exports = { add_hover_card, format_shipping_status_summary, parse_summary };
+		module.exports = { add_hover_card, external_indicator, format_shipping_status_summary, parse_summary };
 	}
 })();
