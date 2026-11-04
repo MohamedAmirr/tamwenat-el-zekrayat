@@ -143,6 +143,49 @@ def _latest_payload_items(order):
 	return items if isinstance(items, list) else []
 
 
+def parse_estimated_shipping_date(value):
+	"""A Noon ``estimated_shipping_date`` ("2026-11-08 10:00:00", date only also fine) as a ``date``, else ``None``.
+
+	Never raises: ``None``, blanks, non-strings and garbage all give ``None`` so the caller can fall back.
+	"""
+	if not value or not isinstance(value, str):
+		return None
+	try:
+		parsed = get_datetime(value.strip())
+		# get_datetime gives None for blanks and zero dates.
+		return parsed.date() if parsed else None
+	except Exception:
+		# dateutil can also raise OverflowError and others; any failure means "no usable date".
+		return None
+
+
+def estimated_shipping_dates_by_sku(order):
+	"""``{partner_sku: earliest date}`` of the order's eligible units that carry a usable ``estimated_shipping_date``.
+
+	Reads the stored latest payload (``items[].estimated_shipping_date``). Eligible means the same as the Sales
+	Order lines: Noon status CONFIRMED and not out of stock. A SKU with no usable date is absent.
+	"""
+	from marketplace_integrations.integrations.noon.order_mapper import INTEGRATION_STATUS_MAP, MP_STATUS_MAP
+
+	dates = {}
+	for unit in _latest_payload_items(order):
+		if not isinstance(unit, dict):
+			continue
+		mp_status = MP_STATUS_MAP.get(cstr(unit.get("mp_status")), cstr(unit.get("mp_status")))
+		integration_status = INTEGRATION_STATUS_MAP.get(
+			cstr(unit.get("integration_status")), cstr(unit.get("integration_status"))
+		)
+		if mp_status != "CONFIRMED" or integration_status == "OUT_OF_STOCK":
+			continue
+		date = parse_estimated_shipping_date(unit.get("estimated_shipping_date"))
+		if not date:
+			continue
+		sku = cstr(unit.get("partner_sku")).strip()
+		if sku not in dates or date < dates[sku]:
+			dates[sku] = date
+	return dates
+
+
 def _pending_oos_units(order):
 	"""Units reserved for a queued UpdateOrder call on this order."""
 	raw = order.noon_pending_oos_units
