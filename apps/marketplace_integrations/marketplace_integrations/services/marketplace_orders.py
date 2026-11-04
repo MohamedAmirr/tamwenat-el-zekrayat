@@ -185,7 +185,8 @@ def upsert_marketplace_order(
 			doc.last_imported_on = imported_on
 			doc.save()
 	else:
-		if not doc.flags.skip_sync_status_update:
+		replanned = not doc.flags.skip_sync_status_update
+		if replanned:
 			# The re-plan ``before_save`` would run, in memory only: a pull that moves the
 			# planned status (a fixed mapping, say) still has to save.
 			from marketplace_integrations.services.sales_order_sync import (
@@ -194,7 +195,14 @@ def upsert_marketplace_order(
 
 			set_sync_status_from_current_snapshot(doc)
 		if _comparable_values(doc) != stored_values:
-			doc.save()
+			# The re-plan already ran: running it again in ``before_save`` is not idempotent (it
+			# would drop the Resolved state a prepared return note just produced) and doubles the cost.
+			doc.flags.skip_sync_status_update = True
+			try:
+				doc.save()
+			finally:
+				# The caller reuses this document, so give back the flag it had.
+				doc.flags.skip_sync_status_update = not replanned
 		else:
 			# Nothing changed, so no save (it would only move ``modified``, and every pull would
 			# show the order as just updated, without a Version row). The import time is still

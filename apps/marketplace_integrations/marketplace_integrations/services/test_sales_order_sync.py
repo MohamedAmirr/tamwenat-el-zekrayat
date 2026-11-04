@@ -3892,9 +3892,10 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 		self.assertEqual(self._modified(order.name), self.AGED)
 
-	def test_unchanged_pull_that_moves_a_linked_order_to_syncing_saves_once(self):
-		"""A linked order whose rows no longer match the synced baseline becomes Syncing on the
-		pull; Syncing keeps its debounce window, so a second identical pull does not save."""
+	def test_unchanged_pull_that_moves_a_linked_order_to_needs_action_saves_once(self):
+		"""A linked order whose rows no longer match the synced baseline is re-planned to Needs Action
+		on the pull (a save, though the payload is unchanged); the second identical pull finds the
+		same plan and does not save."""
 		account = self._make_noon_account()
 		order, _mapping = self._make_noon_order(account)
 		self.assertTrue(sync_sales_order(order.name)["ok"])
@@ -3920,7 +3921,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		upsert_marketplace_order(account.name, payload)
 
 		self.assertNotEqual(self._modified(order.name), self.AGED)
-		self.assertNotEqual(self._sync_status(order.name), "Synced")
+		self.assertEqual(self._sync_status(order.name), "Needs Action")
 		self._age_marketplace_order(order.name)
 
 		upsert_marketplace_order(account.name, payload)
