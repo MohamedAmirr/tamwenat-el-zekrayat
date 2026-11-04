@@ -666,6 +666,108 @@ class IntegrationTestNoonWebhookReceiver(IntegrationTestCase):
 		self.assertLessEqual(len(oversized["truncated_payload"]), 4096)
 
 	@patch.object(orders.frappe, "enqueue")
+	def test_schema_version_rejection_logs_received_value_and_key_names_only(self, enqueue):
+		cases = {
+			"wrong number": (2, {"repr": "2", "type": "number"}),
+			"string": ("v1", {"repr": "'v1'", "type": "string"}),
+			"long string": ("x" * 500, {"repr": repr("x" * 500)[:100], "type": "string"}),
+			"missing": (None, {"repr": None, "type": "missing"}),
+			"explicit null": (None, {"repr": "None", "type": "null"}),
+			"boolean": (True, {"repr": "True", "type": "boolean"}),
+			"array": ([1, "two"], {"repr": "[1, 'two']", "type": "array"}),
+			"object": ({"a": 1}, {"repr": "{'a': 1}", "type": "object"}),
+		}
+		for label, (version, expected) in cases.items():
+			with self.subTest(label):
+				envelope = _envelope(self.connection, event_schema_version=version)
+				envelope["metadata"]["secret_marker"] = "SECRET-METADATA-VALUE"
+				if label == "missing":
+					envelope.pop("event_schema_version")
+				self._call_webhook(envelope, "test-webhook-secret")
+
+				row = self._webhook_logs()[-1]
+				logged = frappe.parse_json(row.request_data)
+				self.assertEqual(logged["received_event_schema_version"], expected)
+				self.assertIn("event_type", logged["envelope_keys"])
+				self.assertIn("metadata", logged["envelope_keys"])
+				if label == "missing":
+					self.assertNotIn("event_schema_version", logged["envelope_keys"])
+				else:
+					self.assertIn("event_schema_version", logged["envelope_keys"])
+				self.assertIn("secret_marker", logged["metadata_keys"])
+				self.assertIn("message_id", logged["metadata_keys"])
+				self.assertNotIn("SECRET-METADATA-VALUE", row.request_data)
+				self.assertNotIn("test-webhook-secret", row.request_data)
+				self.assertNotIn("dest-001", row.request_data)
+		enqueue.assert_not_called()
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_schema_diagnostic_key_names_are_capped_at_fifty_keys_of_one_hundred_chars(self, enqueue):
+		long_key = "K" * 300
+		envelope = _envelope(self.connection, event_schema_version=2)
+		envelope[long_key] = 1
+		envelope.update({f"env-{i}": i for i in range(60)})
+		# The long key goes first in metadata so it survives the 50-key cap.
+		envelope["metadata"] = {
+			long_key: "v",
+			**envelope["metadata"],
+			**{f"meta-{i}": i for i in range(60)},
+		}
+
+		self._call_webhook(envelope, "test-webhook-secret")
+
+		row = self._webhook_logs()[-1]
+		logged = frappe.parse_json(row.request_data)
+		self.assertEqual(len(logged["envelope_keys"]), 50)
+		self.assertEqual(len(logged["metadata_keys"]), 50)
+		self.assertIn("K" * 100, logged["envelope_keys"])
+		self.assertIn("K" * 100, logged["metadata_keys"])
+		self.assertTrue(all(len(key) <= 100 for key in logged["envelope_keys"] + logged["metadata_keys"]))
+		self.assertNotIn("K" * 101, row.request_data)
+		self.assertNotIn(long_key, row.request_data)
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_connection_project_code_value_is_never_stored_on_schema_rejection(self, enqueue):
+		envelope = _envelope(self.connection, event_schema_version="v9")
+
+		self._call_webhook(envelope, "test-webhook-secret")
+
+		row = self._webhook_logs()[-1]
+		logged = frappe.parse_json(row.request_data)
+		self.assertEqual(logged["reason"], "event_schema_version is missing or not 1")
+		self.assertIn("project_code", logged["metadata_keys"])
+		self.assertNotIn(self.connection.project_code, row.request_data)
+		enqueue.assert_not_called()
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_schema_diagnostics_failure_still_answers_200_and_does_not_escape(self, enqueue):
+		envelope = _envelope(self.connection, event_schema_version=2)
+
+		with (
+			patch.object(
+				noon_webhooks, "_schema_version_diagnostics", side_effect=RuntimeError("diagnostics broke")
+			),
+			patch.object(noon_webhooks.frappe, "log_error") as log_error,
+		):
+			result = self._call_webhook(envelope, "test-webhook-secret")
+
+		self.assertEqual(result, {"accepted": True})
+		enqueue.assert_not_called()
+		# The extra callable runs inside _log_invalid_event's guard, so the failure is logged
+		# and the Invalid row is not written.
+		log_error.assert_called_once()
+		self.assertEqual(log_error.call_args.kwargs["title"], "Noon webhook: failed to write sync log")
+		self.assertEqual(self._webhook_logs(), [])
+
+	@patch.object(orders.frappe, "enqueue")
+	def test_other_invalid_reasons_do_not_carry_schema_diagnostics(self, enqueue):
+		self._call_webhook(_envelope(self.connection, payload={"other": 1}), "test-webhook-secret")
+		logged = frappe.parse_json(self._webhook_logs()[-1].request_data)
+		self.assertNotIn("received_event_schema_version", logged)
+		self.assertNotIn("envelope_keys", logged)
+		self.assertNotIn("metadata_keys", logged)
+
+	@patch.object(orders.frappe, "enqueue")
 	def test_invalid_event_caps_message_id_and_event_type(self, enqueue):
 		long_id = "m" * 10000
 		envelope = _envelope(self.connection, message_id=long_id, payload="not-an-object")
