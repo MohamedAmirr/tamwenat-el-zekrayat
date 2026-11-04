@@ -175,6 +175,7 @@ apps/<app_name>/
 - A contract hook that must run for notes no adapter owns (a person setting an app-only value) is `guard_always(doc)` on the adapter, called from `validate_delivery_note` for every adapter.
 - A File shared by content hash: deleting one File row removes the disk file only if no other row has the same `content_hash`, so removing a loose upload after attaching a copy is safe; compare `saved.name != file_doc.name`, not `file_url`.
 - Tests: do not name a mixin helper `_created`; `BostaFixtureMixin` keeps its tracked-docs list in `self._created`.
+- To change a field of a submitted document (`allow_on_submit`) from a `doc_events` handler, assign it in `before_update_after_submit` (or `validate` for a Draft) so the same save writes it. Do not use `db_set` in `on_update_after_submit`: Frappe 16.52 runs `save_version` after `on_update_after_submit`, so the Version row is written anyway. The controller method runs before the `doc_events` handler, so ERPNext's own derived values (such as the Sales Order header `delivery_date`) are already final. "Update Items" (`update_child_qty_rate`) saves the child rows first, reloads the parent and saves it, so a before/after comparison of child rows sees no change; compare against the stored parent value instead.
 
 
 ## Translations

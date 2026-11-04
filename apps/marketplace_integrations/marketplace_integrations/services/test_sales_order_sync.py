@@ -617,9 +617,10 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(sales_order.items[0].rate, 500)
 		self.assertEqual(order.erpnext_sync_status, "Synced")
 
-	def test_draft_resync_keeps_the_original_earliest_delivery_date_when_the_hash_changed(self):
-		"""`_apply_snapshot` sets `custom_earliest_delivery_date` only while empty, so a changed hash on a Draft
-		re-sync reapplies the snapshot but leaves the countdown date alone."""
+	def test_draft_resync_makes_the_earliest_delivery_date_follow_the_item_dates_when_the_hash_changed(self):
+		"""The countdown date is derived from the item dates (`services/sales_order_delivery.py`), so a changed
+		hash on a Draft re-sync, which rebuilds the items, replaces a stale value with the earliest item date,
+		while the hash still changes only because of the snapshot."""
 		order = self._make_order()
 		first = sync_sales_order(order.name)
 		frappe.db.set_value("Sales Order", first["sales_order"], "docstatus", 0, update_modified=False)
@@ -641,9 +642,13 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 		self.assertTrue(second["ok"], second.get("error"))
 		self.assertNotEqual(order.last_synced_hash, hash_before)
+		item_dates = frappe.get_all(
+			"Sales Order Item", filters={"parent": first["sales_order"]}, pluck="delivery_date"
+		)
+		self.assertTrue(item_dates)
 		self.assertEqual(
 			str(frappe.db.get_value("Sales Order", first["sales_order"], "custom_earliest_delivery_date")),
-			"2020-01-02",
+			str(min(item_dates)),
 		)
 
 	def test_unmapped_final_line_blocks_without_creating_a_sales_order(self):
@@ -5097,13 +5102,12 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 	# -- Earliest Delivery Date (the list countdown field) ----------------
 
 	def _assert_earliest_kept_out_of_the_hash(self, order, sales_order_name, expected):
-		"""The field holds ``expected``, is not in the stored snapshot, and a re-sync changes neither it nor the hash."""
+		"""The field holds ``expected`` and a re-sync changes neither it nor the hash."""
 		self.assertEqual(
 			str(frappe.db.get_value("Sales Order", sales_order_name, "custom_earliest_delivery_date")),
 			expected,
 		)
 		order.reload()
-		self.assertNotIn("custom_earliest_delivery_date", order.last_synced_snapshot)
 		hash_before = order.last_synced_hash
 		sync_sales_order(order.name)
 		order.reload()
@@ -5112,6 +5116,181 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			str(frappe.db.get_value("Sales Order", sales_order_name, "custom_earliest_delivery_date")),
 			expected,
 		)
+
+	# -- Earliest Delivery Date follows the item delivery dates (services/sales_order_delivery.py) ----
+
+	def _synced_sales_order(self):
+		order = self._make_order()
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+		return order, result["sales_order"]
+
+	def _update_items_dates(self, sales_order_name, delivery_date, qty=None):
+		"""The real submitted-order path: the "Update Items" dialog (`update_child_qty_rate`)."""
+		from erpnext.controllers.accounts_controller import update_child_qty_rate
+
+		sales_order = frappe.get_doc("Sales Order", sales_order_name)
+		rows = [
+			{
+				"docname": row.name,
+				"item_code": row.item_code,
+				"qty": qty if qty is not None else row.qty,
+				"rate": row.rate,
+				"uom": row.uom,
+				"conversion_factor": row.conversion_factor,
+				"description": row.description,
+				"delivery_date": str(delivery_date),
+			}
+			for row in sales_order.items
+		]
+		update_child_qty_rate("Sales Order", frappe.as_json(rows), sales_order_name)
+
+	def _earliest(self, sales_order_name):
+		return str(frappe.db.get_value("Sales Order", sales_order_name, "custom_earliest_delivery_date"))
+
+	def test_submitted_order_earliest_date_follows_an_update_items_date_change(self):
+		order, sales_order_name = self._synced_sales_order()
+		order.reload()
+		hash_before = order.last_synced_hash
+		new_date = add_days(nowdate(), 9)
+		self._update_items_dates(sales_order_name, new_date)
+		self.assertEqual(self._earliest(sales_order_name), str(new_date))
+		order.reload()
+		self.assertEqual(order.last_synced_hash, hash_before)
+
+	def _spy_earliest_writes(self):
+		"""Record every assignment of the field through ``Document.set`` (the handler's only write)."""
+		from frappe.model.document import Document
+
+		writes = []
+		original = Document.set
+
+		def spy(doc, key, value=None, *args, **kwargs):
+			if key == "custom_earliest_delivery_date":
+				writes.append(value)
+			return original(doc, key, value, *args, **kwargs)
+
+		patcher = patch.object(Document, "set", spy)
+		patcher.start()
+		self.addCleanup(patcher.stop)
+		return writes
+
+	def test_submitted_order_unrelated_edit_does_not_write_the_earliest_date(self):
+		order, sales_order_name = self._synced_sales_order()
+		order.reload()  # the sync wrote the hash in the DB after this copy was loaded
+		hash_before = order.last_synced_hash
+		self.assertTrue(hash_before)
+		stored = self._earliest(sales_order_name)
+		writes = self._spy_earliest_writes()
+		# Same item dates, only the quantity changes.
+		self._update_items_dates(
+			sales_order_name,
+			frappe.db.get_value("Sales Order Item", {"parent": sales_order_name}, "delivery_date"),
+			qty=3,
+		)
+		self.assertEqual(writes, [])
+		self.assertEqual(self._earliest(sales_order_name), stored)
+		order.reload()
+		self.assertEqual(order.last_synced_hash, hash_before)
+
+	def test_update_items_with_a_changed_date_writes_the_earliest_date_once(self):
+		_order, sales_order_name = self._synced_sales_order()
+		new_date = add_days(nowdate(), 8)
+		writes = self._spy_earliest_writes()
+		self._update_items_dates(sales_order_name, new_date)
+		self.assertEqual(len(writes), 1)
+		self.assertEqual(str(writes[0]), str(new_date))
+
+	def test_header_only_edit_on_a_submitted_order_leaves_the_earliest_date(self):
+		_order, sales_order_name = self._synced_sales_order()
+		stored = self._earliest(sales_order_name)
+		sales_order = frappe.get_doc("Sales Order", sales_order_name)
+		sales_order.delivery_date = add_days(nowdate(), 12)
+		sales_order.flags.ignore_permissions = True
+		sales_order.save()
+		# ERPNext resets the header to the latest item date, and the item dates did not change.
+		self.assertEqual(self._earliest(sales_order_name), stored)
+
+	def test_noon_linked_order_date_only_update_items_moves_the_earliest_date(self):
+		"""The prod case (SAL-ORD-2026-00017/18): a date-only Update Items passes the Noon row guard."""
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(account)
+		first = sync_sales_order(order.name)
+		self.assertTrue(first["ok"], first.get("error"))
+		sales_order_name = first["sales_order"]
+		order.reload()
+		hash_before = order.last_synced_hash
+		new_date = add_days(nowdate(), 10)
+		self._update_items_dates(sales_order_name, new_date)
+		self.assertEqual(self._earliest(sales_order_name), str(new_date))
+		order.reload()
+		self.assertEqual(order.last_synced_hash, hash_before)
+
+	def test_draft_to_submit_sets_the_earliest_date_from_the_item_dates(self):
+		_order, sales_order_name = self._synced_sales_order()
+		frappe.db.set_value("Sales Order", sales_order_name, "docstatus", 0, update_modified=False)
+		sales_order = frappe.get_doc("Sales Order", sales_order_name)
+		new_date = add_days(nowdate(), 7)
+		for row in sales_order.items:
+			row.delivery_date = new_date
+		sales_order.flags.ignore_permissions = True
+		sales_order.submit()
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order_name, "docstatus"), 1)
+		self.assertEqual(self._earliest(sales_order_name), str(new_date))
+
+	def test_sync_line_removal_moves_the_earliest_date_to_the_next_earliest_row(self):
+		self._second_item_and_mapping()
+		order = self._make_order()
+		lines = [
+			self._talabat_line("line-1", "SKU-UNIT", 2, 999),
+			self._talabat_line("line-2", "SKU-TWO", 1, 50),
+		]
+		self._reimport_talabat(order, lines)
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+		sales_order_name = result["sales_order"]
+		rows = frappe.get_all(
+			"Sales Order Item",
+			filters={"parent": sales_order_name},
+			fields=["name", "item_code"],
+			order_by="idx",
+		)
+		self.assertEqual(len(rows), 2)
+		early, late = add_days(nowdate(), 3), add_days(nowdate(), 6)
+		# Row 2 (removed below) is the earliest; row 1 stays and is the next earliest.
+		frappe.db.set_value("Sales Order Item", rows[0].name, "delivery_date", late, update_modified=False)
+		frappe.db.set_value("Sales Order Item", rows[1].name, "delivery_date", early, update_modified=False)
+		frappe.db.set_value(
+			"Sales Order", sales_order_name, "custom_earliest_delivery_date", early, update_modified=False
+		)
+		self._reimport_talabat(order, [lines[0], {**lines[1], "external_status": "NOT_FOUND"}])
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["reconciliation"]["outcome"], "UPDATE_SUBMITTED_ORDER")
+		self.assertEqual(self._earliest(sales_order_name), str(late))
+
+	def test_draft_earliest_date_follows_item_dates_on_save(self):
+		_order, sales_order_name = self._synced_sales_order()
+		frappe.db.set_value("Sales Order", sales_order_name, "docstatus", 0, update_modified=False)
+		sales_order = frappe.get_doc("Sales Order", sales_order_name)
+		new_date = add_days(nowdate(), 6)
+		for row in sales_order.items:
+			row.delivery_date = new_date
+		sales_order.flags.ignore_permissions = True
+		sales_order.save()
+		self.assertEqual(self._earliest(sales_order_name), str(new_date))
+
+	def test_non_marketplace_sales_order_is_ignored(self):
+		from marketplace_integrations.services.sales_order_delivery import sync_earliest_delivery_date
+
+		sales_order = frappe._dict(
+			custom_marketplace_order=None,
+			custom_earliest_delivery_date="2020-01-01",
+			delivery_date="2030-01-01",
+			items=[frappe._dict(delivery_date="2030-01-01")],
+		)
+		sync_earliest_delivery_date(sales_order, "validate")
+		self.assertEqual(sales_order.custom_earliest_delivery_date, "2020-01-01")
 
 	def test_talabat_sync_sets_the_earliest_delivery_date_from_the_promised_date_plus_lead_days(self):
 		order = self._make_order()
