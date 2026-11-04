@@ -153,7 +153,12 @@ Status codes (#400):
   row (`Order Import`, `Noon Webhook`, status `Invalid`) holds `message_id`,
   `event_type`, `reason` and the raw `payload`, each capped at 4096 characters (a larger
   payload is kept as `truncated_payload`, the #263 pattern; a longer `message_id` or
-  `event_type` is cut).
+  `event_type` is cut). A rejected `event_schema_version` row also holds
+  `received_event_schema_version` (`repr`, capped at 100 characters, and JSON `type`:
+  `missing`, `null`, `number`, `string`, ...) plus `envelope_keys` and `metadata_keys`
+  (key names only, never values; at most 50 names, each cut at 100 characters, so a list of
+  exactly 50 may be incomplete), so the real Noon shape can be read from the row. `repr` is
+  Python's repr: the string `v1` is stored as `'v1'`.
 - **200, accepted**: everything else. No Noon HTTP call happens in the request.
 
 Accepted `FBPI::ORDER_SYNC`:
