@@ -1881,3 +1881,4 @@ External Variant ID is required for a new Shopify listing.,معرّف المتغ
 Saving this listing can re-sync this account's failed orders and push stock automatically.,قد يؤدي حفظ هذا الإدراج إلى إعادة مزامنة الطلبات الفاشلة لهذا الحساب ودفع المخزون تلقائيًا.
 "A submitted Payment Entry already covers {0} of Sales Order {1}, which is at least the amount of Shopify transaction {2} ({3}). No second Payment Entry was created; review it in ERPNext.","يغطي قيد دفع مُرسَل بالفعل {0} من أمر البيع {1}، وهو لا يقل عن مبلغ معاملة Shopify {2} ({3}). لم يتم إنشاء قيد دفع ثانٍ؛ راجعه في ERPNext."
 "Permission was denied while creating the Payment Entry. Check the user's permissions on Payment Entry and the documents it links to.","تم رفض الصلاحية أثناء إنشاء قيد الدفع. راجع صلاحيات المستخدم على قيد الدفع والمستندات المرتبطة به."
+No shipment yet,لا توجد شحنة بعد
