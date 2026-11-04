@@ -26,16 +26,24 @@ class IntegrationTestCreateManualCourierSuppliers(IntegrationTestCase):
 	def test_each_supplier_exists_once_as_a_transporter_after_any_number_of_runs(self):
 		courier_patch.execute()
 		courier_patch.execute()
-		for name in ("inDrive", "Uber", "Own driver"):
+		self.assertEqual(courier_patch.SUPPLIER_NAMES, ("Manual delivery",))
+		for name in courier_patch.SUPPLIER_NAMES:
 			suppliers = self._suppliers(name)
 			self.assertEqual(len(suppliers), 1, name)
 			self.assertTrue(suppliers[0].is_transporter, name)
+
+	def test_the_old_three_suppliers_are_not_created(self):
+		old_names = ("inDrive", "Uber", "Own driver")
+		before = {name: self._suppliers(name) for name in old_names}
+		courier_patch.execute()
+		# A site where the old patch ran keeps its old Suppliers; none is added by this patch.
+		self.assertEqual({name: self._suppliers(name) for name in old_names}, before)
 
 	def test_an_existing_non_transporter_supplier_is_left_unchanged_and_reported(self):
 		frappe.get_doc(
 			{
 				"doctype": "Supplier",
-				"supplier_name": "Uber",
+				"supplier_name": "Manual delivery",
 				"supplier_group": "All Supplier Groups",
 				"supplier_type": "Company",
 				"is_transporter": 0,
@@ -43,10 +51,9 @@ class IntegrationTestCreateManualCourierSuppliers(IntegrationTestCase):
 		).insert()
 		with patch.object(frappe, "log_error") as log_error:
 			courier_patch.execute()
-		self.assertEqual(len(self._suppliers("Uber")), 1)
-		self.assertFalse(self._suppliers("Uber")[0].is_transporter)
+		self.assertEqual(len(self._suppliers("Manual delivery")), 1)
+		self.assertFalse(self._suppliers("Manual delivery")[0].is_transporter)
 		log_error.assert_called_once()
-		self.assertEqual(len(self._suppliers("inDrive")), 1)
 
 	def _without_all_supplier_groups(self):
 		"""Make the ``All Supplier Groups`` lookup report a missing group; every other lookup stays real."""
@@ -75,7 +82,7 @@ class IntegrationTestCreateManualCourierSuppliers(IntegrationTestCase):
 	):
 		with self._without_all_supplier_groups(), self._buying_settings_supplier_group(None):
 			courier_patch.execute()
-		for name in ("inDrive", "Uber", "Own driver"):
+		for name in courier_patch.SUPPLIER_NAMES:
 			suppliers = frappe.get_all(
 				"Supplier",
 				filters={"supplier_name": name},
@@ -93,7 +100,7 @@ class IntegrationTestCreateManualCourierSuppliers(IntegrationTestCase):
 			self.skipTest("site has no Supplier Group other than All Supplier Groups")
 		with self._without_all_supplier_groups(), self._buying_settings_supplier_group(fallback[0]):
 			courier_patch.execute()
-		for name in ("inDrive", "Uber", "Own driver"):
+		for name in courier_patch.SUPPLIER_NAMES:
 			suppliers = frappe.get_all(
 				"Supplier",
 				filters={"supplier_name": name},
