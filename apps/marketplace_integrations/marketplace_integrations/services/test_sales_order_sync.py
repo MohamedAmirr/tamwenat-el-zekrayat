@@ -1102,6 +1102,41 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "docstatus"), 2)
 		self.assertEqual(self._reopen_log_actions(order), [None, "Reopen", "CANCEL_ORDER"])
 
+	def test_noon_cancelled_order_with_a_retained_earlier_row_is_cancelled_without_a_sales_order(self):
+		# Noon moved the unit from CONFIRMED to CANCELLED; the earlier CONFIRMED row is kept with
+		# current_quantity 0 and must not keep the order out of Cancelled (it was a Sync Error).
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(
+			account,
+			items=[
+				{
+					"external_item_id": "sku:SKU-NOON:MP_ITEM_STATUS_CONFIRMED:INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+					"external_sku": "SKU-NOON",
+					"external_status": "CONFIRMED",
+					"integration_status": "ACKNOWLEDGED",
+					"current_quantity": 0,
+					"transaction_amount": 0,
+				},
+				{
+					"external_item_id": "sku:SKU-NOON:MP_ITEM_STATUS_CANCELLED:INTEGRATION_ITEM_STATUS_SHIPPED",
+					"external_sku": "SKU-NOON",
+					"external_status": "CANCELLED",
+					"integration_status": "SHIPPED",
+					"current_quantity": 1,
+					"transaction_amount": 99.99,
+				},
+			],
+		)
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertTrue(result.get("skipped"))
+		order.reload()
+		self.assertEqual(order.erpnext_sync_status, "Cancelled")
+		self.assertFalse(order.erpnext_sales_order)
+		self.assertFalse(order.last_sync_error)
+
 	def test_noon_closed_order_is_reopened_and_cancelled(self):
 		account = self._make_noon_account()
 		order, _mapping = self._make_noon_order(account)
