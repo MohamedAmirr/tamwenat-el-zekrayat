@@ -650,7 +650,7 @@ Current ERPNext Catalog Price,سعر الكتالوج الحالي في ERPNext
 DELIVERY,توصيل
 DISPATCHED is only valid for Vendor Delivery orders.,DISPATCHED صالحة فقط لطلبات التوصيل بواسطة البائع.
 Damaged,تالف
-Days added to the Shopify order date to set the ERPNext Sales Order Delivery Date. 0 keeps the order date.,الأيام المضافة إلى تاريخ طلب Shopify لتحديد تاريخ التسليم في أمر بيع ERPNext. القيمة 0 تُبقي تاريخ الطلب.
+"Days added to the platform date (Shopify: order date, Talabat: promised date) to set the ERPNext Sales Order Delivery Date. 0 keeps that date.","الأيام المضافة إلى تاريخ المنصة (Shopify: تاريخ الطلب، Talabat: التاريخ الموعود) لتحديد تاريخ التسليم في أمر بيع ERPNext. القيمة 0 تُبقي ذلك التاريخ."
 Deactivate Destination,إلغاء تفعيل الوجهة
 Deactivate destination {0}? Noon stops sending events to it.,إلغاء تفعيل الوجهة {0}؟ ستتوقف Noon عن إرسال الأحداث إليها.
 Delete Demo Data,حذف البيانات التجريبية
@@ -1882,3 +1882,10 @@ Saving this listing can re-sync this account's failed orders and push stock auto
 "A submitted Payment Entry already covers {0} of Sales Order {1}, which is at least the amount of Shopify transaction {2} ({3}). No second Payment Entry was created; review it in ERPNext.","يغطي قيد دفع مُرسَل بالفعل {0} من أمر البيع {1}، وهو لا يقل عن مبلغ معاملة Shopify {2} ({3}). لم يتم إنشاء قيد دفع ثانٍ؛ راجعه في ERPNext."
 "Permission was denied while creating the Payment Entry. Check the user's permissions on Payment Entry and the documents it links to.","تم رفض الصلاحية أثناء إنشاء قيد الدفع. راجع صلاحيات المستخدم على قيد الدفع والمستندات المرتبطة به."
 No shipment yet,لا توجد شحنة بعد
+inDrive,inDrive
+Uber,Uber
+Own driver,سائق خاص
+Earliest Delivery Date,أقرب تاريخ تسليم
+In {0} days,متبقٍ: {0} يوم
+Overdue 1 day,متأخر يوم واحد
+Overdue {0} days,التأخير: {0} يوم

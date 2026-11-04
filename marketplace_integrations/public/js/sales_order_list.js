@@ -8,6 +8,8 @@
 // - The carrier delivery counts column (epic #413, #409): custom_shipping_status_summary holds
 //   {"Delivered": 2, "In transit between Hubs": 1}, stored by the Bosta and Noon status code, and is shown as
 //   translated status pills (colors and the Partially Delivered rule: carrier_status.js).
+// - The delivery countdown column (custom_earliest_delivery_date): days left to the earliest item delivery
+//   date, open marketplace orders only (format_delivery_countdown).
 // - For a marketplace order with a summary, the carrier status replaces the native To Deliver / Delivered
 //   indicator (get_indicator); ERPNext's own indicator stays for every other order.
 //
@@ -17,6 +19,7 @@
 	const CARD_ASSET = "/assets/marketplace_integrations/js/order_hover_card.js";
 	const SUMMARY_FIELD = "custom_shipping_status_summary";
 	const PLATFORM_FIELD = "custom_marketplace_platform";
+	const EARLIEST_FIELD = "custom_earliest_delivery_date";
 	const NO_SHIPMENT = "No shipment yet";
 	// Orders ERPNext itself marks Closed / On Hold / unpaid-advance, drafts and cancelled keep their own indicator.
 	const NATIVE_ONLY_STATUSES = ["Closed", "On Hold", "Cancelled", "Draft"];
@@ -66,6 +69,31 @@
 		return [indicator[0], indicator[1], `custom_marketplace_platform,=,${doc.custom_marketplace_platform}`];
 	}
 
+	// The delivery countdown column: custom_earliest_delivery_date is the earliest item delivery date, set by the
+	// sync (ERPNext's own header delivery_date is the LATEST item date). Only an open marketplace order shows a
+	// pill; the whole-day difference comes from frappe.datetime, never from browser timezone math.
+	function format_delivery_countdown(value, df, doc) {
+		if (
+			!value ||
+			!doc ||
+			!doc.custom_marketplace_platform ||
+			doc.docstatus !== 1 ||
+			!AWAITING_DELIVERY_STATUSES.includes(doc.status)
+		)
+			return "";
+		const days = frappe.datetime.get_diff(value, frappe.datetime.get_today());
+		if (!Number.isFinite(days)) return "";
+		let text;
+		let color;
+		if (days >= 2) [text, color] = [__("In {0} days", [days]), "green"];
+		else if (days === 1) [text, color] = [__("Tomorrow"), "orange"];
+		else if (days === 0) [text, color] = [__("Today"), "orange"];
+		else if (days === -1) [text, color] = [__("Overdue 1 day"), "red"];
+		else [text, color] = [__("Overdue {0} days", [-days]), "red"];
+		const title = frappe.utils.escape_html(frappe.datetime.str_to_user(value));
+		return `<span class="indicator-pill ${color}" title="${title}">${frappe.utils.escape_html(text)}</span>`;
+	}
+
 	function add_hover_card(listview) {
 		return frappe
 			.require(CARD_ASSET)
@@ -80,10 +108,11 @@
 	// Add to ERPNext's own Sales Order list settings instead of replacing them.
 	if (typeof frappe !== "undefined" && frappe.listview_settings) {
 		const settings = (frappe.listview_settings["Sales Order"] = frappe.listview_settings["Sales Order"] || {});
-		settings.add_fields = [...new Set([...(settings.add_fields || []), PLATFORM_FIELD, SUMMARY_FIELD])];
+		settings.add_fields = [...new Set([...(settings.add_fields || []), PLATFORM_FIELD, SUMMARY_FIELD, EARLIEST_FIELD])];
 		settings.formatters = {
 			...(settings.formatters || {}),
 			[SUMMARY_FIELD]: format_shipping_status_summary,
+			[EARLIEST_FIELD]: format_delivery_countdown,
 			[PLATFORM_FIELD]: format_platform,
 		};
 		// Marks the settings as already extended, so loading this file again (route revisit, asset
@@ -106,6 +135,7 @@
 		module.exports = {
 			add_hover_card,
 			external_indicator,
+			format_delivery_countdown,
 			format_platform,
 			format_shipping_status_summary,
 			parse_summary,

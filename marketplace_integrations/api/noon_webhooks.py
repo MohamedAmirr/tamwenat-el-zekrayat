@@ -134,12 +134,15 @@ def event_notification():
 
 
 def _is_supported_schema_version(value):
-	"""Noon documents ``event_schema_version`` ``1``; accept the integer or the string ``"1"``."""
+	"""Noon documents ``event_schema_version`` ``1`` but sends the string ``"1.0"`` (seen on prod, 2026-11-04):
+	accept version 1 as the integer ``1``, the float ``1.0`` or the strings ``"1"`` and ``"1.0"``. Any other
+	value (``2``, ``"1.1"``, ``"1.00"``, a boolean) is rejected."""
 	if isinstance(value, bool):
 		return False
-	if isinstance(value, int):
+	if isinstance(value, (int, float)):
 		return value == NOON_ORDER_SYNC_SCHEMA_VERSION
-	return isinstance(value, str) and value.strip() == str(NOON_ORDER_SYNC_SCHEMA_VERSION)
+	version = str(NOON_ORDER_SYNC_SCHEMA_VERSION)
+	return isinstance(value, str) and value.strip() in (version, f"{version}.0")
 
 
 def _order_nr(payload):

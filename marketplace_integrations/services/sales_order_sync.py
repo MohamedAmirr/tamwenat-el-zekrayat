@@ -259,7 +259,13 @@ def _sync_sales_order(marketplace_order, trigger_source):
 				return _reconcile_submitted_order(order, sales_order, None, evidence, trigger_source)
 			raise
 		snapshot = _make_snapshot(
-			account, customer, lines, _transaction_date(order), _delivery_date(order, account), address, shipping
+			account,
+			customer,
+			lines,
+			_transaction_date(order),
+			_delivery_date(order, account, lines),
+			address,
+			shipping,
 		)
 		current_hash = snapshot_hash(snapshot)
 
@@ -565,7 +571,7 @@ def build_sales_order_snapshot(order, account=None, customer=None, for_submitted
 		customer,
 		lines,
 		_transaction_date(order),
-		_delivery_date(order, account),
+		_delivery_date(order, account, lines),
 		address,
 		_shopify_shipping_amount(order, account, block_taxes=not for_submitted_order),
 	)
@@ -749,6 +755,8 @@ def _build_noon_sales_order_lines(order, account, tolerate_zero_quantity=False):
 		group["amount"] += flt(row.transaction_amount)
 
 	lines = []
+	stored_dates = _stored_line_delivery_dates(order) if order.get("erpnext_sales_order") else None
+	payload_dates = None if stored_dates is not None else _noon_payload_dates(order)
 	for key in group_order:
 		group = groups[key]
 		if group["qty"] <= 0:
@@ -764,17 +772,25 @@ def _build_noon_sales_order_lines(order, account, tolerate_zero_quantity=False):
 		item_uom = resolved.get("sales_uom") or frappe.get_cached_value("Item", resolved["item"], "stock_uom")
 		amount = flt(group["amount"])
 		effective_rate = flt(amount / group["qty"], EFFECTIVE_RATE_PRECISION)
-		lines.append(
-			{
-				"external_item_id": key,
-				"item_code": resolved["item"],
-				"qty": group["qty"],
-				"uom": item_uom,
-				"warehouse": account.warehouse,
-				"fulfilled_total_price": amount,
-				"effective_rate": effective_rate,
-			}
-		)
+		line = {
+			"external_item_id": key,
+			"item_code": resolved["item"],
+			"qty": group["qty"],
+			"uom": item_uom,
+			"warehouse": account.warehouse,
+			"fulfilled_total_price": amount,
+			"effective_rate": effective_rate,
+		}
+		# A linked order keeps the dates it was synced with (a line the stored snapshot has no date
+		# for stays without one), so this field never makes an already-synced order look changed.
+		if stored_dates is not None:
+			if stored_dates.get(key):
+				line["delivery_date"] = stored_dates[key]
+		else:
+			line_date = _noon_line_delivery_date(order, payload_dates, group["external_sku"])
+			if line_date:
+				line["delivery_date"] = str(line_date)
+		lines.append(line)
 
 	if not lines and not tolerate_zero_quantity:
 		raise SyncBlocker(_("No eligible Noon order lines are available to synchronize."))
@@ -1576,6 +1592,11 @@ def _apply_snapshot(sales_order, snapshot, marketplace_order_name, shipping_acco
 	sales_order.delivery_date = snapshot["delivery_date"]
 	sales_order.ignore_pricing_rule = 1
 	sales_order.custom_marketplace_order = marketplace_order_name
+	# The countdown date (earliest item date; the header above becomes the latest after ERPNext's own
+	# validate_delivery_date).  Set only while empty, so it is frozen like the snapshot's delivery_date, and
+	# deliberately outside the snapshot, so it never feeds the hash.
+	if not sales_order.get("custom_earliest_delivery_date"):
+		sales_order.custom_earliest_delivery_date = snapshot["delivery_date"]
 	# A pre-existing Draft being re-synced may carry header discount/tax/
 	# shipping configuration from a prior manual Desk edit made between
 	# syncs. apply_discount_amount() (erpnext/controllers/taxes_and_totals.py)
@@ -1611,6 +1632,11 @@ def _apply_snapshot(sales_order, snapshot, marketplace_order_name, shipping_acco
 		so_item.discount_percentage = 0
 		so_item.discount_amount = 0
 		so_item.is_free_item = 1 if line["effective_rate"] == 0 else 0
+		# Noon lines carry their own date (the header set above is the earliest, but ERPNext's own
+		# validate_delivery_date later sets it to the latest item date); other lines
+		# keep the header date `set_missing_values()` copied onto them.
+		if line.get("delivery_date"):
+			so_item.delivery_date = getdate(line["delivery_date"])
 
 	# The one charge row, rebuilt from scratch on every call (no template or Shipping Rule is
 	# used).  Shopify's shipping is already net of shipping discounts.
@@ -2365,29 +2391,66 @@ def _line_identifier(row):
 	return cstr(row.external_sku).strip() or _("no SKU")
 
 
-def _delivery_date(order, account):
+def _lead_days(account):
+	"""The account's generic Delivery Lead Days (Shopify and Talabat), never negative."""
+	return max(cint(account.get("delivery_lead_days")), 0)
+
+
+def _stored_snapshot_of(order):
+	"""The last synced snapshot of a LINKED order, else ``{}``."""
+	return (_parse_last_synced_snapshot(order) or {}) if order.get("erpnext_sales_order") else {}
+
+
+def _stored_line_delivery_dates(order):
+	"""``{external_item_id: "YYYY-MM-DD"}`` of the lines the linked order was synced with ({} if none stored)."""
+	return {
+		line.get("external_item_id"): line["delivery_date"]
+		for line in _stored_snapshot_of(order).get("items") or []
+		if isinstance(line, dict) and line.get("delivery_date")
+	}
+
+
+def _noon_payload_dates(order):
+	from marketplace_integrations.integrations.noon.fulfillment import estimated_shipping_dates_by_sku
+
+	return estimated_shipping_dates_by_sku(order)
+
+
+def _noon_line_delivery_date(order, payload_dates, sku):
+	"""A Noon line's delivery date: its SKU's earliest `estimated_shipping_date`, else the received date.
+
+	Never earlier than the received date (ERPNext rejects a delivery date before the order date). Never raises.
+	"""
+	received = getdate(order.received_on) if order.received_on else None
+	date = payload_dates.get(sku)
+	if date and received and date < received:
+		date = received
+	return date or received
+
+
+def _delivery_date(order, account, lines=None):
+	# A linked order keeps the delivery date it was synced with, so changing the account's lead
+	# days (or a platform date) never makes already-synced orders look modified.
+	stored = _stored_snapshot_of(order).get("delivery_date")
+	if stored:
+		return getdate(stored)
 	if order.platform == "Shopify":
 		if not order.processed_on:
 			raise SyncBlocker(
 				_("Shopify Processed On is required to set the ERPNext Sales Order Delivery Date.")
 			)
-		# A linked order keeps the delivery date it was synced with, so changing the
-		# account's lead days never makes already-synced orders look modified.
-		stored = (_parse_last_synced_snapshot(order) or {}).get("delivery_date") if order.get("erpnext_sales_order") else None
-		if stored:
-			return getdate(stored)
 		# Shopify sends no promised date; the account's lead days stand in for it.
-		return add_days(getdate(order.processed_on), max(cint(account.shopify_delivery_lead_days), 0))
+		return add_days(getdate(order.processed_on), _lead_days(account))
 	if order.platform == "Noon":
-		# #146 decision 5: Noon documents no promised/delivery date, and
-		# ERPNext requires delivery_date >= transaction_date, so both are set
-		# to the same value (received_on).
+		# The date comes only from Noon: the header is the earliest line date (each line carries its
+		# SKU's `estimated_shipping_date`); no usable date falls back to received_on.
 		if not order.received_on:
 			raise SyncBlocker(_("Noon Received On is required to set the ERPNext Sales Order Delivery Date."))
-		return getdate(order.received_on)
+		line_dates = [getdate(line["delivery_date"]) for line in lines or [] if line.get("delivery_date")]
+		return min(line_dates) if line_dates else getdate(order.received_on)
 	if not order.promised_for:
 		raise SyncBlocker(_("Talabat Promised For is required to set the ERPNext Sales Order Delivery Date."))
-	return getdate(order.promised_for)
+	return add_days(getdate(order.promised_for), _lead_days(account))
 
 
 def _transaction_date(order):

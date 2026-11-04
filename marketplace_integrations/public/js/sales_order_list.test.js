@@ -22,6 +22,12 @@ function load({ original_onload = null, original_formatters = {} } = {}) {
 	global.frappe = {
 		// Frappe's real escape_html mapping (frappe/public/js/frappe/utils/utils.js).
 		utils: { escape_html: (value) => String(value).replace(/[&<>"'`=]/g, (char) => ESCAPE_MAPPING[char] || char) },
+		// Whole-day difference of YYYY-MM-DD strings, like frappe.datetime.get_diff; "today" is fixed.
+		datetime: {
+			get_today: () => "2026-11-04",
+			get_diff: (a, b) => Math.round((Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / 86400000),
+			str_to_user: (value) => `user:${value}`,
+		},
 		listview_settings: {
 			"Sales Order": {
 				...(original_onload ? { onload: original_onload } : {}),
@@ -67,6 +73,7 @@ test("the list loads the platform and shipping summary without dropping ERPNext'
 		"status",
 		"custom_marketplace_platform",
 		"custom_shipping_status_summary",
+		"custom_earliest_delivery_date",
 	]);
 });
 
@@ -262,4 +269,50 @@ test("the indicator wrap is applied once", () => {
 	delete require.cache[path];
 	require(path);
 	assert.equal(global.frappe.listview_settings["Sales Order"].get_indicator, first);
+});
+
+// -- delivery countdown column ----------------------------------------------------------------
+
+test("the countdown pill: green with 2+ days, orange tomorrow and today, red overdue, with the date as tooltip", () => {
+	const { settings } = load();
+	const format = settings.formatters.custom_earliest_delivery_date;
+	const doc = marketplace_order("");
+	const pill = (color, text, date) => `<span class="indicator-pill ${color}" title="user:${date}">${text}</span>`;
+	assert.equal(format("2026-11-09", {}, doc), pill("green", "In 5 days", "2026-11-09"));
+	assert.equal(format("2026-11-06", {}, doc), pill("green", "In 2 days", "2026-11-06"));
+	assert.equal(format("2026-11-05", {}, doc), pill("orange", "Tomorrow", "2026-11-05"));
+	assert.equal(format("2026-11-04", {}, doc), pill("orange", "Today", "2026-11-04"));
+	assert.equal(format("2026-11-03", {}, doc), pill("red", "Overdue 1 day", "2026-11-03"));
+	assert.equal(format("2026-11-01", {}, doc), pill("red", "Overdue 3 days", "2026-11-01"));
+});
+
+test("the countdown shows for To Deliver and To Deliver and Bill only", () => {
+	const { settings } = load();
+	const format = settings.formatters.custom_earliest_delivery_date;
+	for (const status of ["To Deliver", "To Deliver and Bill"]) {
+		assert.match(format("2026-11-09", {}, marketplace_order("", { status })), /In 5 days/, status);
+	}
+	for (const status of ["Closed", "Completed", "On Hold", "To Bill", "Draft", "Cancelled", undefined]) {
+		assert.equal(format("2026-11-09", {}, marketplace_order("", { status })), "", String(status));
+	}
+	assert.equal(format("2026-11-09", {}, marketplace_order("", { docstatus: 0 })), "");
+	assert.equal(format("2026-11-09", {}, marketplace_order("", { docstatus: 2 })), "");
+});
+
+test("the countdown is empty without a date, a platform or a doc", () => {
+	const { settings } = load();
+	const format = settings.formatters.custom_earliest_delivery_date;
+	for (const value of ["", null, undefined]) {
+		assert.equal(format(value, {}, marketplace_order("")), "", String(value));
+	}
+	assert.equal(format("2026-11-09", {}, marketplace_order("", { custom_marketplace_platform: "" })), "");
+	assert.equal(format("2026-11-09", {}), "");
+});
+
+test("the countdown escapes the tooltip date", () => {
+	const { settings } = load();
+	global.frappe.datetime.str_to_user = () => '"><script>';
+	const html = settings.formatters.custom_earliest_delivery_date("2026-11-09", {}, marketplace_order(""));
+	assert.ok(!html.includes("<script>"));
+	assert.ok(html.includes("&quot;&gt;&lt;script&gt;"));
 });
