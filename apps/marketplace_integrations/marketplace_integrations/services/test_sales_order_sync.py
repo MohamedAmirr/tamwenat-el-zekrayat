@@ -617,6 +617,35 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(sales_order.items[0].rate, 500)
 		self.assertEqual(order.erpnext_sync_status, "Synced")
 
+	def test_draft_resync_keeps_the_original_earliest_delivery_date_when_the_hash_changed(self):
+		"""`_apply_snapshot` sets `custom_earliest_delivery_date` only while empty, so a changed hash on a Draft
+		re-sync reapplies the snapshot but leaves the countdown date alone."""
+		order = self._make_order()
+		first = sync_sales_order(order.name)
+		frappe.db.set_value("Sales Order", first["sales_order"], "docstatus", 0, update_modified=False)
+		frappe.db.set_value(
+			"Sales Order",
+			first["sales_order"],
+			"custom_earliest_delivery_date",
+			"2020-01-02",
+			update_modified=False,
+		)
+		order.reload()
+		hash_before = order.last_synced_hash
+		order.items[0].fulfilled_quantity = 3
+		order.items[0].fulfilled_total_price = 1500
+		order.save()
+
+		second = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(second["ok"], second.get("error"))
+		self.assertNotEqual(order.last_synced_hash, hash_before)
+		self.assertEqual(
+			str(frappe.db.get_value("Sales Order", first["sales_order"], "custom_earliest_delivery_date")),
+			"2020-01-02",
+		)
+
 	def test_unmapped_final_line_blocks_without_creating_a_sales_order(self):
 		order = self._make_order(sku="UNMAPPED-SKU")
 
@@ -4971,6 +5000,185 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertNotIn("shipping", noon_snapshot)
 		self.assertEqual(snapshot_hash(noon_snapshot), noon_order.last_synced_hash)
 
+	def test_noon_linked_order_snapshot_hash_ignores_payload_dates_added_later(self):
+		"""A Noon order synced before line dates existed (stored snapshot without them) keeps its hash
+		when the stored payload carries `estimated_shipping_date`s: the real snapshot builder reads the stored
+		dates, never the payload, for a linked order."""
+		import json
+
+		account = self._make_noon_account()
+		order, _mapping = self._make_noon_order(account)
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+		order.reload()
+
+		# Rewrite the baseline the way an old sync stored it: no line delivery dates.
+		old_snapshot = json.loads(order.last_synced_snapshot)
+		for line in old_snapshot["items"]:
+			line.pop("delivery_date", None)
+		old_hash = snapshot_hash(old_snapshot)
+		order.db_set({"last_synced_snapshot": json.dumps(old_snapshot), "last_synced_hash": old_hash})
+		order.db_set(
+			"latest_payload",
+			json.dumps(
+				{
+					"items": [
+						{
+							"partner_sku": "SKU-NOON",
+							"mp_status": "MP_ITEM_STATUS_CONFIRMED",
+							"integration_status": "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+							"estimated_shipping_date": "2099-01-01 10:00:00",
+						}
+					]
+				}
+			),
+		)
+		order.reload()
+
+		snapshot = build_sales_order_snapshot(order)
+		self.assertTrue(all("delivery_date" not in line for line in snapshot["items"]))
+		self.assertEqual(snapshot_hash(snapshot), order.last_synced_hash)
+
+	def test_noon_line_builder_matches_payload_partner_sku_to_each_line(self):
+		"""Each Noon line takes the date of its own payload `partner_sku` (matched to the line's external_sku)."""
+		import json
+
+		from marketplace_integrations.services.sales_order_sync import _build_noon_sales_order_lines
+
+		account = self._make_noon_account()
+		items = [
+			{
+				"external_item_id": f"sku:{sku}:MP_ITEM_STATUS_CONFIRMED:INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+				"external_sku": sku,
+				"external_status": "CONFIRMED",
+				"integration_status": "ACKNOWLEDGED",
+				"current_quantity": 1,
+				"transaction_amount": 100.0,
+			}
+			for sku in ("SKU-NOON", "SKU-NOON-2")
+		]
+		order, _mapping = self._make_noon_order(account, items=items)
+		frappe.get_doc(
+			{
+				"doctype": "Marketplace Product Mapping",
+				"marketplace_account": account.name,
+				"item": self.item.name,
+				"external_reference": "SKU-NOON-2",
+				"sales_uom": "Nos",
+			}
+		).insert()
+		unit = {
+			"mp_status": "MP_ITEM_STATUS_CONFIRMED",
+			"integration_status": "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+		}
+		order.db_set(
+			"latest_payload",
+			json.dumps(
+				{
+					"items": [
+						{**unit, "partner_sku": "SKU-NOON", "estimated_shipping_date": "2099-01-05 10:00:00"},
+						{
+							**unit,
+							"partner_sku": "SKU-NOON-2",
+							"estimated_shipping_date": "2099-01-09 09:00:00",
+						},
+					]
+				}
+			),
+		)
+		order.reload()
+
+		lines = _build_noon_sales_order_lines(order, account)
+		self.assertEqual(
+			{line["external_item_id"]: line["delivery_date"] for line in lines},
+			{"sku:SKU-NOON": "2099-01-05", "sku:SKU-NOON-2": "2099-01-09"},
+		)
+
+	# -- Earliest Delivery Date (the list countdown field) ----------------
+
+	def _assert_earliest_kept_out_of_the_hash(self, order, sales_order_name, expected):
+		"""The field holds ``expected``, is not in the stored snapshot, and a re-sync changes neither it nor the hash."""
+		self.assertEqual(
+			str(frappe.db.get_value("Sales Order", sales_order_name, "custom_earliest_delivery_date")),
+			expected,
+		)
+		order.reload()
+		self.assertNotIn("custom_earliest_delivery_date", order.last_synced_snapshot)
+		hash_before = order.last_synced_hash
+		sync_sales_order(order.name)
+		order.reload()
+		self.assertEqual(order.last_synced_hash, hash_before)
+		self.assertEqual(
+			str(frappe.db.get_value("Sales Order", sales_order_name, "custom_earliest_delivery_date")),
+			expected,
+		)
+
+	def test_talabat_sync_sets_the_earliest_delivery_date_from_the_promised_date_plus_lead_days(self):
+		order = self._make_order()
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+		self._assert_earliest_kept_out_of_the_hash(order, sales_order.name, str(sales_order.delivery_date))
+
+	def test_shopify_sync_sets_the_earliest_delivery_date_from_the_order_date(self):
+		_account, order, result = self._sync_shopify()
+		self.assertTrue(result["ok"], result.get("error"))
+		delivery_date = frappe.db.get_value("Sales Order", result["sales_order"], "delivery_date")
+		self._assert_earliest_kept_out_of_the_hash(order, result["sales_order"], str(delivery_date))
+
+	def test_noon_sync_sets_the_earliest_of_the_line_delivery_dates(self):
+		import json
+
+		account = self._make_noon_account()
+		items = [
+			{
+				"external_item_id": f"sku:{sku}:MP_ITEM_STATUS_CONFIRMED:INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+				"external_sku": sku,
+				"external_status": "CONFIRMED",
+				"integration_status": "ACKNOWLEDGED",
+				"current_quantity": 1,
+				"transaction_amount": 100.0,
+			}
+			for sku in ("SKU-NOON", "SKU-NOON-2")
+		]
+		order, _mapping = self._make_noon_order(account, items=items)
+		frappe.get_doc(
+			{
+				"doctype": "Marketplace Product Mapping",
+				"marketplace_account": account.name,
+				"item": self.item.name,
+				"external_reference": "SKU-NOON-2",
+				"sales_uom": "Nos",
+			}
+		).insert()
+		unit = {
+			"mp_status": "MP_ITEM_STATUS_CONFIRMED",
+			"integration_status": "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+		}
+		order.db_set(
+			"latest_payload",
+			json.dumps(
+				{
+					"items": [
+						{**unit, "partner_sku": "SKU-NOON", "estimated_shipping_date": "2099-01-09 10:00:00"},
+						{
+							**unit,
+							"partner_sku": "SKU-NOON-2",
+							"estimated_shipping_date": "2099-01-05 09:00:00",
+						},
+					]
+				}
+			),
+		)
+		order.reload()
+
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+		# ERPNext sets the header to the LATEST item date; the new field keeps the earliest.
+		self.assertEqual(
+			str(frappe.db.get_value("Sales Order", result["sales_order"], "delivery_date")), "2099-01-09"
+		)
+		self._assert_earliest_kept_out_of_the_hash(order, result["sales_order"], "2099-01-05")
 
 	# -- retry after a blocker or error (Finding 7) ----------------------
 
@@ -5963,7 +6171,7 @@ class IntegrationTestShopifyDeliveryLeadDays(IntegrationTestCase):
 		from marketplace_integrations.services.sales_order_sync import _delivery_date
 
 		order = frappe._dict(platform="Shopify", processed_on="2026-10-17 15:50:16")
-		account = frappe._dict(shopify_delivery_lead_days=lead_days)
+		account = frappe._dict(delivery_lead_days=lead_days)
 		return str(_delivery_date(order, account))
 
 	def test_adds_the_account_lead_days_to_the_order_date(self):
@@ -5982,8 +6190,160 @@ class IntegrationTestShopifyDeliveryLeadDays(IntegrationTestCase):
 			erpnext_sales_order="SO-1",
 			last_synced_snapshot='{"delivery_date": "2026-10-17"}',
 		)
-		account = frappe._dict(shopify_delivery_lead_days=3)
+		account = frappe._dict(delivery_lead_days=3)
 		self.assertEqual(str(_delivery_date(order, account)), "2026-10-17")
 
 	def test_negative_lead_days_are_ignored(self):
 		self.assertEqual(self._date(-2), "2026-10-17")
+
+
+class IntegrationTestTalabatDeliveryLeadDays(IntegrationTestCase):
+	def _date(self, lead_days, **extra):
+		from marketplace_integrations.services.sales_order_sync import _delivery_date
+
+		order = frappe._dict(platform="Talabat", promised_for="2026-10-17 15:50:16", **extra)
+		return str(_delivery_date(order, frappe._dict(delivery_lead_days=lead_days)))
+
+	def test_adds_the_account_lead_days_to_the_promised_date(self):
+		self.assertEqual(self._date(2), "2026-10-19")
+
+	def test_zero_blank_or_negative_keeps_the_promised_date(self):
+		self.assertEqual(self._date(0), "2026-10-17")
+		self.assertEqual(self._date(None), "2026-10-17")
+		self.assertEqual(self._date(-4), "2026-10-17")
+
+	def test_linked_order_keeps_the_delivery_date_it_was_synced_with(self):
+		date = self._date(
+			5, erpnext_sales_order="SO-1", last_synced_snapshot='{"delivery_date": "2026-10-17"}'
+		)
+		self.assertEqual(date, "2026-10-17")
+
+
+class IntegrationTestNoonDeliveryDate(IntegrationTestCase):
+	def _payload_order(self, items, received_on="2026-11-04 09:00:00", **extra):
+		import json
+
+		return frappe._dict(
+			platform="Noon",
+			received_on=received_on,
+			latest_payload=json.dumps({"items": items}),
+			**extra,
+		)
+
+	def _unit(self, sku, date, **extra):
+		return {
+			"partner_sku": sku,
+			"mp_status": "MP_ITEM_STATUS_CONFIRMED",
+			"integration_status": "INTEGRATION_ITEM_STATUS_ACKNOWLEDGED",
+			"estimated_shipping_date": date,
+			**extra,
+		}
+
+	def _dates(self, order):
+		from marketplace_integrations.services.sales_order_sync import _noon_payload_dates
+
+		return {sku: str(date) for sku, date in _noon_payload_dates(order).items()}
+
+	def test_each_sku_gets_its_earliest_estimated_shipping_date(self):
+		order = self._payload_order(
+			[
+				self._unit("A", "2026-11-08 10:00:00"),
+				self._unit("A", "2026-11-06 10:00:00"),
+				self._unit("B", "2026-11-10"),
+			]
+		)
+		self.assertEqual(self._dates(order), {"A": "2026-11-06", "B": "2026-11-10"})
+
+	def test_cancelled_and_out_of_stock_units_are_ignored(self):
+		order = self._payload_order(
+			[
+				self._unit("A", "2026-11-06 10:00:00", mp_status="MP_ITEM_STATUS_CANCELLED"),
+				self._unit(
+					"A", "2026-11-07 10:00:00", integration_status="INTEGRATION_ITEM_STATUS_OUT_OF_STOCK"
+				),
+				self._unit("A", "2026-11-09 10:00:00"),
+			]
+		)
+		self.assertEqual(self._dates(order), {"A": "2026-11-09"})
+
+	def test_missing_or_garbage_dates_are_skipped_without_raising(self):
+		order = self._payload_order(
+			[
+				self._unit("A", None),
+				self._unit("B", ""),
+				self._unit("C", "not a date"),
+				self._unit("D", 12345),
+				"junk",
+			]
+		)
+		self.assertEqual(self._dates(order), {})
+
+	def test_parser_never_raises_and_reads_the_date_part(self):
+		from marketplace_integrations.integrations.noon.fulfillment import parse_estimated_shipping_date
+
+		for bad in ("  ", "0000-00-00 00:00:00", "9" * 400, "", None, 12345):
+			self.assertIsNone(parse_estimated_shipping_date(bad), bad)
+		self.assertEqual(str(parse_estimated_shipping_date("2026-11-08")), "2026-11-08")
+		self.assertEqual(str(parse_estimated_shipping_date(" 2026-11-08 10:00:00 ")), "2026-11-08")
+
+	def test_no_or_invalid_payload_gives_no_dates(self):
+		self.assertEqual(self._dates(frappe._dict(platform="Noon", latest_payload=None)), {})
+		self.assertEqual(self._dates(frappe._dict(platform="Noon", latest_payload="{not json")), {})
+
+	def test_line_date_falls_back_to_received_and_is_never_before_it(self):
+		from marketplace_integrations.services.sales_order_sync import _noon_line_delivery_date
+
+		order = self._payload_order([])
+		dates = {"A": frappe.utils.getdate("2026-11-08"), "OLD": frappe.utils.getdate("2026-11-01")}
+		self.assertEqual(str(_noon_line_delivery_date(order, dates, "A")), "2026-11-08")
+		self.assertEqual(str(_noon_line_delivery_date(order, dates, "MISSING")), "2026-11-04")
+		self.assertEqual(str(_noon_line_delivery_date(order, dates, "OLD")), "2026-11-04")
+
+	def test_header_is_the_earliest_line_date(self):
+		from marketplace_integrations.services.sales_order_sync import _delivery_date
+
+		order = self._payload_order([])
+		lines = [{"delivery_date": "2026-11-09"}, {"delivery_date": "2026-11-06"}, {}]
+		self.assertEqual(str(_delivery_date(order, frappe._dict(), lines)), "2026-11-06")
+
+	def test_header_is_the_received_date_without_line_dates(self):
+		from marketplace_integrations.services.sales_order_sync import _delivery_date
+
+		order = self._payload_order([])
+		self.assertEqual(str(_delivery_date(order, frappe._dict(), [{}])), "2026-11-04")
+
+	def test_the_lead_days_setting_is_not_used(self):
+		from marketplace_integrations.services.sales_order_sync import _delivery_date
+
+		order = self._payload_order([])
+		lines = [{"delivery_date": "2026-11-06"}]
+		account = frappe._dict(delivery_lead_days=9)
+		self.assertEqual(str(_delivery_date(order, account, lines)), "2026-11-06")
+		self.assertEqual(str(_delivery_date(order, account)), "2026-11-04")
+
+	def test_a_linked_order_keeps_its_stored_dates(self):
+		from marketplace_integrations.services.sales_order_sync import (
+			_delivery_date,
+			_stored_line_delivery_dates,
+		)
+
+		order = self._payload_order(
+			[self._unit("A", "2026-11-20 10:00:00")],
+			erpnext_sales_order="SO-1",
+			last_synced_snapshot=(
+				'{"delivery_date": "2026-11-04", "items": ['
+				'{"external_item_id": "sku:A", "delivery_date": "2026-11-04"}, {"external_item_id": "sku:B"}]}'
+			),
+		)
+		self.assertEqual(str(_delivery_date(order, frappe._dict(), [])), "2026-11-04")
+		self.assertEqual(_stored_line_delivery_dates(order), {"sku:A": "2026-11-04"})
+
+	def test_a_linked_order_with_an_old_snapshot_gains_no_line_dates(self):
+		from marketplace_integrations.services.sales_order_sync import _stored_line_delivery_dates
+
+		order = self._payload_order(
+			[self._unit("A", "2026-11-20")],
+			erpnext_sales_order="SO-1",
+			last_synced_snapshot='{"delivery_date": "2026-11-04", "items": [{"external_item_id": "sku:A"}]}',
+		)
+		self.assertEqual(_stored_line_delivery_dates(order), {})
