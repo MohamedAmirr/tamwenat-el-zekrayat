@@ -14,8 +14,8 @@
 	const FALLBACK_COLOR = "grey";
 
 	// Delivery Note carrier (the native `transporter`, a Supplier name): Noon, Bosta and the manual courier
-	// inDrive have a color; Uber, Own driver and any other carrier are grey.
-	const CARRIER_COLORS = { Noon: "yellow", Bosta: "red", inDrive: "green" };
+	// "Manual delivery" have a color; any other carrier is grey.
+	const CARRIER_COLORS = { Noon: "yellow", Bosta: "red", "Manual delivery": "green" };
 
 	function lookup(map, name) {
 		return Object.prototype.hasOwnProperty.call(map, name) ? map[name] : FALLBACK_COLOR;

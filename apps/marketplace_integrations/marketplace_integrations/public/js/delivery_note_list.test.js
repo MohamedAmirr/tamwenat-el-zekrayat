@@ -62,12 +62,13 @@ const pill = (color, name) =>
 	`<a class="filterable ellipsis" data-filter="transporter,&#x3D;,${name}" title="Carrier: ${name}">` +
 	`<span class="indicator-pill ${color}">${name}</span></a>`;
 
-test("the Carrier column is a yellow Noon, red Bosta, green inDrive and grey for any other courier", () => {
+test("the Carrier column is a yellow Noon, red Bosta, green Manual delivery and grey for any other courier", () => {
 	const { settings } = load();
 	const format = settings.formatters.transporter;
 	assert.equal(format("Noon", DF), pill("yellow", "Noon"));
 	assert.equal(format("Bosta", DF), pill("red", "Bosta"));
-	assert.equal(format("inDrive", DF), pill("green", "inDrive"));
+	assert.equal(format("Manual delivery", DF), pill("green", "Manual delivery"));
+	assert.equal(format("inDrive", DF), pill("grey", "inDrive"));
 	assert.equal(format("Uber", DF), pill("grey", "Uber"));
 	assert.equal(format("Own driver", DF), pill("grey", "Own driver"));
 	assert.equal(format("Aramex", DF), pill("grey", "Aramex"));
