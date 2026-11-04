@@ -248,7 +248,7 @@ Noon is the second adapter (#415): the old `custom_carrier_status` / `custom_car
   event refreshes from Bosta; a failed refresh closes the log `Failed`. `_write_state` stores the state name, bumps `custom_last_sync_at` and treats state 48/49 on a
   Created note as Cancelled. A Delivered or terminal state never reopens a note. Sales Order counts
   are JSON in `Sales Order.custom_shipping_status_summary` (read by the list formatter and the hover card).
-  The sync also stores `Sales Order.custom_earliest_delivery_date` (earliest item delivery date, set once outside the snapshot hash) for the list's delivery countdown pill.
+  The sync also stores `Sales Order.custom_earliest_delivery_date` (earliest item delivery date, outside the snapshot hash; first value from the sync, then always derived from the item rows by `services/sales_order_delivery.py` on Sales Order `validate` and `before_update_after_submit`, for staff and system edits alike) for the list's delivery countdown pill.
   Noon Created / Cancellation Unknown notes (no delivery id, `transporter` = the Noon Supplier) are counted
   in the same summary under their Shipping Status words; the Noon adapter refreshes it in `after_created`,
   `after_cancelled` and at the end of `refresh` through `update_sales_order_summary_of`.
