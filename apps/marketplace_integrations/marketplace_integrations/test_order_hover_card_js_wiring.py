@@ -102,3 +102,13 @@ class UnitTestOrderHoverCardJsWiring(UnitTestCase):
 	def test_sales_order_list_js_is_registered_in_doctype_list_js(self):
 		registered = frappe.get_hooks("doctype_list_js")["Sales Order"]
 		self.assertIn("public/js/sales_order_list.js", registered)
+
+	def test_carrier_status_helper_loads_before_both_list_scripts(self):
+		hooks = frappe.get_hooks("doctype_list_js")
+		for doctype, script in (
+			("Sales Order", "sales_order_list.js"),
+			("Delivery Note", "delivery_note_list.js"),
+		):
+			registered = hooks[doctype]
+			self.assertEqual(registered[0], "public/js/carrier_status.js", doctype)
+			self.assertIn(f"public/js/{script}", registered)

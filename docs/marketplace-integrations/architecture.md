@@ -247,6 +247,9 @@ Noon is the second adapter (#415): the old `custom_carrier_status` / `custom_car
   event refreshes from Bosta; a failed refresh closes the log `Failed`. `_write_state` stores the state name, bumps `custom_last_sync_at` and treats state 48/49 on a
   Created note as Cancelled. A Delivered or terminal state never reopens a note. Sales Order counts
   are JSON in `Sales Order.custom_shipping_status_summary` (read by the list formatter and the hover card).
+  Noon Created / Cancellation Unknown notes (no delivery id, `transporter` = the Noon Supplier) are counted
+  in the same summary under their Shipping Status words; the Noon adapter refreshes it in `after_created`,
+  `after_cancelled` and at the end of `refresh` through `update_sales_order_summary_of`.
 - **Guards** (`validate`): items, quantities, carrier, tracking number, COD and city are locked once
   the shipment started; integration fields cannot be hand-edited; a note with a live shipment cannot
   be cancelled or deleted until it is Cancelled at Bosta, and its Sales Order cannot be cancelled.

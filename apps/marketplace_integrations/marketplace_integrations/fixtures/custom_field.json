@@ -573,7 +573,7 @@
   "insert_after": "custom_integration_status",
   "name": "Delivery Note-custom_shipping_status",
   "hidden": 0,
-  "modified": "2026-11-01 18:00:00.000000",
+  "modified": "2026-11-03 12:00:00.000000",
   "module": null,
   "permlevel": 0,
   "translatable": 0,
@@ -581,7 +581,8 @@
   "read_only": 1,
   "allow_on_submit": 1,
   "options": "\nPickup requested\nWaiting for route\nRoute Assigned\nPicked up from business\nPicking up from consignee\nPicked up from consignee\nReceived at warehouse\nFulfilled\nIn transit between Hubs\nPicking up\nPicked up\nDelivered\nReturned to business\nException\nTerminated\nCanceled\nReturned to stock\nLost\nDamaged\nInvestigation\nAwaiting your action\nArchived\nOn hold\nAcknowledged\nShipped\nOut of Stock\nCancelled\nMixed",
-  "in_standard_filter": 1
+  "in_standard_filter": 1,
+  "in_list_view": 1
  },
  {
   "doctype": "Custom Field",

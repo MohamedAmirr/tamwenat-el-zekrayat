@@ -657,6 +657,40 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		self.assertFalse(stored.custom_last_integration_error)
 		self.assertEqual([(r.item_code, r.qty) for r in stored.items], rows_before)
 
+	def test_a_noon_note_is_counted_in_the_sales_order_summary_and_a_refresh_updates_it(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		summary = lambda: frappe.db.get_value("Sales Order", fx.name, "custom_shipping_status_summary")  # noqa: E731
+		frappe.db.set_value("Delivery Note", note.name, "custom_shipping_status", "Acknowledged", update_modified=False)
+		noon.after_created(note.name, {})
+		self.assertEqual(json.loads(summary()), {"Acknowledged": 1})
+
+		self._refresh(note, self._found(fx), [self._unit("1")])
+		self.assertEqual(json.loads(summary()), {"Shipped": 1})
+
+		# a Cancelled shipment is not live: it leaves the summary
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Cancelled", update_modified=False)
+		noon.after_cancelled(note.name)
+		self.assertIsNone(summary())
+
+	def test_a_failed_summary_update_is_logged_and_never_raises_on_create_or_cancel(self):
+		# The summary is display only: a lock wait on the Sales Order must not stop the auto-submit after
+		# create or the native cancel after a carrier cancel, so the error is logged and swallowed.
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		with (
+			patch(
+				"marketplace_integrations.integrations.bosta.statuses.update_sales_order_summary_of",
+				side_effect=frappe.QueryDeadlockError("Lock wait timeout exceeded"),
+			) as update,
+			patch.object(frappe, "log_error") as log_error,
+		):
+			noon.after_created(note.name, {})
+			noon.after_cancelled(note.name)
+		self.assertEqual(update.call_count, 2)
+		self.assertEqual(log_error.call_count, 2)
+		self.assertEqual(log_error.call_args.kwargs["title"], "Noon shipping summary")
+
 	def test_refresh_shows_mixed_and_an_item_difference_sets_the_error(self):
 		fx = self._order([("SKU-A", 2)], ["SKU-A", "SKU-A"])
 		note = self._created_note(fx, units=("1", "2"))
