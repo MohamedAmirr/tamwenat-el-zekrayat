@@ -482,9 +482,13 @@ NOON_CANCELLED_EXTERNAL_STATUS = "CANCELLED"
 
 
 def _noon_fully_cancelled(order):
-	"""True when the Noon order has units and every one is CANCELLED (out-of-stock units that
-	are not cancelled keep the normal blocker path)."""
-	rows = order.items or []
+	"""True when the Noon order has live units and every one is CANCELLED (out-of-stock units that
+	are not cancelled keep the normal blocker path).
+
+	Rows with ``current_quantity`` 0 are earlier states of a unit that Noon has since moved on (a
+	retained CONFIRMED row next to its later CANCELLED row); they are not live units, so they must not
+	keep a fully cancelled order out of ``Cancelled``."""
+	rows = [row for row in (order.items or []) if flt(row.current_quantity) > 0]
 	return bool(rows) and all(row.external_status == NOON_CANCELLED_EXTERNAL_STATUS for row in rows)
 
 
