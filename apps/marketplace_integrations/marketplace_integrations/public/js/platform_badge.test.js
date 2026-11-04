@@ -90,10 +90,12 @@ test("the value is escaped in the pill text, the filter attribute and the toolti
 	assert.match(tricky, /data-filter="platform,&#x3D;,a&#39;b&#x60;c&#x3D;d"/);
 });
 
-test("each courier has a color: Noon yellow, Bosta red, everything else grey", () => {
+test("each courier has a color: Noon yellow, Bosta red, inDrive green, everything else grey", () => {
 	assert.equal(badge.carrier_color_of("Noon"), "yellow");
 	assert.equal(badge.carrier_color_of("Bosta"), "red");
-	for (const carrier of ["Aramex", "noon", "Shopify", "constructor", "__proto__"]) {
+	assert.equal(badge.carrier_color_of("inDrive"), "green");
+	assert.equal(badge.carrier_pill("inDrive"), '<span class="indicator-pill green">inDrive</span>');
+	for (const carrier of ["Uber", "Own driver", "Aramex", "noon", "indrive", "Shopify", "constructor", "__proto__"]) {
 		assert.equal(badge.carrier_color_of(carrier), "grey", carrier);
 	}
 	assert.equal(badge.carrier_pill("Bosta"), '<span class="indicator-pill red">Bosta</span>');
