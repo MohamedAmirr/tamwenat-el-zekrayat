@@ -12,7 +12,9 @@ from marketplace_integrations.patches.v0_0 import create_manual_courier_supplier
 class IntegrationTestCreateManualCourierSuppliers(IntegrationTestCase):
 	def setUp(self):
 		# Start from a site without the Suppliers (a rollback in tearDown restores whatever was there).
-		for name in frappe.get_all("Supplier", filters={"supplier_name": ["in", list(courier_patch.SUPPLIER_NAMES)]}, pluck="name"):
+		for name in frappe.get_all(
+			"Supplier", filters={"supplier_name": ["in", list(courier_patch.SUPPLIER_NAMES)]}, pluck="name"
+		):
 			frappe.delete_doc("Supplier", name, force=True, ignore_permissions=True)
 
 	def tearDown(self):
@@ -45,3 +47,58 @@ class IntegrationTestCreateManualCourierSuppliers(IntegrationTestCase):
 		self.assertFalse(self._suppliers("Uber")[0].is_transporter)
 		log_error.assert_called_once()
 		self.assertEqual(len(self._suppliers("inDrive")), 1)
+
+	def _without_all_supplier_groups(self):
+		"""Make the ``All Supplier Groups`` lookup report a missing group; every other lookup stays real."""
+		real_exists = frappe.db.exists
+
+		def exists(doctype, name=None, *args, **kwargs):
+			if doctype == "Supplier Group" and name == courier_patch.SUPPLIER_GROUP:
+				return False
+			return real_exists(doctype, name, *args, **kwargs)
+
+		return patch.object(frappe.db, "exists", side_effect=exists)
+
+	def _buying_settings_supplier_group(self, value):
+		"""Make the Buying Settings ``supplier_group`` read return ``value``; every other read stays real."""
+		real_get_single_value = frappe.db.get_single_value
+
+		def get_single_value(doctype, fieldname, *args, **kwargs):
+			if (doctype, fieldname) == ("Buying Settings", "supplier_group"):
+				return value
+			return real_get_single_value(doctype, fieldname, *args, **kwargs)
+
+		return patch.object(frappe.db, "get_single_value", side_effect=get_single_value)
+
+	def test_creates_all_suppliers_without_a_group_when_all_supplier_groups_and_buying_settings_have_none(
+		self,
+	):
+		with self._without_all_supplier_groups(), self._buying_settings_supplier_group(None):
+			courier_patch.execute()
+		for name in ("inDrive", "Uber", "Own driver"):
+			suppliers = frappe.get_all(
+				"Supplier",
+				filters={"supplier_name": name},
+				fields=["name", "is_transporter", "supplier_group"],
+			)
+			self.assertEqual(len(suppliers), 1, name)
+			self.assertTrue(suppliers[0].is_transporter, name)
+			self.assertFalse(suppliers[0].supplier_group, name)
+
+	def test_creates_all_suppliers_in_the_buying_settings_group_when_all_supplier_groups_is_missing(self):
+		fallback = frappe.get_all(
+			"Supplier Group", filters={"name": ["!=", courier_patch.SUPPLIER_GROUP]}, pluck="name", limit=1
+		)
+		if not fallback:
+			self.skipTest("site has no Supplier Group other than All Supplier Groups")
+		with self._without_all_supplier_groups(), self._buying_settings_supplier_group(fallback[0]):
+			courier_patch.execute()
+		for name in ("inDrive", "Uber", "Own driver"):
+			suppliers = frappe.get_all(
+				"Supplier",
+				filters={"supplier_name": name},
+				fields=["name", "is_transporter", "supplier_group"],
+			)
+			self.assertEqual(len(suppliers), 1, name)
+			self.assertTrue(suppliers[0].is_transporter, name)
+			self.assertEqual(suppliers[0].supplier_group, fallback[0], name)

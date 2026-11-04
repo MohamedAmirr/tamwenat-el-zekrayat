@@ -30,11 +30,7 @@ class IntegrationTestManualCouriers(BostaFixtureMixin, IntegrationTestCase):
 		return self.make_note(transporter=self.couriers[courier], **overrides)
 
 	def _items(self, note):
-		return [
-			item
-			for item in attention._collect_carrier_items()
-			if item["reference_name"] == note.name
-		]
+		return [item for item in attention._collect_carrier_items() if item["reference_name"] == note.name]
 
 	def test_no_adapter_claims_a_manual_courier_note(self):
 		for courier, supplier in self.couriers.items():
@@ -61,7 +57,10 @@ class IntegrationTestManualCouriers(BostaFixtureMixin, IntegrationTestCase):
 			self.assertEqual(self.http.sent(), [])
 			self.enqueue.assert_not_called()
 			self.assertEqual(
-				frappe.db.count("Integration Request", {"reference_doctype": "Delivery Note", "reference_docname": note.name}),
+				frappe.db.count(
+					"Integration Request",
+					{"reference_doctype": "Delivery Note", "reference_docname": note.name},
+				),
 				0,
 			)
 

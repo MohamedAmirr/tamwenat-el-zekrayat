@@ -40,7 +40,9 @@ def execute():
 					"Delivery Note transporter field."
 				)
 				print(f"create_manual_courier_suppliers: {message}")
-				frappe.log_error(title=f"{supplier_name} transporter Supplier is not a transporter", message=message)
+				frappe.log_error(
+					title=f"{supplier_name} transporter Supplier is not a transporter", message=message
+				)
 			continue
 		frappe.get_doc(
 			{
