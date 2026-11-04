@@ -624,8 +624,9 @@ class IntegrationTestNoonWebhookReceiver(IntegrationTestCase):
 		self.assertNotIn("refresh_queued", logged)
 
 	@patch.object(orders.frappe, "enqueue")
-	def test_schema_version_accepts_integer_and_string_one(self, enqueue):
-		for version in (1, "1"):
+	def test_schema_version_accepts_one_as_integer_float_and_strings(self, enqueue):
+		# "1.0" is what Noon really sends (prod, 2026-11-04)
+		for version in (1, 1.0, "1", "1.0", " 1.0 "):
 			with self.subTest(version=version):
 				enqueue.reset_mock()
 				envelope = _envelope(self.connection, event_schema_version=version)
@@ -637,7 +638,9 @@ class IntegrationTestNoonWebhookReceiver(IntegrationTestCase):
 		big = {"order_nr": "", "padding": "y" * 10000}
 		cases = {
 			"wrong schema version": _envelope(self.connection, event_schema_version=2),
-			"string 1.0": _envelope(self.connection, event_schema_version="1.0"),
+			"string 1.1": _envelope(self.connection, event_schema_version="1.1"),
+			"string 1.00": _envelope(self.connection, event_schema_version="1.00"),
+			"float 1.5": _envelope(self.connection, event_schema_version=1.5),
 			"boolean true": _envelope(self.connection, event_schema_version=True),
 			"missing schema version": _envelope(self.connection, event_schema_version=None),
 			"missing order_nr": _envelope(self.connection, payload={"other": 1}),

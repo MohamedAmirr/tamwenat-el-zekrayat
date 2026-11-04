@@ -29,9 +29,11 @@ JSON envelope:
 ```
 
 - `event_schema_version` — a version marker for the envelope/payload shape.
-  For `FBPI::ORDER_SYNC` the receiver (#400) requires it to be `1`, as an
-  integer or the string `"1"`; any other or missing value is answered 200 and
-  logged (see "Delivery semantics"). Other event types are not checked.
+  For `FBPI::ORDER_SYNC` the receiver (#400) requires it to be version 1, as the
+  integer `1`, the float `1.0` or the strings `"1"` and `"1.0"`; any other or missing
+  value is answered 200 and logged (see "Delivery semantics"). Noon really sends the
+  string `"1.0"` (seen on prod on 2026-11-04, row MSL-00091); the documented value is
+  `1`. Other event types are not checked.
 - `event_type` — identifies what happened (e.g. `FBPI::ORDER_SYNC`). This
   receiver acts on `FBPI::ORDER_SYNC` (refreshes the named order, else queues the order import) and
   `RETURNS::REFERENCE_UPDATE` (queues a return lookup, see below); every other
