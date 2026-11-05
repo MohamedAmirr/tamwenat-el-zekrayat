@@ -43,6 +43,12 @@ def _order_gid(suffix):
 	return f"gid://shopify/Order/{suffix}"
 
 
+def _query_block(query, name):
+	"""Return the text of the ``name { ... }`` selection (the blocks used here have no nesting)."""
+	start = query.index(f"{name} {{")
+	return query[start : query.index("}", start)]
+
+
 def make_order_payload(order_gid, updated_at="2026-09-27T10:05:00Z", **overrides):
 	"""Build one Shopify GraphQL Order node, including a refund with a
 	refundLineItem carrying restockType - the exact fixture shape #109's own
@@ -152,13 +158,61 @@ class IntegrationTestImportOrderNoSideEffects(IntegrationTestCase):
 			result = orders.import_order(self.account.name, order_gid)
 
 		query, variables = execute.call_args.args[:2]
-		for needle in ("shippingLines(first: $shippingLinesFirst)", "provinceCode", "countryCodeV2"):
+		for needle in (
+			"shippingLines(first: $shippingLinesFirst)",
+			"provinceCode",
+			"countryCodeV2",
+		):
 			self.assertIn(needle, query)
+		# firstName/lastName also exist in the customer block: assert on the address blocks only.
+		for block in ("shippingAddress", "billingAddress"):
+			text = _query_block(query, block)
+			self.assertIn("firstName", text, block)
+			self.assertIn("lastName", text, block)
 		self.assertEqual(variables["shippingLinesFirst"], 10)
 		result.reload()
 		stored = frappe.parse_json(result.shipping_lines)
 		self.assertTrue(stored["requiresShipping"])
 		self.assertEqual(stored["shippingLines"][0]["code"], "express")
+
+	def test_order_query_retries_without_address_names_when_shopify_rejects_them(self):
+		order_gid = _order_gid(frappe.generate_hash(length=8))
+		payload = make_order_payload(order_gid)
+		queries = []
+
+		def fake_execute(_client, query, variables=None, *args, **kwargs):
+			queries.append(query)
+			if len(queries) == 1:
+				frappe.throw("Shopify GraphQL request returned errors: Access denied for firstName field.")
+			return {"order": payload}
+
+		with patch(EXECUTE_TARGET, autospec=True, side_effect=fake_execute):
+			result = orders.import_order(self.account.name, order_gid)
+
+		self.assertTrue(result)
+		self.assertEqual(len(queries), 2)
+		for block in ("shippingAddress", "billingAddress"):
+			self.assertIn("firstName", _query_block(queries[0], block))
+			self.assertNotIn("firstName", _query_block(queries[1], block))
+			self.assertNotIn("lastName", _query_block(queries[1], block))
+			self.assertIn("provinceCode", _query_block(queries[1], block))
+		# The customer block keeps its names, and the rest of the query is identical.
+		self.assertIn("firstName", _query_block(queries[1], "customer"))
+		self.assertEqual(len(queries[0]) - len(queries[1]), 2 * len("      firstName\n      lastName\n"))
+
+	def test_order_query_does_not_retry_on_unrelated_errors(self):
+		order_gid = _order_gid(frappe.generate_hash(length=8))
+		calls = []
+
+		def fake_execute(_client, query, variables=None, *args, **kwargs):
+			calls.append(query)
+			frappe.throw("Shopify GraphQL request returned errors: Internal error.")
+
+		with patch(EXECUTE_TARGET, autospec=True, side_effect=fake_execute):
+			with self.assertRaises(frappe.ValidationError):
+				orders.import_order(self.account.name, order_gid)
+
+		self.assertEqual(len(calls), 1)
 
 	def test_refund_evidence_is_persisted_without_interpretation(self):
 		order_gid = _order_gid(frappe.generate_hash(length=8))

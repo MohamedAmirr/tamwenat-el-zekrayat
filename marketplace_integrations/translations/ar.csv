@@ -1890,3 +1890,5 @@ Earliest Delivery Date,أقرب تاريخ تسليم
 In {0} days,متبقٍ: {0} يوم
 Overdue 1 day,متأخر يوم واحد
 Overdue {0} days,التأخير: {0} يوم
+Shopify buyer Customer creation failed,فشل إنشاء عميل مشتري Shopify
+Shopify order query retried without address names,أُعيد استعلام طلب Shopify بدون أسماء العناوين
