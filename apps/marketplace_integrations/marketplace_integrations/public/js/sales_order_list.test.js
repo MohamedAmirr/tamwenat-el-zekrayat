@@ -316,3 +316,61 @@ test("the countdown escapes the tooltip date", () => {
 	assert.ok(!html.includes("<script>"));
 	assert.ok(html.includes("&quot;&gt;&lt;script&gt;"));
 });
+
+// -- bulk Delivery Note action ---------------------------------------------------------------
+
+function load_bulk() {
+	const listeners = [];
+	global.frappe.realtime = { on: (event, handler) => listeners.push([event, handler]) };
+	global.frappe.ui = { Dialog: class {} };
+	global.frappe.msgprint = () => {};
+	const path = require.resolve("./sales_order_bulk_delivery.js");
+	delete require.cache[path];
+	require(path);
+	return { listeners };
+}
+
+test("onload runs ERPNext's onload with our Delivery Note dialog added, ERPNext's action kept, other items untouched", async () => {
+	const native_calls = [];
+	const original_onload = (view) => {
+		view.page.add_action_item("Close", () => native_calls.push("close"));
+		view.page.add_action_item("Delivery Note", () => native_calls.push("native delivery note"));
+		view.page.add_action_item("Advance Payment", () => native_calls.push("advance"));
+	};
+	const { settings } = load({ original_onload });
+	const { listeners } = load_bulk();
+	const added = [];
+	const page = { add_action_item: (label, click) => added.push({ label, click }) };
+	const original_method = page.add_action_item;
+	settings.onload({ page, get_checked_items: () => [] });
+	await settle();
+	assert.deepEqual(
+		added.map((item) => item.label),
+		["Close", "Delivery Note", "Delivery Note (ERPNext)", "Advance Payment"]
+	);
+	added[0].click();
+	added[3].click();
+	assert.deepEqual(native_calls, ["close", "advance"]);
+	// the Delivery Note item no longer runs ERPNext's callback; ERPNext's own keeps working under its new name
+	added[1].click();
+	assert.deepEqual(native_calls, ["close", "advance"]);
+	added[2].click();
+	assert.deepEqual(native_calls, ["close", "advance", "native delivery note"]);
+	assert.equal(page.add_action_item, original_method);
+	assert.deepEqual(
+		listeners.map(([event]) => event),
+		["bulk_delivery_note_progress"]
+	);
+});
+
+test("without the bulk helper ERPNext's Delivery Note action stays as it is", async () => {
+	const native_calls = [];
+	const original_onload = (view) =>
+		view.page.add_action_item("Delivery Note", () => native_calls.push("native delivery note"));
+	const { settings } = load({ original_onload });
+	const added = [];
+	settings.onload({ page: { add_action_item: (label, click) => added.push({ label, click }) } });
+	await settle();
+	added[0].click();
+	assert.deepEqual(native_calls, ["native delivery note"]);
+});

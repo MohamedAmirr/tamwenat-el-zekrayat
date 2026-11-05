@@ -199,18 +199,29 @@ def _only_reduced(before, doc):
 
 
 def default_cod(doc):
-	"""The note's share of what the customer still owes: its total minus the same share of the Sales
-	Order's advance (proportional when the note ships part of the order), never below 0."""
-	total = flt(doc.get("rounded_total")) or flt(doc.get("grand_total"))
+	"""The note's share of what the customer still owes: its GRAND total (Shopify's total, shipping included;
+	never the rounded total, which can differ by up to 0.50) minus the same share of the Sales Order's
+	advance (proportional when the note ships part of the order), never below 0. An order that is fully paid
+	by ERPNext's own measure (nothing outstanding on ``rounded_total`` else ``grand_total`` minus
+	``advance_paid``; ERPNext caps a recorded payment at the rounded total, so 494 paid on 494.21 is fully
+	paid) has COD 0, not the 0.21 the grand total alone would leave."""
+	total = flt(doc.get("grand_total"))
 	order = sales_order_of(doc)
 	advance = 0
 	values = (
-		frappe.db.get_value("Sales Order", order, ["advance_paid", "rounded_total", "grand_total"], as_dict=True)
+		frappe.db.get_value(
+			"Sales Order", order, ["advance_paid", "rounded_total", "grand_total"], as_dict=True
+		)
 		if order
 		else None
 	)
 	if values:
-		order_total = flt(values.rounded_total) or flt(values.grand_total)
+		order_total = flt(values.grand_total)
+		if (
+			flt(values.advance_paid) > 0
+			and flt((flt(values.rounded_total) or order_total) - flt(values.advance_paid), 2) <= 0
+		):
+			return 0
 		if order_total:
 			advance = flt(values.advance_paid) * min(total / order_total, 1)
 	return max(flt(total - advance, 2), 0)
