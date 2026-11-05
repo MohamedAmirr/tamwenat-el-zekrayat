@@ -603,10 +603,28 @@ orders retain the regular Sales Order reconciliation status path. `Cancelled`
 is excluded from the existing unmapped and Sync Error metrics by their existing
 status/cancellation filters.
 
+Every imported order is scheduled. A Marketplace Order is created with the field
+default `Syncing`, so a row nothing schedules stays `Syncing` forever. A
+cancelled/voided/fully refunded old order was once skipped by every Shopify
+import path (the nightly job inserted 47 of them and they sat `Syncing` until
+pressed by hand). Now `upsert_marketplace_order()` sets
+`doc.flags.marketplace_order_inserted` on the row it creates, and the Shopify
+`_import_order_isolated()` bumps the debounce for it through `_needs_first_sync()`,
+cancelled or not, so the real sync settles it to `Cancelled` / `Needs Action`
+with a log row (never resolved inline in the import). An existing order is
+bumped only when it is unlinked, `Syncing` and without a window, so a re-pull of
+an unchanged settled cancelled order is not bumped again. Webhook, Talabat
+(`bump=True` / webhook bump of a new order) and Noon (bumps every new order)
+already scheduled new rows. The hourly stuck sweep (`unlinked_due`) also takes a
+cancelled Shopify order that is still `Syncing` with no window, so a straggler
+recovers within about an hour. This holds for the daily watermark sweep too: it
+schedules the first sync of every order it inserts, cancelled or not.
+
 At `23:59` site time, a small coordinator queues one deduplicated long job per
 enabled Shopify/Noon account. Only this nightly Shopify job opts into unlinked
 catch-up and canceled-paid retries; the existing daily Shopify watermark sweep
-continues to reconcile linked-order changes only. Shopify uses its existing
+reconciles linked-order changes and schedules the first sync of every order it
+inserts (cancelled or not), but not of older unlinked orders. Shopify uses its existing
 persisted watermark and overlap. Noon uses
 its existing seven-day order import window and records `Scheduled
 Reconciliation` as the debounce trigger. The Noon catch-up is a flag

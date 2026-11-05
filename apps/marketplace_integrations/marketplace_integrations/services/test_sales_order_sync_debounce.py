@@ -553,6 +553,16 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 	def _candidates(self, limit=100000):
 		return debounce._stuck_reconciliation_candidates(limit)
 
+	def _sweep_only(self, order):
+		# The shared test site holds more stuck orders than RECONCILIATION_SWEEP_BATCH (200), so
+		# the sweep would stop before reaching this test's order: keep only this order's candidate.
+		real = debounce._stuck_reconciliation_candidates
+		return patch.object(
+			debounce,
+			"_stuck_reconciliation_candidates",
+			side_effect=lambda limit: [name for name in real(100000) if name == order.name],
+		)
+
 	def test_stuck_sweep_picks_closed_attention_orders_for_every_platform(self):
 		picked = [
 			self._stuck_order(status="Needs Action", platform="Talabat"),
@@ -591,12 +601,27 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 			"Sync Error",
 			last_reconciliation_check_on=add_to_date(now_datetime(), hours=-2),
 		)
-		cancelled = unlinked("Shopify", "Syncing", cancelled_at=now_datetime())
+		# Cancelled and still Syncing with no window: never resolved, so it must be swept.
+		cancelled_syncing = unlinked("Shopify", "Syncing", cancelled_at=now_datetime())
+		# A cancelled order in any other attention status was already resolved once: skipped.
+		cancelled_needs_action = unlinked("Shopify", "Needs Action", cancelled_at=now_datetime())
+		cancelled_syncing_with_window = unlinked(
+			"Shopify",
+			"Syncing",
+			cancelled_at=now_datetime(),
+			sync_debounce_until=add_to_date(now_datetime(), minutes=5),
+		)
 		other_platform = unlinked("Talabat", "Syncing")
 		names = self._candidates()
 		self.assertIn(lost, names)
 		self.assertIn(failed_long_ago, names)
-		for skipped in (recently_checked, cancelled, other_platform):
+		self.assertIn(cancelled_syncing, names)
+		for skipped in (
+			recently_checked,
+			cancelled_needs_action,
+			cancelled_syncing_with_window,
+			other_platform,
+		):
 			self.assertNotIn(skipped, names)
 
 	def test_cancelled_and_closed_with_delivery_orders_are_candidates(self):
@@ -700,7 +725,8 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 			frappe.db.set_value("Sales Order", so_name, "status", "Cancelled")
 			frappe.db.set_value("Marketplace Order", name, "erpnext_sync_status", "Synced")
 
-		debounce.sweep_stuck_sales_order_reconciliations()
+		with self._sweep_only(order):
+			debounce.sweep_stuck_sales_order_reconciliations()
 		until = frappe.db.get_value("Marketplace Order", order.name, "sync_debounce_until")
 		with patch(SYNC_TARGET, side_effect=fake_sync):
 			debounce._run_debounced_sync(order.name, until)
@@ -752,7 +778,8 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 
 	def test_stuck_sweep_bumps_with_scheduled_sweep_and_second_run_is_a_no_op(self):
 		order = self._stuck_order(so_closed=True)
-		debounce.sweep_stuck_sales_order_reconciliations()
+		with self._sweep_only(order):
+			debounce.sweep_stuck_sales_order_reconciliations()
 		state = frappe.db.get_value(
 			"Marketplace Order",
 			order.name,

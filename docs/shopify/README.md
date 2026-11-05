@@ -241,13 +241,20 @@ Sales Order reconciliation path.
 The existing daily Shopify watermark reconciliation remains in place. A
 separate nightly coordinator queues one deduplicated long job per enabled
 Shopify or Noon account at `23:59` site time. Only the nightly Shopify job
-enables unlinked-order catch-up; the existing daily watermark sweep continues
-to reconcile linked-order changes only. Shopify reuses its persisted watermark
+enables unlinked-order catch-up; the existing daily watermark sweep reconciles
+linked-order changes and schedules the first sync of every order it inserts
+(cancelled or not), but not of older unlinked orders. Shopify reuses its persisted watermark
 and overlap; Noon reuses its seven-day import window. Imports update
 Marketplace Orders and schedule the existing debounce sync; they do not create
-Sales Orders inline. Each account's run writes one `Marketplace Sync Log` row
+Sales Orders inline. Every order an import creates is scheduled for its first
+sync, even when it is already cancelled, voided or fully refunded (the sync then
+settles it as `Cancelled` or `Needs Action`); an existing order is scheduled
+again only when it is unlinked, still `Syncing` and has no pending window. The
+hourly stuck sweep also picks up a cancelled order left `Syncing` without a
+window. Each account's run writes one `Marketplace Sync Log` row
 (sync type Order Import, trigger source Scheduled Reconciliation) whose response
-holds the orders imported, first syncs scheduled and failures; an account that
+holds the orders imported, first syncs scheduled (including those the import
+itself scheduled for newly inserted orders, cancelled ones too) and failures; an account that
 raised records an Error row with the traceback. The Noon catch-up job has its
 own job id, so the hourly Noon poll never runs it and is not deduplicated
 against it. See `docs/user-actions.md` for scheduler restart and the
