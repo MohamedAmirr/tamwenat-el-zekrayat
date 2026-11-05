@@ -497,6 +497,26 @@ The old flow removed by #415: `integrations/noon/awb_pool.py`, `api/noon_awbs.py
 
 **Bosta is refused for platforms that fulfil their own orders** (#368, #408). `BOSTA_EXCLUDED_PLATFORMS = ("Noon", "Talabat")` in `integrations/bosta/constants.py` (Amazon and Instashop are added when those platforms are built). The Bosta adapter does not claim a note whose Sales Order is of such a platform (`excluded_platform`), and `_validate_ready` refuses with a translated message. The old JS mirror and parity test went with the Sales Order Bosta UI.
 
+### Document names per platform (`services/platform_naming.py`)
+
+The Sales Order, Delivery Note and Sales Invoice of a marketplace order are named by ERPNext's own `naming_series`, chosen by a `before_naming` doc event (Frappe runs it in `set_new_name` before the name is built; `naming_series` is not checked against the Select options, but the options are shipped anyway so the form can show them). The counter is ERPNext's default five digits, so the first Shopify order is `SO-SHP-2026-00001`.
+
+| Platform | Sales Order | Delivery Note | Sales Invoice |
+|---|---|---|---|
+| Shopify | `SO-SHP-.YYYY.-` | `DN-SHP-.YYYY.-` | `SI-SHP-.YYYY.-` |
+| Noon | `SO-NOON-.YYYY.-` | `DN-NOON-.YYYY.-` | `SI-NOON-.YYYY.-` |
+| Talabat | `SO-TLB-.YYYY.-` | `DN-TLB-.YYYY.-` | `SI-TLB-.YYYY.-` |
+| none (manual order) | `SAL-ORD-.YYYY.-` | `MAT-DN-.YYYY.-` | `ACC-SINV-.YYYY.-` |
+
+- The platform of a Sales Order is `custom_marketplace_platform` (fetched from its Marketplace Order during insert, before naming; the hook falls back to the Marketplace Order itself). A Delivery Note takes it from the first item row's `against_sales_order`, a Sales Invoice from the first row's `sales_order`; if that Sales Order has an empty `custom_marketplace_platform` but a `custom_marketplace_order`, the Marketplace Order's platform is used (one shared helper, `_order_platform`).
+- Scope: EVERY non-return Sales Invoice made from a platform Sales Order is named by the platform, whether made by the bulk action, by hand, or from its Delivery Note; not only the invoice of a paid order in the bulk action.
+- Return documents (`is_return`) are skipped on purpose. ERPNext never picks the `-RET-` series by itself (`naming_series` is `no_copy`, so `get_mapped_doc` leaves it empty and the first option is used). A return made by the sync (`make_sales_return` in `services/sales_order_sync.py`) is therefore named in the default series (`MAT-DN-` / `ACC-SINV-`) unless a user picks the `-RET-` series.
+- Amended documents: `before_naming` runs before Frappe sets the amended name, so an amended document of the old series keeps its correct name but stores the platform series in `naming_series` (cosmetic).
+- A document with no platform is left alone, so a series chosen on the form of a manual order stays. Any error is logged and the default series is kept: naming never blocks a sync or a shipment.
+- The options live in `fixtures/property_setter.json` (`<Doctype>-naming_series-options`), always with ERPNext's own series first, because the first option is the default series.
+- Existing documents keep their names; only new ones change.
+- The Noon `integration_shipment_nr` and the Bosta `businessReference` are the Delivery Note name, so they now read `DN-NOON-2026-00001` / `DN-SHP-2026-00001`. Deleting the newest note gives its number back to its series (`docs/frappe-conventions.md`), so the next Noon note gets the same number: with a dedicated `DN-NOON-` series this is guaranteed, not rare. No code guard exists; this is an operating rule: **never delete (or cancel) a Noon Delivery Note whose shipment Noon already created.** Existing notes keep their `MAT-DN-` names and the new names start only after the update. The clash that happened with `MAT-DN-2026-00005` is the example. The Noon adapter asks Noon first by the number on every attempt, but that does not make a reused number safe.
+
 ## Platform implementation boundaries
 
 Platform-specific code owns:
