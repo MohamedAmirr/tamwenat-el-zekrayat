@@ -31,7 +31,7 @@ from marketplace_integrations.services.sales_order_sync_debounce import (
 	bump_sync_debounce,
 	linked_order_fingerprint,
 )
-from marketplace_integrations.services.sync_status import CANCELLED, NEEDS_ACTION
+from marketplace_integrations.services.sync_status import CANCELLED, NEEDS_ACTION, SYNCING
 
 ORDER_IMPORT_RESULT_TTL = 60 * 60
 MAX_ORDER_IMPORT_DAYS = 60
@@ -368,6 +368,19 @@ def list_order_ids_updated_since(client, since, until=None):
 			return
 
 
+def _needs_first_sync(order):
+	"""True when an import left an order with no Sales Order and no sync scheduled.
+
+	A row created by this import starts as Syncing, so it is always scheduled, cancelled, voided or
+	fully refunded included: the real sync resolves such an order to Cancelled / Needs Action with a
+	log row. An existing order is scheduled only when it is still Syncing with no debounce pending
+	(a lost window), so a re-pull of an unchanged cancelled order is not bumped again.
+	"""
+	if not order or order.erpnext_sales_order or order.sync_debounce_until:
+		return False
+	return bool(order.flags.marketplace_order_inserted) or order.erpnext_sync_status == SYNCING
+
+
 def _import_order_isolated(
 	account, order_gid, bump_linked_changes=False, trigger_source="Manual", bump_unlinked=False
 ):
@@ -391,8 +404,8 @@ def _import_order_isolated(
 		order = import_order(account, order_gid)
 		if bump_linked_changes and order:
 			bump_if_linked_order_changed(order.name, fingerprint_before, trigger_source)
-		# A manual import has no webhook behind it, so a new order would otherwise
-		# never be synced to ERPNext automatically.
+		# The nightly catch-up and a manual import ask for the first sync of every uncancelled
+		# unlinked order (a manual import has no webhook behind it).
 		if (
 			bump_unlinked
 			and order
@@ -401,6 +414,13 @@ def _import_order_isolated(
 			and order.erpnext_sync_status != CANCELLED
 		):
 			bump_sync_debounce(order.name, trigger_source)
+			order.flags.first_sync_scheduled = True
+		# Every path (the daily sweep too): a row this import created, and any order left
+		# Syncing with no window, gets its first sync scheduled even when cancelled, since
+		# nothing else would ever pick it up.
+		elif _needs_first_sync(order):
+			bump_sync_debounce(order.name, trigger_source)
+			order.flags.first_sync_scheduled = True
 	except Exception as exc:
 		frappe.db.rollback(save_point=savepoint)
 		return None, str(exc)
@@ -418,6 +438,7 @@ def import_orders_updated_between(
 	trigger_source="Manual",
 	bump_linked_changes=False,
 	bump_unlinked=False,
+	scheduled=None,
 ):
 	"""List order ids updated in ``[start, end]`` (``end`` defaults to no
 	upper bound) via ``list_order_ids_updated_since()`` and ``import_order()``
@@ -450,8 +471,13 @@ def import_orders_updated_between(
 	sweep, reconcile_all_accounts_orders(): it then bumps the sales-order sync
 	debounce for an already-linked order whose evidence fingerprint changed. A manual
 	range import (run_order_import()) never bumps linked orders, regardless of ``trigger_source``.
-	``bump_unlinked`` (manual import only) schedules the first Sales Order sync for each
-	imported order that has no Sales Order yet and is not cancelled.
+	``bump_unlinked`` (nightly catch-up and manual import) schedules the first Sales Order sync
+	for each imported order that has no Sales Order yet and is not cancelled. Independent of it,
+	EVERY import path (the daily sweep included) schedules the first sync of each order it
+	INSERTS, cancelled or not, and of an existing order left Syncing with no window.
+
+	``scheduled`` (an optional list) receives the name of each imported order whose first sync
+	this call scheduled, so a caller can count them.
 	"""
 	imported = []
 	errors = []
@@ -475,6 +501,8 @@ def import_orders_updated_between(
 			_log_order_import_failure(account, order_gid, error, trigger_source)
 		elif order:
 			imported.append(order.name)
+			if scheduled is not None and order.flags.first_sync_scheduled:
+				scheduled.append(order.name)
 		if on_progress:
 			on_progress(imported, errors)
 	return imported, errors
@@ -565,6 +593,7 @@ def reconcile_all_accounts_orders(account_name=None, catch_up_unlinked=False):
 			account = frappe.get_doc("Marketplace Account", row.name)
 			start = row.shopify_orders_reconciled_through or add_to_date(now_datetime(), days=-60)
 			run_started = now_datetime()
+			import_scheduled = []
 			_imported, errors = import_orders_updated_between(
 				account,
 				ShopifyClient(account.connection),
@@ -572,8 +601,11 @@ def reconcile_all_accounts_orders(account_name=None, catch_up_unlinked=False):
 				trigger_source="Scheduled Reconciliation",
 				bump_linked_changes=True,
 				bump_unlinked=catch_up_unlinked,
+				scheduled=import_scheduled,
 			)
-			scheduled = 0
+			# First syncs the import itself scheduled (new orders, cancelled ones included) are
+			# counted here; the catch-up below leaves them out so no order is counted twice.
+			scheduled = len(import_scheduled)
 			if catch_up_unlinked:
 				scheduled += schedule_first_syncs(
 					{
@@ -582,7 +614,8 @@ def reconcile_all_accounts_orders(account_name=None, catch_up_unlinked=False):
 						"cancelled_at": ["is", "not set"],
 						"erpnext_sales_order": ["is", "not set"],
 						"erpnext_sync_status": ["!=", CANCELLED],
-					}
+					},
+					exclude_names=import_scheduled,
 				)
 				# Canceled-but-paid orders are intentionally outside the normal
 				# unlinked import bump (their cancelled_at excludes that path).
@@ -593,7 +626,8 @@ def reconcile_all_accounts_orders(account_name=None, catch_up_unlinked=False):
 						"cancelled_at": ["is", "set"],
 						"erpnext_sales_order": ["is", "not set"],
 						"erpnext_sync_status": NEEDS_ACTION,
-					}
+					},
+					exclude_names=import_scheduled,
 				)
 			# Advance the watermark only after a successful run (decision 8) -
 			# per-order failures are already isolated above and don't count as

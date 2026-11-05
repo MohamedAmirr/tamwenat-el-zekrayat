@@ -115,6 +115,8 @@ def upsert_marketplace_order(
 	Rows absent from a later payload are retained so a partial/recovery import
 	cannot erase operational replacement history.
 
+	The returned document has ``flags.marketplace_order_inserted`` set when this call created the row.
+
 	``skip_status_replan`` saves without the ``before_save`` re-plan of the sync status; the
 	echo guard (``services/echo_guard.py``) uses it for the echo of our own outbound call.
 	"""
@@ -162,6 +164,9 @@ def upsert_marketplace_order(
 	if doc.is_new():
 		try:
 			doc.insert()
+			# Lets an import path tell a row it just created from one it updated: a new row starts
+			# as Syncing (field default) and needs its first sync scheduled.
+			doc.flags.marketplace_order_inserted = True
 		except frappe.UniqueValidationError:
 			# The unique identity key is the atomic backstop for two workers
 			# receiving the same order concurrently. Reload the winner and

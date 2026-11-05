@@ -612,11 +612,13 @@ def _stuck_reconciliation_candidates(limit):
 	linked = order.erpnext_sales_order.isnotnull() & (order.erpnext_sales_order != "")
 	# A Shopify order with no Sales Order yet whose webhook-triggered sync never ran or was
 	# lost: the reconcile import only bumps linked orders, so nothing else would ever
-	# sync it.  Never checked, or an old failure, qualifies; cancelled orders are skipped.
+	# sync it.  Never checked, or an old failure, qualifies; cancelled orders are skipped, except
+	# one still Syncing with no window (the outer query requires none): it was never resolved, so
+	# the sync must run to settle it as Cancelled / Needs Action.
 	unlinked_due = (
 		(order.platform == "Shopify")
 		& order.erpnext_sync_status.isin((SYNCING, SYNC_ERROR, NEEDS_ACTION))
-		& order.cancelled_at.isnull()
+		& (order.cancelled_at.isnull() | (order.erpnext_sync_status == SYNCING))
 		& (checked.isnull() | (checked <= add_to_date(now, hours=-ATTENTION_RECHECK_HOURS)))
 	)
 	rows = (
