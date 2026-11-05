@@ -13,8 +13,7 @@ const SAMPLE = {
 	status: "To Deliver and Bill",
 	currency: "EGP",
 	total: 150,
-	items: [{ item_name: "Rice", qty: 2, uom: "Nos" }],
-	more_items: false,
+	items: [{ item_code: "ITEM-1", item_name: "Rice", qty: 2, image: "" }],
 	marketplace: {
 		platform: "Talabat",
 		reference: "ORD-77",
@@ -52,7 +51,7 @@ function load({ hover_card = true } = {}) {
 	global.document = { createElement: fake_element };
 	delete global.$;
 	global.frappe = {
-		utils: { escape_html: (value) => String(value).replace(/</g, "&lt;").replace(/>/g, "&gt;") },
+		utils: { escape_html: (value) => String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") },
 		call: (opts) => {
 			calls.push(opts);
 			return new Promise((resolve, reject) => pending.push({ opts, resolve, reject }));
@@ -146,12 +145,178 @@ test("the card shows the readable platform number, escapes server text and total
 	const html = module_exports.render_sales_order_card(SAMPLE);
 	assert.match(html, /ORD-77/);
 	assert.doesNotMatch(html, /MKTORD-/);
-	assert.match(html, /Rice x 2/);
+	assert.match(html, /Rice/);
+	assert.match(html, /<bdi dir="ltr">x 2<\/bdi>/);
 	assert.match(html, /Delivered: <bdi dir="ltr">1<\/bdi>/);
 	assert.match(html, /Out for delivery/);
 	assert.match(html, /Ahmed &lt;b&gt;/);
 	assert.doesNotMatch(html, /<img/);
 	assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+});
+
+function many_items(count) {
+	return Array.from({ length: count }, (_, i) => ({
+		item_code: `CODE-${i + 1}`,
+		item_name: `Item ${i + 1}`,
+		qty: i + 1,
+		image: `https://cdn.example.com/${i + 1}.jpg`,
+	}));
+}
+
+test("every item of a 45-item order is listed, in order, with count, code, quantity and a lazy image", () => {
+	const { module_exports } = load();
+	const html = module_exports.render_sales_order_card({ ...SAMPLE, items: many_items(45) });
+	assert.match(html, /Items \(45\)/);
+	assert.equal((html.match(/class="mi-hc-item"/g) || []).length, 45);
+	assert.equal((html.match(/<img /g) || []).length, 45);
+	assert.ok(html.indexOf("Item 1<") < html.indexOf("Item 2<"));
+	assert.ok(html.indexOf("Item 44<") < html.indexOf("Item 45<"));
+	assert.match(html, /<bdi dir="ltr">CODE-45<\/bdi>/);
+	assert.match(html, /<bdi dir="ltr">x 45<\/bdi>/);
+	assert.match(html, /loading="lazy"/);
+	assert.match(html, /width="40" height="40"/);
+	assert.doesNotMatch(html, /More items/);
+});
+
+test("the item area scrolls with a max height and keeps wheel scrolling inside (focusable for the Details dialog)", () => {
+	const { module_exports } = load();
+	const html = module_exports.render_sales_order_card({ ...SAMPLE, items: many_items(3) });
+	assert.match(html, /class="mi-hc-items" tabindex="0"[^>]*max-height: 320px; overflow-y: auto; overscroll-behavior: contain/);
+	assert.match(html, /aria-label="Items \(3\)"/);
+});
+
+test("an item without an image (or with an unsafe one) gets the neutral box and no img", () => {
+	const { module_exports } = load();
+	const items = [
+		{ item_code: "A", item_name: "No image", qty: 1, image: "" },
+		{ item_code: "B", item_name: "Missing key", qty: 1 },
+		{ item_code: "C", item_name: "Script", qty: 1, image: "javascript:alert(1)" },
+		{ item_code: "D", item_name: "Data", qty: 1, image: "data:image/png;base64,AAAA" },
+		{ item_code: "E", item_name: "Quote", qty: 1, image: 'https://x.example/a.png" onerror="alert(1)' },
+	];
+	const html = module_exports.render_sales_order_card({ ...SAMPLE, items });
+	assert.doesNotMatch(html, /<img/);
+	assert.equal((html.match(/class="mi-hc-item"/g) || []).length, 5);
+	assert.equal((html.match(/background: var\(--control-bg\)/g) || []).length >= 5, true);
+});
+
+test("safe_image allows http(s) and file paths only", () => {
+	const { module_exports } = load();
+	const { safe_image } = module_exports;
+	assert.equal(safe_image("https://cdn.shopify.com/a.jpg?v=1"), "https://cdn.shopify.com/a.jpg?v=1");
+	assert.equal(safe_image("/files/a.png"), "/files/a.png");
+	assert.equal(safe_image("/private/files/a.png"), "/private/files/a.png");
+	// Frappe keeps a space and an apostrophe in file names.
+	assert.equal(safe_image("/files/Screenshot 2026-11-01.png"), "/files/Screenshot 2026-11-01.png");
+	assert.equal(safe_image("/files/Mama's rice.jpg"), "/files/Mama's rice.jpg");
+	const bad_values = [
+		"",
+		null,
+		undefined,
+		"//evil.example/a.png",
+		"/assets/a.png",
+		"ftp://x/a",
+		"/files/../a",
+		'/files/a".png',
+		"/files/a\\b.png",
+		"/files/a<b>.png",
+		"/files/a\nb",
+		"https://user:pw@example.com/a.png",
+		"https://example.com/a b.png",
+		"https://example.com/it's.png",
+		"https:///a.png",
+		"https://example.com/" + "a".repeat(2000),
+	];
+	for (const bad of bad_values) {
+		assert.equal(safe_image(bad), "", String(bad));
+	}
+});
+
+test("thumbnail_url asks Shopify's CDN for a small picture and leaves everything else alone", () => {
+	const { module_exports } = load();
+	const { thumbnail_url } = module_exports;
+	const base = "https://cdn.shopify.com/s/files/1/0001/x.jpg";
+	assert.equal(thumbnail_url(`${base}?v=1754753901`), `${base}?v=1754753901&width=96`);
+	assert.equal(thumbnail_url(base), `${base}?width=96`);
+	assert.equal(thumbnail_url(`${base}?v=1#frag`), `${base}?v=1&width=96#frag`);
+	// An existing width is never doubled or replaced.
+	assert.equal(thumbnail_url(`${base}?width=200&v=1`), `${base}?width=200&v=1`);
+	assert.equal(thumbnail_url(`${base}?v=1&width=300`), `${base}?v=1&width=300`);
+	// Other hosts (including look-alikes) and file paths are unchanged.
+	assert.equal(thumbnail_url("https://cdn.example.com/a.jpg?v=1"), "https://cdn.example.com/a.jpg?v=1");
+	assert.equal(thumbnail_url("https://cdn.shopify.com.evil.example/a.jpg"), "https://cdn.shopify.com.evil.example/a.jpg");
+	assert.equal(thumbnail_url("https://evil.example/cdn.shopify.com/a.jpg"), "https://evil.example/cdn.shopify.com/a.jpg");
+	assert.equal(thumbnail_url("/files/a.png"), "/files/a.png");
+	assert.equal(thumbnail_url("/private/files/a.png"), "/private/files/a.png");
+});
+
+test("the rendered Shopify picture is the small version, other pictures are as stored", () => {
+	const { module_exports } = load();
+	const items = [
+		{ item_code: "S", item_name: "Shopify", qty: 1, image: "https://cdn.shopify.com/s/files/1/x.jpg?v=9" },
+		{ item_code: "F", item_name: "File", qty: 1, image: "/files/a.png" },
+	];
+	const html = module_exports.render_sales_order_card({ ...SAMPLE, items });
+	assert.match(html, /src="https:\/\/cdn\.shopify\.com\/s\/files\/1\/x\.jpg\?v=9&amp;width=96"/);
+	assert.match(html, /src="\/files\/a\.png"/);
+});
+
+test("item text and image URLs are escaped", () => {
+	const { module_exports } = load();
+	const items = [
+		{
+			item_code: "<i>C</i>",
+			item_name: "<script>x</script>",
+			qty: "<b>1</b>",
+			image: "https://x.example/a.png?a=<b>",
+		},
+	];
+	const html = module_exports.render_sales_order_card({ ...SAMPLE, items });
+	assert.doesNotMatch(html, /<script>|<i>C|<b>1/);
+	assert.match(html, /&lt;script&gt;x&lt;\/script&gt;/);
+	// The unsafe URL (angle brackets) is dropped entirely.
+	assert.doesNotMatch(html, /<img/);
+});
+
+test("codes and quantities are direction-isolated for RTL", () => {
+	const { module_exports } = load();
+	const html = module_exports.render_sales_order_card(SAMPLE);
+	assert.match(html, /<bdi dir="ltr">ITEM-1<\/bdi>/);
+	assert.doesNotMatch(html, /margin-left|margin-right|padding-left|padding-right|text-align: (left|right)/);
+});
+
+test("an order without items has no items section", () => {
+	const { module_exports } = load();
+	const html = module_exports.render_sales_order_card({ ...SAMPLE, items: [] });
+	assert.doesNotMatch(html, /Items \(/);
+});
+
+test("a failed image hides itself through a listener, not an inline handler", () => {
+	const { module_exports } = load();
+	const html = module_exports.render_sales_order_card({ ...SAMPLE, marketplace: null, items: many_items(1) });
+	assert.match(html, /<img /);
+	assert.doesNotMatch(html, /onerror/i);
+	const img = { style: {}, addEventListener: (name, fn) => (img.handler = { name, fn }) };
+	module_exports.wire_images({ querySelectorAll: () => [img] });
+	assert.equal(img.handler.name, "error");
+	img.handler.fn();
+	assert.equal(img.style.display, "none");
+	// A root without querySelectorAll (skeleton, plain object) is ignored.
+	module_exports.wire_images({});
+	module_exports.wire_images(null);
+});
+
+test("fill wires the images after rendering the card", async () => {
+	const { helper, pending } = load();
+	const img = { style: {}, addEventListener: (name, fn) => (img.fn = fn) };
+	const el = fake_element();
+	el.querySelectorAll = () => [img];
+	const p = helper.fill(el, "SO-1");
+	pending[0].resolve({ message: { ...SAMPLE, items: many_items(1) } });
+	await p;
+	assert.match(el.innerHTML, /<img /);
+	img.fn();
+	assert.equal(img.style.display, "none");
 });
 
 test("parts the server left out are not rendered", () => {
