@@ -1924,7 +1924,6 @@ The cash on delivery amount is filled from each order. A fully paid order gets a
 Sales Orders selected: {0},عدد أوامر البيع المحددة: {0}
 Documents,المستندات
 No orders were processed.,لم تتم معالجة أي طلبات.
-Delivery Note (ERPNext),مذكرة التسليم (ERPNext)
 The bulk run could not be queued.,تعذّر وضع التشغيل الجماعي في قائمة الانتظار.
 Waiting,في الانتظار
 Creating documents,جارٍ إنشاء المستندات
