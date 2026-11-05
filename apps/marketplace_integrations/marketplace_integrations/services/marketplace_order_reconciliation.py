@@ -14,12 +14,15 @@ CANCELLED_PAID_STATUSES = frozenset({"PAID", "PARTIALLY_PAID", "PARTIALLY_REFUND
 CANCELLED_PAID_ERROR = "Cancelled in Shopify but the payment was not fully refunded; refund it in Shopify"
 
 
-def schedule_first_syncs(filters):
+def schedule_first_syncs(filters, exclude_names=None):
 	"""Schedule the first sync (through the debounce) for every order matching ``filters``.
 	Never creates a Sales Order inline. Returns the number of orders that now have a sync
-	pending, including ones a recent run already scheduled."""
+	pending, including ones a recent run already scheduled.  ``exclude_names`` leaves out
+	orders a caller already scheduled and counted, so no order is counted twice."""
 	from marketplace_integrations.services.sales_order_sync_debounce import bump_sync_debounce_unless_pending
 
+	if exclude_names:
+		filters = {**filters, "name": ["not in", list(exclude_names)]}
 	rows = frappe.get_all(
 		"Marketplace Order",
 		filters=filters,
