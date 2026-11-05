@@ -23,7 +23,8 @@ app_logo_url = "/assets/marketplace_integrations/icons/desktop_icons/solid/tamwe
 # include js, css files in header of desk.html
 # boot: the carriers whose Delivery Note shows the Shipping section (services/carrier_shipments.py)
 boot_session = "marketplace_integrations.services.carrier_shipments.boot_session"
-# app_include_js = "/assets/marketplace_integrations/js/marketplace_integrations.js"
+# The bulk Delivery Note action's progress listener must work on every Desk page, not only the Sales Order list.
+app_include_js = ["/assets/marketplace_integrations/js/sales_order_bulk_delivery.js"]
 
 # include js, css files in header of web template
 # web_include_css = "/assets/marketplace_integrations/css/marketplace_integrations.css"

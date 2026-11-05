@@ -168,7 +168,38 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		note = self.make_note()
 		doc = frappe.get_doc("Delivery Note", note.name)
 		with patch.object(shipment, "sales_order_of", return_value="SO-DOES-NOT-EXIST"):
-			self.assertEqual(shipment.default_cod(doc), doc.rounded_total or doc.grand_total)
+			self.assertEqual(shipment.default_cod(doc), doc.grand_total)
+
+	def test_the_default_cod_is_the_grand_total_not_the_rounded_total(self):
+		# Shopify's total (shipping included) is the grand total; the rounded total can differ by up to 0.50.
+		note = self.make_note(self.make_order(rate=555.5), confirm_cod=False)
+
+		doc = frappe.get_doc("Delivery Note", note.name)
+		self.assertEqual(doc.grand_total, 555.5)
+		self.assertEqual(shipment.default_cod(doc), 555.5)
+		self.assertEqual(stored(note, "custom_cod_amount").custom_cod_amount, 555.5)
+		# The advance is deducted from the same grand-total basis.
+		frappe.db.set_value("Sales Order", doc.items[0].against_sales_order, "advance_paid", 100)
+		self.assertEqual(shipment.default_cod(doc), 455.5)
+
+	def test_a_fully_paid_order_that_rounds_down_has_cod_zero(self):
+		# ERPNext caps the recorded payment at the rounded total: 494 paid on grand 494.21 / rounded 494 is
+		# fully paid, so the single note gets COD 0, not the 0.21 the grand total alone would leave.
+		order = self.make_order(rate=494.21)
+		frappe.db.set_value("Sales Order", order.name, {"rounded_total": 494, "advance_paid": 494})
+		note = self.make_note(order, confirm_cod=False)
+
+		doc = frappe.get_doc("Delivery Note", note.name)
+		self.assertEqual(shipment.default_cod(doc), 0)
+		self.assertEqual(stored(note, "custom_cod_amount").custom_cod_amount, 0)
+
+	def test_a_part_paid_or_unpaid_order_keeps_the_grand_total_basis(self):
+		order = self.make_order(rate=555.5)
+		frappe.db.set_value("Sales Order", order.name, {"rounded_total": 556, "advance_paid": 200})
+		doc = frappe.get_doc("Delivery Note", self.make_note(order, confirm_cod=False).name)
+		self.assertEqual(shipment.default_cod(doc), 355.5)
+		frappe.db.set_value("Sales Order", order.name, "advance_paid", 0)
+		self.assertEqual(shipment.default_cod(doc), 555.5)
 
 	def test_an_amended_note_must_confirm_its_cod_again(self):
 		note = self.make_note(cod=77)

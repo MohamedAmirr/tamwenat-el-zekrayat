@@ -1892,3 +1892,54 @@ Overdue 1 day,متأخر يوم واحد
 Overdue {0} days,التأخير: {0} يوم
 Shopify buyer Customer creation failed,فشل إنشاء عميل مشتري Shopify
 Shopify order query retried without address names,أُعيد استعلام طلب Shopify بدون أسماء العناوين
+Select at least one Sales Order.,حدّد أمر بيع واحدًا على الأقل.
+Select at most {0} Sales Orders at a time. You selected {1}.,حدّد {0} أمر بيع على الأكثر في المرة الواحدة. لقد حددت {1}.
+You need permission to create and submit {0} to use this action.,تحتاج إلى صلاحية إنشاء وتسجيل {0} لاستخدام هذا الإجراء.
+Choose a shipping method.,اختر طريقة الشحن.
+Your previous bulk Delivery Note run is still in progress. Wait for its result.,تشغيلك السابق لإنشاء مذكرات التسليم بالجملة ما زال قيد التنفيذ. انتظر نتيجته.
+Sales Order {0} was not found.,لم يتم العثور على أمر البيع {0}.
+You do not have permission to read Sales Order {0}.,ليست لديك صلاحية قراءة أمر البيع {0}.
+Delivery Note {0} was created as a draft but Bosta was not started. Open it and press Submit. Reason: {1},تم إنشاء مذكرة التسليم {0} كمسودة لكن لم يبدأ الشحن عبر Bosta. افتحها واضغط تسجيل. السبب: {1}
+"Delivery Note {0} was created as a draft. The Bosta city could not be found from the address: open it, pick the city and press Submit.",تم إنشاء مذكرة التسليم {0} كمسودة. تعذّر تحديد مدينة Bosta من العنوان: افتحها واختر المدينة ثم اضغط تسجيل.
+Creating at Bosta,جارٍ الإنشاء لدى Bosta
+Sales Order {0} is not a marketplace order.,أمر البيع {0} ليس طلب سوق.
+Sales Order {0} is {1}; only To Deliver and To Deliver and Bill orders can be shipped.,أمر البيع {0} حالته {1}؛ يمكن شحن الطلبات بحالة للتسليم أو للتسليم والفوترة فقط.
+Delivery Note {0} already exists for this order.,مذكرة التسليم {0} موجودة بالفعل لهذا الطلب.
+The Bosta carrier is not set up: there is no Supplier named Bosta.,شركة الشحن Bosta غير مُعدّة: لا يوجد مورد باسم Bosta.
+Sales Order {0} has more than one submitted Sales Invoice ({1}); check them first.,لأمر البيع {0} أكثر من فاتورة مبيعات مسجلة ({1})؛ راجعها أولًا.
+Sales Invoice {0} still has an outstanding amount while Sales Order {1} also has a recorded payment. Apply the payment to the invoice first.,فاتورة المبيعات {0} عليها مبلغ مستحق بينما أمر البيع {1} عليه أيضًا دفعة مسجلة. طبّق الدفعة على الفاتورة أولًا.
+Sales Order {0} has a draft Sales Invoice. Submit or delete it first.,لأمر البيع {0} فاتورة مبيعات مسودة. سجّلها أو احذفها أولًا.
+The recorded payment of Sales Order {0} covers its total except a rounding difference; settle the difference first.,الدفعة المسجلة لأمر البيع {0} تغطي إجماليه عدا فرق التقريب؛ سوِّ الفرق أولًا.
+The bulk run stopped unexpectedly: {0},توقف التشغيل الجماعي بشكل غير متوقع: {0}
+Bosta accepted the shipment but Delivery Note {0} is still a draft: {1},قبلت Bosta الشحنة لكن مذكرة التسليم {0} ما زالت مسودة: {1}
+Bosta accepted the shipment but Delivery Note {0} has not been submitted. Open it and press Submit.,قبلت Bosta الشحنة لكن مذكرة التسليم {0} لم تُسجَّل. افتحها واضغط تسجيل.
+The recorded payment could not be applied to the Sales Invoice.,تعذّر تطبيق الدفعة المسجلة على فاتورة المبيعات.
+Sales Invoice {0} was not fully paid by the recorded payment (outstanding {1}).,لم تُسدَّد فاتورة المبيعات {0} بالكامل بالدفعة المسجلة (المستحق {1}).
+You do not have permission to do this.,ليست لديك صلاحية للقيام بذلك.
+Create Delivery Notes,إنشاء مذكرات التسليم
+Delivery Notes,مذكرات التسليم
+Shipping Method,طريقة الشحن
+The cash on delivery amount is filled from each order. A fully paid order gets a Sales Invoice first and COD 0. Orders that cannot be shipped are skipped and listed with the reason.,يُملأ مبلغ الدفع عند الاستلام من كل طلب. الطلب المدفوع بالكامل تُنشأ له فاتورة مبيعات أولًا ويكون الدفع عند الاستلام 0. الطلبات التي لا يمكن شحنها تُتجاوز وتُعرض مع السبب.
+Sales Orders selected: {0},عدد أوامر البيع المحددة: {0}
+Documents,المستندات
+No orders were processed.,لم تتم معالجة أي طلبات.
+Delivery Note (ERPNext),مذكرة التسليم (ERPNext)
+The bulk run could not be queued.,تعذّر وضع التشغيل الجماعي في قائمة الانتظار.
+Waiting,في الانتظار
+Creating documents,جارٍ إنشاء المستندات
+Waiting for {0},بانتظار {0}
+Accepted by {0},قبلته {0}
+Still creating at {0},ما زال قيد الإنشاء لدى {0}
+Creating documents {0} of {1},إنشاء المستندات {0} من {1}
+Waiting for {0}: {1} of {2} accepted,بانتظار {0}: تم قبول {1} من {2}
+"{0} accepted, {1} failed, {2} skipped, {3} still creating",قُبل {0}، فشل {1}، تم تجاوز {2}، ما زال {3} قيد الإنشاء
+A summary was also saved in your notifications. Check unfinished orders in the Delivery Note list.,حُفظ ملخص أيضًا في إشعاراتك. تحقق من الطلبات غير المكتملة في قائمة مذكرات التسليم.
+Copy failed orders,نسخ الطلبات الفاشلة
+Copied,تم النسخ
+Accepted by Bosta,قبلته Bosta
+"Bosta did not accept the shipment: {0}",لم تقبل Bosta الشحنة: {0}
+Still creating at Bosta. Check the Delivery Note list later.,ما زال قيد الإنشاء لدى Bosta. تحقق من قائمة مذكرات التسليم لاحقًا.
+"Bulk Delivery Notes: {0} accepted, {1} failed, {2} skipped, {3} still creating","مذكرات التسليم الجماعية: قُبل {0}، فشل {1}، تم تجاوز {2}، ما زال {3} قيد الإنشاء"
+Sales Order {0} has a zero total; create its Delivery Note by hand.,إجمالي أمر البيع {0} صفر؛ أنشئ مذكرة التسليم الخاصة به يدويًا.
+Sales Invoice {0} has a credit note; check Sales Order {1} by hand.,لفاتورة المبيعات {0} إشعار دائن؛ راجع أمر البيع {1} يدويًا.
+"Sales Invoice {0} does not cover the whole Sales Order {1} (invoice {2}, order {3}); check it first.","لا تغطي فاتورة المبيعات {0} أمر البيع {1} بالكامل (الفاتورة {2}، الطلب {3})؛ راجعها أولًا."
