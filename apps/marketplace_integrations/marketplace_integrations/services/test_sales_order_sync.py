@@ -477,6 +477,16 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(sales_order.custom_marketplace_order, order.name)
 		self.assertEqual(sales_order.custom_marketplace_platform, "Talabat")
 
+	def test_a_synced_sales_order_is_named_by_the_platform_of_its_marketplace_order(self):
+		"""The sync sets only ``custom_marketplace_order``; the platform field is fetched during insert, before
+		naming (``services/platform_naming.py``). Pins that timing: the name carries the platform series."""
+		order = self._make_order()
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"])
+		self.assertRegex(result["sales_order"], r"^SO-TLB-\d{4}-\d{5}$")
+
 	def test_zero_value_line_remains_zero_and_is_not_price_list_filled(self):
 		"""Zero fulfilled_total_price (with a matching zero fulfilled_unit_price,
 		see `_make_order()`) is a valid, final, free-item amount - not
