@@ -189,6 +189,86 @@ class IntegrationTestUpsertMarketplaceOrderConcurrentRace(IntegrationTestCase):
 		self.assertEqual(result.external_financial_status, "PAID")
 
 
+class IntegrationTestUpsertMarketplaceOrderSnapshotRace(IntegrationTestCase):
+	"""A locking lookup (current read) can find a row committed after this
+	transaction's read view began; a plain get_doc (consistent read) then raises
+	DoesNotExistError. One process cannot hold two transactions, so the
+	consistent read is simulated: a plain load raises, a ``for_update`` load works."""
+
+	def setUp(self):
+		self.account = make_shopify_account(f"Order Snapshot {frappe.generate_hash(length=8)}")
+		self.external_order_id = f"snapshot-order-{frappe.generate_hash(length=8)}"
+		self.payload = {
+			"external_order_id": self.external_order_id,
+			"latest_payload": {"updatedAt": "2026-11-05T10:00:00Z"},
+			"external_financial_status": "PENDING",
+			"items": [],
+		}
+		self.order = upsert_marketplace_order(self.account.name, self.payload)
+
+	def _snapshot_blind_get_doc(self, calls):
+		real_get_doc = frappe.get_doc
+
+		def get_doc(*args, **kwargs):
+			if args and args[0] == "Marketplace Order" and len(args) > 1:
+				calls.append(bool(kwargs.get("for_update")))
+				if not kwargs.get("for_update"):
+					raise frappe.DoesNotExistError("Marketplace Order not visible to this read view")
+			return real_get_doc(*args, **kwargs)
+
+		return get_doc
+
+	def test_locked_upsert_loads_the_order_with_a_locking_read(self):
+		calls = []
+		updated = {**self.payload, "external_financial_status": "PAID"}
+		with patch.object(
+			marketplace_orders_module.frappe, "get_doc", side_effect=self._snapshot_blind_get_doc(calls)
+		):
+			result = upsert_marketplace_order(
+				self.account.name,
+				updated,
+				is_stale=_is_stale_by_updated_at("2026-11-05T11:00:00Z"),
+			)
+
+		# The patch sits on the global frappe module, so Frappe's own load_doc_before_save()
+		# (document.py, for_update=True) during save() is recorded too. Assert that no plain
+		# load happened and that the upsert's own load (the first call) was locking.
+		self.assertTrue(calls)
+		self.assertTrue(calls[0])
+		self.assertNotIn(False, calls)
+		self.assertEqual(result.name, self.order.name)
+		result.reload()
+		self.assertEqual(result.external_financial_status, "PAID")
+		self.assertEqual(
+			frappe.db.count("Marketplace Order", {"external_order_id": self.external_order_id}), 1
+		)
+
+	def test_unlocked_upsert_keeps_the_plain_load(self):
+		calls = []
+		real_get_doc = frappe.get_doc
+
+		def recording_get_doc(*args, **kwargs):
+			if args and args[0] == "Marketplace Order" and len(args) > 1:
+				calls.append(bool(kwargs.get("for_update")))
+			return real_get_doc(*args, **kwargs)
+
+		with patch.object(marketplace_orders_module.frappe, "get_doc", side_effect=recording_get_doc):
+			upsert_marketplace_order(self.account.name, self.payload)
+
+		self.assertEqual(calls, [False])
+
+	def test_order_missing_for_a_locking_read_still_raises(self):
+		with (
+			patch.object(
+				marketplace_orders_module.frappe.db, "get_value", return_value="MKTORD-DOES-NOT-EXIST"
+			),
+			self.assertRaises(frappe.DoesNotExistError),
+		):
+			upsert_marketplace_order(
+				self.account.name, self.payload, is_stale=_is_stale_by_updated_at("2026-11-05T11:00:00Z")
+			)
+
+
 class IntegrationTestUpsertMarketplaceOrderNoopResave(IntegrationTestCase):
 	def setUp(self):
 		self.account = make_shopify_account(f"Order Noop {frappe.generate_hash(length=8)}")
