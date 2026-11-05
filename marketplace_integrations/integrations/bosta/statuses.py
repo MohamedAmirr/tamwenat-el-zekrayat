@@ -171,15 +171,11 @@ def _note_for(delivery_id, tracking_number):
 		rows = frappe.get_all(
 			"Delivery Note",
 			filters={fieldname: value, "docstatus": ["<", 2]},
-			fields=["name", fieldname, "is_return", "custom_return_source"],
+			fields=["name", fieldname, "is_return", "custom_return_source", "transporter"],
 			limit_page_length=20,
 		)
-		rows = [
-			row
-			for row in rows
-			if cstr(row[fieldname]).strip() == value
-			and (not row.is_return or row.custom_return_source == shipment.RETURN_PICKUP)
-		]
+		# Only a Bosta note: another carrier's note can carry the same number (its own AWB).
+		rows = [row for row in rows if cstr(row[fieldname]).strip() == value and shipment.applies_to(row)]
 		if len(rows) == 1:
 			return rows[0].name
 	return None
@@ -239,10 +235,17 @@ def _apply_event(log):
 
 
 def _a_create_is_in_flight():
+	supplier = shipment.bosta_supplier()
+	if not supplier:
+		return False
 	return bool(
 		frappe.db.exists(
 			"Delivery Note",
-			{"custom_integration_status": ["in", [shipment.CREATING, shipment.UNKNOWN]], "docstatus": 0},
+			{
+				"custom_integration_status": ["in", [shipment.CREATING, shipment.UNKNOWN]],
+				"docstatus": 0,
+				"transporter": supplier,
+			},
 		)
 	)
 
@@ -383,6 +386,15 @@ def _write_state(note, code, timestamp=None, fee=None, event=False):
 # ---------------------------------------------------------------------------
 
 
+def is_bosta_note(delivery_note):
+	"""Whether the Delivery Note belongs to Bosta (the same rule as ``shipment.applies_to``). Every Bosta job
+	checks it before it asks Bosta about a note or writes a Bosta state onto it."""
+	values = frappe.db.get_value(
+		"Delivery Note", delivery_note, ["transporter", "is_return", "custom_return_source"], as_dict=True
+	)
+	return bool(values) and shipment.applies_to(values)
+
+
 def refresh_note(delivery_note, held=None):
 	"""Read the note's delivery from Bosta and apply its state. The HTTP call comes first; the lock and
 	the write after it. Raises ``RateLimited`` on HTTP 429. Returns the Bosta state name or ``None``.
@@ -395,6 +407,9 @@ def refresh_note(delivery_note, held=None):
 
 	``held`` (the nightly run passes a list): a "Delivery not found" answer for a Created note is not applied;
 	the note is appended to the list and the run decides (``MASS_1066_LIMIT``). Returns ``None`` then."""
+	if not is_bosta_note(delivery_note):
+		# Another carrier's note (its tracking number is not a Bosta one) or a missing note: never ask Bosta, never write.
+		return None
 	current = frappe.db.get_value(
 		"Delivery Note", delivery_note, ["lr_no", "custom_integration_status", "docstatus", "custom_last_integration_error"], as_dict=True
 	)
@@ -471,8 +486,12 @@ def reconcile_open_notes():
 
 
 def _open_notes():
+	"""The open notes of Bosta only: another carrier's note (Noon) must never be asked about at Bosta."""
+	supplier = shipment.bosta_supplier()
+	if not supplier:
+		return []
 	cutoff = add_days(now_datetime(), -POLL_MAX_AGE_DAYS)
-	base = {"docstatus": ["<", 2], "creation": [">=", cutoff]}
+	base = {"docstatus": ["<", 2], "creation": [">=", cutoff], "transporter": supplier}
 	notes = []
 	for status in (shipment.CREATING, shipment.UNKNOWN, "Cancellation Pending", "Cancellation Unknown"):
 		notes += frappe.get_all(

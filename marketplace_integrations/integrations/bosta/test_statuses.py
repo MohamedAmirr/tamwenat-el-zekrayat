@@ -502,3 +502,190 @@ class IntegrationTestBostaStatuses(BostaFixtureMixin, IntegrationTestCase):
 			statuses.update_sales_order_summary(order.name)
 
 		self.assertEqual(events[:2], [("commit",), ("lock", "Sales Order", order.name)])
+
+	# -- Bosta jobs act on Bosta notes only --------------------------------------------------
+
+	def _other_carrier_note(self, status, tracking="NOON-AWB-1", shipping_status="Shipped", **values):
+		"""A note of another carrier (Noon-like): its own AWB in ``lr_no``, a status Bosta does not know."""
+		other = self._track(
+			frappe.get_doc(
+				{
+					"doctype": "Supplier",
+					"supplier_name": f"Noon Test {frappe.generate_hash(length=6)}",
+					"supplier_group": "All Supplier Groups",
+					"supplier_type": "Company",
+					"is_transporter": 1,
+				}
+			).insert()
+		)
+		note = self.make_note()
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{
+				"transporter": other.name,
+				"custom_integration_status": status,
+				"custom_shipping_status": shipping_status,
+				"lr_no": tracking,
+				**values,
+			},
+		)
+		frappe.db.commit()
+		return note
+
+	def test_open_notes_exclude_another_carriers_note_in_every_status_bucket(self):
+		bosta = {
+			"creating": self.make_note(),
+			"unknown": self.make_note(),
+			"created": self._created_note(),
+			"cancelled": self.make_note(),
+		}
+		frappe.db.set_value("Delivery Note", bosta["creating"].name, "custom_integration_status", "Creating")
+		frappe.db.set_value(
+			"Delivery Note", bosta["unknown"].name, "custom_integration_status", "Creation Unknown"
+		)
+		frappe.db.set_value(
+			"Delivery Note",
+			bosta["cancelled"].name,
+			{"custom_integration_status": "Cancelled", "custom_last_integration_error": "blocked"},
+		)
+		other = [
+			self._other_carrier_note("Creating", "N-1"),
+			self._other_carrier_note("Creation Unknown", "N-2"),
+			self._other_carrier_note("Cancellation Pending", "N-3"),
+			self._other_carrier_note("Cancellation Unknown", "N-4"),
+			self._other_carrier_note("Created", "N-5"),
+			self._other_carrier_note("Cancelled", "N-6", custom_last_integration_error="blocked"),
+		]
+		# Marked submitted for the query only and never committed: the fixture teardown rolls it back.
+		for name in (bosta["cancelled"].name, other[-1].name):
+			frappe.db.set_value("Delivery Note", name, "docstatus", 1)
+
+		open_notes = statuses._open_notes()
+
+		for note in bosta.values():
+			self.assertIn(note.name, open_notes)
+		for note in other:
+			self.assertNotIn(note.name, open_notes)
+
+	def test_open_notes_are_empty_when_there_is_no_bosta_supplier(self):
+		self._created_note()
+
+		with patch.object(shipment, "bosta_supplier", return_value=None):
+			self.assertEqual(statuses._open_notes(), [])
+
+	def test_refresh_of_another_carriers_note_makes_no_bosta_call_and_writes_nothing(self):
+		note = self._other_carrier_note("Created")
+		before = frappe.db.get_value(
+			"Delivery Note",
+			note.name,
+			["custom_integration_status", "custom_shipping_status", "custom_last_integration_error"],
+			as_dict=True,
+		)
+		self.http.queue["get"].append(
+			FakeResponse(400, {"success": False, "message": "Delivery not found.", "errorCode": 1066})
+		)
+
+		with patch.object(statuses, "_write_state") as write:
+			self.assertIsNone(statuses.refresh_note(note.name))
+			self.assertIsNone(statuses.refresh_note(note.name, held=[]))
+
+		write.assert_not_called()
+		self.assertEqual(self.http.urls_of("get"), [])
+		self.assertEqual(
+			frappe.db.get_value(
+				"Delivery Note",
+				note.name,
+				["custom_integration_status", "custom_shipping_status", "custom_last_integration_error"],
+				as_dict=True,
+			),
+			before,
+		)
+
+	def test_refresh_of_another_carriers_cancelled_note_with_an_error_does_not_cancel_it(self):
+		note = self._other_carrier_note("Cancelled", custom_last_integration_error="blocked")
+		frappe.db.set_value("Delivery Note", note.name, "docstatus", 1)
+
+		with patch(
+			"marketplace_integrations.services.carrier_shipments.cancel_after_carrier_cancelled"
+		) as auto:
+			self.assertIsNone(statuses.refresh_note(note.name))
+
+		auto.assert_not_called()
+
+	def test_a_webhook_never_matches_another_carriers_note(self):
+		note = self._other_carrier_note("Created", "SHARED-TRK", custom_carrier_delivery_id="DELIVERY-9")
+
+		self.assertIsNone(statuses._note_for("DELIVERY-9", "SHARED-TRK"))
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "custom_shipping_status"), "Shipped")
+
+	def test_the_nightly_run_touches_only_bosta_notes(self):
+		bosta = self._created_note(tracking="TRK-B", delivery_id="DELIVERY-B")
+		noons = [self._other_carrier_note("Created", f"NOON-{i}") for i in range(5)]
+		self.http.queue["get"].append(delivery_body(41))
+
+		with patch.object(statuses.carrier_shipments, "check") as check:
+			statuses.run_reconcile()
+
+		check.assert_not_called()
+		reads = [url for url in self.http.urls_of("get") if "NOON-" in url]
+		self.assertEqual(reads, [])
+		self.assertEqual(
+			frappe.db.get_value("Delivery Note", bosta.name, "custom_shipping_status"), "Picked up"
+		)
+		for note in noons:
+			values = frappe.db.get_value(
+				"Delivery Note",
+				note.name,
+				["custom_integration_status", "custom_shipping_status", "custom_last_integration_error"],
+				as_dict=True,
+			)
+			self.assertEqual(values.custom_integration_status, "Created")
+			self.assertEqual(values.custom_shipping_status, "Shipped")
+			self.assertFalse(values.custom_last_integration_error)
+
+	def test_the_nightly_run_never_writes_state_onto_another_carriers_note(self):
+		noons = [self._other_carrier_note("Created", f"NOON-{i}") for i in range(2)]
+		not_found = FakeResponse(400, {"message": "Delivery not found.", "errorCode": 1066})
+		self.http.queue["get"] += [not_found] * 10
+
+		with patch.object(statuses, "_write_state") as write:
+			statuses.run_reconcile()
+
+		for call in write.call_args_list:
+			self.assertNotIn(call.args[0], [note.name for note in noons])
+
+	def test_a_not_found_answer_for_bosta_notes_still_follows_the_mass_limit_with_other_carriers_present(
+		self,
+	):
+		for i in range(2):
+			self._other_carrier_note("Created", f"NOON-{i}")
+		# The test site can hold open Bosta notes committed by earlier runs: fill only the room left under the limit.
+		room = statuses.MASS_1066_LIMIT - len(statuses._open_notes())
+		few = [self._created_note(tracking=f"TRK-F{i}", delivery_id=f"DELIVERY-F{i}") for i in range(room)]
+		self.assertTrue(few)
+		not_found = FakeResponse(400, {"message": "Delivery not found.", "errorCode": 1066})
+		self.http.queue["get"] += [not_found] * 50
+
+		with patch.object(statuses.carrier_shipments, "cancel_after_carrier_cancelled"):
+			statuses.run_reconcile()
+
+		for note in few:
+			self.assertEqual(
+				frappe.db.get_value("Delivery Note", note.name, "custom_integration_status"), "Cancelled"
+			)
+
+		many = [
+			self._created_note(tracking=f"TRK-M{i}", delivery_id=f"DELIVERY-M{i}")
+			for i in range(statuses.MASS_1066_LIMIT + 1)
+		]
+		with patch("marketplace_integrations.services.carrier_shipments.notify_stock_managers"):
+			statuses.run_reconcile()
+
+		for note in many:
+			self.assertEqual(
+				frappe.db.get_value("Delivery Note", note.name, "custom_integration_status"), "Created"
+			)
+		self.assertTrue(
+			any(frappe.db.get_value("Delivery Note", n.name, "custom_last_integration_error") for n in many)
+		)
