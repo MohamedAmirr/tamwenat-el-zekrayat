@@ -557,7 +557,18 @@ class IntegrationTestImportOrdersUpdatedBetween(IntegrationTestCase):
 		fixture = LinkedSalesOrderFixture()
 		self._fixtures.append(fixture)
 		fixture.link(name)
+		# The import that created the row scheduled its first sync; these tests start from a
+		# linked order with nothing pending.
+		self._clear_debounce(name)
 		return name
+
+	def _clear_debounce(self, name):
+		frappe.db.set_value(
+			"Marketplace Order",
+			name,
+			{"sync_debounce_until": None, "pending_sync_trigger_source": None},
+			update_modified=False,
+		)
 
 	def _debounce(self, name):
 		return frappe.db.get_value(
@@ -592,7 +603,7 @@ class IntegrationTestImportOrdersUpdatedBetween(IntegrationTestCase):
 
 		self.assertIsNone(self._debounce(name).sync_debounce_until)
 
-	def test_manual_import_schedules_the_first_sync_of_a_new_order_but_not_a_cancelled_one(self):
+	def test_manual_import_schedules_the_first_sync_of_a_new_order_and_a_cancelled_one(self):
 		new_gid = _order_gid(frappe.generate_hash(length=8))
 		cancelled_gid = _order_gid(frappe.generate_hash(length=8))
 
@@ -607,12 +618,73 @@ class IntegrationTestImportOrdersUpdatedBetween(IntegrationTestCase):
 			bump_unlinked=True,
 		)
 
-		new_name = frappe.db.get_value("Marketplace Order", {"external_order_id": new_gid}, "name")
-		cancelled_name = frappe.db.get_value("Marketplace Order", {"external_order_id": cancelled_gid}, "name")
-		state = self._debounce(new_name)
+		for gid in (new_gid, cancelled_gid):
+			name = frappe.db.get_value("Marketplace Order", {"external_order_id": gid}, "name")
+			state = self._debounce(name)
+			self.assertIsNotNone(state.sync_debounce_until)
+			self.assertEqual(state.pending_sync_trigger_source, "Manual")
+
+	def test_every_inserted_order_is_scheduled_even_a_cancelled_one_without_the_catch_up_flag(self):
+		# The nightly reconciliation (bump_unlinked False) inserted old cancelled orders as Syncing
+		# and nothing ever scheduled them (47 stuck orders, 2026-11-05).
+		gid = _order_gid(frappe.generate_hash(length=8))
+
+		self._import_range(gid, {"cancelledAt": "2026-09-27T10:02:00Z"})
+
+		name = frappe.db.get_value("Marketplace Order", {"external_order_id": gid}, "name")
+		self.assertEqual(frappe.db.get_value("Marketplace Order", name, "erpnext_sync_status"), "Syncing")
+		state = self._debounce(name)
 		self.assertIsNotNone(state.sync_debounce_until)
-		self.assertEqual(state.pending_sync_trigger_source, "Manual")
-		self.assertIsNone(self._debounce(cancelled_name).sync_debounce_until)
+		self.assertEqual(state.pending_sync_trigger_source, "Scheduled Reconciliation")
+
+	def test_a_repull_of_an_unchanged_cancelled_order_is_not_bumped_again(self):
+		gid = _order_gid(frappe.generate_hash(length=8))
+		overrides = {"cancelledAt": "2026-09-27T10:02:00Z"}
+		self._import_range(gid, overrides)
+		name = frappe.db.get_value("Marketplace Order", {"external_order_id": gid}, "name")
+		# What the sync does: it consumes the window and settles the order.
+		self._clear_debounce(name)
+		frappe.db.set_value("Marketplace Order", name, "erpnext_sync_status", "Cancelled")
+
+		self._import_range(gid, overrides)
+
+		self.assertIsNone(self._debounce(name).sync_debounce_until)
+
+	def test_a_repull_reschedules_an_existing_order_left_syncing_without_a_window(self):
+		gid = _order_gid(frappe.generate_hash(length=8))
+		overrides = {"cancelledAt": "2026-09-27T10:02:00Z"}
+		self._import_range(gid, overrides)
+		name = frappe.db.get_value("Marketplace Order", {"external_order_id": gid}, "name")
+		self._clear_debounce(name)
+
+		self._import_range(gid, overrides)
+
+		self.assertIsNotNone(self._debounce(name).sync_debounce_until)
+
+	def test_an_inserted_cancelled_order_ends_cancelled_after_the_sweep_ran(self):
+		gid = _order_gid(frappe.generate_hash(length=8))
+		# An unpaid cancellation ends Cancelled; the default payload is PARTIALLY_REFUNDED (a paid one).
+		self._import_range(gid, {"cancelledAt": "2026-09-27T10:02:00Z", "displayFinancialStatus": "VOIDED"})
+		name = frappe.db.get_value("Marketplace Order", {"external_order_id": gid}, "name")
+		# Make the window due, then run what the minute sweep's job does.
+		due = frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=-1)
+		frappe.db.set_value("Marketplace Order", name, "sync_debounce_until", due, update_modified=False)
+		due = frappe.db.get_value("Marketplace Order", name, "sync_debounce_until")
+
+		from marketplace_integrations.services.sales_order_sync_debounce import _run_debounced_sync
+
+		_run_debounced_sync(name, due)
+
+		values = frappe.db.get_value(
+			"Marketplace Order", name, ["erpnext_sync_status", "sync_debounce_until"], as_dict=True
+		)
+		self.assertEqual(values.erpnext_sync_status, "Cancelled")
+		self.assertIsNone(values.sync_debounce_until)
+		self.assertTrue(
+			frappe.db.exists(
+				"Marketplace Sync Log", {"marketplace_order": name, "sync_type": "Sales Order Sync"}
+			)
+		)
 
 	def test_unchanged_linked_order_does_not_bump(self):
 		gid = _order_gid(frappe.generate_hash(length=8))
@@ -623,13 +695,18 @@ class IntegrationTestImportOrdersUpdatedBetween(IntegrationTestCase):
 		self.assertIsNone(self._debounce(name).sync_debounce_until)
 
 	def test_unlinked_order_does_not_bump(self):
-		gid = _order_gid(frappe.generate_hash(length=8))
-		self._import_range(gid)
-		name = frappe.db.get_value("Marketplace Order", {"external_order_id": gid}, "name")
+		# The import that created the row scheduled its first sync, and the sync settled it as
+		# Sync Error or Needs Action; a later change to the unlinked, settled order must not re-bump.
+		for settled in ("Sync Error", "Needs Action"):
+			gid = _order_gid(frappe.generate_hash(length=8))
+			self._import_range(gid)
+			name = frappe.db.get_value("Marketplace Order", {"external_order_id": gid}, "name")
+			self._clear_debounce(name)
+			frappe.db.set_value("Marketplace Order", name, "erpnext_sync_status", settled)
 
-		self._import_range(gid, {"cancelledAt": "2026-09-27T10:02:00Z"})
+			self._import_range(gid, {"cancelledAt": "2026-09-27T10:02:00Z"})
 
-		self.assertIsNone(self._debounce(name).sync_debounce_until)
+			self.assertIsNone(self._debounce(name).sync_debounce_until, settled)
 
 	def test_fingerprint_or_bump_failure_for_one_order_does_not_stop_the_others(self):
 		bad_gid = _order_gid(frappe.generate_hash(length=8))
@@ -831,6 +908,67 @@ class IntegrationTestReconcileAllAccountsOrders(IntegrationTestCase):
 
 		self.assertIsNone(self._debounce(name).sync_debounce_until)
 		self.assertEqual(self._summaries(self.account_b), [])
+
+	def test_catch_up_counts_a_new_cancelled_order_once_as_a_first_sync_scheduled(self):
+		# The import inserts a cancelled order as Syncing and schedules its first sync itself; the
+		# catch-up's own schedule_first_syncs() queries skip cancelled orders, so it is counted once.
+		gid = _order_gid(frappe.generate_hash(length=8))
+		payload = make_order_payload(gid, cancelledAt="2026-09-27T10:02:00Z", displayFinancialStatus="VOIDED")
+
+		def fake_execute(client_self, query, variables=None):
+			if client_self.connection_name != self.account_b.connection:
+				return {"orders": {"pageInfo": {"hasNextPage": False}, "nodes": []}}
+			if "ShopifyOrderIds" in query:
+				return {
+					"orders": {
+						"pageInfo": {"hasNextPage": False},
+						"nodes": [{"id": gid, "updatedAt": "2026-09-27T10:01:00Z"}],
+					}
+				}
+			return {"order": payload}
+
+		with patch(EXECUTE_TARGET, autospec=True, side_effect=fake_execute):
+			orders.reconcile_all_accounts_orders(catch_up_unlinked=True)
+
+		name = frappe.db.get_value("Marketplace Order", {"external_order_id": gid}, "name")
+		self.assertEqual(frappe.db.get_value("Marketplace Order", name, "erpnext_sync_status"), "Syncing")
+		self.assertIsNotNone(self._debounce(name).sync_debounce_until)
+		summaries = self._summaries(self.account_b)
+		self.assertEqual(len(summaries), 1)
+		self.assertEqual(summaries[0].status, "Success")
+		self.assertEqual(
+			frappe.parse_json(summaries[0].response_data),
+			{"imported": 1, "first_syncs_scheduled": 1, "failures": 0},
+		)
+
+	def test_catch_up_counts_a_new_uncancelled_order_once_not_twice(self):
+		# The import bumps the new uncancelled order; the catch-up queries match it again, but
+		# exclude what the import already scheduled, so it is counted exactly once.
+		gid = _order_gid(frappe.generate_hash(length=8))
+		payload = make_order_payload(gid)
+
+		def fake_execute(client_self, query, variables=None):
+			if client_self.connection_name != self.account_b.connection:
+				return {"orders": {"pageInfo": {"hasNextPage": False}, "nodes": []}}
+			if "ShopifyOrderIds" in query:
+				return {
+					"orders": {
+						"pageInfo": {"hasNextPage": False},
+						"nodes": [{"id": gid, "updatedAt": "2026-09-27T10:01:00Z"}],
+					}
+				}
+			return {"order": payload}
+
+		with patch(EXECUTE_TARGET, autospec=True, side_effect=fake_execute):
+			orders.reconcile_all_accounts_orders(catch_up_unlinked=True)
+
+		name = frappe.db.get_value("Marketplace Order", {"external_order_id": gid}, "name")
+		self.assertIsNotNone(self._debounce(name).sync_debounce_until)
+		(summary,) = self._summaries(self.account_b)
+		self.assertEqual(
+			frappe.parse_json(summary.response_data),
+			{"imported": 1, "first_syncs_scheduled": 1, "failures": 0},
+		)
 
 
 class IntegrationTestQueueOrderImportDateRange(IntegrationTestCase):
