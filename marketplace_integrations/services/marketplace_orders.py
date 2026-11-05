@@ -134,7 +134,15 @@ def upsert_marketplace_order(
 		"name",
 		for_update=bool(is_stale),
 	)
-	doc = frappe.get_doc("Marketplace Order", name) if name else frappe.new_doc("Marketplace Order")
+	if name:
+		# The locking lookup above is a current read and can see a row another worker committed
+		# after this transaction's read view began (Shopify sends ORDERS_CREATE/UPDATED/PAID for
+		# a new order within milliseconds). A plain get_doc is a consistent read and would not
+		# find it. Frappe's ``for_update`` load locks the parent and its child rows with current
+		# reads too, so the document and its items match the row just locked.
+		doc = frappe.get_doc("Marketplace Order", name, for_update=bool(is_stale))
+	else:
+		doc = frappe.new_doc("Marketplace Order")
 	if name and is_stale and is_stale(doc):
 		return doc
 	stored_values = _comparable_values(doc) if name else None
@@ -171,16 +179,17 @@ def upsert_marketplace_order(
 			# The unique identity key is the atomic backstop for two workers
 			# receiving the same order concurrently. Reload the winner and
 			# apply this normalized payload to it rather than creating a second.
-			name = frappe.db.get_value("Marketplace Order", {"order_identity_key": identity_key}, "name")
-			if not name:
-				raise
 			# Lock the winner before comparing the incoming platform timestamp;
 			# otherwise an older concurrent fetch could overwrite it immediately
-			# after the first insert commits.
-			frappe.db.get_value(
+			# after the first insert commits. The lookup is the locking (current)
+			# read itself: a plain read here could miss a row committed after this
+			# transaction's read view began.
+			name = frappe.db.get_value(
 				"Marketplace Order", {"order_identity_key": identity_key}, "name", for_update=True
 			)
-			doc = frappe.get_doc("Marketplace Order", name)
+			if not name:
+				raise
+			doc = frappe.get_doc("Marketplace Order", name, for_update=True)
 			if is_stale and is_stale(doc):
 				return doc
 			if skip_status_replan:

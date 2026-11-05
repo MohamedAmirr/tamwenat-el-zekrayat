@@ -1321,7 +1321,7 @@ Last sync error,آخر خطأ مزامنة
 Marketplace,السوق
 Customer,العميل
 Items,الأصناف
-More items on the order.,يحتوي الطلب على أصناف أخرى.
+Items ({0}),الأصناف ({0})
 Delivery status,حالة التسليم
 Tracking number,رقم التتبع
 Total,الإجمالي
