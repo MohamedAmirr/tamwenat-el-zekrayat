@@ -56,8 +56,8 @@ def normalize_order(order):
 		"payment_transactions": order.get("transactions"),
 		"refunds": order.get("refunds"),
 		"customer_external_id": customer.get("id"),
-		"customer_first_name": customer.get("firstName"),
-		"customer_last_name": customer.get("lastName"),
+		"customer_first_name": _customer_name_part("firstName", customer, shipping_address, billing_address),
+		"customer_last_name": _customer_name_part("lastName", customer, shipping_address, billing_address),
 		"customer_phone_number": _customer_phone_number(default_phone, shipping_address, billing_address),
 		"customer_email": default_email.get("emailAddress"),
 		"customer_formatted_address": ", ".join(address.get("formatted") or []),
@@ -86,6 +86,19 @@ def _shipping_lines(order):
 		"retailLocation": order.get("retailLocation"),
 		"shippingLines": lines,
 	}
+
+
+def _customer_name_part(key, customer, shipping_address, billing_address):
+	"""``firstName``/``lastName`` from the customer; only a blank one falls back to the
+	shipping address, then the billing address (phone-only buyers and draft orders have
+	no customer name while the address still carries one). The customer's own value is
+	returned untouched when it is not blank; odd shapes never raise.
+	"""
+	for source in (customer, shipping_address, billing_address):
+		value = source.get(key) if isinstance(source, dict) else None
+		if isinstance(value, str) and value.strip():
+			return value if source is customer else value.strip()
+	return customer.get(key) if isinstance(customer, dict) else None
 
 
 def _customer_phone_number(default_phone, shipping_address, billing_address):

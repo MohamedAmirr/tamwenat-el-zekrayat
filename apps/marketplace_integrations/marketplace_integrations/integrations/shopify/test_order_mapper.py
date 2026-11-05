@@ -246,6 +246,50 @@ class UnitTestShopifyOrderMapper(UnitTestCase):
 
 		self.assertEqual(result["customer_phone_number"], "+201000000002")
 
+	def test_customer_name_falls_back_customer_then_shipping_then_billing(self):
+		shipping = {"firstName": "Ship", "lastName": "Address"}
+		billing = {"firstName": "Bill", "lastName": "Address"}
+
+		result = normalize_order(
+			self.order(
+				customer={"id": "c", "firstName": "Cust", "lastName": "Omer"},
+				shippingAddress=shipping,
+				billingAddress=billing,
+			)
+		)
+		self.assertEqual((result["customer_first_name"], result["customer_last_name"]), ("Cust", "Omer"))
+
+		result = normalize_order(
+			self.order(customer={"id": "c"}, shippingAddress=shipping, billingAddress=billing)
+		)
+		self.assertEqual((result["customer_first_name"], result["customer_last_name"]), ("Ship", "Address"))
+
+		result = normalize_order(
+			self.order(customer={"id": "c"}, shippingAddress={"city": "Cairo"}, billingAddress=billing)
+		)
+		self.assertEqual((result["customer_first_name"], result["customer_last_name"]), ("Bill", "Address"))
+
+	def test_customer_name_address_only_fills_blank_parts(self):
+		result = normalize_order(
+			self.order(
+				customer={"id": "c", "firstName": "Aya", "lastName": "  "},
+				shippingAddress={"firstName": "Other", "lastName": "Yahia"},
+			)
+		)
+		self.assertEqual((result["customer_first_name"], result["customer_last_name"]), ("Aya", "Yahia"))
+
+	def test_customer_name_from_address_with_only_a_phone_or_odd_shapes_stays_empty(self):
+		for shipping, billing in (
+			({"phone": "01069452847"}, None),
+			(None, None),
+			({"firstName": None, "lastName": 5}, {"firstName": "  "}),
+		):
+			result = normalize_order(
+				self.order(customer={"id": "c"}, shippingAddress=shipping, billingAddress=billing)
+			)
+			self.assertFalse(result["customer_first_name"])
+			self.assertFalse(result["customer_last_name"])
+
 	def test_customer_phone_number_prefers_default_phone_over_address_phones(self):
 		"""defaultPhoneNumber wins even when both addresses also have a phone (precedence)."""
 		order = self.order(

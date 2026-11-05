@@ -3,6 +3,7 @@
 
 """Canonical Shopify order retrieval and persistence (#109)."""
 
+import re
 import time
 from datetime import UTC
 
@@ -73,6 +74,8 @@ query ShopifyOrder($id: ID!, $lineItemsFirst: Int!, $transactionsFirst: Int!, $r
       defaultPhoneNumber { phoneNumber }
     }
     shippingAddress {
+      firstName
+      lastName
       address1
       address2
       city
@@ -87,6 +90,8 @@ query ShopifyOrder($id: ID!, $lineItemsFirst: Int!, $transactionsFirst: Int!, $r
       formatted
     }
     billingAddress {
+      firstName
+      lastName
       address1
       address2
       city
@@ -195,6 +200,33 @@ def account_for_connection(connection_name):
 	return frappe.get_doc("Marketplace Account", accounts[0].name)
 
 
+# The same query text without ``firstName``/``lastName`` on the two address blocks (the customer
+# block keeps its own): the fallback when Shopify rejects those address fields.
+_ADDRESS_NAME_LINES = re.compile(r"((?:shippingAddress|billingAddress) \{\n)\s*firstName\n\s*lastName\n")
+_ORDER_QUERY_WITHOUT_ADDRESS_NAMES = _ADDRESS_NAME_LINES.sub(r"\1", _ORDER_QUERY)
+
+
+def _execute_order_query(client, variables):
+	"""Run the order query; retry once without the address name fields if Shopify rejects them.
+
+	A GraphQL error that mentions ``firstName``/``lastName`` (field missing or protected-data
+	access denied) must not stop order imports: the mapper only uses those two fields to fill a
+	blank buyer name. The retry is per call (no cached decision); one Error Log entry, no
+	personal data. Any other failure is raised unchanged.
+	"""
+	try:
+		return client.execute(_ORDER_QUERY, variables)
+	except frappe.ValidationError as exc:
+		message = cstr(exc)
+		if "firstName" not in message and "lastName" not in message:
+			raise
+	frappe.log_error(
+		title=_("Shopify order query retried without address names"),
+		message="Shopify rejected firstName/lastName on shippingAddress/billingAddress.",
+	)
+	return client.execute(_ORDER_QUERY_WITHOUT_ADDRESS_NAMES, variables)
+
+
 def import_order(account, order_gid):
 	"""Fetch one canonical Shopify order and upsert it by Shopify GID."""
 	if isinstance(account, str):
@@ -206,8 +238,8 @@ def import_order(account, order_gid):
 		frappe.throw(_("Shopify order GID is required."))
 
 	client = ShopifyClient(account.connection)
-	data = client.execute(
-		_ORDER_QUERY,
+	data = _execute_order_query(
+		client,
 		{
 			"id": order_gid,
 			"lineItemsFirst": SHOPIFY_ORDER_LINE_ITEMS_PAGE_SIZE,

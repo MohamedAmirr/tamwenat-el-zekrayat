@@ -64,6 +64,7 @@ from marketplace_integrations.services.marketplace_order_reconciliation import (
 	CANCELLED_UNPAID_STATUSES,
 )
 from marketplace_integrations.services.marketplace_outbound import platform_instruction
+from marketplace_integrations.services.phone_numbers import clean_phone_number, phone_match_key
 from marketplace_integrations.services.sales_order_reconciliation import (
 	CANCEL_ORDER,
 	CLOSE_REMAINDER,
@@ -1334,8 +1335,54 @@ def _get_or_create_customer(account):
 	return customer.name
 
 
+PREFILTER_DIGITS = 7
+
+
+def _phone_match_key(value):
+	"""Match key of a phone number (see ``services/phone_numbers.py``), ``None`` when unusable."""
+	return phone_match_key(value)
+
+
+def _find_customer_by_phone(phone_key):
+	"""Return the oldest enabled Customer whose ``mobile_no`` has this match key.
+
+	ERPNext stores ``Customer.mobile_no`` exactly as typed (``db_set`` after the
+	primary Contact is created), so formats differ (a stored number may lack the
+	country code). A LIKE pattern with the last 7 key digits in order narrows
+	candidates in the database; the exact comparison is the full cleaned number
+	(``phone_match_key()``, E.164 digits) of the stored value in Python. A stored
+	value written with non-ASCII digits is not found by the pre-filter.
+	"""
+	pattern = "%" + "%".join(phone_key[-PREFILTER_DIGITS:]) + "%"
+	candidates = frappe.get_all(
+		"Customer",
+		filters={"mobile_no": ["like", pattern], "disabled": 0},
+		fields=["name", "mobile_no"],
+		order_by="creation asc, name asc",
+		# 0 = no limit (get_all defaults to 20): the exact check below decides.
+		limit_page_length=0,
+	)
+	return next((row.name for row in candidates if _phone_match_key(row.mobile_no) == phone_key), None)
+
+
 def _get_or_create_shopify_customer(order, account, create=True):
-	"""Resolve a Shopify buyer by email, falling back to the account Customer.
+	"""Resolve a Shopify buyer: by email, else by phone, else the account Customer.
+
+	Email present: the Customer with that ``email_id`` (created when missing).
+
+	No email: an order already linked to a Sales Order keeps that Sales Order's
+	Customer (ERPNext forbids changing it after submit, and the snapshot hash
+	must not flip). Otherwise, with a usable phone (``clean_phone_number()`` in
+	``services/phone_numbers.py``: Arabic digits, first of several numbers, words
+	dropped, Egyptian forms stored as ``+20`` plus 10 digits; the full cleaned number
+	is the match key, so ``+971501234567`` never matches ``01501234567``), the
+	enabled Customer whose cleaned ``mobile_no`` equals it is reused (even when the order has no name); when none exists and
+	the order has a Shopify first or last name, one named from it with that
+	mobile is created. Same phone, different name reuses the first Customer;
+	same name, different phone is a different Customer. No usable phone, no name
+	to create with, or a failed creation (rolled back, logged without personal
+	data, not raised; a transient error such as a deadlock IS re-raised for the
+	sync's retry path) falls back to the account Customer.
 
 	``create=False`` is the read-only snapshot-preview/status-check mode used
 	by ``build_sales_order_snapshot()`` when it wasn't given an explicit
@@ -1347,9 +1394,7 @@ def _get_or_create_shopify_customer(order, account, create=True):
 	"""
 	email = cstr(order.customer_email).strip()
 	if not email:
-		if create:
-			return _get_or_create_customer(account)
-		return account.erpnext_customer or None
+		return _get_or_create_shopify_customer_without_email(order, account, create)
 
 	customer_name = frappe.db.get_value("Customer", {"email_id": email}, "name")
 	if customer_name:
@@ -1366,10 +1411,115 @@ def _get_or_create_shopify_customer(order, account, create=True):
 			"customer_name": full_name,
 			"customer_type": "Individual",
 			"email_id": email,
-			"mobile_no": order.customer_phone_number,
+			# Cleaned so a free-text phone cannot fail the insert; None when unusable.
+			"mobile_no": clean_phone_number(order.customer_phone_number),
 		}
 	).insert()
 	return customer.name
+
+
+def _get_or_create_shopify_customer_without_email(order, account, create):
+	"""Phone-based branch of ``_get_or_create_shopify_customer()`` (see its docstring)."""
+	if order.erpnext_sales_order:
+		linked_customer = frappe.db.get_value("Sales Order", order.erpnext_sales_order, "customer")
+		if linked_customer:
+			return linked_customer
+
+	first_name = cstr(order.customer_first_name or "").strip()
+	last_name = cstr(order.customer_last_name or "").strip()
+	full_name = " ".join(part for part in (first_name, last_name) if part)
+	phone = clean_phone_number(order.customer_phone_number)
+	phone_key = phone_match_key(phone)  # full cleaned number, not a last-digits fragment
+	if phone_key:
+		existing = _find_customer_by_phone(phone_key)
+		if existing:
+			return existing
+		if create and full_name:
+			created = _insert_phone_customer(full_name, phone, phone_key)
+			if created:
+				return created
+	if create:
+		return _get_or_create_customer(account)
+	return account.erpnext_customer or None
+
+
+_SHOPIFY_CUSTOMER_SAVEPOINT = "marketplace_shopify_phone_customer"
+
+
+def _insert_phone_customer(full_name, phone, phone_key):
+	"""Insert the phone-keyed Customer; None when it could not be created. Never raises.
+
+	``phone`` is the already cleaned number. A transient failure (deadlock, lock wait,
+	timeout) is re-raised so the sync's own retry path handles it. Any other failure
+	(validation, permission, duplicate name, partial insert) rolls back to a savepoint
+	and is not raised: the phone is looked up again (this covers a Customer that a
+	concurrent order committed before our failed insert; two simultaneous first orders
+	of one new phone can still create two Customers, and later lookups reuse the
+	oldest). Otherwise ERPNext may still reject the phone, so the Customer is created
+	once more with the name only, in a fresh savepoint. If that fails too the caller
+	falls back to the account Customer. One Error Log entry is written per call chain,
+	with only exception class names: no name, phone or email.
+	"""
+	name, first_failure = _try_insert_customer(full_name, phone)
+	if name:
+		return name
+	existing = _find_customer_by_phone(phone_key)
+	failures = [first_failure]
+	if not existing:
+		name, second_failure = _try_insert_customer(full_name, None)
+		failures.append(second_failure)
+		existing = name
+	_log_customer_creation_failure(failures, bool(existing))
+	return existing
+
+
+def _log_customer_creation_failure(failures, recovered):
+	"""Write one Error Log entry for a failed creation chain; never raises.
+
+	``failures`` holds exception class names, ``None`` for an attempt that did not fail.
+	"""
+	try:
+		names = [name for name in failures if isinstance(name, str) and name]
+		frappe.log_error(
+			title=_("Shopify buyer Customer creation failed"),
+			message=" -> ".join(names) + (" (Customer found or created afterwards)" if recovered else ""),
+		)
+	except Exception:
+		# Logging must never fail the sync; the Customer outcome is already decided.
+		pass
+
+
+def _rollback_customer_savepoint():
+	"""Roll back to the savepoint; False when it was already gone (nothing was undone)."""
+	try:
+		frappe.db.rollback(save_point=_SHOPIFY_CUSTOMER_SAVEPOINT)
+	except Exception as exc:
+		# The savepoint can already be gone (MariaDB rolls the whole transaction back on a
+		# deadlock); anything else is a real error.
+		if "SAVEPOINT" not in cstr(exc).upper():
+			raise
+		return False
+	return True
+
+
+def _try_insert_customer(full_name, phone):
+	"""Return ``(name, None)`` on success or ``(None, exception class name)`` on failure."""
+	frappe.db.savepoint(_SHOPIFY_CUSTOMER_SAVEPOINT)
+	try:
+		values = {"doctype": "Customer", "customer_name": full_name, "customer_type": "Individual"}
+		if phone:
+			values["mobile_no"] = phone
+		name = frappe.get_doc(values).insert().name
+		frappe.db.release_savepoint(_SHOPIFY_CUSTOMER_SAVEPOINT)
+		return name, None
+	except Exception as exc:
+		rolled_back = _rollback_customer_savepoint()
+		if is_transient_failure(exc):
+			raise
+		if rolled_back:
+			frappe.db.release_savepoint(_SHOPIFY_CUSTOMER_SAVEPOINT)
+		frappe.clear_messages()
+		return None, f"{type(exc).__name__}{' (with phone)' if phone else ''}"
 
 
 SHOPIFY_ADDRESS_TITLE_PREFIX = "Shopify Marketplace Address-"

@@ -3378,6 +3378,359 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(frappe.db.count("Address"), address_count_before)
 		self.assertEqual(status, "Needs Action")
 
+	def _unique_egypt_phone(self):
+		# Unique across tests, not just within one: IntegrationTestCase only rolls back at class
+		# end, so a Customer an earlier test in this class left behind is still visible, and the
+		# phone lookup would reuse it. Derive the number from this test's random suffix.
+		self._phone_sequence = getattr(self, "_phone_sequence", 0) + 1
+		national = (int(self.suffix, 16) + self._phone_sequence) % 10**9
+		return f"+201{national:09d}"
+
+	def _synced_customer(self, order):
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+		return frappe.db.get_value("Sales Order", result["sales_order"], "customer")
+
+	def test_phone_match_key_normalises_egypt_formats(self):
+		from marketplace_integrations.services.sales_order_sync import _phone_match_key
+
+		for value in ("+201069452847", "201069452847", "01069452847", "1069452847", "+20 106-945 2847"):
+			self.assertEqual(_phone_match_key(value), "201069452847", value)
+		for value in (None, "", "masked", "12345"):
+			self.assertIsNone(_phone_match_key(value))
+
+	def test_shopify_no_email_creates_named_customer_with_mobile_and_reuses_it(self):
+		account = self._make_shopify_account()
+		phone = self._unique_egypt_phone()
+		first, _m = self._make_shopify_order(
+			account, customer_first_name="Aya", customer_last_name="Yahia", customer_phone_number=phone
+		)
+		customer_name = self._synced_customer(first)
+
+		customer = frappe.get_doc("Customer", customer_name)
+		# The sync persists the generic account Customer on its own copy of the account.
+		account.reload()
+		self.assertNotEqual(customer_name, account.erpnext_customer)
+		self.assertEqual(customer.customer_name, "Aya Yahia")
+		self.assertEqual(customer.customer_type, "Individual")
+		self.assertEqual(customer.mobile_no, phone)
+
+		# Same phone in another format and a different name reuses the first Customer.
+		second, _m = self._make_shopify_order(
+			account,
+			customer_first_name="Someone",
+			customer_last_name="Else",
+			customer_phone_number="0" + phone[3:],
+		)
+		self.assertEqual(self._synced_customer(second), customer_name)
+
+	def test_shopify_no_email_same_name_different_phone_is_a_different_customer(self):
+		account = self._make_shopify_account()
+		first, _m = self._make_shopify_order(
+			account,
+			customer_first_name="Same",
+			customer_last_name="Name",
+			customer_phone_number=self._unique_egypt_phone(),
+		)
+		second, _m = self._make_shopify_order(
+			account,
+			customer_first_name="Same",
+			customer_last_name="Name",
+			customer_phone_number=self._unique_egypt_phone(),
+		)
+		self.assertNotEqual(self._synced_customer(first), self._synced_customer(second))
+
+	def test_shopify_no_email_without_usable_phone_or_name_keeps_account_customer(self):
+		account = self._make_shopify_account()
+		for kwargs in (
+			{"customer_first_name": "Aya", "customer_phone_number": None},
+			{"customer_first_name": "Aya", "customer_phone_number": "masked"},
+			{"customer_phone_number": self._unique_egypt_phone()},
+		):
+			order, _m = self._make_shopify_order(account, **kwargs)
+			synced = self._synced_customer(order)
+			# The sync persists the generic account Customer on its own copy of the account.
+			account.reload()
+			self.assertEqual(synced, account.erpnext_customer, kwargs)
+
+	def test_shopify_no_email_preview_never_inserts_and_matches_real_sync(self):
+		from marketplace_integrations.services.sales_order_sync import _get_or_create_shopify_customer
+
+		account = self._make_shopify_account()
+		phone = self._unique_egypt_phone()
+		order, _m = self._make_shopify_order(
+			account, customer_first_name="Aya", customer_last_name="Yahia", customer_phone_number=phone
+		)
+		before = frappe.db.count("Customer")
+		self.assertEqual(
+			_get_or_create_shopify_customer(order, account, create=False),
+			account.erpnext_customer or None,
+		)
+		self.assertEqual(frappe.db.count("Customer"), before)
+
+		other, _m = self._make_shopify_order(
+			account, customer_first_name="Aya", customer_last_name="Yahia", customer_phone_number=phone
+		)
+		customer_name = self._synced_customer(other)
+		self.assertEqual(_get_or_create_shopify_customer(order, account, create=False), customer_name)
+
+	def test_shopify_email_customer_path_ignores_phone(self):
+		account = self._make_shopify_account()
+		email = f"email-path-{self.suffix}@example.test"
+		order, _m = self._make_shopify_order(
+			account,
+			customer_email=email,
+			customer_first_name="Em",
+			customer_phone_number=self._unique_egypt_phone(),
+		)
+		self.assertEqual(frappe.db.get_value("Customer", self._synced_customer(order), "email_id"), email)
+
+	def test_shopify_linked_no_email_order_keeps_customer_and_hash(self):
+		account = self._make_shopify_account()
+		order, _m = self._make_shopify_order(account)
+		synced = self._synced_customer(order)
+		# The sync persists the generic account Customer on its own copy of the account.
+		account.reload()
+		self.assertEqual(synced, account.erpnext_customer)
+		hash_before = frappe.db.get_value("Marketplace Order", order.name, "last_synced_hash")
+
+		# Name and phone arrive later, and a matching Customer already exists.
+		phone = self._unique_egypt_phone()
+		frappe.get_doc(
+			{
+				"doctype": "Customer",
+				"customer_name": f"Late {self.suffix}",
+				"customer_type": "Individual",
+				"mobile_no": phone,
+			}
+		).insert()
+		order_doc = frappe.get_doc("Marketplace Order", order.name)
+		order_doc.customer_first_name = "Late"
+		order_doc.customer_phone_number = phone
+		order_doc.save(ignore_permissions=True)
+
+		self.assertEqual(snapshot_hash(build_sales_order_snapshot(order_doc)), hash_before)
+		self.assertEqual(get_current_sync_status(order.name), "Synced")
+		self.assertEqual(self._synced_customer(order_doc), account.erpnext_customer)
+		self.assertEqual(
+			frappe.db.get_value("Marketplace Order", order.name, "last_synced_hash"), hash_before
+		)
+
+	def _make_phone_customer(self, name, mobile_no):
+		return frappe.get_doc(
+			{
+				"doctype": "Customer",
+				"customer_name": name,
+				"customer_type": "Individual",
+				"mobile_no": mobile_no,
+			}
+		).insert()
+
+	def test_find_customer_by_phone_matches_stored_separators(self):
+		from marketplace_integrations.services.sales_order_sync import _find_customer_by_phone
+
+		customer = self._make_phone_customer(f"Sep {self.suffix}", "+20 106-945 2847")
+		self.assertEqual(frappe.db.get_value("Customer", customer.name, "mobile_no"), "+20 106-945 2847")
+		self.assertEqual(_find_customer_by_phone("201069452847"), customer.name)
+		self.assertIsNone(_find_customer_by_phone("201069452848"))
+
+	def test_find_customer_by_phone_does_not_match_another_country_with_same_tail(self):
+		from marketplace_integrations.services.sales_order_sync import _find_customer_by_phone
+
+		egyptian = self._make_phone_customer(f"Eg {self.suffix}", "01501234567")
+		self.assertEqual(_find_customer_by_phone("201501234567"), egyptian.name)
+		self.assertIsNone(_find_customer_by_phone("971501234567"))
+
+	def test_shopify_no_email_nameless_order_reuses_matching_customer_but_never_creates(self):
+		account = self._make_shopify_account()
+		phone = self._unique_egypt_phone()
+		existing = self._make_phone_customer(f"Known {self.suffix}", phone)
+		matching, _m = self._make_shopify_order(account, customer_phone_number="0" + phone[3:])
+		self.assertEqual(self._synced_customer(matching), existing.name)
+
+		individuals_before = frappe.db.count("Customer", {"customer_type": "Individual"})
+		unmatched_phone = self._unique_egypt_phone()
+		unmatched, _m = self._make_shopify_order(account, customer_phone_number=unmatched_phone)
+		self._synced_customer(unmatched)
+		self.assertFalse(frappe.db.exists("Customer", {"mobile_no": unmatched_phone}))
+		self.assertEqual(frappe.db.count("Customer", {"customer_type": "Individual"}), individuals_before)
+
+	def test_shopify_linked_no_email_draft_and_cancelled_sales_orders_keep_customer(self):
+		from marketplace_integrations.services.sales_order_sync import _get_or_create_shopify_customer
+
+		account = self._make_shopify_account()
+		order, _m = self._make_shopify_order(account)
+		result = sync_sales_order(order.name)
+		sales_order = result["sales_order"]
+		linked_customer = frappe.db.get_value("Sales Order", sales_order, "customer")
+
+		phone = self._unique_egypt_phone()
+		self._make_phone_customer(f"Other {self.suffix}", phone)
+		order_doc = frappe.get_doc("Marketplace Order", order.name)
+		order_doc.customer_first_name = "Other"
+		order_doc.customer_phone_number = phone
+
+		# The guard only reads the linked Sales Order's customer, so flip its docstatus directly.
+		for docstatus in (0, 2):
+			frappe.db.set_value("Sales Order", sales_order, "docstatus", docstatus, update_modified=False)
+			for create in (True, False):
+				self.assertEqual(
+					_get_or_create_shopify_customer(order_doc, account, create=create), linked_customer
+				)
+
+	def test_shopify_no_email_phone_rejected_retries_customer_without_phone(self):
+		from frappe.model.document import Document
+
+		account = self._make_shopify_account()
+		phone = self._unique_egypt_phone()
+		order, _m = self._make_shopify_order(
+			account, customer_first_name="Aya", customer_last_name="Yahia", customer_phone_number=phone
+		)
+		original_insert = Document.insert
+
+		def phone_rejecting_insert(doc, *args, **kwargs):
+			if doc.doctype == "Customer" and doc.get("mobile_no"):
+				raise frappe.ValidationError("boom")
+			return original_insert(doc, *args, **kwargs)
+
+		with patch.object(Document, "insert", autospec=True, side_effect=phone_rejecting_insert):
+			customer_name = self._synced_customer(order)
+
+		customer = frappe.get_doc("Customer", customer_name)
+		self.assertEqual(customer.customer_name, "Aya Yahia")
+		self.assertFalse(customer.mobile_no)
+
+	def test_shopify_no_email_both_customer_inserts_failing_fall_back_to_account_customer(self):
+		from frappe.model.document import Document
+
+		account = self._make_shopify_account()
+		order, _m = self._make_shopify_order(
+			account,
+			customer_first_name="Aya",
+			customer_last_name="Yahia",
+			customer_phone_number=self._unique_egypt_phone(),
+		)
+		original_insert = Document.insert
+
+		def failing_insert(doc, *args, **kwargs):
+			if doc.doctype == "Customer" and doc.customer_type == "Individual":
+				raise frappe.ValidationError("boom")
+			return original_insert(doc, *args, **kwargs)
+
+		with patch.object(Document, "insert", autospec=True, side_effect=failing_insert):
+			customer_name = self._synced_customer(order)
+
+		account.reload()
+		self.assertEqual(customer_name, account.erpnext_customer)
+		self.assertFalse(frappe.db.exists("Customer", {"customer_name": "Aya Yahia"}))
+
+	def test_shopify_email_path_with_junk_phone_does_not_fail(self):
+		account = self._make_shopify_account()
+		email = f"junk-phone-{self.suffix}@example.test"
+		order, _m = self._make_shopify_order(
+			account,
+			customer_email=email,
+			customer_first_name="Junk",
+			customer_phone_number="whatsapp ٠١٠٦٩٤٥٢٨٤٧ / ***",
+		)
+		customer = frappe.get_doc("Customer", self._synced_customer(order))
+		self.assertEqual(customer.email_id, email)
+		self.assertEqual(customer.mobile_no, "+201069452847")
+
+		order, _m = self._make_shopify_order(
+			account, customer_email=f"junk2-{self.suffix}@example.test", customer_phone_number="*****"
+		)
+		self.assertFalse(frappe.db.get_value("Customer", self._synced_customer(order), "mobile_no"))
+
+	def test_customer_creation_failure_logging_never_raises(self):
+		from marketplace_integrations.services.sales_order_sync import _log_customer_creation_failure
+
+		for failures in (
+			[None],
+			[None, None],
+			["ValidationError (with phone)", None],
+			[None, "X"],
+			[],
+			[5, ""],
+		):
+			for recovered in (True, False):
+				_log_customer_creation_failure(failures, recovered)
+		with patch.object(frappe, "log_error", side_effect=RuntimeError("log down")):
+			_log_customer_creation_failure(["ValidationError"], False)
+
+	def test_shopify_no_email_transient_insert_failure_is_reraised_for_the_retry_path(self):
+		from frappe.model.document import Document
+
+		from marketplace_integrations.services.sales_order_sync import _get_or_create_shopify_customer
+
+		account = self._make_shopify_account()
+		order, _m = self._make_shopify_order(
+			account,
+			customer_first_name="Aya",
+			customer_last_name="Yahia",
+			customer_phone_number=self._unique_egypt_phone(),
+		)
+		original_insert = Document.insert
+
+		def deadlocked_insert(doc, *args, **kwargs):
+			if doc.doctype == "Customer" and doc.customer_type == "Individual":
+				raise frappe.QueryDeadlockError("deadlock")
+			return original_insert(doc, *args, **kwargs)
+
+		with patch.object(Document, "insert", autospec=True, side_effect=deadlocked_insert):
+			with self.assertRaises(frappe.QueryDeadlockError):
+				_get_or_create_shopify_customer(order, account)
+
+	def test_shopify_no_email_permission_error_on_insert_falls_back_to_account_customer(self):
+		from frappe.model.document import Document
+
+		account = self._make_shopify_account()
+		order, _m = self._make_shopify_order(
+			account,
+			customer_first_name="Aya",
+			customer_last_name="Yahia",
+			customer_phone_number=self._unique_egypt_phone(),
+		)
+		original_insert = Document.insert
+
+		def forbidden_insert(doc, *args, **kwargs):
+			if doc.doctype == "Customer" and doc.customer_type == "Individual":
+				raise frappe.PermissionError("no")
+			return original_insert(doc, *args, **kwargs)
+
+		with patch.object(Document, "insert", autospec=True, side_effect=forbidden_insert):
+			customer_name = self._synced_customer(order)
+
+		account.reload()
+		self.assertEqual(customer_name, account.erpnext_customer)
+
+	def test_shopify_no_email_failed_insert_retry_lookup_reuses_customer_created_meanwhile(self):
+		from frappe.model.document import Document
+
+		account = self._make_shopify_account()
+		phone = self._unique_egypt_phone()
+		order, _m = self._make_shopify_order(
+			account, customer_first_name="Aya", customer_last_name="Yahia", customer_phone_number=phone
+		)
+		original_insert = Document.insert
+		# Simulates a Customer committed after our first lookup: the first lookup misses, our
+		# insert fails, the lookup after the failure finds it. (Two simultaneous first orders
+		# whose inserts both succeed can still create two Customers; this covers a failed insert.)
+		racer = self._make_phone_customer(f"Racer {self.suffix}", phone)
+
+		def failing_insert(doc, *args, **kwargs):
+			if doc.doctype == "Customer" and doc.get("mobile_no"):
+				raise frappe.DuplicateEntryError("Customer", "x", Exception("dup"))
+			return original_insert(doc, *args, **kwargs)
+
+		with (
+			patch.object(sales_order_sync_service, "_find_customer_by_phone", side_effect=[None, racer.name]),
+			patch.object(Document, "insert", autospec=True, side_effect=failing_insert),
+		):
+			customer_name = self._synced_customer(order)
+
+		self.assertEqual(customer_name, racer.name)
+
 	def test_shopify_shipping_address_is_created_and_linked_to_buyer(self):
 		account = self._make_shopify_account()
 		email = f"shipping-{self.suffix}@example.test"
