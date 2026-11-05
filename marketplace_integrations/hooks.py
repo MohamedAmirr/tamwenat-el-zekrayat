@@ -202,9 +202,13 @@ _RECHECK_EVENTS = {
 # cancel or delete while its shipment is live. The Sales Order before_cancel refuses while a draft note has
 # a live shipment. Each only touches the Delivery Notes its carrier adapter claims.
 _CARRIER_GUARD = "marketplace_integrations.services.carrier_shipments.guard_cancel_or_delete"
+# Platform naming series (services/platform_naming.py): a marketplace order, its Delivery Note and its Sales
+# Invoice are named per platform (SO-SHP-, DN-NOON-, SI-TLB-...). Runs before the name is built; never raises.
+_PLATFORM_NAMING = {"before_naming": "marketplace_integrations.services.platform_naming.set_naming_series"}
 doc_events = {
 	"Delivery Note": {
 		**_RECHECK_EVENTS,
+		**_PLATFORM_NAMING,
 		"on_submit": [_RECHECK_HANDLER, "marketplace_integrations.services.carrier_shipments.after_submit"],
 		# The guard comes first: it refuses a delete while the shipment is live.
 		"on_trash": [_CARRIER_GUARD, _RECHECK_HANDLER],
@@ -212,7 +216,7 @@ doc_events = {
 		"validate": "marketplace_integrations.services.carrier_shipments.validate_delivery_note",
 		"before_submit": "marketplace_integrations.services.carrier_shipments.require_shipment_created",
 	},
-	"Sales Invoice": _RECHECK_EVENTS,
+	"Sales Invoice": {**_RECHECK_EVENTS, **_PLATFORM_NAMING},
 	"Payment Entry": _RECHECK_EVENTS,
 	# #368: Noon has no order update, so item rows of a submitted Noon Sales Order are locked. The check
 	# is on the rows because update_child_qty_rate changes them before it saves the parent.
@@ -222,6 +226,7 @@ doc_events = {
 		"on_trash": "marketplace_integrations.services.noon_item_edit_guard.block_row_remove",
 	},
 	"Sales Order": {
+		**_PLATFORM_NAMING,
 		# #393: ERPNext only blocks on submitted links; a draft Delivery Note with a live Noon shipment must block too.
 		"before_cancel": "marketplace_integrations.services.carrier_shipments.refuse_sales_order_cancel",
 		"on_update_after_submit": _RECHECK_HANDLER,
@@ -265,7 +270,8 @@ doc_events = {
 # test_no_catalog_document_events_are_registered depends on this app registering
 # no doc_events for the catalog doctypes; do not add one for them here. The
 # only doc_events are the #364 Marketplace Order re-check handlers, the #368 Noon Sales
-# Order Item row check and the #391/#393 Delivery Note and Sales Order carrier handlers above.
+# Order Item row check, the #391/#393 Delivery Note and Sales Order carrier handlers and the platform
+# naming series before_naming hook above.
 scheduler_events = {
 	# #367: the four hourly jobs run at staggered minutes instead of all at :00, where
 	# Frappe's own hourly jobs also start; prod hit "(1040) Too many connections" there.
@@ -412,6 +418,12 @@ fixtures = [
 					"Delivery Note-per_returned-depends_on",
 					# A Noon note has no Shipping Rule (integrations/noon/delivery_note_shipment.py clears it).
 					"Delivery Note-shipping_rule-depends_on",
+					# Platform naming series (services/platform_naming.py). The options keep ERPNext's own
+					# series FIRST (the first option is the default series). The Sales Order name equals the
+					# setter prod already has, so migrate replaces its value instead of adding a second setter.
+					"Sales Order-naming_series-options",
+					"Delivery Note-naming_series-options",
+					"Sales Invoice-naming_series-options",
 				],
 			]
 		],
