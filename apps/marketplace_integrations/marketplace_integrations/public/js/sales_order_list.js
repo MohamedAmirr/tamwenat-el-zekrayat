@@ -13,6 +13,9 @@
 // - For a marketplace order with a summary, the carrier status replaces the native To Deliver / Delivered
 //   indicator (get_indicator); ERPNext's own indicator stays for every other order.
 //
+// - The bulk "Delivery Note" action of the Actions menu opens the shipping method dialog
+//   (sales_order_bulk_delivery.js); ERPNext's own action stays, fully working, as "Delivery Note (ERPNext)".
+//
 // Wrapped in a function: doctype_list_js files share one scope with ERPNext's own list script.
 (function () {
 	const CARD_METHOD = "marketplace_integrations.api.order_hover_card.get_sales_order_card";
@@ -124,7 +127,17 @@
 			};
 			const original_onload = settings.onload;
 			settings.onload = function (listview) {
-				if (original_onload) original_onload.call(this, listview);
+				const run_original = () => original_onload && original_onload.call(this, listview);
+				// ERPNext's onload adds its own bulk "Delivery Note" action; ours takes that label and ERPNext's
+				// moves to "Delivery Note (ERPNext)" (sales_order_bulk_delivery.js, an app include). Without it,
+				// ERPNext's stays as it is.
+				const bulk = (frappe.marketplace_integrations || {}).bulk_delivery;
+				if (bulk) {
+					bulk.listen();
+					bulk.run_with_replaced_action(listview, run_original);
+				} else {
+					run_original();
+				}
 				add_hover_card(listview);
 			};
 			settings.__mi_list_extended = true;

@@ -205,7 +205,7 @@ in `services/carrier_shipments.CARRIERS` (Bosta and Noon) and driven by the
 existing Delivery Note `doc_events`. `services/carrier_shipments.py` is the neutral contract and state
 machine (`request_create`, `run_create`, `check`, `cancel`, `reconcile_open_notes`); `services/carrier_log.py`
 holds the Integration Log rows and shared statuses; `api/carrier_shipments.py` the neutral endpoints
-(`request_shipment`, `check_shipment`, `refresh_shipment`, `cancel_shipment`). The Bosta adapter only
+(`request_shipment`, `check_shipment`, `refresh_shipment`, `cancel_shipment`). The bulk Sales Order list action (Bosta only) is `services/bulk_delivery_notes.py` (job: invoice for paid orders, draft note, then `request_create`), `api/bulk_delivery_notes.py::create_delivery_notes` and `public/js/sales_order_bulk_delivery.js` (see `delivery-note-first.md`, "Bulk path"). The Bosta adapter only
 implements the contract (the methods are listed at the top of `carrier_shipments.py`). Neutral Custom Fields on Delivery Note (`custom_integration_status` plus native
 `docstatus`, `custom_shipping_status`, `custom_carrier_delivery_id`, `custom_carrier_reference`,
 `custom_cod_amount`, `custom_cod_confirmed`, `custom_shipping_label`, `custom_last_sync_at`, `custom_last_integration_error`,
