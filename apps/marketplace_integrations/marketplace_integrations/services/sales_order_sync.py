@@ -1525,50 +1525,131 @@ def _try_insert_customer(full_name, phone):
 SHOPIFY_ADDRESS_TITLE_PREFIX = "Shopify Marketplace Address-"
 
 
-def _shopify_address_title(customer):
-	"""Return a stable, customer-specific title for this integration's Address."""
-	customer_hash = hashlib.sha256(cstr(customer).encode()).hexdigest()[:10]
-	return f"{SHOPIFY_ADDRESS_TITLE_PREFIX}{customer_hash}"
+def _shopify_address_title(customer, order=None):
+	"""Return a stable title for this integration's Address.
+
+	With ``order`` (a Marketplace Order) the title is specific to that order, so every
+	order of a buyer gets its own Address. Without it, the old customer-wide title that
+	orders synced before the per-order change still point to (never written any more).
+	"""
+	key = f"{customer}|{order.name}" if order else cstr(customer)
+	return f"{SHOPIFY_ADDRESS_TITLE_PREFIX}{hashlib.sha256(key.encode()).hexdigest()[:10]}"
 
 
-def _find_shopify_address(customer):
-	"""Return the name of this integration's dedicated Address for a buyer, if any."""
-	links = frappe.get_all(
-		"Dynamic Link",
-		filters={
-			"parenttype": "Address",
-			"parentfield": "links",
-			"link_doctype": "Customer",
-			"link_name": customer,
-		},
-		fields=["parent"],
+def _customer_address_filters(customer):
+	"""Address filters through the Dynamic Link child table (the pattern ERPNext uses)."""
+	return [
+		["Dynamic Link", "link_doctype", "=", "Customer"],
+		["Dynamic Link", "link_name", "=", customer],
+	]
+
+
+def _find_shopify_address(customer, order):
+	"""Return the name of this order's own Address for the buyer, if any."""
+	found = frappe.get_all(
+		"Address",
+		filters=[
+			*_customer_address_filters(customer),
+			["Address", "address_title", "=", _shopify_address_title(customer, order)],
+		],
+		pluck="name",
+		limit_page_length=1,
 	)
-	address_title = _shopify_address_title(customer)
-	return next(
-		(
-			row.parent
-			for row in links
-			if frappe.db.get_value("Address", row.parent, "address_title") == address_title
-		),
-		None,
+	return found[0] if found else None
+
+
+def _customer_has_primary_address(customer):
+	"""Whether the buyer has an enabled primary Address (a disabled one does not count)."""
+	return bool(
+		frappe.get_all(
+			"Address",
+			filters=[
+				*_customer_address_filters(customer),
+				["Address", "is_primary_address", "=", 1],
+				["Address", "disabled", "=", 0],
+			],
+			pluck="name",
+			limit_page_length=1,
+		)
 	)
+
+
+def _rollback_address_savepoint():
+	"""Roll back to the Address savepoint and release it; False when it was already gone."""
+	try:
+		frappe.db.rollback(save_point="shopify_address_sync")
+	except Exception as exc:
+		# Gone when MariaDB rolled the whole transaction back (deadlock); anything else is real.
+		if "SAVEPOINT" not in cstr(exc).upper():
+			raise
+		return False
+	frappe.db.release_savepoint("shopify_address_sync")
+	return True
+
+
+def _frozen_shopify_address(order, customer):
+	"""The Address a linked order keeps, or ``False`` when the order may still resolve one.
+
+	An order linked to a SUBMITTED Sales Order is frozen on the Address that Sales Order
+	points to: ERPNext does not let the Sales Order change, an old-format order must keep
+	its shared customer-wide Address (looking the order up by its own title would find
+	nothing and flip the snapshot hash), and nothing may overwrite an Address a person
+	may have corrected. A linked draft Sales Order is frozen too unless it points to this
+	order's own Address, which a re-sync may still update. Same principle as the linked
+	guard in ``_get_or_create_shopify_customer_without_email()``. Returns ``None`` for a
+	frozen order whose Sales Order has no Address.
+	"""
+	if not order.erpnext_sales_order:
+		return False
+	linked = frappe.db.get_value(
+		"Sales Order", order.erpnext_sales_order, ["docstatus", "shipping_address_name"], as_dict=True
+	)
+	if not linked:
+		return False
+	if linked.docstatus == 0 and linked.shipping_address_name:
+		if linked.shipping_address_name == _find_shopify_address(customer, order):
+			return False
+	if not linked.shipping_address_name:
+		return None
+	return {
+		"name": linked.shipping_address_name,
+		"address_type": frappe.db.get_value("Address", linked.shipping_address_name, "address_type"),
+	}
+
+
+def _log_address_failure(exc):
+	"""One Error Log entry with only the exception class name: no address, phone or email."""
+	try:
+		frappe.log_error(title=_("Shopify buyer Address could not be saved"), message=type(exc).__name__)
+	except Exception:
+		# Logging must never fail the sync; the Address outcome is already decided.
+		pass
 
 
 def _resolve_shopify_address(order, customer, create=True):
-	"""Create/update this integration's dedicated Address for a buyer.
+	"""Create/update the dedicated Address of one Shopify order (one Address per order).
+
+	Each order has its own Address linked to the buyer's Customer, so the Sales Order
+	and its Delivery Note keep that order's address and a correction applies to that
+	order only. A linked order is frozen (``_frozen_shopify_address()``).
 
 	``create=False`` is the read-only snapshot-preview/status-check mode used
 	by ``build_sales_order_snapshot()`` (see that function's docstring): it
-	only looks up an Address already created by a prior real sync and never
-	inserts or updates one. When nothing exists yet, it returns ``None`` -
+	only looks up this order's own Address already created by a prior real sync
+	and never inserts or updates one. When nothing exists yet, it returns ``None`` -
 	the caller falls back to a blank address for the snapshot only.
+
+	A failure never fails the order: it degrades to no Address and one Error Log entry.
 	"""
 	if not cstr(order.customer_email).strip() or not customer:
 		return None
 
 	try:
+		frozen = _frozen_shopify_address(order, customer)
+		if frozen is not False:
+			return frozen
 		if not create:
-			address_name = _find_shopify_address(customer)
+			address_name = _find_shopify_address(customer, order)
 			if not address_name:
 				return None
 			address_type = frappe.db.get_value("Address", address_name, "address_type")
@@ -1595,20 +1676,24 @@ def _resolve_shopify_address(order, customer, create=True):
 		# Shopify province -> ERPNext state; city stays in city (#156).
 		values["state"] = cstr(source.get("province") or "").strip()
 		values["email_id"] = cstr(order.customer_email).strip()
-		values["phone"] = cstr(order.customer_phone_number or "").strip()
+		# Cleaned so a free-text phone cannot fail the save; None when unusable.
+		values["phone"] = clean_phone_number(order.customer_phone_number)
 		if values["country"] and not frappe.db.exists("Country", values["country"]):
 			frappe.logger("marketplace_integrations").warning(
 				"Shopify Address country was not recognized; defaulted to Egypt."
 			)
 			values["country"] = "Egypt"
 
-		address_title = _shopify_address_title(customer)
-		address_name = _find_shopify_address(customer)
+		address_title = _shopify_address_title(customer, order)
+		address_name = _find_shopify_address(customer, order)
 
 		if address_name:
 			address = frappe.get_doc("Address", address_name)
 		else:
 			address = frappe.new_doc("Address")
+			# ERPNext allows one primary Address per link: only the buyer's first one is
+			# primary, so repeated orders never flip it.
+			address.is_primary_address = 0 if _customer_has_primary_address(customer) else 1
 		address.address_title = address_title
 		address.address_type = address_type
 		for fieldname, value in values.items():
@@ -1618,7 +1703,6 @@ def _resolve_shopify_address(order, customer, create=True):
 			for link in address.get("links", [])
 		):
 			address.append("links", {"link_doctype": "Customer", "link_name": customer})
-		address.is_primary_address = 1
 
 		frappe.db.savepoint("shopify_address_sync")
 		try:
@@ -1626,21 +1710,21 @@ def _resolve_shopify_address(order, customer, create=True):
 				address.insert()
 			else:
 				address.save()
-		except Exception:
-			frappe.db.rollback(save_point="shopify_address_sync")
-			frappe.db.release_savepoint("shopify_address_sync")
+		except Exception as exc:
+			_rollback_address_savepoint()
+			if is_transient_failure(exc):
+				raise
 			frappe.clear_messages()
-			frappe.logger("marketplace_integrations").warning(
-				"Shopify Address could not be saved; Sales Order synchronization will continue without it."
-			)
+			_log_address_failure(exc)
 			return None
 		frappe.db.release_savepoint("shopify_address_sync")
 		return {"name": address.name, "address_type": address_type}
-	except Exception:
+	except Exception as exc:
+		if is_transient_failure(exc):
+			# A deadlock or lock wait: the sync's own retry path handles it.
+			raise
 		frappe.clear_messages()
-		frappe.logger("marketplace_integrations").warning(
-			"Shopify Address could not be resolved; Sales Order synchronization will continue without it."
-		)
+		_log_address_failure(exc)
 		return None
 
 

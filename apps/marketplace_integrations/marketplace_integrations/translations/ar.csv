@@ -1891,6 +1891,7 @@ In {0} days,متبقٍ: {0} يوم
 Overdue 1 day,متأخر يوم واحد
 Overdue {0} days,التأخير: {0} يوم
 Shopify buyer Customer creation failed,فشل إنشاء عميل مشتري Shopify
+Shopify buyer Address could not be saved,تعذر حفظ عنوان مشتري Shopify
 Shopify order query retried without address names,أُعيد استعلام طلب Shopify بدون أسماء العناوين
 Select at least one Sales Order.,حدّد أمر بيع واحدًا على الأقل.
 Select at most {0} Sales Orders at a time. You selected {1}.,حدّد {0} أمر بيع على الأكثر في المرة الواحدة. لقد حددت {1}.
