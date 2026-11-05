@@ -174,5 +174,53 @@
   "value": "eval:doc.transporter_name!=\"Noon\"",
   "field_name": "shipping_rule",
   "name": "Delivery Note-shipping_rule-depends_on"
+ },
+ {
+  "default_value": null,
+  "doc_type": "Sales Order",
+  "docstatus": 0,
+  "doctype": "Property Setter",
+  "doctype_or_field": "DocField",
+  "field_name": "naming_series",
+  "is_system_generated": 0,
+  "modified": "2026-11-05 12:00:00.000000",
+  "module": "Marketplace Integrations",
+  "name": "Sales Order-naming_series-options",
+  "property": "options",
+  "property_type": "Text",
+  "row_name": null,
+  "value": "SAL-ORD-.YYYY.-\nSO-SHP-.YYYY.-\nSO-NOON-.YYYY.-\nSO-TLB-.YYYY.-"
+ },
+ {
+  "default_value": null,
+  "doc_type": "Delivery Note",
+  "docstatus": 0,
+  "doctype": "Property Setter",
+  "doctype_or_field": "DocField",
+  "field_name": "naming_series",
+  "is_system_generated": 0,
+  "modified": "2026-11-05 12:00:00.000000",
+  "module": "Marketplace Integrations",
+  "name": "Delivery Note-naming_series-options",
+  "property": "options",
+  "property_type": "Text",
+  "row_name": null,
+  "value": "MAT-DN-.YYYY.-\nMAT-DN-RET-.YYYY.-\nDN-SHP-.YYYY.-\nDN-NOON-.YYYY.-\nDN-TLB-.YYYY.-"
+ },
+ {
+  "default_value": null,
+  "doc_type": "Sales Invoice",
+  "docstatus": 0,
+  "doctype": "Property Setter",
+  "doctype_or_field": "DocField",
+  "field_name": "naming_series",
+  "is_system_generated": 0,
+  "modified": "2026-11-05 12:00:00.000000",
+  "module": "Marketplace Integrations",
+  "name": "Sales Invoice-naming_series-options",
+  "property": "options",
+  "property_type": "Text",
+  "row_name": null,
+  "value": "ACC-SINV-.YYYY.-\nACC-SINV-RET-.YYYY.-\nSI-SHP-.YYYY.-\nSI-NOON-.YYYY.-\nSI-TLB-.YYYY.-"
  }
 ]
