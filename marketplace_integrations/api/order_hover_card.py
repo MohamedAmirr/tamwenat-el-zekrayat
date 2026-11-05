@@ -3,11 +3,41 @@
 
 """Read-only summary of a Sales Order for the list hover card (#325)."""
 
+from urllib.parse import urlparse
+
 import frappe
 from frappe import _
 from frappe.utils import cint, cstr, flt
 
-MAX_ITEMS = 10
+MAX_IMAGE_URL_LENGTH = 2000
+FILE_PATH_PREFIXES = ("/files/", "/private/files/")
+
+
+def safe_image_url(value):
+	"""The item image URL if it is safe to put in an <img src>, else "".
+
+	Allowed: absolute http(s) URLs with a host (Shopify CDN) and ERPNext file paths under
+	/files/ or /private/files/. Anything else (javascript:, data:, protocol-relative, paths
+	with "..", control characters, double quotes, backslash, angle brackets, userinfo, very long
+	values) gives no image. File paths may hold a space and an apostrophe (Frappe keeps both in
+	file names); an http(s) URL may not.
+	"""
+	url = cstr(value).strip()
+	if not url or len(url) > MAX_IMAGE_URL_LENGTH:
+		return ""
+	if ".." in url or any(ord(ch) < 32 or ch in '\\"<>`' for ch in url):
+		return ""
+	if url.startswith(FILE_PATH_PREFIXES):
+		return url
+	if any(ch in " '" for ch in url):
+		return ""
+	try:
+		parsed = urlparse(url)
+	except ValueError:
+		return ""
+	if parsed.scheme in ("http", "https") and parsed.netloc and not parsed.username:
+		return url
+	return ""
 
 
 @frappe.whitelist()
@@ -34,14 +64,14 @@ def get_sales_order_card(sales_order: str):
 		["customer", "customer_name", "contact_mobile", "status", "currency", "grand_total", "rounded_total"],
 		as_dict=True,
 	)
-	# One extra row tells whether the list was cut, without a second count query.
+	# Every item in one query, no description. Limit 0 means no limit: no cap on the item count.
 	rows = frappe.get_list(
 		"Sales Order Item",
 		parent_doctype="Sales Order",
 		filters={"parent": sales_order},
-		fields=["item_name", "qty"],
+		fields=["item_code", "item_name", "qty", "image"],
 		order_by="idx asc",
-		limit_page_length=MAX_ITEMS + 1,
+		limit_page_length=0,
 	)
 	return {
 		"sales_order": sales_order,
@@ -50,8 +80,15 @@ def get_sales_order_card(sales_order: str):
 		"status": order.status,
 		"currency": order.currency,
 		"total": flt(order.rounded_total or order.grand_total),
-		"items": [{"item_name": r.item_name, "qty": flt(r.qty)} for r in rows[:MAX_ITEMS]],
-		"more_items": len(rows) > MAX_ITEMS,
+		"items": [
+			{
+				"item_code": r.item_code or "",
+				"item_name": r.item_name or "",
+				"qty": flt(r.qty),
+				"image": safe_image_url(r.image),
+			}
+			for r in rows
+		],
 		"marketplace": _marketplace_part(sales_order),
 		"bosta": _bosta_part(sales_order),
 	}

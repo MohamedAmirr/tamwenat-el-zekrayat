@@ -6,7 +6,7 @@ from unittest.mock import patch
 import frappe
 from frappe.tests import IntegrationTestCase
 
-from marketplace_integrations.api.order_hover_card import MAX_ITEMS, get_sales_order_card
+from marketplace_integrations.api.order_hover_card import get_sales_order_card, safe_image_url
 from marketplace_integrations.integrations.shopify.test_products import make_shopify_account
 from marketplace_integrations.services.linked_sales_order_fixture import LinkedSalesOrderFixture
 from marketplace_integrations.tests.utils import make_role_user
@@ -76,8 +76,7 @@ class IntegrationTestOrderHoverCard(IntegrationTestCase):
 
 		self.assertEqual(card["sales_order"], self.fixture.name)
 		self.assertEqual(card["customer"], self.fixture.customer.customer_name)
-		self.assertEqual(card["items"], [{"item_name": self.fixture.item.item_name, "qty": 1.0}])
-		self.assertFalse(card["more_items"])
+		self.assertEqual([row["item_name"] for row in card["items"]], [self.fixture.item.item_name])
 		self.assertEqual(card["marketplace"]["reference"], f"#PLAT-{self.suffix}")
 		self.assertEqual(card["marketplace"]["platform"], "Shopify")
 		self.assertEqual(card["marketplace"]["payment_status"], "PAID")
@@ -124,15 +123,15 @@ class IntegrationTestOrderHoverCard(IntegrationTestCase):
 		self.assertNotIn("Item is not mapped", frappe.as_json(card))
 		self.assertNotIn(f"#PLAT-{self.suffix}", frappe.as_json(card))
 
-	def test_item_list_is_capped_and_flagged(self):
+	def _add_items(self, count):
 		order = frappe.get_doc("Sales Order", self.fixture.name)
-		for _ in range(MAX_ITEMS):
-			first = order.items[0]
+		first = order.items[0]
+		for index in range(count):
 			order.append(
 				"items",
 				{
 					"item_code": self.fixture.item.name,
-					"qty": 1,
+					"qty": index + 2,
 					"rate": 10,
 					"uom": "Nos",
 					"warehouse": first.warehouse,
@@ -141,10 +140,80 @@ class IntegrationTestOrderHoverCard(IntegrationTestCase):
 			)
 		order.save()
 
+	def test_every_item_is_returned_in_order_without_a_cap(self):
+		count = 45
+		self._add_items(count - 1)
+
 		card = get_sales_order_card(self.fixture.name)
 
-		self.assertEqual(len(card["items"]), MAX_ITEMS)
-		self.assertTrue(card["more_items"])
+		self.assertEqual(len(card["items"]), count)
+		self.assertEqual(
+			[row["qty"] for row in card["items"]], [1.0] + [float(i + 2) for i in range(count - 1)]
+		)
+		self.assertNotIn("more_items", card)
+
+	def test_item_rows_hold_only_code_name_qty_and_image(self):
+		card = get_sales_order_card(self.fixture.name)
+
+		self.assertEqual(
+			card["items"],
+			[
+				{
+					"item_code": self.fixture.item.name,
+					"item_name": self.fixture.item.item_name,
+					"qty": 1.0,
+					"image": "",
+				}
+			],
+		)
+
+	def test_image_is_returned_only_when_the_url_is_safe(self):
+		self._add_items(1)
+		cdn = "https://cdn.shopify.com/s/files/1/0001/a.jpg?v=1"
+		names = frappe.get_all(
+			"Sales Order Item", filters={"parent": self.fixture.name}, pluck="name", order_by="idx asc"
+		)
+		frappe.db.set_value("Sales Order Item", names[0], "image", cdn)
+		frappe.db.set_value("Sales Order Item", names[1], "image", "javascript:alert(1)")
+
+		images = [row["image"] for row in get_sales_order_card(self.fixture.name)["items"]]
+
+		self.assertEqual(images, [cdn, ""])
+
+	def test_safe_image_url_rules(self):
+		allowed = [
+			"https://cdn.shopify.com/a.jpg",
+			"http://example.com/a.png",
+			"/files/a.png",
+			"/private/files/a.png",
+			"/files/Screenshot 2026-11-01.png",
+			"/files/Mama's rice.jpg",
+			"/private/files/Mama's rice.jpg",
+		]
+		refused = [
+			"",
+			None,
+			"javascript:alert(1)",
+			"data:image/png;base64,AAAA",
+			"//evil.example/a.png",
+			"ftp://example.com/a.png",
+			"https:///a.png",
+			"https://user:pw@example.com/a.png",
+			"/assets/a.png",
+			"/files/../etc/passwd",
+			'/files/a".png',
+			"/files/a\\b.png",
+			"https://example.com/a b.png",
+			"https://example.com/it's.png",
+			"/files/a<b>.png",
+			"/files/a\nb.png",
+			"https://example.com/" + "a" * 2000,
+		]
+
+		for url in allowed:
+			self.assertEqual(safe_image_url(url), url, url)
+		for url in refused:
+			self.assertEqual(safe_image_url(url), "", url)
 
 	def test_response_holds_only_what_the_card_renders(self):
 		self._make_sync_log("Error")
@@ -162,7 +231,6 @@ class IntegrationTestOrderHoverCard(IntegrationTestCase):
 				"currency",
 				"total",
 				"items",
-				"more_items",
 				"marketplace",
 				"bosta",
 			},
