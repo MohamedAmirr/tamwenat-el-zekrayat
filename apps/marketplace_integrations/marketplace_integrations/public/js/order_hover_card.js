@@ -24,6 +24,10 @@
 // and `render`.
 (function () {
 	const SKELETON_BARS = [60, 90, 75, 85];
+	const THUMB = 40;
+	const LIST_MAX_HEIGHT = 320;
+	const SHOPIFY_THUMB_WIDTH = 96;
+	const MAX_IMAGE_URL_LENGTH = 2000;
 
 	function escape(value) {
 		return frappe.utils.escape_html(value === null || value === undefined ? "" : String(value));
@@ -95,6 +99,84 @@
 		return html;
 	}
 
+	// Same rules as the server (api/order_hover_card.py safe_image_url): an http(s) URL with a host
+	// and no userinfo, or an ERPNext /files/ or /private/files/ path (a space and an apostrophe are
+	// allowed in file paths only, Frappe keeps them in file names); never "..", double quotes,
+	// backslash, angle brackets, backticks, control characters or more than 2000 characters.
+	function safe_image(url) {
+		const value = typeof url === "string" ? url.trim() : "";
+		if (!value || value.length > MAX_IMAGE_URL_LENGTH || value.includes("..")) return "";
+		if (/[\\"<>`]/.test(value) || Array.from(value).some((ch) => ch.charCodeAt(0) < 32)) return "";
+		if (value.startsWith("/files/") || value.startsWith("/private/files/")) return value;
+		if (/[ ']/.test(value)) return "";
+		// The URL parser reads "https:///a.png" as host "a.png"; the server rejects it, so does this.
+		if (!/^https?:\/\/[^/]/i.test(value)) return "";
+		try {
+			const parsed = new URL(value);
+			const ok = (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.host && !parsed.username && !parsed.password;
+			return ok ? value : "";
+		} catch (e) {
+			return "";
+		}
+	}
+
+	// Shopify's CDN resizes on request: ask for a small picture for the 40 px thumbnail (2x for
+	// sharp screens). Other hosts and file paths stay as they are; an existing width is kept.
+	function thumbnail_url(url) {
+		if (!/^https?:\/\/cdn\.shopify\.com(\/|\?|#|$)/i.test(url)) return url;
+		let parsed;
+		try {
+			parsed = new URL(url);
+		} catch (e) {
+			return url;
+		}
+		if (parsed.searchParams.has("width")) return url;
+		const hash_at = url.indexOf("#");
+		const base = hash_at === -1 ? url : url.slice(0, hash_at);
+		const hash = hash_at === -1 ? "" : url.slice(hash_at);
+		return `${base}${base.includes("?") ? "&" : "?"}width=${SHOPIFY_THUMB_WIDTH}${hash}`;
+	}
+
+	// One line per item: fixed-size thumbnail (neutral box when there is no image; the box also
+	// stays when the image fails, see wire_images), name, item code, quantity. The list scrolls.
+	function render_item(row) {
+		const safe = safe_image(row.image);
+		const src = safe && thumbnail_url(safe);
+		const img = src
+			? `<img class="mi-hc-img" src="${escape(src)}" alt="" width="${THUMB}" height="${THUMB}" loading="lazy" decoding="async" referrerpolicy="no-referrer" style="display: block; width: 100%; height: 100%; object-fit: cover;">`
+			: "";
+		const box = `<span style="flex: none; display: block; width: ${THUMB}px; height: ${THUMB}px; overflow: hidden; border-radius: var(--border-radius); background: var(--control-bg);">${img}</span>`;
+		const code = row.item_code ? `<div class="text-muted small">${ltr(row.item_code)}</div>` : "";
+		return (
+			`<div class="mi-hc-item" style="display: flex; align-items: center; gap: var(--margin-sm); margin-bottom: var(--margin-sm);">` +
+			box +
+			`<span style="flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere;"><div>${escape(row.item_name)}</div>${code}</span>` +
+			`<span style="flex: none;"><bdi dir="ltr">x ${escape(row.qty)}</bdi></span>` +
+			`</div>`
+		);
+	}
+
+	function render_items(items) {
+		const rows = Array.isArray(items) ? items : [];
+		if (!rows.length) return "";
+		const label = __("Items ({0})", [rows.length]);
+		const list = `<div class="mi-hc-items" tabindex="0" role="region" aria-label="${escape(
+			label
+		)}" style="max-height: ${LIST_MAX_HEIGHT}px; overflow-y: auto; overscroll-behavior: contain;">${rows.map(render_item).join("")}</div>`;
+		return section(label, list);
+	}
+
+	// Failed images (404, blocked, offline) hide themselves and leave the neutral box. No inline
+	// handler: the error event does not bubble, so each image gets its own listener.
+	function wire_images(root) {
+		if (!root || typeof root.querySelectorAll !== "function") return;
+		root.querySelectorAll("img.mi-hc-img").forEach((img) => {
+			img.addEventListener("error", () => {
+				img.style.display = "none";
+			});
+		});
+	}
+
 	// The Sales Order card: customer, items, marketplace and Bosta details, totals.
 	function render_sales_order_card(data) {
 		let html = `<div style="margin-bottom: var(--margin-md);"><b>${escape(data.sales_order)}</b>`;
@@ -105,9 +187,7 @@
 		if (data.phone) customer.push(ltr(data.phone));
 		html += section(__("Customer"), customer.join("<br>"));
 
-		const items = (data.items || []).map((row) => `${escape(row.item_name)} x ${escape(row.qty)}`);
-		if (data.more_items) items.push(`<span class="text-muted">${escape(__("More items on the order."))}</span>`);
-		if (items.length) html += section(__("Items"), items.join("<br>"));
+		html += render_items(data.items);
 
 		if (data.marketplace) html += render_marketplace(data.marketplace);
 
@@ -174,6 +254,7 @@
 				(data) => {
 					if (token !== latest) return;
 					el.innerHTML = render(data);
+					wire_images(el);
 					if (after_render) after_render();
 				},
 				(error) => {
@@ -297,6 +378,6 @@
 	}
 
 	if (typeof module !== "undefined") {
-		module.exports = { create, render_sales_order_card, server_message, row_docname, row_link };
+		module.exports = { create, render_sales_order_card, server_message, row_docname, row_link, safe_image, thumbnail_url, wire_images };
 	}
 })();
