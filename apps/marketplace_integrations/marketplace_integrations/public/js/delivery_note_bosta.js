@@ -143,17 +143,128 @@
 		frm.set_df_property("custom_cod_confirmed", "read_only", read_only);
 	}
 
+	// ---- Live COD prefill ------------------------------------------------------------------------
+	// The server rule (default_cod) stays the single source of truth: the browser asks it for the amount of the
+	// unsaved form and shows it, still editable and NOT confirmed, so a save recomputes it until the person
+	// edits it. A typed or confirmed amount is never overwritten.
+
+	const COD_FIELD = "custom_cod_amount";
+	const PREFILL_DELAY_MS = 400;
+
+	function can_prefill(frm) {
+		const doc = frm.doc || {};
+		return doc.transporter_name === "Bosta" && !doc.is_return && is_editable(frm) && !doc.custom_cod_confirmed;
+	}
+
+	// What the answer depends on: a response for another carrier, item set or total is stale.
+	function cod_key(frm) {
+		const doc = frm.doc;
+		return JSON.stringify([
+			doc.transporter_name,
+			doc.grand_total,
+			(doc.items || []).map((row) => [row.item_code, row.qty, row.against_sales_order]),
+		]);
+	}
+
+	function cod_description(frm, text) {
+		const field = frm.fields_dict && frm.fields_dict[COD_FIELD];
+		if (field && field.df && frm.__cod_description === undefined) frm.__cod_description = field.df.description || "";
+		frm.set_df_property(COD_FIELD, "description", text === null ? frm.__cod_description || "" : text);
+	}
+
+	// The programmatic write: the flag keeps the amount handler from reading it as the person's edit.
+	function set_cod(frm, value) {
+		frm.__cod_programmatic = true;
+		return Promise.resolve(frm.set_value(COD_FIELD, value)).finally(() => {
+			frm.__cod_programmatic = false;
+		});
+	}
+
+	function show_prefilled(frm, amount) {
+		cod_description(frm, __("Filled from the order: {0}. You can change it.", [money(amount, frm.doc.currency)]));
+	}
+
+	function prefill_cod(frm) {
+		if (!can_prefill(frm)) return Promise.resolve();
+		const key = cod_key(frm);
+		const form = {
+			grand_total: frm.doc.grand_total,
+			rounded_total: frm.doc.rounded_total,
+			currency: frm.doc.currency,
+			items: (frm.doc.items || []).map((row) => ({ item_code: row.item_code, qty: row.qty, against_sales_order: row.against_sales_order })),
+		};
+		return frappe
+			.call({ method: API + "get_default_cod", type: "POST", args: { doc: JSON.stringify(form) } })
+			.then((r) => {
+				const amount = r && r.message;
+				// stale: the carrier, items or total changed meanwhile, or the person confirmed or typed an amount
+				if (typeof amount !== "number" || !can_prefill(frm) || cod_key(frm) !== key) return;
+				frm.__cod_prefilled = amount;
+				const write = Number(frm.doc[COD_FIELD]) === amount ? Promise.resolve() : set_cod(frm, amount);
+				return write.then(() => show_prefilled(frm, amount));
+			})
+			.catch(() => {
+				// a convenience only: the server still computes the amount on save
+			});
+	}
+
+	// Carrier changed away from Bosta: drop only the amount this code filled in and the person never touched.
+	function clear_prefill(frm) {
+		const filled = frm.__cod_prefilled;
+		if (filled === undefined) return Promise.resolve();
+		delete frm.__cod_prefilled;
+		cod_description(frm, null);
+		if (!is_editable(frm) || frm.doc.custom_cod_confirmed || Number(frm.doc[COD_FIELD]) !== filled) return Promise.resolve();
+		return set_cod(frm, null);
+	}
+
+	function sync_cod(frm) {
+		return frm.doc.transporter_name === "Bosta" ? prefill_cod(frm) : clear_prefill(frm);
+	}
+
+	// Item and total edits come in bursts: ask once, after ERPNext finished its totals.
+	function schedule_sync(frm) {
+		clearTimeout(frm.__cod_timer);
+		frm.__cod_timer = setTimeout(() => sync_cod(frm), PREFILL_DELAY_MS);
+	}
+
+	function prefill_on_refresh(frm) {
+		const amount = frm.doc[COD_FIELD];
+		const empty = amount === null || amount === undefined || amount === "";
+		if (can_prefill(frm) && ((frm.is_new && frm.is_new()) || empty)) return prefill_cod(frm);
+	}
+
 	function refresh(frm) {
 		set_cod_state(frm);
 		show_cod_hint(frm);
+		prefill_on_refresh(frm);
 	}
 
 	// Editing the COD is the person's choice: it confirms the amount.
 	function custom_cod_amount(frm) {
+		if (frm.__cod_programmatic) return;
+		if (frm.__cod_prefilled !== undefined) {
+			delete frm.__cod_prefilled;
+			cod_description(frm, null);
+		}
 		if (frm.doc.transporter_name === "Bosta" && is_editable(frm) && !frm.doc.custom_cod_confirmed) {
 			frm.set_value("custom_cod_confirmed", 1);
 		}
 	}
+
+	const form_events = {
+		before_cancel,
+		custom_cod_amount,
+		transporter: sync_cod,
+		transporter_name: sync_cod,
+		grand_total: schedule_sync,
+		items_remove: schedule_sync,
+	};
+	const item_events = {
+		item_code: (frm) => schedule_sync(frm),
+		qty: (frm) => schedule_sync(frm),
+		rate: (frm) => schedule_sync(frm),
+	};
 
 	// ---- Cancel at Bosta ------------------------------------------------------------------------
 
@@ -458,7 +569,8 @@
 	if (typeof frappe !== "undefined" && frappe.marketplace_integrations && frappe.marketplace_integrations.shipping) {
 		frappe.marketplace_integrations.shipping.register_carrier("Bosta", hooks);
 		if (frappe.ui && frappe.ui.form) {
-			frappe.ui.form.on("Delivery Note", { before_cancel, custom_cod_amount });
+			frappe.ui.form.on("Delivery Note", form_events);
+			frappe.ui.form.on("Delivery Note Item", item_events);
 		}
 	}
 
@@ -473,6 +585,11 @@
 			city_label,
 			before_cancel,
 			custom_cod_amount,
+			prefill_cod,
+			sync_cod,
+			schedule_sync,
+			form_events,
+			item_events,
 			before_send,
 			show_cod_hint,
 			set_cod_state,

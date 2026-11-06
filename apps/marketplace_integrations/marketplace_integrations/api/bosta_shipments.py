@@ -7,6 +7,7 @@ authorizes, validates and delegates to ``integrations/bosta/``."""
 
 import frappe
 from frappe import _
+from frappe.utils import flt
 
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as shipment
 from marketplace_integrations.integrations.bosta import editing, locations
@@ -50,6 +51,31 @@ def get_cod_hint(delivery_note: str):
 	"""The computed COD when it differs from the merchant's confirmed amount (a hint, never a write)."""
 	_bosta_note(delivery_note, "read")
 	return shipment.cod_hint(delivery_note)
+
+
+@frappe.whitelist(methods=["POST"])
+def get_default_cod(doc):
+	"""The COD the server rule would set for an unsaved Delivery Note form (a live prefill, never a write).
+	Only the Sales Orders of the rows and the grand total are read from the form; the rule stays the one in
+	``default_cod``. The transient document is never saved."""
+	frappe.has_permission("Delivery Note", "read", throw=True)
+	values = frappe.parse_json(doc) if isinstance(doc, str) else doc
+	if not isinstance(values, dict):
+		frappe.throw(_("The Delivery Note data is not valid."))
+	rows = values.get("items") or []
+	if not isinstance(rows, list):
+		frappe.throw(_("The Delivery Note data is not valid."))
+	orders = [row.get("against_sales_order") for row in rows if isinstance(row, dict) and row.get("against_sales_order")]
+	for order in set(orders):
+		frappe.has_permission("Sales Order", "read", doc=order, throw=True)
+	draft = frappe.get_doc(
+		{
+			"doctype": "Delivery Note",
+			"grand_total": flt(values.get("grand_total")),
+			"items": [{"doctype": "Delivery Note Item", "against_sales_order": order} for order in orders],
+		}
+	)
+	return shipment.default_cod(draft)
 
 
 @frappe.whitelist(methods=["POST"])

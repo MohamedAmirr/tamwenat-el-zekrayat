@@ -307,7 +307,7 @@ Noon is the second adapter (#415): the old `custom_carrier_status` / `custom_car
 
 **Bosta Settings and city lookup.** `Bosta Settings`, the pickup-location picker and
 `integrations/bosta/locations.py` are unchanged (see above). The Delivery Note's **Pick Bosta City**
-button uses `api.bosta_shipments.get_cities` and `resolve_city`; Submit first fills an empty city from the address (`delivery_note_shipment.autofill_city`, run inside the adapter's `validate_ready`) and only answers `needs_city` (the form opens the picker) when that finds none. `get_cod_hint` returns the computed COD when it differs from the merchant's confirmed one (shown on the form, never blocks). A Sales Order `validate`/`before_update_after_submit` hook (`statuses.keep_stored_summary`) keeps the app-written summary from being overwritten by an older form copy.
+button uses `api.bosta_shipments.get_cities` and `resolve_city`; Submit first fills an empty city from the address (`delivery_note_shipment.autofill_city`, run inside the adapter's `validate_ready`) and only answers `needs_city` (the form opens the picker) when that finds none. `get_cod_hint` returns the computed COD when it differs from the merchant's confirmed one (shown on the form, never blocks). `get_default_cod` (read-only) returns `default_cod` for the unsaved form so the browser can prefill the COD at once. A Sales Order `validate`/`before_update_after_submit` hook (`statuses.keep_stored_summary`) keeps the app-written summary from being overwritten by an older form copy.
 
 **No district: Bosta resolves it (#318).** The create call is `POST /deliveries` **without**
 `?apiVersion=1` (that version requires a district and rejects a create without one with
