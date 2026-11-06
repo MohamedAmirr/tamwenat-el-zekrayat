@@ -86,24 +86,28 @@ test("the helper registers itself on the shared namespace", () => {
 
 // -- the Actions menu -----------------------------------------------------------------------
 
-test("our dialog takes the Delivery Note label and ERPNext's callback moves to Delivery Note (ERPNext)", () => {
-	const { api } = load();
+test("exactly one Delivery Note item is added, it opens our dialog, and there is no Delivery Note (ERPNext) item", () => {
+	const { api, log } = load();
 	const view = listview(["SO-1"]);
 	const close = () => "close";
-	const native = () => "native";
+	const native_calls = [];
+	const native = () => native_calls.push("native");
 	api.run_with_replaced_action(view, () => {
 		view.page.add_action_item("Close", close);
 		view.page.add_action_item("Delivery Note", native, true);
 	});
 	assert.deepEqual(
 		view.added.map((item) => item.label),
-		["Close", "Delivery Note", "Delivery Note (ERPNext)"]
+		["Close", "Delivery Note"]
 	);
+	assert.ok(!view.added.some((item) => item.label === "Delivery Note (ERPNext)"));
 	assert.equal(view.added[0].click, close);
 	assert.notEqual(view.added[1].click, native);
-	assert.equal(view.added[2].click, native);
 	assert.equal(view.added[1].standard, true);
-	assert.equal(view.added[2].standard, true);
+	view.added[1].click();
+	assert.deepEqual(native_calls, []);
+	assert.equal(log.dialogs.length, 1);
+	assert.ok(log.dialogs[0].shown);
 });
 
 test("the page method is restored afterwards, also when ERPNext's onload throws", () => {

@@ -776,6 +776,42 @@ class IntegrationTestHandleTopicRealOrderRouting(IntegrationTestCase):
 		# above, and unlike a genuine success (which also leaves error blank).
 		self.assertTrue(delivery.error)
 
+	def test_order_before_the_sync_orders_from_cutoff_is_processed_with_a_note_and_no_row(self):
+		# "Sync Orders From": the real import_order() runs (only the Shopify call is mocked). An
+		# old order that was never imported creates no Marketplace Order, is not retried
+		# (Processed, not Error) and is not scheduled for a sync.
+		account = make_shopify_account(
+			f"Handle Topic Cutoff Account {frappe.generate_hash(length=8)}",
+			connection=self.connection.name,
+		)
+		account.db_set("shopify_orders_sync_from", "2099-01-01 00:00:00", update_modified=False)
+		gid = f"gid://shopify/Order/{frappe.generate_hash(length=8)}"
+		webhook_id = f"webhook-before-cutoff-{frappe.generate_hash(length=6)}"
+
+		import marketplace_integrations.integrations.shopify.webhooks as webhooks_module
+
+		with (
+			patch(
+				"marketplace_integrations.integrations.shopify.client.ShopifyClient.execute",
+				return_value={"order": make_order_payload(gid)},
+			),
+			patch.object(webhooks_module, "bump_sync_debounce") as mocked_bump,
+		):
+			process_shopify_webhook(
+				self.connection.name,
+				"ORDERS_UPDATED",
+				webhook_id,
+				self.connection.shop_domain,
+				order_gid=gid,
+			)
+
+		delivery = frappe.get_doc("Shopify Webhook Delivery", {"webhook_id": webhook_id})
+		self.assertEqual(delivery.status, "Processed")
+		self.assertIn("Sync Orders From", delivery.error)
+		self.assertIn(gid, delivery.error)
+		self.assertFalse(frappe.db.exists("Marketplace Order", {"external_order_id": gid}))
+		mocked_bump.assert_not_called()
+
 	def test_successful_import_bumps_the_sync_debounce_window(self):
 		# #133: a successful import_order() schedules the eventual Sales Order
 		# sync via bump_sync_debounce() (#132) rather than enqueueing directly.

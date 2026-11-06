@@ -94,6 +94,18 @@ class IntegrationTestReconcilePlatformCustomDocperms(IntegrationTestCase):
 		self.assertEqual(reconcile([SEEDED, UNTOUCHED]), {})
 		self.assertEqual(rows(SEEDED), after)
 
+	def test_permlevel_restriction_adds_only_the_shipped_level_1_rows(self):
+		changed = reconcile([SEEDED], permlevel=1)
+
+		after = rows(SEEDED)
+		self.assertEqual(set(changed), {SEEDED})
+		for role in (*PLATFORM_ROLES, "System Manager"):
+			self.assertIn((role, 1), after)
+			# Level 0 rows a site removed are not re-granted.
+			self.assertNotIn((role, 0), after)
+		self.assertEqual((after[("System Manager", 1)].read, after[("System Manager", 1)].write), (1, 1))
+		self.assertEqual(reconcile([SEEDED], permlevel=1), {})
+
 	def test_raises_missing_ptypes_but_never_lowers_or_touches_other_roles(self):
 		reconcile([SEEDED])
 		talabat = rows(SEEDED)[("Talabat User", 0)]

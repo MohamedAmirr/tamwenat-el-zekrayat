@@ -33,9 +33,10 @@ def schedule_first_syncs(filters, exclude_names=None):
 	return len(rows)
 
 
-def write_catch_up_summary(account, imported=0, scheduled=0, failures=0, error=None):
+def write_catch_up_summary(account, imported=0, scheduled=0, failures=0, error=None, skipped=0):
 	"""Record one account's nightly catch-up run in ``Marketplace Sync Log`` (#354):
-	orders imported, first syncs scheduled, failures. Committed on its own."""
+	orders imported, first syncs scheduled, failures, and (Shopify) orders skipped because they
+	were created before the account's "Sync Orders From" cutoff. Committed on its own."""
 	now = frappe.utils.now_datetime()
 	try:
 		frappe.get_doc(
@@ -48,7 +49,12 @@ def write_catch_up_summary(account, imported=0, scheduled=0, failures=0, error=N
 				"attempted_at": now,
 				"completed_at": now,
 				"response_data": frappe.as_json(
-					{"imported": imported, "first_syncs_scheduled": scheduled, "failures": failures}
+					{
+						"imported": imported,
+						"first_syncs_scheduled": scheduled,
+						"failures": failures,
+						**({"skipped_before_sync_start": skipped} if skipped else {}),
+					}
 				),
 				"traceback": error,
 			}

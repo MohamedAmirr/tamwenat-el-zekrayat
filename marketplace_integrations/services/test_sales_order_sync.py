@@ -212,6 +212,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		total_taxes=0,
 		duties_total=0,
 		payment_terms=None,
+		received_on=None,
 	):
 		if order_total is None:
 			order_total = flt(transaction_amount) + flt(shipping_total)
@@ -234,6 +235,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			{
 				"external_order_id": f"gid://shopify/Order/{self.suffix}-{frappe.generate_hash(length=4)}",
 				"processed_on": nowdate(),
+				"received_on": received_on,
 				"cancelled_at": cancelled_at,
 				"external_financial_status": financial_status,
 				"customer_email": customer_email,
@@ -2516,6 +2518,19 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertFalse(order.last_sync_error)
 		self.assertEqual([(row.sync_type, row.status) for row in logs], [("Sales Order Sync", "Success")])
 		self.assertFalse(frappe.db.exists("Sales Order", {"custom_marketplace_order": order.name}))
+
+	def test_sync_orders_from_never_blocks_the_sales_order_step_of_an_existing_row(self):
+		# The cutoff only gates the import of orders that have no Marketplace Order yet.
+		account = self._make_shopify_account()
+		account.db_set("shopify_orders_sync_from", "2026-09-27 12:00:00", update_modified=False)
+		order, _mapping = self._make_shopify_order(account, received_on="2026-09-27 11:59:59")
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertTrue(order.erpnext_sales_order)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
 
 	def test_cancelling_after_an_earlier_sync_error_clears_the_obsolete_error(self):
 		"""A COD order first blocked as unpaid, then cancelled, must not stay in Sync Error."""
@@ -6959,6 +6974,176 @@ class IntegrationTestShopifyDeliveryLeadDays(IntegrationTestCase):
 
 	def test_negative_lead_days_are_ignored(self):
 		self.assertEqual(self._date(-2), "2026-10-17")
+
+
+class IntegrationTestShopifyShippingMethodRules(IntegrationTestCase):
+	RULES = (
+		{"shipping_title": "From 3 to 6 working days", "delivery_days": 6},
+		{"shipping_title": "instant shipping 3pm-12am", "delivery_days": 0},
+		{"shipping_title": "Express", "delivery_days": 2},
+	)
+
+	def _date(self, shipping_lines, lead_days=3, rules=None, **order_extra):
+		from marketplace_integrations.services.sales_order_sync import _delivery_date
+
+		order = frappe._dict(
+			platform="Shopify",
+			processed_on="2026-10-17 15:50:16",
+			shipping_lines=shipping_lines,
+			**order_extra,
+		)
+		account = frappe._dict(
+			delivery_lead_days=lead_days,
+			shopify_shipping_method_rules=self.RULES if rules is None else rules,
+		)
+		return str(_delivery_date(order, account))
+
+	@staticmethod
+	def _lines(*titles):
+		return {"requiresShipping": True, "shippingLines": [{"title": title} for title in titles]}
+
+	def test_a_matching_title_adds_its_delivery_days(self):
+		self.assertEqual(self._date(self._lines("From 3 to 6 working days")), "2026-10-23")
+		self.assertEqual(self._date(self._lines("Express")), "2026-10-19")
+
+	def test_zero_days_keeps_the_order_date_even_when_lead_days_are_set(self):
+		self.assertEqual(self._date(self._lines("instant shipping 3pm-12am")), "2026-10-17")
+
+	def test_the_match_is_exact_apart_from_surrounding_spaces(self):
+		self.assertEqual(self._date(self._lines("  Express ")), "2026-10-19")
+		self.assertEqual(self._date(self._lines("express")), "2026-10-20")
+
+	def test_unmatched_empty_or_malformed_shipping_lines_use_the_lead_days(self):
+		fallback = "2026-10-20"
+		for shipping_lines in (
+			self._lines("Unknown method"),
+			self._lines(),
+			None,
+			"",
+			"{not json",
+			"[]",
+			"null",
+			"12",
+			12,
+			[],
+			{},
+			{"shippingLines": None},
+			{"shippingLines": "Express"},
+			{"shippingLines": ["Express", None, 7, {}, {"title": None}, {"title": 5}]},
+		):
+			self.assertEqual(self._date(shipping_lines), fallback, repr(shipping_lines))
+
+	def test_a_json_string_and_a_bare_list_are_read(self):
+		self.assertEqual(self._date(frappe.as_json(self._lines("Express"))), "2026-10-19")
+		self.assertEqual(self._date([{"title": "Express"}]), "2026-10-19")
+
+	def test_no_rules_uses_the_lead_days(self):
+		self.assertEqual(self._date(self._lines("Express"), rules=[]), "2026-10-20")
+		self.assertEqual(self._date(self._lines("Express"), rules=None, lead_days=0), "2026-10-19")
+
+	def test_several_shipping_lines_use_the_latest_date(self):
+		lines = self._lines("instant shipping 3pm-12am", "From 3 to 6 working days", "Express")
+		self.assertEqual(self._date(lines), "2026-10-23")
+
+	def test_an_unmatched_line_does_not_hide_a_matched_one(self):
+		self.assertEqual(self._date(self._lines("Unknown method", "Express")), "2026-10-19")
+
+	def test_a_linked_order_keeps_the_stored_date_after_a_rule_edit(self):
+		date = self._date(
+			self._lines("From 3 to 6 working days"),
+			erpnext_sales_order="SO-1",
+			last_synced_snapshot='{"delivery_date": "2026-10-20"}',
+		)
+		self.assertEqual(date, "2026-10-20")
+
+	def test_a_missing_order_date_still_blocks(self):
+		from marketplace_integrations.services.sales_order_sync import SyncBlocker, _delivery_date
+
+		order = frappe._dict(platform="Shopify", processed_on=None, shipping_lines=self._lines("Express"))
+		with self.assertRaises(SyncBlocker):
+			_delivery_date(order, frappe._dict(shopify_shipping_method_rules=self.RULES))
+
+
+class IntegrationTestShopifyShippingMethodRulesSync(IntegrationTestCase):
+	"""The rule reaches the real Sales Order, and a rule edit never touches a linked one."""
+
+	def setUp(self):
+		self.sync = IntegrationTestSalesOrderSync()
+		self.sync.setUp()
+		self.account = self.sync._make_shopify_account()
+		self.account.update(
+			{
+				"delivery_lead_days": 1,
+				"shopify_shipping_method_rules": [
+					{"shipping_title": "Slow", "delivery_days": 6},
+					{"shipping_title": "Fast", "delivery_days": 0},
+				],
+			}
+		)
+		self._save_account()
+
+	def _save_account(self):
+		with patch(
+			"marketplace_integrations.marketplace_integrations.doctype.marketplace_account.marketplace_account.fetch_shop_and_active_locations",
+			return_value={"shop_id": self.account.external_account_id, "active_locations": []},
+		):
+			self.account.save()
+
+	def _order(self, *titles):
+		order, _mapping = self.sync._make_shopify_order(self.account)
+		order.shipping_lines = {"requiresShipping": True, "shippingLines": [{"title": t} for t in titles]}
+		order.save()
+		return order
+
+	def test_the_sales_order_gets_the_rule_date_on_header_items_and_countdown(self):
+		order = self._order("Slow")
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+		expected = add_days(nowdate(), 6)
+		self.assertEqual(str(sales_order.delivery_date), expected)
+		self.assertEqual(str(sales_order.custom_earliest_delivery_date), expected)
+		self.assertEqual({str(row.delivery_date) for row in sales_order.items}, {expected})
+
+	def test_an_unmatched_order_gets_the_lead_days_date(self):
+		order = self._order("Something else")
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(
+			str(frappe.db.get_value("Sales Order", result["sales_order"], "delivery_date")),
+			add_days(nowdate(), 1),
+		)
+
+	def test_editing_a_rule_leaves_a_linked_order_unchanged(self):
+		order = self._order("Slow")
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+		order.reload()
+		hash_before = order.last_synced_hash
+		self.account.reload()
+		self.account.shopify_shipping_method_rules[0].delivery_days = 1
+		self.account.delivery_lead_days = 9
+		self._save_account()
+
+		again = sync_sales_order(order.name)
+		self.assertTrue(again["ok"], again.get("error"))
+		order.reload()
+		self.assertEqual(order.last_synced_hash, hash_before)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertEqual(
+			str(frappe.db.get_value("Sales Order", result["sales_order"], "delivery_date")),
+			add_days(nowdate(), 6),
+		)
+
+	def test_the_account_rejects_duplicate_titles_and_negative_days(self):
+		self.account.reload()
+		self.account.append("shopify_shipping_method_rules", {"shipping_title": " Slow ", "delivery_days": 2})
+		with self.assertRaises(frappe.ValidationError):
+			self._save_account()
+		self.account.reload()
+		self.account.shopify_shipping_method_rules[0].delivery_days = -1
+		with self.assertRaises(frappe.ValidationError):
+			self._save_account()
 
 
 class IntegrationTestTalabatDeliveryLeadDays(IntegrationTestCase):

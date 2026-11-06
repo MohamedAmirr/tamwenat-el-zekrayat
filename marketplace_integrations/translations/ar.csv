@@ -650,7 +650,7 @@ Current ERPNext Catalog Price,سعر الكتالوج الحالي في ERPNext
 DELIVERY,توصيل
 DISPATCHED is only valid for Vendor Delivery orders.,DISPATCHED صالحة فقط لطلبات التوصيل بواسطة البائع.
 Damaged,تالف
-"Days added to the platform date (Shopify: order date, Talabat: promised date) to set the ERPNext Sales Order Delivery Date. 0 keeps that date.","الأيام المضافة إلى تاريخ المنصة (Shopify: تاريخ الطلب، Talabat: التاريخ الموعود) لتحديد تاريخ التسليم في أمر بيع ERPNext. القيمة 0 تُبقي ذلك التاريخ."
+"Days added to the platform date (Shopify: order date, Talabat: promised date) to set the ERPNext Sales Order Delivery Date. 0 keeps that date. For Shopify this is the fallback used when no Shipping Method Rule matches the order.","الأيام المضافة إلى تاريخ المنصة (Shopify: تاريخ الطلب، Talabat: التاريخ الموعود) لتحديد تاريخ التسليم في أمر بيع ERPNext. القيمة 0 تُبقي ذلك التاريخ. في Shopify تُستخدم هذه القيمة عندما لا تنطبق أي قاعدة لطريقة الشحن على الطلب."
 Deactivate Destination,إلغاء تفعيل الوجهة
 Deactivate destination {0}? Noon stops sending events to it.,إلغاء تفعيل الوجهة {0}؟ ستتوقف Noon عن إرسال الأحداث إليها.
 Delete Demo Data,حذف البيانات التجريبية
@@ -1009,6 +1009,16 @@ Return receipt was already acknowledged.,تم الإقرار باستلام ال
 Rounding difference of Sales Order {0},فرق التقريب لأمر البيع {0}
 Row #{0}: Shopify Gateway is required.,الصف #{0}: بوابة Shopify مطلوبة.
 Row #{0}: Shopify Gateway {1} is listed more than once.,الصف #{0}: بوابة Shopify {1} مدرجة أكثر من مرة.
+Row #{0}: Shipping Title is required.,الصف #{0}: اسم طريقة الشحن مطلوب.
+Row #{0}: Shipping Title {1} is listed more than once.,الصف #{0}: اسم طريقة الشحن {1} مدرج أكثر من مرة.
+Row #{0}: Delivery Days cannot be negative.,الصف #{0}: لا يمكن أن تكون أيام التسليم سالبة.
+Shopify Shipping Method Rule,قاعدة طريقة شحن Shopify
+Shipping Method Rules,قواعد طرق الشحن
+Shipping Title,اسم طريقة الشحن
+Delivery Days,أيام التسليم
+The exact shipping method title Shopify sends on the order's shipping line.,الاسم الدقيق لطريقة الشحن الذي ترسله Shopify في سطر شحن الطلب.
+Calendar days added to the order date for this shipping method. 0 keeps the order date.,أيام تقويمية تُضاف إلى تاريخ الطلب لطريقة الشحن هذه. القيمة 0 تُبقي تاريخ الطلب.
+"Delivery days per Shopify shipping method (exact title). An order's delivery date is its order date plus the days of its shipping method; with several shipping lines the latest date is used. Orders with no matching rule use Delivery Lead Days.","أيام التسليم لكل طريقة شحن في Shopify (بالاسم الدقيق). تاريخ تسليم الطلب هو تاريخ الطلب مضافًا إليه أيام طريقة الشحن؛ وعند وجود عدة سطور شحن يُستخدم أبعد تاريخ. الطلبات التي لا تنطبق عليها قاعدة تستخدم أيام مهلة التسليم."
 Row #{0}: {1},الصف #{0}: {1}
 SHIPPED,تم الشحن
 "Sales Invoice {0} updates stock, so a Credit Note from it would return the stock a second time.",فاتورة المبيعات {0} تُحدّث المخزون، لذا فإن إنشاء إشعار دائن منها سيُرجع المخزون مرة ثانية.
@@ -1924,7 +1934,6 @@ The cash on delivery amount is filled from each order. A fully paid order gets a
 Sales Orders selected: {0},عدد أوامر البيع المحددة: {0}
 Documents,المستندات
 No orders were processed.,لم تتم معالجة أي طلبات.
-Delivery Note (ERPNext),مذكرة التسليم (ERPNext)
 The bulk run could not be queued.,تعذّر وضع التشغيل الجماعي في قائمة الانتظار.
 Waiting,في الانتظار
 Creating documents,جارٍ إنشاء المستندات
@@ -1944,3 +1953,9 @@ Still creating at Bosta. Check the Delivery Note list later.,ما زال قيد 
 Sales Order {0} has a zero total; create its Delivery Note by hand.,إجمالي أمر البيع {0} صفر؛ أنشئ مذكرة التسليم الخاصة به يدويًا.
 Sales Invoice {0} has a credit note; check Sales Order {1} by hand.,لفاتورة المبيعات {0} إشعار دائن؛ راجع أمر البيع {1} يدويًا.
 "Sales Invoice {0} does not cover the whole Sales Order {1} (invoice {2}, order {3}); check it first.","لا تغطي فاتورة المبيعات {0} أمر البيع {1} بالكامل (الفاتورة {2}، الطلب {3})؛ راجعها أولًا."
+"Filled from the order: {0}. You can change it.","تمت التعبئة من الطلب: {0}. يمكنك تغييره."
+The Delivery Note data is not valid.,بيانات مذكرة التسليم غير صالحة.
+Sync Orders From,مزامنة الطلبات من
+Shopify orders created before this date and time are not imported and never get a Sales Order. Orders already imported keep updating. Leave empty to import every order. Enter it in your time zone; it is stored in the System Settings time zone.,"لا يتم استيراد طلبات Shopify التي أُنشئت قبل هذا التاريخ والوقت، ولا يُنشأ لها أمر بيع أبدًا. الطلبات المستوردة بالفعل تستمر في التحديث. اتركه فارغًا لاستيراد كل الطلبات. أدخله بمنطقتك الزمنية؛ ويُخزَّن بالمنطقة الزمنية في إعدادات النظام."
+Shopify order {0} was created before the account's Sync Orders From date and was not imported.,"تم إنشاء طلب Shopify {0} قبل تاريخ ""مزامنة الطلبات من"" في الحساب ولم يتم استيراده."
+"This range ends before the account's Sync Orders From date ({0}). Orders created before that date are not imported.","تنتهي هذه الفترة قبل تاريخ ""مزامنة الطلبات من"" في الحساب ({0}). لا يتم استيراد الطلبات التي أُنشئت قبل ذلك التاريخ."
