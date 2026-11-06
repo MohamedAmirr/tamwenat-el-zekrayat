@@ -7,6 +7,7 @@ authorizes, validates and delegates to ``integrations/bosta/``."""
 
 import frappe
 from frappe import _
+from frappe.utils import flt
 
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as shipment
 from marketplace_integrations.integrations.bosta import editing, locations
@@ -19,6 +20,9 @@ def _bosta_note(delivery_note, ptype):
 	if not shipment.applies_to(doc):
 		frappe.throw(_("This Delivery Note is not a Bosta shipment."))
 	return doc
+
+
+MAX_FORM_ROWS = 200
 
 
 @frappe.whitelist(methods=["POST"])
@@ -50,6 +54,59 @@ def get_cod_hint(delivery_note: str):
 	"""The computed COD when it differs from the merchant's confirmed amount (a hint, never a write)."""
 	_bosta_note(delivery_note, "read")
 	return shipment.cod_hint(delivery_note)
+
+
+@frappe.whitelist(methods=["POST"])
+def get_default_cod(doc):
+	"""The COD the server rule would set for a new, unsaved Delivery Note form (a live prefill, never a write).
+	Only the grand total and the Sales Order name of each row are read from the form (at most
+	``MAX_FORM_ROWS`` rows); the rule stays the one in ``default_cod``. The transient document is never
+	saved. The Sales Order is read, and so permission-checked, only when exactly one is referenced:
+	``default_cod`` ignores the order when there are several."""
+	frappe.has_permission("Delivery Note", "read", throw=True)
+	invalid = _("The Delivery Note data is not valid.")
+	values = frappe.parse_json(doc) if isinstance(doc, str) else doc
+	if not isinstance(values, dict):
+		frappe.throw(invalid)
+	rows = values.get("items") or []
+	if not isinstance(rows, list):
+		frappe.throw(invalid)
+	total = values.get("grand_total")
+	if total in (None, ""):
+		total = 0
+	if isinstance(total, bool) or not isinstance(total, (int, float, str)):
+		frappe.throw(invalid)
+	try:
+		total = float(total)
+	except ValueError:
+		frappe.throw(invalid)
+	if total != total or total in (float("inf"), float("-inf")):
+		frappe.throw(invalid)
+	orders = []
+	for row in rows[:MAX_FORM_ROWS]:
+		if not isinstance(row, dict):
+			frappe.throw(invalid)
+		order = row.get("against_sales_order")
+		if order in (None, ""):
+			continue
+		if not isinstance(order, str):
+			frappe.throw(invalid)
+		if order not in orders:
+			orders.append(order)
+	if len(orders) == 1:
+		# a missing order answers like a forbidden one: existence is not revealed
+		if not frappe.db.exists("Sales Order", orders[0]) or not frappe.has_permission(
+			"Sales Order", "read", doc=orders[0]
+		):
+			frappe.throw(_("Not permitted"), frappe.PermissionError)
+	draft = frappe.get_doc(
+		{
+			"doctype": "Delivery Note",
+			"grand_total": flt(total),
+			"items": [{"doctype": "Delivery Note Item", "against_sales_order": order} for order in orders],
+		}
+	)
+	return shipment.default_cod(draft)
 
 
 @frappe.whitelist(methods=["POST"])

@@ -1943,3 +1943,5 @@ Still creating at Bosta. Check the Delivery Note list later.,ما زال قيد 
 Sales Order {0} has a zero total; create its Delivery Note by hand.,إجمالي أمر البيع {0} صفر؛ أنشئ مذكرة التسليم الخاصة به يدويًا.
 Sales Invoice {0} has a credit note; check Sales Order {1} by hand.,لفاتورة المبيعات {0} إشعار دائن؛ راجع أمر البيع {1} يدويًا.
 "Sales Invoice {0} does not cover the whole Sales Order {1} (invoice {2}, order {3}); check it first.","لا تغطي فاتورة المبيعات {0} أمر البيع {1} بالكامل (الفاتورة {2}، الطلب {3})؛ راجعها أولًا."
+"Filled from the order: {0}. You can change it.","تمت التعبئة من الطلب: {0}. يمكنك تغييره."
+The Delivery Note data is not valid.,بيانات مذكرة التسليم غير صالحة.
