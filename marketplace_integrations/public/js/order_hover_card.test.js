@@ -319,6 +319,28 @@ test("fill wires the images after rendering the card", async () => {
 	assert.equal(img.style.display, "none");
 });
 
+test("the delivery address lines are escaped, direction-isolated and sit right after the customer", () => {
+	const { module_exports } = load();
+	const html = module_exports.render_sales_order_card({
+		...SAMPLE,
+		address: ["12 Nile St <b>", "القاهرة الجديدة", "<img src=x onerror=alert(1)>"],
+	});
+	assert.match(html, /Delivery Address/);
+	assert.match(html, /<bdi dir="auto">12 Nile St &lt;b&gt;<\/bdi><br><bdi dir="auto">القاهرة الجديدة<\/bdi>/);
+	assert.match(html, /overflow-wrap: anywhere/);
+	assert.doesNotMatch(html, /<img |St <b>/);
+	assert.ok(html.indexOf("Customer") < html.indexOf("Delivery Address"));
+	assert.ok(html.indexOf("Delivery Address") < html.indexOf("Items ("));
+});
+
+test("the delivery address section is hidden when there are no lines", () => {
+	const { module_exports } = load();
+	for (const address of [undefined, null, [], ["", "  "], "not a list"]) {
+		const html = module_exports.render_sales_order_card({ ...SAMPLE, address });
+		assert.doesNotMatch(html, /Delivery Address/);
+	}
+});
+
 test("parts the server left out are not rendered", () => {
 	const { module_exports } = load();
 	const html = module_exports.render_sales_order_card({ ...SAMPLE, marketplace: null, bosta: null });

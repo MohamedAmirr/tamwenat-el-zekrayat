@@ -3,11 +3,13 @@
 
 """Read-only summary of a Sales Order for the list hover card (#325)."""
 
+import re
+from html import unescape
 from urllib.parse import urlparse
 
 import frappe
 from frappe import _
-from frappe.utils import cint, cstr, flt
+from frappe.utils import cint, cstr, flt, strip_html
 
 MAX_IMAGE_URL_LENGTH = 2000
 FILE_PATH_PREFIXES = ("/files/", "/private/files/")
@@ -61,7 +63,17 @@ def get_sales_order_card(sales_order: str):
 	order = frappe.db.get_value(
 		"Sales Order",
 		sales_order,
-		["customer", "customer_name", "contact_mobile", "status", "currency", "grand_total", "rounded_total"],
+		[
+			"customer",
+			"customer_name",
+			"contact_mobile",
+			"status",
+			"currency",
+			"grand_total",
+			"rounded_total",
+			"shipping_address",
+			"address_display",
+		],
 		as_dict=True,
 	)
 	# Every item in one query, no description. Limit 0 means no limit: no cap on the item count.
@@ -77,6 +89,9 @@ def get_sales_order_card(sales_order: str):
 		"sales_order": sales_order,
 		"customer": order.customer_name or order.customer,
 		"phone": order.contact_mobile or "",
+		"address": _address_lines(order.shipping_address)
+		or _address_lines(order.address_display)
+		or _marketplace_address(sales_order),
 		"status": order.status,
 		"currency": order.currency,
 		"total": flt(order.rounded_total or order.grand_total),
@@ -92,6 +107,41 @@ def get_sales_order_card(sales_order: str):
 		"marketplace": _marketplace_part(sales_order),
 		"bosta": _bosta_part(sales_order),
 	}
+
+
+def _text_lines(text):
+	"""Split on newlines, strip whitespace, drop blank lines."""
+	return [line.strip() for line in cstr(text).replace("\r", "\n").split("\n") if line.strip()]
+
+
+def _address_lines(value):
+	"""Plain-text lines of an address held as HTML (Sales Order Text Editor fields).
+
+	Line breaks and block ends become newlines, tags are removed, entities unescaped, blank
+	lines dropped. The lines are PLAIN TEXT, not safe HTML: an escaped payload in the stored
+	value (``&lt;img&gt;``) comes back as the literal text ``<img>``. Callers MUST escape
+	each line before putting it in HTML (the card JS does).
+	"""
+	text = re.sub(r"(?i)<\s*br\s*/?>|</\s*(p|div|li|h[1-6]|tr)\s*>", "\n", cstr(value))
+	return _text_lines(unescape(strip_html(text)))
+
+
+def _marketplace_address(sales_order):
+	"""Fallback address from the linked Marketplace Order (Talabat, Noon: no address on the Sales
+	Order). Same permission rule as the marketplace part: no read access or platform role, no lines."""
+	if not frappe.has_permission("Marketplace Order", "read"):
+		return []
+	rows = frappe.get_list(
+		"Marketplace Order",
+		filters={"erpnext_sales_order": sales_order},
+		fields=["customer_formatted_address", "customer_city"],
+		order_by="creation desc, name desc",
+		limit_page_length=1,
+	)
+	if not rows:
+		return []
+	# Raw platform text, not HTML: no tag stripping (the client escapes).
+	return _text_lines(rows[0].customer_formatted_address) + _text_lines(rows[0].customer_city)
 
 
 def _marketplace_part(sales_order):
