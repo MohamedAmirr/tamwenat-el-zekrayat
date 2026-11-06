@@ -2630,6 +2630,38 @@ def _lead_days(account):
 	return max(cint(account.get("delivery_lead_days")), 0)
 
 
+def _shopify_shipping_titles(order):
+	"""The shipping method titles on a Shopify order's stored shipping evidence.  Never raises."""
+	try:
+		evidence = order.get("shipping_lines")
+		if isinstance(evidence, str):
+			evidence = frappe.parse_json(evidence) if evidence.strip() else None
+		lines = evidence.get("shippingLines") if isinstance(evidence, dict) else evidence
+	except Exception:
+		return []
+	if not isinstance(lines, list):
+		return []
+	titles = []
+	for line in lines:
+		title = cstr(line.get("title")).strip() if isinstance(line, dict) else ""
+		if title:
+			titles.append(title)
+	return titles
+
+
+def _shopify_delivery_date(order, account):
+	"""Order date plus the delivery days of the matching Shipping Method Rule (latest date when several
+	shipping lines match), else plus the account's Delivery Lead Days.  Calendar days; never raises."""
+	days_by_title = {}
+	for rule in account.get("shopify_shipping_method_rules") or []:
+		title = cstr(rule.get("shipping_title")).strip()
+		if title:
+			days_by_title.setdefault(title, max(cint(rule.get("delivery_days")), 0))
+	matched = [days_by_title[title] for title in _shopify_shipping_titles(order) if title in days_by_title]
+	days = max(matched) if matched else _lead_days(account)
+	return add_days(getdate(order.processed_on), days)
+
+
 def _stored_snapshot_of(order):
 	"""The last synced snapshot of a LINKED order, else ``{}``."""
 	return (_parse_last_synced_snapshot(order) or {}) if order.get("erpnext_sales_order") else {}
@@ -2673,8 +2705,9 @@ def _delivery_date(order, account, lines=None):
 			raise SyncBlocker(
 				_("Shopify Processed On is required to set the ERPNext Sales Order Delivery Date.")
 			)
-		# Shopify sends no promised date; the account's lead days stand in for it.
-		return add_days(getdate(order.processed_on), _lead_days(account))
+		# Shopify sends no promised date; the order's shipping method rule (else the account's lead
+		# days) stands in for it.
+		return _shopify_delivery_date(order, account)
 	if order.platform == "Noon":
 		# The date comes only from Noon: the header is the earliest line date (each line carries its
 		# SKU's `estimated_shipping_date`); no usable date falls back to received_on.

@@ -166,6 +166,8 @@ def order_evidence_fingerprint(order):
 	Also the snapshot's transaction/delivery date sources (``processed_on``,
 	``received_on``, ``promised_for``, as dates), ``presentment_currency`` and the
 	per-line ``*_missing`` flags, since the snapshot builder reads all of them.
+	``shipping_lines`` is deliberately NOT hashed: a linked order's delivery date is frozen in its
+	stored snapshot, and unlinked orders read the latest stored row.
 	Deliberately excludes volatile fields (``last_platform_update_on``,
 	``latest_payload`` timestamps, ``modified``), and, for Noon, the zero-quantity
 	stale status-group rows the importer zeroes instead of deleting.
