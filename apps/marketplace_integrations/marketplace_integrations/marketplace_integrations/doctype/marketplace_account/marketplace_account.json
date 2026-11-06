@@ -26,6 +26,7 @@
   "shopify_location_name",
   "shopify_inventory_push_enabled",
   "shopify_orders_reconciled_through",
+  "shopify_orders_sync_from",
   "outlet_status_section",
   "external_status",
   "external_status_reason",
@@ -190,6 +191,14 @@
    "read_only": 1
   },
   {
+   "depends_on": "eval:doc.platform==\"Shopify\"",
+   "description": "Shopify orders created before this date and time are not imported and never get a Sales Order. Orders already imported keep updating. Leave empty to import every order. Enter it in your time zone; it is stored in the System Settings time zone.",
+   "fieldname": "shopify_orders_sync_from",
+   "fieldtype": "Datetime",
+   "label": "Sync Orders From",
+   "permlevel": 1
+  },
+  {
    "fieldname": "outlet_status_section",
    "fieldtype": "Section Break",
    "label": "Marketplace Availability"
@@ -296,7 +305,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-11-01 19:00:00.000000",
+ "modified": "2026-11-06 15:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Marketplace Account",
@@ -331,6 +340,27 @@
    "report": 1,
    "role": "Shopify User",
    "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "Talabat User"
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "Noon User"
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "Shopify User"
   }
  ],
  "sort_field": "creation",
