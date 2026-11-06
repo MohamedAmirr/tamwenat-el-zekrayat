@@ -6,7 +6,7 @@ import hashlib
 import frappe
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import cstr
+from frappe.utils import cint, cstr
 
 from marketplace_integrations.integrations.shopify.locations import fetch_shop_and_active_locations
 
@@ -182,6 +182,7 @@ class MarketplaceAccount(Document):
 		self.validate_warehouse()
 		self.validate_shipping_account()
 		self.validate_payment_gateways()
+		self.validate_shipping_method_rules()
 		# validate_shopify_account() must run BEFORE validate_unique_account_identity():
 		# for a new Shopify account, external_account_id starts out blank and
 		# is only populated from the live-confirmed shop GID inside
@@ -291,6 +292,25 @@ class MarketplaceAccount(Document):
 			problem = clearing_account_problem(row.clearing_account, self.erpnext_company)
 			if problem:
 				frappe.throw(_("Row #{0}: {1}").format(row.idx, problem))
+
+	def validate_shipping_method_rules(self):
+		"""Trim each shipping title, allow one rule per title and no negative days.  Shopify only."""
+		if self.platform != "Shopify":
+			return
+		seen = set()
+		for row in self.shopify_shipping_method_rules or []:
+			row.shipping_title = cstr(row.shipping_title).strip()
+			if not row.shipping_title:
+				frappe.throw(_("Row #{0}: Shipping Title is required.").format(row.idx))
+			if row.shipping_title in seen:
+				frappe.throw(
+					_("Row #{0}: Shipping Title {1} is listed more than once.").format(
+						row.idx, row.shipping_title
+					)
+				)
+			seen.add(row.shipping_title)
+			if cint(row.delivery_days) < 0:
+				frappe.throw(_("Row #{0}: Delivery Days cannot be negative.").format(row.idx))
 
 	def validate_noon_account(self):
 		"""Bind a Noon account to the selected connection's project code locally."""
