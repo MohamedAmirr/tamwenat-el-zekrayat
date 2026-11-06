@@ -7,8 +7,8 @@
 // ERPNext's own list script adds a "Delivery Note" item to the list's Actions menu in onload
 // (erpnext/selling/doctype/sales_order/sales_order_list.js, page.add_action_item(__("Delivery Note"), ...)).
 // This app's list script (sales_order_list.js) runs ERPNext's onload inside run_with_replaced_action(), which
-// shows OUR dialog under the label "Delivery Note" (one shipping method Select, Bosta only for now) and keeps
-// ERPNext's own bulk action, unchanged, under "Delivery Note (ERPNext)". Our dialog calls
+// shows OUR dialog under the label "Delivery Note" (one shipping method Select, Bosta only for now) in place of
+// ERPNext's own bulk action, which is dropped (one "Delivery Note" item only). Our dialog calls
 // api/bulk_delivery_notes.create_delivery_notes, which queues a background job. The job reports on the
 // realtime event "bulk_delivery_note_progress": stage "creating" (documents N of M), "waiting" (K of M accepted
 // by Bosta), "done" (summary, also kept as a Notification Log). The listener is registered once on every Desk
@@ -46,8 +46,8 @@
 		return `<a href="${esc(href)}"><bdi dir="ltr">${esc(name)}</bdi></a>`;
 	}
 
-	// Run ERPNext's onload while its "Delivery Note" action item is split in two: our dialog keeps the label,
-	// ERPNext's own callback moves to "Delivery Note (ERPNext)" and still works (cut-off date, any order).
+	// Run ERPNext's onload while its "Delivery Note" action item is REPLACED: the item keeps the label but
+	// opens our dialog, ERPNext's own callback is dropped (one "Delivery Note" item in the menu).
 	// The page method is restored afterwards, so every other action item is added exactly as ERPNext adds it.
 	function run_with_replaced_action(listview, run) {
 		const page = listview.page;
@@ -56,8 +56,7 @@
 		const native_label = __("Delivery Note");
 		page.add_action_item = function (label, click, ...rest) {
 			if (label !== native_label) return original.call(this, label, click, ...rest);
-			original.call(this, label, () => open_dialog(listview), ...rest);
-			return original.call(this, __("Delivery Note (ERPNext)"), click, ...rest);
+			return original.call(this, label, () => open_dialog(listview), ...rest);
 		};
 		try {
 			run();

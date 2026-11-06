@@ -14,7 +14,7 @@
 //   indicator (get_indicator); ERPNext's own indicator stays for every other order.
 //
 // - The bulk "Delivery Note" action of the Actions menu opens the shipping method dialog
-//   (sales_order_bulk_delivery.js); ERPNext's own action stays, fully working, as "Delivery Note (ERPNext)".
+//   (sales_order_bulk_delivery.js) in place of ERPNext's own bulk action, which is dropped.
 //
 // Wrapped in a function: doctype_list_js files share one scope with ERPNext's own list script.
 (function () {
@@ -128,9 +128,9 @@
 			const original_onload = settings.onload;
 			settings.onload = function (listview) {
 				const run_original = () => original_onload && original_onload.call(this, listview);
-				// ERPNext's onload adds its own bulk "Delivery Note" action; ours takes that label and ERPNext's
-				// moves to "Delivery Note (ERPNext)" (sales_order_bulk_delivery.js, an app include). Without it,
-				// ERPNext's stays as it is.
+				// ERPNext's onload adds its own bulk "Delivery Note" action; the item with that label opens our
+				// dialog instead and ERPNext's callback is dropped (sales_order_bulk_delivery.js, an app include).
+				// Without it, ERPNext's stays as it is.
 				const bulk = (frappe.marketplace_integrations || {}).bulk_delivery;
 				if (bulk) {
 					bulk.listen();

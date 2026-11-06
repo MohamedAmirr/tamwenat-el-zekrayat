@@ -46,6 +46,7 @@ from marketplace_integrations.integrations.shopify.constants import (
 	SHOPIFY_WEBHOOK_TOPICS,
 )
 from marketplace_integrations.integrations.shopify.orders import account_for_connection, import_order
+from marketplace_integrations.integrations.shopify.sync_start import OrderBeforeSyncStart
 from marketplace_integrations.services.sales_order_sync_debounce import bump_sync_debounce
 
 _WEBHOOK_SUBSCRIPTIONS_QUERY = """
@@ -561,7 +562,14 @@ def _handle_topic(connection, topic, order_gid=None):
 			# here would just burn through the 5-attempt retry budget for
 			# nothing actionable.
 			return None
-		order = import_order(account, order_gid)
+		try:
+			order = import_order(account, order_gid)
+		except OrderBeforeSyncStart:
+			# Created before the account's "Sync Orders From" cutoff and not imported before:
+			# nothing to retry, so Processed with a visible note.
+			return frappe._(
+				"Shopify order {0} was created before the account's Sync Orders From date and was not imported."
+			).format(order_gid)
 		if order is None:
 			# #109 decision 5, edge case 3: order(id:) returned null (older
 			# than the 60-day read_orders window, or genuinely deleted).

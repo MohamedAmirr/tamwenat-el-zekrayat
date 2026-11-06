@@ -26,6 +26,7 @@
   "shopify_location_name",
   "shopify_inventory_push_enabled",
   "shopify_orders_reconciled_through",
+  "shopify_orders_sync_from",
   "outlet_status_section",
   "external_status",
   "external_status_reason",
@@ -39,6 +40,7 @@
   "erpnext_customer",
   "erpnext_shipping_account",
   "delivery_lead_days",
+  "shopify_shipping_method_rules",
   "enabled",
   "shopify_payments_section",
   "shopify_payment_gateways"
@@ -190,6 +192,14 @@
    "read_only": 1
   },
   {
+   "depends_on": "eval:doc.platform==\"Shopify\"",
+   "description": "Shopify orders created before this date and time are not imported and never get a Sales Order. Orders already imported keep updating. Leave empty to import every order. Enter it in your time zone; it is stored in the System Settings time zone.",
+   "fieldname": "shopify_orders_sync_from",
+   "fieldtype": "Datetime",
+   "label": "Sync Orders From",
+   "permlevel": 1
+  },
+  {
    "fieldname": "outlet_status_section",
    "fieldtype": "Section Break",
    "label": "Marketplace Availability"
@@ -267,10 +277,18 @@
   {
    "default": "0",
    "depends_on": "eval:doc.platform==\"Shopify\" || doc.platform==\"Talabat\"",
-   "description": "Days added to the platform date (Shopify: order date, Talabat: promised date) to set the ERPNext Sales Order Delivery Date. 0 keeps that date.",
+   "description": "Days added to the platform date (Shopify: order date, Talabat: promised date) to set the ERPNext Sales Order Delivery Date. 0 keeps that date. For Shopify this is the fallback used when no Shipping Method Rule matches the order.",
    "fieldname": "delivery_lead_days",
    "fieldtype": "Int",
    "label": "Delivery Lead Days"
+  },
+  {
+   "depends_on": "eval:doc.platform==\"Shopify\"",
+   "description": "Delivery days per Shopify shipping method (exact title). An order's delivery date is its order date plus the days of its shipping method; with several shipping lines the latest date is used. Orders with no matching rule use Delivery Lead Days.",
+   "fieldname": "shopify_shipping_method_rules",
+   "fieldtype": "Table",
+   "label": "Shipping Method Rules",
+   "options": "Shopify Shipping Method Rule"
   },
   {
    "depends_on": "eval:doc.platform==\"Shopify\"",
@@ -296,7 +314,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-11-01 19:00:00.000000",
+ "modified": "2026-11-06 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Marketplace Account",
@@ -331,6 +349,27 @@
    "report": 1,
    "role": "Shopify User",
    "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "Talabat User"
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "Noon User"
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "Shopify User"
   }
  ],
  "sort_field": "creation",

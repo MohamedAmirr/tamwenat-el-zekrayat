@@ -330,7 +330,7 @@ function load_bulk() {
 	return { listeners };
 }
 
-test("onload runs ERPNext's onload with our Delivery Note dialog added, ERPNext's action kept, other items untouched", async () => {
+test("onload runs ERPNext's onload with one Delivery Note item that opens our dialog, other items untouched", async () => {
 	const native_calls = [];
 	const original_onload = (view) => {
 		view.page.add_action_item("Close", () => native_calls.push("close"));
@@ -346,16 +346,14 @@ test("onload runs ERPNext's onload with our Delivery Note dialog added, ERPNext'
 	await settle();
 	assert.deepEqual(
 		added.map((item) => item.label),
-		["Close", "Delivery Note", "Delivery Note (ERPNext)", "Advance Payment"]
+		["Close", "Delivery Note", "Advance Payment"]
 	);
 	added[0].click();
-	added[3].click();
+	added[2].click();
 	assert.deepEqual(native_calls, ["close", "advance"]);
-	// the Delivery Note item no longer runs ERPNext's callback; ERPNext's own keeps working under its new name
+	// the Delivery Note item never runs ERPNext's callback
 	added[1].click();
 	assert.deepEqual(native_calls, ["close", "advance"]);
-	added[2].click();
-	assert.deepEqual(native_calls, ["close", "advance", "native delivery note"]);
 	assert.equal(page.add_action_item, original_method);
 	assert.deepEqual(
 		listeners.map(([event]) => event),
