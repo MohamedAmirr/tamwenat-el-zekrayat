@@ -177,6 +177,15 @@
 		});
 	}
 
+	// Plain-text address lines from the server, each escaped here; mixed Arabic/English lines keep
+	// their own direction (bdi dir=auto) and long words wrap instead of widening the card.
+	function render_address(lines) {
+		const rows = (Array.isArray(lines) ? lines : []).filter((line) => String(line || "").trim());
+		if (!rows.length) return "";
+		const body = rows.map((line) => `<bdi dir="auto">${escape(line)}</bdi>`).join("<br>");
+		return section(__("Delivery Address"), `<div style="overflow-wrap: anywhere;">${body}</div>`);
+	}
+
 	// The Sales Order card: customer, items, marketplace and Bosta details, totals.
 	function render_sales_order_card(data) {
 		let html = `<div style="margin-bottom: var(--margin-md);"><b>${escape(data.sales_order)}</b>`;
@@ -186,6 +195,8 @@
 		const customer = [escape(data.customer)];
 		if (data.phone) customer.push(ltr(data.phone));
 		html += section(__("Customer"), customer.join("<br>"));
+
+		html += render_address(data.address);
 
 		html += render_items(data.items);
 
