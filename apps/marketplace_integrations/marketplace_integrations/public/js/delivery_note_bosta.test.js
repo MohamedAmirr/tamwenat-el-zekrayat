@@ -436,12 +436,14 @@ test("no COD note when the amount matches, the form is unsaved or dirty, or the 
 // ---- Live COD prefill -----------------------------------------------------------------------
 
 // A form whose set_value writes the doc and fires the field handler, as frappe does.
-function prefill_form(mod, doc = {}) {
+function prefill_form(mod, doc = {}, { is_new = true } = {}) {
+	global.frappe.boot = { marketplace_shipping_carriers: ["Bosta"] };
 	const frm = {
+		doctype: "Delivery Note",
 		doc: { name: "new-delivery-note-1", transporter_name: "Bosta", docstatus: 0, custom_cod_confirmed: 0, grand_total: 555.5, currency: "EGP", items: [{ item_code: "A", qty: 1, against_sales_order: "SO-1" }], ...doc },
 		df: {},
 		writes: [],
-		is_new: () => true,
+		is_new: () => is_new,
 		is_dirty: () => true,
 		set_df_property(field, prop, value) {
 			this.df[`${field}.${prop}`] = value;
@@ -515,7 +517,126 @@ test("a response is ignored when the person confirmed or the items changed meanw
 	release();
 	await Promise.all([pending_typed, pending_changed]);
 	assert.deepEqual(typed.writes, []);
-	assert.deepEqual(changed.writes, []);
+	// the stale answer asked once more, and that answer matched the new total
+	assert.deepEqual(changed.writes, [["custom_cod_amount", 10]]);
+});
+
+test("a stale answer re-runs once only, so a form that keeps changing cannot loop", async () => {
+	let n = 0;
+	const { mod, calls } = load({ responses: { get_default_cod: () => 10 } });
+	const frm = prefill_form(mod);
+	const original = global.frappe.call;
+	global.frappe.call = (opts) => {
+		frm.doc.grand_total = 1000 + ++n; // changes again while every request is in flight
+		return original(opts);
+	};
+	await mod.sync_cod(frm);
+	assert.equal(calls.length, 2);
+	assert.deepEqual(frm.writes, []);
+});
+
+test("a saved note is never prefilled, whatever the event", async () => {
+	const { mod, calls } = load({ responses: { get_default_cod: 80 } });
+	const frm = prefill_form(mod, { custom_integration_status: "Not Created" }, { is_new: false });
+	await mod.sync_cod(frm);
+	await mod.prefill_cod(frm);
+	mod.hooks.refresh(frm);
+	mod.schedule_sync(frm);
+	await new Promise((resolve) => setTimeout(resolve, 450));
+	assert.equal(calls.length, 0);
+	assert.deepEqual(frm.writes, []);
+});
+
+test("a carrier the server did not enable is not handled", async () => {
+	const { mod, calls } = load({ responses: { get_default_cod: 80 } });
+	const frm = prefill_form(mod);
+	global.frappe.boot = { marketplace_shipping_carriers: [] };
+	await mod.sync_cod(frm);
+	mod.schedule_sync(frm);
+	assert.equal(frm.__cod_timer, undefined);
+	assert.equal(calls.length, 0);
+});
+
+test("item, tax, shipping and discount events ask once after the burst (400 ms debounce)", async () => {
+	const { mod, calls } = load({ responses: { get_default_cod: 80 } });
+	const frm = prefill_form(mod);
+	const events = [
+		mod.item_events.qty,
+		mod.item_events.rate,
+		mod.tax_events.tax_amount,
+		mod.tax_events.rate,
+		mod.form_events.taxes_add,
+		mod.form_events.taxes_remove,
+		mod.form_events.taxes_and_charges,
+		mod.form_events.shipping_rule,
+		mod.form_events.additional_discount_percentage,
+		mod.form_events.discount_amount,
+		mod.form_events.apply_discount_on,
+	];
+	for (const event of events) assert.equal(typeof event, "function");
+	for (const event of events) event(frm);
+	assert.equal(calls.length, 0);
+	await new Promise((resolve) => setTimeout(resolve, 450));
+	assert.equal(calls.length, 1);
+	assert.equal(frm.doc.custom_cod_amount, 80);
+});
+
+test("the request carries only the grand total and the order of each row", async () => {
+	const { mod, calls } = load({ responses: { get_default_cod: 80 } });
+	await mod.sync_cod(prefill_form(mod, { items: [{ item_code: "A", qty: 3, against_sales_order: "SO-1" }] }));
+	assert.deepEqual(JSON.parse(calls[0].args.doc), { grand_total: 555.5, items: [{ against_sales_order: "SO-1" }] });
+});
+
+test("a timer of one note never writes into the next note opened in the same form", async () => {
+	const { mod, calls } = load({ responses: { get_default_cod: 80 } });
+	const frm = prefill_form(mod);
+	mod.schedule_sync(frm);
+	frm.doc = { ...frm.doc, name: "new-delivery-note-2", transporter_name: "Noon" };
+	mod.onload(frm);
+	assert.equal(frm.__cod_timer, undefined);
+	await new Promise((resolve) => setTimeout(resolve, 450));
+	assert.equal(calls.length, 0);
+	assert.deepEqual(frm.writes, []);
+});
+
+test("switching documents drops the marker and restores the field text; a late answer of the old one is ignored", async () => {
+	const { mod, calls } = load({ responses: { get_default_cod: 80 } });
+	const frm = prefill_form(mod);
+	await mod.sync_cod(frm);
+	assert.equal(frm.__cod_prefilled, 80);
+	frm.doc = { ...frm.doc, name: "new-delivery-note-2", custom_cod_amount: 0 };
+	mod.onload(frm);
+	assert.equal(frm.__cod_prefilled, undefined);
+	assert.equal(frm.df["custom_cod_amount.description"], "");
+	// a request of note 2 in flight while note 3 opens
+	let release;
+	const gate = new Promise((resolve) => (release = resolve));
+	const original = global.frappe.call;
+	global.frappe.call = (opts) => gate.then(() => original(opts));
+	const pending = mod.sync_cod(frm);
+	frm.doc = { ...frm.doc, name: "new-delivery-note-3" };
+	mod.onload(frm);
+	const writes = frm.writes.length;
+	release();
+	await pending;
+	assert.equal(frm.writes.length, writes);
+	assert.ok(calls.length >= 2);
+});
+
+test("saving clears the prefill text and marker so it never names another amount", async () => {
+	const { mod } = load({ responses: { get_default_cod: 80 } });
+	const frm = prefill_form(mod);
+	await mod.sync_cod(frm);
+	assert.match(frm.df["custom_cod_amount.description"], /Filled from the order/);
+	mod.after_save(frm);
+	assert.equal(frm.__cod_prefilled, undefined);
+	assert.equal(frm.df["custom_cod_amount.description"], "");
+	// and the refresh of a note that is no longer new clears it too
+	await mod.sync_cod(frm);
+	frm.is_new = () => false;
+	mod.hooks.refresh(frm);
+	assert.equal(frm.__cod_prefilled, undefined);
+	assert.equal(frm.df["custom_cod_amount.description"], "");
 });
 
 test("a carrier other than Bosta is untouched, and leaving Bosta clears only the unconfirmed prefilled amount", async () => {

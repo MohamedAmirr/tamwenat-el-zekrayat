@@ -144,32 +144,70 @@
 	}
 
 	// ---- Live COD prefill ------------------------------------------------------------------------
-	// The server rule (default_cod) stays the single source of truth: the browser asks it for the amount of the
-	// unsaved form and shows it, still editable and NOT confirmed, so a save recomputes it until the person
-	// edits it. A typed or confirmed amount is never overwritten.
+	// The server rule (default_cod) stays the single source of truth: while a note is being CREATED (new,
+	// unsaved) the browser asks it for the amount of the form and shows it, still editable and NOT confirmed.
+	// A saved note is never prefilled by the browser: the server fills or recomputes the COD on save (until the
+	// person confirms it). A typed or confirmed amount is never overwritten.
+	// Frappe reuses one `frm` for many documents, so the state (`__cod_*`) is reset when the document changes.
 
 	const COD_FIELD = "custom_cod_amount";
 	const PREFILL_DELAY_MS = 400;
 
+	// The shell shows the shipping section for a carrier only when the server enabled it.
+	function carrier_enabled() {
+		const enabled = (frappe.boot && frappe.boot.marketplace_shipping_carriers) || [];
+		return enabled.includes("Bosta");
+	}
+
+	// The child doctypes (taxes) are shared with other documents: only a Delivery Note form is handled.
+	function is_creating(frm) {
+		if (frm.doctype && frm.doctype !== "Delivery Note") return false;
+		return Boolean(frm.is_new && frm.is_new());
+	}
+
 	function can_prefill(frm) {
 		const doc = frm.doc || {};
-		return doc.transporter_name === "Bosta" && !doc.is_return && is_editable(frm) && !doc.custom_cod_confirmed;
+		return (
+			carrier_enabled() &&
+			is_creating(frm) &&
+			doc.transporter_name === "Bosta" &&
+			!doc.is_return &&
+			is_editable(frm) &&
+			!doc.custom_cod_confirmed
+		);
 	}
 
 	// What the answer depends on: a response for another carrier, item set or total is stale.
 	function cod_key(frm) {
 		const doc = frm.doc;
-		return JSON.stringify([
-			doc.transporter_name,
-			doc.grand_total,
-			(doc.items || []).map((row) => [row.item_code, row.qty, row.against_sales_order]),
-		]);
+		return JSON.stringify([doc.transporter_name, doc.grand_total, (doc.items || []).map((row) => row.against_sales_order)]);
 	}
 
 	function cod_description(frm, text) {
 		const field = frm.fields_dict && frm.fields_dict[COD_FIELD];
 		if (field && field.df && frm.__cod_description === undefined) frm.__cod_description = field.df.description || "";
 		frm.set_df_property(COD_FIELD, "description", text === null ? frm.__cod_description || "" : text);
+	}
+
+	// Drops the prefill marker and its text (never the amount).
+	function forget_prefill(frm) {
+		const had = frm.__cod_prefilled !== undefined;
+		delete frm.__cod_prefilled;
+		if (had) cod_description(frm, null);
+	}
+
+	// A form reused for another document starts clean: no timer, marker or text of the previous one.
+	function reset_state(frm) {
+		clearTimeout(frm.__cod_timer);
+		frm.__cod_timer = undefined;
+		forget_prefill(frm);
+		frm.__cod_description = undefined;
+		frm.__cod_programmatic = false;
+		frm.__cod_doc = frm.doc && frm.doc.name;
+	}
+
+	function ensure_state(frm) {
+		if (frm.__cod_doc !== (frm.doc && frm.doc.name)) reset_state(frm);
 	}
 
 	// The programmatic write: the flag keeps the amount handler from reading it as the person's edit.
@@ -184,21 +222,25 @@
 		cod_description(frm, __("Filled from the order: {0}. You can change it.", [money(amount, frm.doc.currency)]));
 	}
 
-	function prefill_cod(frm) {
+	// `retried`: a stale answer asks once more (never loops).
+	function prefill_cod(frm, retried) {
+		ensure_state(frm);
 		if (!can_prefill(frm)) return Promise.resolve();
 		const key = cod_key(frm);
+		const name = frm.doc.name;
+		// only what the server reads
 		const form = {
 			grand_total: frm.doc.grand_total,
-			rounded_total: frm.doc.rounded_total,
-			currency: frm.doc.currency,
-			items: (frm.doc.items || []).map((row) => ({ item_code: row.item_code, qty: row.qty, against_sales_order: row.against_sales_order })),
+			items: (frm.doc.items || []).map((row) => ({ against_sales_order: row.against_sales_order })),
 		};
 		return frappe
 			.call({ method: API + "get_default_cod", type: "POST", args: { doc: JSON.stringify(form) } })
 			.then((r) => {
 				const amount = r && r.message;
-				// stale: the carrier, items or total changed meanwhile, or the person confirmed or typed an amount
-				if (typeof amount !== "number" || !can_prefill(frm) || cod_key(frm) !== key) return;
+				// another document is open now, or the person confirmed or typed an amount, or the carrier left Bosta
+				if (typeof amount !== "number" || frm.doc.name !== name || !can_prefill(frm)) return;
+				// the carrier, items or total changed meanwhile: ask once more
+				if (cod_key(frm) !== key) return retried ? undefined : prefill_cod(frm, true);
 				frm.__cod_prefilled = amount;
 				const write = Number(frm.doc[COD_FIELD]) === amount ? Promise.resolve() : set_cod(frm, amount);
 				return write.then(() => show_prefilled(frm, amount));
@@ -212,58 +254,88 @@
 	function clear_prefill(frm) {
 		const filled = frm.__cod_prefilled;
 		if (filled === undefined) return Promise.resolve();
-		delete frm.__cod_prefilled;
-		cod_description(frm, null);
+		forget_prefill(frm);
 		if (!is_editable(frm) || frm.doc.custom_cod_confirmed || Number(frm.doc[COD_FIELD]) !== filled) return Promise.resolve();
 		return set_cod(frm, null);
 	}
 
+	// Only while the note is being created, and only when the server enabled the carrier.
 	function sync_cod(frm) {
+		ensure_state(frm);
+		if (!carrier_enabled() || !is_creating(frm)) return Promise.resolve();
 		return frm.doc.transporter_name === "Bosta" ? prefill_cod(frm) : clear_prefill(frm);
 	}
 
-	// Item and total edits come in bursts: ask once, after ERPNext finished its totals.
+	// Item, tax, discount and shipping edits come in bursts and ERPNext assigns `grand_total` without a field
+	// event: ask once, after the burst. A timer of another document never writes into the open one.
 	function schedule_sync(frm) {
+		ensure_state(frm);
+		if (!carrier_enabled() || !is_creating(frm)) return;
 		clearTimeout(frm.__cod_timer);
-		frm.__cod_timer = setTimeout(() => sync_cod(frm), PREFILL_DELAY_MS);
-	}
-
-	function prefill_on_refresh(frm) {
-		const amount = frm.doc[COD_FIELD];
-		const empty = amount === null || amount === undefined || amount === "";
-		if (can_prefill(frm) && ((frm.is_new && frm.is_new()) || empty)) return prefill_cod(frm);
+		const name = frm.doc.name;
+		frm.__cod_timer = setTimeout(() => {
+			frm.__cod_timer = undefined;
+			if (frm.doc && frm.doc.name === name) sync_cod(frm);
+		}, PREFILL_DELAY_MS);
 	}
 
 	function refresh(frm) {
+		ensure_state(frm);
 		set_cod_state(frm);
 		show_cod_hint(frm);
-		prefill_on_refresh(frm);
+		// no longer new (saved): the text must not name an amount other than the saved one
+		if (!is_creating(frm)) forget_prefill(frm);
+		else if (can_prefill(frm)) prefill_cod(frm);
+	}
+
+	function onload(frm) {
+		reset_state(frm);
+	}
+
+	function after_save(frm) {
+		clearTimeout(frm.__cod_timer);
+		frm.__cod_timer = undefined;
+		forget_prefill(frm);
 	}
 
 	// Editing the COD is the person's choice: it confirms the amount.
 	function custom_cod_amount(frm) {
 		if (frm.__cod_programmatic) return;
-		if (frm.__cod_prefilled !== undefined) {
-			delete frm.__cod_prefilled;
-			cod_description(frm, null);
-		}
+		forget_prefill(frm);
 		if (frm.doc.transporter_name === "Bosta" && is_editable(frm) && !frm.doc.custom_cod_confirmed) {
 			frm.set_value("custom_cod_confirmed", 1);
 		}
 	}
 
+	const on_change = (frm) => schedule_sync(frm);
 	const form_events = {
 		before_cancel,
 		custom_cod_amount,
+		onload,
+		after_save,
 		transporter: sync_cod,
 		transporter_name: sync_cod,
-		grand_total: schedule_sync,
-		items_remove: schedule_sync,
+		grand_total: on_change,
+		items_remove: on_change,
+		taxes_add: on_change,
+		taxes_remove: on_change,
+		taxes_and_charges: on_change,
+		shipping_rule: on_change,
+		additional_discount_percentage: on_change,
+		discount_amount: on_change,
+		apply_discount_on: on_change,
 	};
 	const item_events = {
-		item_code: (frm) => schedule_sync(frm),
-		qty: (frm) => schedule_sync(frm),
-		rate: (frm) => schedule_sync(frm),
+		item_code: on_change,
+		qty: on_change,
+		rate: on_change,
+		discount_percentage: on_change,
+		discount_amount: on_change,
+	};
+	const tax_events = {
+		charge_type: on_change,
+		rate: on_change,
+		tax_amount: on_change,
 	};
 
 	// ---- Cancel at Bosta ------------------------------------------------------------------------
@@ -571,6 +643,7 @@
 		if (frappe.ui && frappe.ui.form) {
 			frappe.ui.form.on("Delivery Note", form_events);
 			frappe.ui.form.on("Delivery Note Item", item_events);
+			frappe.ui.form.on("Sales Taxes and Charges", tax_events);
 		}
 	}
 
@@ -590,6 +663,10 @@
 			schedule_sync,
 			form_events,
 			item_events,
+			tax_events,
+			onload,
+			after_save,
+			refresh,
 			before_send,
 			show_cod_hint,
 			set_cod_state,

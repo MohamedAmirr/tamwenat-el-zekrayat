@@ -22,6 +22,9 @@ def _bosta_note(delivery_note, ptype):
 	return doc
 
 
+MAX_FORM_ROWS = 200
+
+
 @frappe.whitelist(methods=["POST"])
 def fetch_label(delivery_note: str):
 	"""Fetch and attach the Bosta label of a Created note (needs write permission)."""
@@ -55,23 +58,51 @@ def get_cod_hint(delivery_note: str):
 
 @frappe.whitelist(methods=["POST"])
 def get_default_cod(doc):
-	"""The COD the server rule would set for an unsaved Delivery Note form (a live prefill, never a write).
-	Only the Sales Orders of the rows and the grand total are read from the form; the rule stays the one in
-	``default_cod``. The transient document is never saved."""
+	"""The COD the server rule would set for a new, unsaved Delivery Note form (a live prefill, never a write).
+	Only the grand total and the Sales Order name of each row are read from the form (at most
+	``MAX_FORM_ROWS`` rows); the rule stays the one in ``default_cod``. The transient document is never
+	saved. The Sales Order is read, and so permission-checked, only when exactly one is referenced:
+	``default_cod`` ignores the order when there are several."""
 	frappe.has_permission("Delivery Note", "read", throw=True)
+	invalid = _("The Delivery Note data is not valid.")
 	values = frappe.parse_json(doc) if isinstance(doc, str) else doc
 	if not isinstance(values, dict):
-		frappe.throw(_("The Delivery Note data is not valid."))
+		frappe.throw(invalid)
 	rows = values.get("items") or []
 	if not isinstance(rows, list):
-		frappe.throw(_("The Delivery Note data is not valid."))
-	orders = [row.get("against_sales_order") for row in rows if isinstance(row, dict) and row.get("against_sales_order")]
-	for order in set(orders):
-		frappe.has_permission("Sales Order", "read", doc=order, throw=True)
+		frappe.throw(invalid)
+	total = values.get("grand_total")
+	if total in (None, ""):
+		total = 0
+	if isinstance(total, bool) or not isinstance(total, (int, float, str)):
+		frappe.throw(invalid)
+	try:
+		total = float(total)
+	except ValueError:
+		frappe.throw(invalid)
+	if total != total or total in (float("inf"), float("-inf")):
+		frappe.throw(invalid)
+	orders = []
+	for row in rows[:MAX_FORM_ROWS]:
+		if not isinstance(row, dict):
+			frappe.throw(invalid)
+		order = row.get("against_sales_order")
+		if order in (None, ""):
+			continue
+		if not isinstance(order, str):
+			frappe.throw(invalid)
+		if order not in orders:
+			orders.append(order)
+	if len(orders) == 1:
+		# a missing order answers like a forbidden one: existence is not revealed
+		if not frappe.db.exists("Sales Order", orders[0]) or not frappe.has_permission(
+			"Sales Order", "read", doc=orders[0]
+		):
+			frappe.throw(_("Not permitted"), frappe.PermissionError)
 	draft = frappe.get_doc(
 		{
 			"doctype": "Delivery Note",
-			"grand_total": flt(values.get("grand_total")),
+			"grand_total": flt(total),
 			"items": [{"doctype": "Delivery Note Item", "against_sales_order": order} for order in orders],
 		}
 	)

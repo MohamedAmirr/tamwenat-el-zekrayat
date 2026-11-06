@@ -816,7 +816,14 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 	def _form(self, order=None, grand_total=0):
 		"""An unsaved Delivery Note form as the browser posts it."""
 		items = [{"item_code": "X", "qty": 1, "against_sales_order": order}] if order else []
-		return json.dumps({"items": items, "grand_total": grand_total, "rounded_total": round(grand_total), "currency": "EGP"})
+		return json.dumps(
+			{
+				"items": items,
+				"grand_total": grand_total,
+				"rounded_total": round(grand_total),
+				"currency": "EGP",
+			}
+		)
 
 	def test_the_live_default_cod_is_the_grand_total_of_an_unpaid_order_not_the_rounded_one(self):
 		order = self.make_order(rate=555.5)
@@ -855,11 +862,58 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 	def test_the_live_default_cod_saves_nothing(self):
 		order = self.make_order(rate=100)
 		notes = frappe.db.count("Delivery Note")
-		with patch("frappe.model.document.Document.save") as save, patch("frappe.model.document.Document.insert") as insert:
+		with (
+			patch("frappe.model.document.Document.save") as save,
+			patch("frappe.model.document.Document.insert") as insert,
+		):
 			bosta_shipments.get_default_cod(self._form(order.name, 100))
 		save.assert_not_called()
 		insert.assert_not_called()
 		self.assertEqual(frappe.db.count("Delivery Note"), notes)
+
+	def _raw_form(self, rows, grand_total=100):
+		return json.dumps({"items": rows, "grand_total": grand_total})
+
+	def test_the_live_default_cod_checks_the_order_only_when_exactly_one_is_referenced(self):
+		first, second = self.make_order(rate=100), self.make_order(rate=100)
+		rows = [{"against_sales_order": first.name}, {"against_sales_order": second.name}]
+		email, _role = make_role_user(self, "Cod Note Reader", {"Delivery Note": ["read"]})
+		frappe.set_user(email)
+		try:
+			# several orders: default_cod ignores them, so none is read and the answer is the grand total
+			self.assertEqual(bosta_shipments.get_default_cod(self._raw_form(rows, 100)), 100)
+			with self.assertRaises(frappe.PermissionError):
+				bosta_shipments.get_default_cod(self._raw_form(rows[:1], 100))
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_the_live_default_cod_answers_a_missing_order_like_a_forbidden_one(self):
+		with self.assertRaises(frappe.PermissionError):
+			bosta_shipments.get_default_cod(self._raw_form([{"against_sales_order": "SO-NO-SUCH"}]))
+
+	def test_the_live_default_cod_rejects_non_string_orders_and_non_numeric_totals(self):
+		for rows, total in (
+			([{"against_sales_order": ["SO-1"]}], 100),
+			([{"against_sales_order": 5}], 100),
+			(["not a row"], 100),
+			([], "abc"),
+			([], {"a": 1}),
+			([], True),
+		):
+			with self.assertRaises(frappe.ValidationError, msg=repr((rows, total))):
+				bosta_shipments.get_default_cod(self._raw_form(rows, total))
+		with self.assertRaises(frappe.ValidationError):
+			bosta_shipments.get_default_cod(json.dumps({"items": "x"}))
+		with self.assertRaises(frappe.ValidationError):
+			bosta_shipments.get_default_cod(json.dumps([1]))
+
+	def test_the_live_default_cod_considers_only_the_first_rows(self):
+		order = self.make_order(rate=100)
+		# the order named after the cap is never read: only the first row's order counts
+		rows = [{"against_sales_order": order.name}]
+		rows += [{"item_code": "X"}] * (bosta_shipments.MAX_FORM_ROWS - 1)
+		rows += [{"against_sales_order": "SO-AFTER-THE-CAP"}]
+		self.assertEqual(bosta_shipments.get_default_cod(self._raw_form(rows, 100)), 100)
 
 	def test_request_refuses_a_note_changed_between_validation_and_the_lock(self):
 		note = self.make_note()
