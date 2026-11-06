@@ -640,7 +640,42 @@ entry. `services/marketplace_order_reconciliation.py` holds the coordinator
 `write_catch_up_summary()` Sync Log row per account (orders imported, first
 syncs scheduled, failures; trigger source Scheduled Reconciliation) and the
 cancelled-order status constants shared by `sales_order_sync` and the
-`reconcile_cancelled_shopify_orders` patch. The nightly job has no age or date
-cutoff (open decision). The production System Settings
+`reconcile_cancelled_shopify_orders` patch. The production System Settings
 timezone must be checked before deployment; dev/test scheduler evidence is
 Asia/Kolkata.
+
+**Shopify "Sync Orders From" cutoff (decided 2026-11-06).** Shopify went live at
+order #25175, but older orders were imported (updated_at listing, ORDERS_UPDATED
+webhooks) and became Sales Orders. `Marketplace Account.shopify_orders_sync_from`
+(Datetime, Shopify only, label "Sync Orders From", permission level 1: System
+Manager edits it, platform users only read it; the Custom DocPerm patch
+`reconcile_marketplace_account_permlevel1_docperms` copies the level 1 rows on sites
+that already have Custom DocPerm rows for the doctype) is compared with
+`Marketplace Order.received_on` (Shopify `createdAt`, normalized to the System
+Settings time zone by `order_mapper`; both are naive site-time datetimes). Empty
+means no cutoff, an order created exactly at the cutoff is imported. All the
+logic is in `integrations/shopify/sync_start.py` (`is_before_sync_start`,
+`clamp_listing_start`, `OrderBeforeSyncStart`):
+
+- `import_order()` raises `OrderBeforeSyncStart` for an order before the cutoff
+  that has no Marketplace Order yet: no row, no status, nothing written. An existing
+  row keeps updating whatever the cutoff (cleaning up old rows is out of scope).
+- `import_orders_updated_between()` takes a `skipped` list (like `scheduled`); a
+  skipped order is neither imported nor an error. The nightly Sync Log summary adds
+  `skipped_before_sync_start` when it is non-zero; the manual range result reports it
+  as `skipped_mappings`, which the shared status dialog already shows as "skipped".
+- The listing start of the sweep and of a manual range is `max(start, cutoff)`;
+  changing the cutoff never resets `shopify_orders_reconciled_through`. A manual range
+  that ends before the cutoff is refused (`queue_order_import`).
+- The webhook handler (`_handle_topic`) marks such a delivery `Processed` with a
+  translated note (no retry, no debounce bump).
+- The cutoff acts ONLY at import (decided 2026-11-06: "old orders are handled
+  manually"). It never examines an existing Marketplace Order: the Sales Order sync
+  (`_sync_sales_order`), the nightly unlinked catch-up and webhook bumps treat old
+  existing rows exactly as before, so an old existing unlinked row can still reach a
+  Sales Order (by the catch-up, a webhook, or the manual button) until the user closes
+  or deletes it by hand.
+- `_as_shopify_timestamp()` now reads a naive datetime as System Settings time
+  zone wall-clock time (it used to use the server process zone, which is not the
+  site zone), so the listing watermark and the cutoff reach Shopify as the right UTC
+  instant.

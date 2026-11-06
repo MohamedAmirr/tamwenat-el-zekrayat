@@ -212,6 +212,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		total_taxes=0,
 		duties_total=0,
 		payment_terms=None,
+		received_on=None,
 	):
 		if order_total is None:
 			order_total = flt(transaction_amount) + flt(shipping_total)
@@ -234,6 +235,7 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			{
 				"external_order_id": f"gid://shopify/Order/{self.suffix}-{frappe.generate_hash(length=4)}",
 				"processed_on": nowdate(),
+				"received_on": received_on,
 				"cancelled_at": cancelled_at,
 				"external_financial_status": financial_status,
 				"customer_email": customer_email,
@@ -2516,6 +2518,19 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertFalse(order.last_sync_error)
 		self.assertEqual([(row.sync_type, row.status) for row in logs], [("Sales Order Sync", "Success")])
 		self.assertFalse(frappe.db.exists("Sales Order", {"custom_marketplace_order": order.name}))
+
+	def test_sync_orders_from_never_blocks_the_sales_order_step_of_an_existing_row(self):
+		# The cutoff only gates the import of orders that have no Marketplace Order yet.
+		account = self._make_shopify_account()
+		account.db_set("shopify_orders_sync_from", "2026-09-27 12:00:00", update_modified=False)
+		order, _mapping = self._make_shopify_order(account, received_on="2026-09-27 11:59:59")
+
+		result = sync_sales_order(order.name)
+		order.reload()
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertTrue(order.erpnext_sales_order)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
 
 	def test_cancelling_after_an_earlier_sync_error_clears_the_obsolete_error(self):
 		"""A COD order first blocked as unpaid, then cancelled, must not stay in Sync Error."""

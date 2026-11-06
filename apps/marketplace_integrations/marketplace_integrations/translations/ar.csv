@@ -1945,3 +1945,7 @@ Sales Invoice {0} has a credit note; check Sales Order {1} by hand.,لفاتور
 "Sales Invoice {0} does not cover the whole Sales Order {1} (invoice {2}, order {3}); check it first.","لا تغطي فاتورة المبيعات {0} أمر البيع {1} بالكامل (الفاتورة {2}، الطلب {3})؛ راجعها أولًا."
 "Filled from the order: {0}. You can change it.","تمت التعبئة من الطلب: {0}. يمكنك تغييره."
 The Delivery Note data is not valid.,بيانات مذكرة التسليم غير صالحة.
+Sync Orders From,مزامنة الطلبات من
+Shopify orders created before this date and time are not imported and never get a Sales Order. Orders already imported keep updating. Leave empty to import every order. Enter it in your time zone; it is stored in the System Settings time zone.,"لا يتم استيراد طلبات Shopify التي أُنشئت قبل هذا التاريخ والوقت، ولا يُنشأ لها أمر بيع أبدًا. الطلبات المستوردة بالفعل تستمر في التحديث. اتركه فارغًا لاستيراد كل الطلبات. أدخله بمنطقتك الزمنية؛ ويُخزَّن بالمنطقة الزمنية في إعدادات النظام."
+Shopify order {0} was created before the account's Sync Orders From date and was not imported.,"تم إنشاء طلب Shopify {0} قبل تاريخ ""مزامنة الطلبات من"" في الحساب ولم يتم استيراده."
+"This range ends before the account's Sync Orders From date ({0}). Orders created before that date are not imported.","تنتهي هذه الفترة قبل تاريخ ""مزامنة الطلبات من"" في الحساب ({0}). لا يتم استيراد الطلبات التي أُنشئت قبل ذلك التاريخ."

@@ -6,8 +6,10 @@
 import re
 import time
 from datetime import UTC
+from zoneinfo import ZoneInfo
 
 import frappe
+import frappe.utils.data
 from frappe import _
 from frappe.utils import add_to_date, cstr, escape_html, get_datetime, now_datetime
 
@@ -21,6 +23,15 @@ from marketplace_integrations.integrations.shopify.constants import (
 	SHOPIFY_ORDERS_PAGE_SIZE,
 )
 from marketplace_integrations.integrations.shopify.order_mapper import normalize_order
+from marketplace_integrations.integrations.shopify.sync_start import (
+	OrderBeforeSyncStart,
+	clamp_listing_start,
+	get_sync_start,
+	is_before_sync_start,
+)
+from marketplace_integrations.marketplace_integrations.doctype.marketplace_order.marketplace_order import (
+	compute_order_identity_key,
+)
 from marketplace_integrations.services.marketplace_order_reconciliation import (
 	schedule_first_syncs,
 	write_catch_up_summary,
@@ -228,7 +239,10 @@ def _execute_order_query(client, variables):
 
 
 def import_order(account, order_gid):
-	"""Fetch one canonical Shopify order and upsert it by Shopify GID."""
+	"""Fetch one canonical Shopify order and upsert it by Shopify GID.
+
+	Raises ``OrderBeforeSyncStart`` (nothing written) for a not-yet-imported order created before
+	the account's "Sync Orders From" cutoff."""
 	if isinstance(account, str):
 		account = frappe.get_doc("Marketplace Account", account)
 	if account.platform != "Shopify" or account.connection_doctype != "Shopify Connection":
@@ -253,6 +267,14 @@ def import_order(account, order_gid):
 	if not order:
 		return None
 	normalized = normalize_order(order)
+
+	# "Sync Orders From" cutoff: an order created before it is not imported at all unless a row
+	# for it already exists (that row keeps updating).
+	if is_before_sync_start(account, normalized.get("received_on")) and not frappe.db.exists(
+		"Marketplace Order",
+		{"order_identity_key": compute_order_identity_key(account.name, normalized["external_order_id"])},
+	):
+		raise OrderBeforeSyncStart(order_gid)
 
 	def is_stale(existing):
 		stored_payload = existing.latest_payload
@@ -382,7 +404,12 @@ def _needs_first_sync(order):
 
 
 def _import_order_isolated(
-	account, order_gid, bump_linked_changes=False, trigger_source="Manual", bump_unlinked=False
+	account,
+	order_gid,
+	bump_linked_changes=False,
+	trigger_source="Manual",
+	bump_unlinked=False,
+	skipped=None,
 ):
 	"""Import one order under its own DB savepoint, isolating its failure
 	from every other order in the same range-import/reconciliation run (#109
@@ -421,6 +448,12 @@ def _import_order_isolated(
 		elif _needs_first_sync(order):
 			bump_sync_debounce(order.name, trigger_source)
 			order.flags.first_sync_scheduled = True
+	except OrderBeforeSyncStart:
+		# Created before the account's "Sync Orders From" cutoff: nothing was written; not an error.
+		frappe.db.rollback(save_point=savepoint)
+		if skipped is not None:
+			skipped.append(order_gid)
+		return None, None
 	except Exception as exc:
 		frappe.db.rollback(save_point=savepoint)
 		return None, str(exc)
@@ -439,6 +472,7 @@ def import_orders_updated_between(
 	bump_linked_changes=False,
 	bump_unlinked=False,
 	scheduled=None,
+	skipped=None,
 ):
 	"""List order ids updated in ``[start, end]`` (``end`` defaults to no
 	upper bound) via ``list_order_ids_updated_since()`` and ``import_order()``
@@ -478,6 +512,9 @@ def import_orders_updated_between(
 
 	``scheduled`` (an optional list) receives the name of each imported order whose first sync
 	this call scheduled, so a caller can count them.
+
+	``skipped`` (an optional list) receives the GID of each order left out because it was created
+	before the account's "Sync Orders From" cutoff; those are neither imported nor errors.
 	"""
 	imported = []
 	errors = []
@@ -495,6 +532,7 @@ def import_orders_updated_between(
 			bump_linked_changes=bump_linked_changes,
 			trigger_source=trigger_source,
 			bump_unlinked=bump_unlinked,
+			skipped=skipped,
 		)
 		if error:
 			errors.append({"order_gid": order_gid, "error": error})
@@ -591,9 +629,13 @@ def reconcile_all_accounts_orders(account_name=None, catch_up_unlinked=False):
 	):
 		try:
 			account = frappe.get_doc("Marketplace Account", row.name)
-			start = row.shopify_orders_reconciled_through or add_to_date(now_datetime(), days=-60)
+			# Never list back past the "Sync Orders From" cutoff; the watermark itself is untouched.
+			start = clamp_listing_start(
+				account, row.shopify_orders_reconciled_through or add_to_date(now_datetime(), days=-60)
+			)
 			run_started = now_datetime()
 			import_scheduled = []
+			import_skipped = []
 			_imported, errors = import_orders_updated_between(
 				account,
 				ShopifyClient(account.connection),
@@ -602,6 +644,7 @@ def reconcile_all_accounts_orders(account_name=None, catch_up_unlinked=False):
 				bump_linked_changes=True,
 				bump_unlinked=catch_up_unlinked,
 				scheduled=import_scheduled,
+				skipped=import_skipped,
 			)
 			# First syncs the import itself scheduled (new orders, cancelled ones included) are
 			# counted here; the catch-up below leaves them out so no order is counted twice.
@@ -643,7 +686,11 @@ def reconcile_all_accounts_orders(account_name=None, catch_up_unlinked=False):
 				)
 			if catch_up_unlinked:
 				write_catch_up_summary(
-					account.name, imported=len(_imported), scheduled=scheduled, failures=len(errors)
+					account.name,
+					imported=len(_imported),
+					scheduled=scheduled,
+					failures=len(errors),
+					skipped=len(import_skipped),
 				)
 		except Exception:
 			error = frappe.get_traceback()
@@ -675,6 +722,15 @@ def queue_order_import(account_name, start, end):
 		frappe.throw(_("A valid Shopify order import date range is required."))
 	if (end_dt - start_dt).days > MAX_ORDER_IMPORT_DAYS:
 		frappe.throw(_("Shopify order imports are limited to 60 days."))
+	cutoff = get_sync_start(account)
+	if cutoff and end_dt < cutoff:
+		frappe.throw(
+			_(
+				"This range ends before the account's Sync Orders From date ({0}). "
+				"Orders created before that date are not imported."
+			).format(frappe.format(cutoff, {"fieldtype": "Datetime"}))
+		)
+	start_dt = clamp_listing_start(account, start_dt)
 	job_id = frappe.generate_hash(length=16)
 	owner = frappe.session.user
 	_set_import_status(job_id, {"owner": owner, "status": "queued", "processed": 0})
@@ -720,8 +776,9 @@ def run_order_import(job_id_for_result, owner, account_name, start, end):
 		# (#109 decision 6) - the manual range job and the scheduled
 		# reconciliation must never reimplement the "list then import" loop
 		# independently.
+		skipped = []
 		imported, errors = import_orders_updated_between(
-			account, client, start, end=end, on_progress=report, bump_unlinked=True
+			account, client, start, end=end, on_progress=report, bump_unlinked=True, skipped=skipped
 		)
 		_set_import_status(
 			job_id_for_result,
@@ -729,7 +786,7 @@ def run_order_import(job_id_for_result, owner, account_name, start, end):
 				"owner": owner,
 				"status": "completed",
 				"processed": len(imported),
-				"result": _order_import_result_payload(imported, errors),
+				"result": _order_import_result_payload(imported, errors, len(skipped)),
 			},
 		)
 	except Exception as exc:
@@ -739,7 +796,7 @@ def run_order_import(job_id_for_result, owner, account_name, start, end):
 		raise
 
 
-def _order_import_result_payload(imported, errors):
+def _order_import_result_payload(imported, errors, skipped=0):
 	"""Shape the completed job's result to match the same
 	{results, total, succeeded, failed, skipped_mappings, truncated} contract
 	the shared job-status dialog (public/js/shopify_catalog_push_status.js,
@@ -758,7 +815,8 @@ def _order_import_result_payload(imported, errors):
 		"total": len(results),
 		"succeeded": len(imported),
 		"failed": len(errors),
-		"skipped_mappings": 0,
+		# Orders created before the account's "Sync Orders From" cutoff, shown by the dialog as skipped.
+		"skipped_mappings": skipped,
 		"truncated": False,
 	}
 
@@ -772,4 +830,11 @@ def _set_import_status(job_id, state):
 
 
 def _as_shopify_timestamp(value):
-	return get_datetime(value).astimezone(UTC).isoformat().replace("+00:00", "Z")
+	"""A Shopify UTC timestamp for a datetime. A naive datetime is a System Settings time zone
+	wall-clock value (what ``now_datetime()`` and the Datetime fields hold), not the server's
+	zone, so it is attached to that zone before converting to UTC."""
+	value = get_datetime(value)
+	if value.tzinfo is None:
+		# Looked up through the module at call time so tests can patch it.
+		value = value.replace(tzinfo=ZoneInfo(frappe.utils.data.get_system_timezone()))
+	return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
