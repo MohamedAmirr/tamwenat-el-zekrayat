@@ -227,6 +227,7 @@ class IntegrationTestOrderHoverCard(IntegrationTestCase):
 				"sales_order",
 				"customer",
 				"phone",
+				"address",
 				"status",
 				"currency",
 				"total",
@@ -316,6 +317,89 @@ class IntegrationTestOrderHoverCard(IntegrationTestCase):
 
 		self.assertEqual(card["marketplace"]["reference"], f"#PLAT-{self.suffix}")
 		self.assertIsNone(card["marketplace"]["last_sync"])
+
+	def _set_order_address(self, **values):
+		for fieldname, value in values.items():
+			frappe.db.set_value("Sales Order", self.fixture.name, fieldname, value, update_modified=False)
+
+	def _set_marketplace_address(self, address, city):
+		frappe.db.set_value(
+			"Marketplace Order",
+			self.marketplace_order.name,
+			{"customer_formatted_address": address, "customer_city": city},
+		)
+
+	def test_address_is_the_shipping_address_as_plain_lines(self):
+		cairo = "القاهرة"  # Arabic text survives untouched
+		self._set_order_address(
+			shipping_address=f"<div>12 Nile St<br>Apt 4</div><div>{cairo} &amp; Co</div>\r\n<br><br>",
+			address_display="Billing Street<br>Giza",
+		)
+
+		card = get_sales_order_card(self.fixture.name)
+
+		self.assertEqual(card["address"], ["12 Nile St", "Apt 4", f"{cairo} & Co"])
+
+	def test_address_falls_back_to_the_billing_address_display(self):
+		self._set_order_address(shipping_address="", address_display="Billing Street<br>Giza")
+
+		self.assertEqual(get_sales_order_card(self.fixture.name)["address"], ["Billing Street", "Giza"])
+
+	def test_address_is_empty_when_there_is_none_anywhere(self):
+		self._set_order_address(shipping_address="", address_display="")
+
+		self.assertEqual(get_sales_order_card(self.fixture.name)["address"], [])
+
+	def test_address_falls_back_to_the_marketplace_order_for_a_platform_user(self):
+		self._set_order_address(shipping_address="", address_display="")
+		self._set_marketplace_address("5 Tahrir Sq\nFloor 2", "Cairo")
+		email = self._make_platform_user("Hover Address Platform")
+
+		card = self._call_as(email)
+
+		self.assertEqual(card["address"], ["5 Tahrir Sq", "Floor 2", "Cairo"])
+
+	def test_marketplace_address_fallback_is_not_used_when_the_sales_order_has_one(self):
+		self._set_order_address(shipping_address="Order Street", address_display="")
+		self._set_marketplace_address("5 Tahrir Sq", "Cairo")
+
+		self.assertEqual(get_sales_order_card(self.fixture.name)["address"], ["Order Street"])
+
+	def test_marketplace_address_fallback_needs_the_platform_role(self):
+		self._set_order_address(shipping_address="", address_display="")
+		self._set_marketplace_address("5 Tahrir Sq", "Cairo")
+		reader, _role = make_role_user(self, "Hover Address SO Only", {"Sales Order": ["read"]})
+		no_platform, _role = make_role_user(
+			self, "Hover Address No Platform", {"Sales Order": ["read"], "Marketplace Order": ["read"]}
+		)
+		other_platform = self._make_platform_user("Hover Address Talabat", "Talabat User")
+
+		for email in (reader, no_platform, other_platform):
+			card = self._call_as(email)
+			self.assertEqual(card["address"], [], email)
+			self.assertNotIn("Tahrir", frappe.as_json(card))
+
+	def test_sales_order_address_html_tags_are_stripped(self):
+		self._set_order_address(
+			shipping_address="<img src=x onerror=alert(1)>Street 1<script>alert(2)</script><br><b>Zone</b>",
+			address_display="",
+		)
+
+		self.assertEqual(get_sales_order_card(self.fixture.name)["address"], ["Street 1alert(2)", "Zone"])
+
+	def test_escaped_payload_comes_back_as_literal_text_the_client_must_escape(self):
+		# The lines are plain text, not safe HTML: callers escape them (the card JS does).
+		self._set_order_address(shipping_address="&lt;img src=x onerror=alert(1)&gt;", address_display="")
+
+		self.assertEqual(get_sales_order_card(self.fixture.name)["address"], ["<img src=x onerror=alert(1)>"])
+
+	def test_marketplace_order_address_is_raw_text_not_stripped(self):
+		self._set_order_address(shipping_address="", address_display="")
+		self._set_marketplace_address("Villa <5> gate\n\n  Zone 2  ", "Cairo")
+
+		self.assertEqual(
+			get_sales_order_card(self.fixture.name)["address"], ["Villa <5> gate", "Zone 2", "Cairo"]
+		)
 
 	def test_bosta_part_shows_the_stored_delivery_counts(self):
 		self._make_summary()
