@@ -619,14 +619,18 @@ an unchanged settled cancelled order is not bumped again. Webhook, Talabat
 (`bump=True` / webhook bump of a new order) and Noon (bumps every new order)
 already scheduled new rows. The hourly stuck sweep (`unlinked_due`) also takes a
 cancelled Shopify order that is still `Syncing` with no window, so a straggler
-recovers within about an hour. This holds for the daily watermark sweep too: it
+recovers within about an hour. This holds for the nightly watermark sweep too: it
 schedules the first sync of every order it inserts, cancelled or not.
 
 At `23:59` site time, a small coordinator queues one deduplicated long job per
 enabled Shopify/Noon account. Only this nightly Shopify job opts into unlinked
-catch-up and canceled-paid retries; the existing daily Shopify watermark sweep
-reconciles linked-order changes and schedules the first sync of every order it
-inserts (cancelled or not), but not of older unlinked orders. Shopify uses its existing
+catch-up and canceled-paid retries. It is the only scheduled Shopify order
+reconciliation (#478 removed the duplicate `daily` hook entry): it reconciles
+linked-order changes and schedules the first sync of every order it inserts
+(cancelled or not). `_import_order_isolated()` retries a lock wait timeout
+(`frappe.QueryTimeoutError`, 1205) up to 3 times total, 2 s apart, after the
+savepoint rollback, and never catches an RQ `BaseTimeoutException` (neither does
+the per-account loop), so a job timeout fails the job. Shopify uses its existing
 persisted watermark and overlap. Noon uses
 its existing seven-day order import window and records `Scheduled
 Reconciliation` as the debounce trigger. The Noon catch-up is a flag

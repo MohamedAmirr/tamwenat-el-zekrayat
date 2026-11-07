@@ -185,7 +185,7 @@ Sources (not re-read for this change): shopify.dev `orderEditBegin`, `orderEditS
 
 ## Known limits
 
-- **Unlinked-order recovery (#354).** A new Shopify order whose webhook never arrives, or whose first Sales Order sync fails transiently, is retried only by the nightly 23:59 catch-up (once per night per order, see "Order cancellation and nightly catch-up"), a new webhook for it, or the "Send to ERPNext" button. The hourly/daily sweeps still do not schedule it. The nightly catch-up has no age or date cutoff yet (open decision): every unlinked, non-`Cancelled` order of the account is scheduled again each night. Needs Attention lists such orders as Sync Error with Retry. The reconciliation sweeps only look at orders that already have a linked Sales Order.
+- **Unlinked-order recovery (#354).** A new Shopify order whose webhook never arrives, or whose first Sales Order sync fails transiently, is retried only by the nightly 23:59 catch-up (once per night per order, see "Order cancellation and nightly catch-up"), a new webhook for it, or the "Send to ERPNext" button. The hourly sweeps still do not schedule it. The nightly catch-up has no age or date cutoff yet (open decision): every unlinked, non-`Cancelled` order of the account is scheduled again each night. Needs Attention lists such orders as Sync Error with Retry. The reconciliation sweeps only look at orders that already have a linked Sales Order.
 - **HTTP 429/5xx are not retried.** `ShopifyClient.execute()` retries a GraphQL `THROTTLED` response (HTTP 200 with `errors[]`, bounded by `MAX_THROTTLE_ATTEMPTS`) but any non-2xx response other than a single 401 token refresh raises immediately ("Shopify GraphQL request failed"), including HTTP 429 and 5xx. Hardening gap, not changed. Webhook deliveries are covered by the hourly errored-delivery sweep; inventory chunks are re-covered by the next sweep tick.
 - **Unused webhook headers.** `X-Shopify-Event-Id` and `X-Shopify-Triggered-At` are sent by Shopify but not used; deduplication is by `X-Shopify-Webhook-Id` only, and ordering by the order's `updatedAt` from the refetch.
 
@@ -239,12 +239,16 @@ refund in Shopify. Later Shopify imports preserve the terminal `Cancelled`
 state for unlinked canceled orders. Linked orders continue through the normal
 Sales Order reconciliation path.
 
-The existing daily Shopify watermark reconciliation remains in place. A
-separate nightly coordinator queues one deduplicated long job per enabled
-Shopify or Noon account at `23:59` site time. Only the nightly Shopify job
-enables unlinked-order catch-up; the existing daily watermark sweep reconciles
-linked-order changes and schedules the first sync of every order it inserts
-(cancelled or not), but not of older unlinked orders. Shopify reuses its persisted watermark
+Shopify order reconciliation runs once a night per account (#478): a nightly
+coordinator queues one deduplicated long job (3600 s) per enabled
+Shopify or Noon account at `23:59` site time. There is no separate `daily`
+scheduler entry for it any more (it used to overlap this job on the default
+queue with a 300 s timeout). The nightly Shopify job reconciles
+linked-order changes, schedules the first sync of every order it inserts
+(cancelled or not) and opts into unlinked-order catch-up. A lock wait timeout
+(1205) on one order is retried up to 3 times in the same run, 2 s apart, before
+the order is logged as a failure; an RQ job timeout is never caught per order
+or per account, so it fails the job visibly. Shopify reuses its persisted watermark
 and overlap; Noon reuses its seven-day import window. Imports update
 Marketplace Orders and schedule the existing debounce sync; they do not create
 Sales Orders inline. Every order an import creates is scheduled for its first
