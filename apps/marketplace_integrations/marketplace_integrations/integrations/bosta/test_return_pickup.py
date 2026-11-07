@@ -115,6 +115,7 @@ class IntegrationTestBostaReturnPickup(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual(payload["dropOffAddress"], {"city": "EG-01", "firstLine": "12 Example Street"})
 		self.assertEqual(payload["businessLocationId"], "LOC-1")
 		self.assertNotIn("returnAddress", payload)
+		self.assertNotIn("specs", payload)
 		self.assertEqual(payload["businessReference"], draft.name)
 		self.assertEqual(payload["uniqueBusinessReference"], draft.name)
 

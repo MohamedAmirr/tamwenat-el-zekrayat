@@ -336,7 +336,36 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		self.assertEqual(payload["businessReference"], note.name)
 		self.assertEqual(payload["uniqueBusinessReference"], note.name)
 		self.assertEqual(payload["dropOffAddress"], {"city": "EG-01", "firstLine": "12 Example Street"})
+		details = payload["specs"]["packageDetails"]
+		self.assertEqual(details["itemsCount"], sum(int(row.qty) for row in note.items))
+		self.assertEqual(
+			details["description"], ", ".join(f"{int(row.qty)}x {row.item_name}" for row in note.items)
+		)
 		self.assertEqual(frappe.db.get_value("Integration Request", log, "custom_result"), "Success")
+
+	# -- the parcel contents (package_details) -----------------------------------------------
+
+	@staticmethod
+	def _rows(*rows):
+		return frappe._dict(items=[frappe._dict(qty=qty, item_name=name, item_code="TZ-1") for qty, name in rows])
+
+	def test_package_details_is_quantity_and_name_per_row(self):
+		doc = self._rows((2, "Lays"), (1, "راجا"), (0, "Skipped"))
+
+		self.assertEqual(shipment.package_details(doc), {"itemsCount": 3, "description": "2x Lays, 1x راجا"})
+
+	def test_package_details_sends_a_long_description_in_full_and_counts_a_fraction_as_one_piece(self):
+		names = ["Item number %d with a long name" % i for i in range(30)]
+		details = shipment.package_details(self._rows(*[(1, name) for name in names]))
+
+		self.assertEqual(details["description"], ", ".join(f"1x {name}" for name in names))
+		self.assertGreater(len(details["description"]), 250)
+		self.assertEqual(details["itemsCount"], 30)
+		self.assertEqual(shipment.package_details(self._rows((0.5, "Cheese")))["itemsCount"], 1)
+		self.assertEqual(shipment.package_details(self._rows((0.5, "Cheese")))["description"], "0.5x Cheese")
+
+	def test_package_details_is_none_without_a_row_to_ship(self):
+		self.assertIsNone(shipment.package_details(self._rows((0, "Nothing"))))
 
 	# -- the job submits the Created note as the requester (delivery-note-first.md) ---------------
 
