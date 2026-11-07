@@ -619,9 +619,28 @@ def validate_ready(doc, action="create"):
 # ---------------------------------------------------------------------------
 
 
+PACKAGE_DESCRIPTION_MAX = 250
+
+
+def package_details(doc):
+	"""What is in the parcel, for the Bosta AWB and the courier app: the piece count and a short
+	``2x name, 1x name`` description of the note's items (cut to ``PACKAGE_DESCRIPTION_MAX``)."""
+	rows = [row for row in (doc.get("items") or []) if flt(row.qty) > 0]
+	parts = []
+	for row in rows:
+		qty = flt(row.qty)
+		qty_text = str(int(qty)) if qty == int(qty) else str(qty)
+		parts.append(f"{qty_text}x {cstr(row.item_name or row.item_code).strip()}")
+	description = ", ".join(parts)
+	if len(description) > PACKAGE_DESCRIPTION_MAX:
+		description = description[: PACKAGE_DESCRIPTION_MAX - 3].rstrip() + "..."
+	return {"itemsCount": cint(sum(flt(row.qty) for row in rows)), "description": description}
+
+
 def build_payload(doc):
-	"""The create body: only Bosta's required fields. The drop-off address is the city code and the first
-	line; Bosta resolves the district."""
+	"""The create body: Bosta's required fields plus, for a delivery, the parcel contents
+	(``specs.packageDetails``). The drop-off address is the city code and the first line; Bosta resolves the
+	district."""
 	order = sales_order_of(doc)
 	settings = BostaClient().get_settings()
 	reference = cstr(doc.custom_carrier_reference) or doc.name
@@ -630,7 +649,7 @@ def build_payload(doc):
 	# goods to ``businessLocationId`` (the pickup location of the settings, also used by a delivery).
 	is_pickup = bool(doc.get("is_return"))
 	returned_cod = flt(doc.get("custom_returned_cod"), 2)
-	return {
+	payload = {
 		"type": BOSTA_RETURN_PICKUP_TYPE if is_pickup else BOSTA_DELIVERY_TYPE,
 		"cod": (-returned_cod if returned_cod else 0) if is_pickup else flt(doc.custom_cod_amount, 2),
 		"receiver": {"firstName": cstr(doc.customer_name).strip(), "phone": _receiver_phone(doc, order)},
@@ -641,6 +660,11 @@ def build_payload(doc):
 		"businessReference": reference,
 		"uniqueBusinessReference": reference,
 	}
+	if not is_pickup:
+		# What is in the parcel (docs.yaml: ``specs.packageDetails.itemsCount`` / ``description``), shown on
+		# the AWB and in the courier's app. A return pickup sends none (no ``returnSpecs`` either).
+		payload["specs"] = {"packageDetails": package_details(doc)}
+	return payload
 
 
 def _delivery_data(body):

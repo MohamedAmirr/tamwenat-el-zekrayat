@@ -336,6 +336,11 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		self.assertEqual(payload["businessReference"], note.name)
 		self.assertEqual(payload["uniqueBusinessReference"], note.name)
 		self.assertEqual(payload["dropOffAddress"], {"city": "EG-01", "firstLine": "12 Example Street"})
+		details = payload["specs"]["packageDetails"]
+		self.assertEqual(details["itemsCount"], sum(int(row.qty) for row in note.items))
+		self.assertEqual(
+			details["description"], ", ".join(f"{int(row.qty)}x {row.item_name}" for row in note.items)
+		)
 		self.assertEqual(frappe.db.get_value("Integration Request", log, "custom_result"), "Success")
 
 	# -- the job submits the Created note as the requester (delivery-note-first.md) ---------------
