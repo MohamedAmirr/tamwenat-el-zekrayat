@@ -624,17 +624,19 @@ PACKAGE_DESCRIPTION_MAX = 250
 
 def package_details(doc):
 	"""What is in the parcel, for the Bosta AWB and the courier app: the piece count and a short
-	``2x name, 1x name`` description of the note's items (cut to ``PACKAGE_DESCRIPTION_MAX``)."""
+	``2x name, 1x name`` description of the note's items (cut to ``PACKAGE_DESCRIPTION_MAX``). ``None`` when
+	no row has a quantity above 0."""
 	rows = [row for row in (doc.get("items") or []) if flt(row.qty) > 0]
+	if not rows:
+		return None
 	parts = []
 	for row in rows:
-		qty = flt(row.qty)
-		qty_text = str(int(qty)) if qty == int(qty) else str(qty)
+		qty_text = str(flt(row.qty, 3)).rstrip("0").rstrip(".")
 		parts.append(f"{qty_text}x {cstr(row.item_name or row.item_code).strip()}")
 	description = ", ".join(parts)
 	if len(description) > PACKAGE_DESCRIPTION_MAX:
 		description = description[: PACKAGE_DESCRIPTION_MAX - 3].rstrip() + "..."
-	return {"itemsCount": cint(sum(flt(row.qty) for row in rows)), "description": description}
+	return {"itemsCount": max(1, cint(round(sum(flt(row.qty) for row in rows)))), "description": description}
 
 
 def build_payload(doc):
@@ -660,10 +662,11 @@ def build_payload(doc):
 		"businessReference": reference,
 		"uniqueBusinessReference": reference,
 	}
-	if not is_pickup:
+	details = None if is_pickup else package_details(doc)
+	if details:
 		# What is in the parcel (docs.yaml: ``specs.packageDetails.itemsCount`` / ``description``), shown on
 		# the AWB and in the courier's app. A return pickup sends none (no ``returnSpecs`` either).
-		payload["specs"] = {"packageDetails": package_details(doc)}
+		payload["specs"] = {"packageDetails": details}
 	return payload
 
 
