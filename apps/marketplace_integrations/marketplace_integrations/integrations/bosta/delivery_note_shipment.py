@@ -619,12 +619,9 @@ def validate_ready(doc, action="create"):
 # ---------------------------------------------------------------------------
 
 
-PACKAGE_DESCRIPTION_MAX = 250
-
-
 def package_details(doc):
-	"""What is in the parcel, for the Bosta AWB and the courier app: the piece count and a short
-	``2x name, 1x name`` description of the note's items (cut to ``PACKAGE_DESCRIPTION_MAX``). ``None`` when
+	"""What is in the parcel, for the Bosta AWB and the courier app: the piece count and the full
+	``2x name, 1x name`` description of the note's items (no length cap; Bosta documents none). ``None`` when
 	no row has a quantity above 0."""
 	rows = [row for row in (doc.get("items") or []) if flt(row.qty) > 0]
 	if not rows:
@@ -634,8 +631,6 @@ def package_details(doc):
 		qty_text = str(flt(row.qty, 3)).rstrip("0").rstrip(".")
 		parts.append(f"{qty_text}x {cstr(row.item_name or row.item_code).strip()}")
 	description = ", ".join(parts)
-	if len(description) > PACKAGE_DESCRIPTION_MAX:
-		description = description[: PACKAGE_DESCRIPTION_MAX - 3].rstrip() + "..."
 	return {"itemsCount": max(1, cint(round(sum(flt(row.qty) for row in rows)))), "description": description}
 
 
