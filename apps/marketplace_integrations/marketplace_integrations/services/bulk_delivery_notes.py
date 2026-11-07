@@ -14,14 +14,18 @@ one order never stops the others. Per order (``ship_order``):
    COD = ``grand_total`` minus the paid amount (never below 0) and no invoice (a rule decided by the user).
 3. In ONE transaction (the commit before the lock to the commit after the note): that invoice (paid orders
    only), then a draft Delivery Note made with ERPNext's mapper, transporter Bosta, ``custom_cod_amount`` and
-   ``custom_cod_confirmed = 1``. Any failure rolls the whole order back.
+   ``custom_cod_confirmed = 1``. Then, still before the commit, the neutral pre-flight check
+   ``carrier_shipments.check_deliverable`` (stock of each warehouse, quantity left on the Sales Order): an
+   order it refuses is Skipped with its reason. Any failure or refusal rolls the whole order back (no draft,
+   no invoice, no Bosta call).
 4. After the commit (no lock held): the same ``carrier_shipments.request_create`` the form's Submit uses,
    with ``submit_as`` the requesting user. It runs the adapter guards (``validate_ready``) and queues the
    Bosta create job, which submits the note once Bosta confirms Created. THIS MODULE NEVER SUBMITS A
    DELIVERY NOTE and never calls Bosta itself.
 5. When every order was handled the job watches the queued notes for a bounded time (``WAIT_SECONDS``): a
    note whose Integration Status reached Created is "accepted by Bosta"; Failed / Unknown is a failure with
-   Bosta's reason; a note still Creating when the wait ends is reported "still creating".
+   Bosta's reason; a note still Creating when the wait ends is reported "still creating", and a note Created at
+   Bosta that is still a draft with no stored error "still being submitted" (the submit job is late, not failed).
 
 Progress and summary go to the requesting user on the realtime event ``EVENT`` (one payload shape, ``stage``
 "creating" / "waiting" / "done"); the final summary is also kept as a native Notification Log.
@@ -243,13 +247,13 @@ def wait_for_bosta(rows, on_change):
 			for row in rows:
 				if row["status"] != SENT:
 					continue
+				row["status"] = STILL_CREATING
 				if drafts.get(row["delivery_note"]):
-					row["status"] = FAILED
+					# Created, no error: the submit job is only late, not failed.
 					row["message"] = _(
-						"Bosta accepted the shipment but Delivery Note {0} has not been submitted. Open it and press Submit."
+						"Bosta accepted the shipment and Delivery Note {0} is still being submitted. Check the Delivery Note list later."
 					).format(row["delivery_note"])
 				else:
-					row["status"] = STILL_CREATING
 					row["message"] = _("Still creating at Bosta. Check the Delivery Note list later.")
 			return
 		time.sleep(POLL_SECONDS)
@@ -339,6 +343,13 @@ def ship_order(name, shipping_method=BOSTA):
 	# One transaction from the commit above to the commit below: the invoice and the note are all or nothing.
 	invoice = _make_paid_invoice(order) if plan["needs_invoice"] else plan["invoice"]
 	note = _make_note(order, plan["cod"])
+	try:
+		# The same pre-flight check ``request_create`` runs, but before the commit: an order ERPNext would
+		# refuse to submit (short of stock, over-delivery) is skipped with no draft and no invoice.
+		carrier_shipments.check_deliverable(note)
+	except frappe.ValidationError as exc:
+		frappe.clear_messages()
+		raise Refused(strip_html_tags(cstr(exc)).strip()) from exc
 	frappe.db.commit()  # releases the Sales Order lock before anything that may call out
 
 	result = {"delivery_note": note.name, "sales_invoice": invoice, "cod": plan["cod"]}

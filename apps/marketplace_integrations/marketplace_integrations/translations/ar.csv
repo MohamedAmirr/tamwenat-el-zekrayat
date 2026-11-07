@@ -1923,7 +1923,10 @@ Sales Order {0} has a draft Sales Invoice. Submit or delete it first.,لأمر �
 The recorded payment of Sales Order {0} covers its total except a rounding difference; settle the difference first.,الدفعة المسجلة لأمر البيع {0} تغطي إجماليه عدا فرق التقريب؛ سوِّ الفرق أولًا.
 The bulk run stopped unexpectedly: {0},توقف التشغيل الجماعي بشكل غير متوقع: {0}
 Bosta accepted the shipment but Delivery Note {0} is still a draft: {1},قبلت Bosta الشحنة لكن مذكرة التسليم {0} ما زالت مسودة: {1}
-Bosta accepted the shipment but Delivery Note {0} has not been submitted. Open it and press Submit.,قبلت Bosta الشحنة لكن مذكرة التسليم {0} لم تُسجَّل. افتحها واضغط تسجيل.
+Bosta accepted the shipment and Delivery Note {0} is still being submitted. Check the Delivery Note list later.,قبلت Bosta الشحنة وما زالت مذكرة التسليم {0} قيد التسجيل. تحقق من قائمة مذكرات التسليم لاحقًا.
+The Delivery Note cannot be submitted,لا يمكن تسجيل مذكرة التسليم
+Item {0}: {1} to deliver but only {2} in stock in warehouse {3}.,الصنف {0}: المطلوب تسليمه {1} لكن المتوفر في المخزون {2} فقط في المستودع {3}.
+Item {0}: {1} to deliver but only {2} left on Sales Order {3}.,الصنف {0}: المطلوب تسليمه {1} لكن المتبقي على أمر البيع {3} هو {2} فقط.
 The recorded payment could not be applied to the Sales Invoice.,تعذّر تطبيق الدفعة المسجلة على فاتورة المبيعات.
 Sales Invoice {0} was not fully paid by the recorded payment (outstanding {1}).,لم تُسدَّد فاتورة المبيعات {0} بالكامل بالدفعة المسجلة (المستحق {1}).
 You do not have permission to do this.,ليست لديك صلاحية للقيام بذلك.

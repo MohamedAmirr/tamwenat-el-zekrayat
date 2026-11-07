@@ -35,6 +35,9 @@ STAFF_PERMISSIONS = {
 class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 	def setUp(self):
 		super().setUp()
+		self._stock_items = []
+		self._stock_entries = []
+		self._pin_stock_settings()
 
 		def fill_city(doc):
 			values = {"custom_bosta_city": "EG-01", "custom_bosta_city_name": "Cairo"}
@@ -663,7 +666,7 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		self.assertIn("1 still creating", notify.call_args.args[1]["subject"])
 		sleep.assert_not_called()
 
-	def test_created_at_bosta_but_still_a_draft_is_not_accepted(self):
+	def test_created_at_bosta_but_still_a_draft_with_no_error_is_still_submitting_not_failed(self):
 		order = self._order()
 		result = bulk.process_order(order.name)
 		frappe.db.set_value("Delivery Note", result["delivery_note"], "custom_integration_status", "Created")
@@ -673,9 +676,201 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		with patch.object(bulk, "WAIT_SECONDS", 0):
 			bulk.wait_for_bosta(rows, lambda: None)
 
-		self.assertEqual(rows[0]["status"], bulk.FAILED)
+		self.assertEqual(rows[0]["status"], bulk.STILL_CREATING)
 		self.assertIn(result["delivery_note"], rows[0]["message"])
-		self.assertIn("has not been submitted", rows[0]["message"])
+		self.assertIn("still being submitted", rows[0]["message"])
+
+	# -- pre-flight stock check (#476) ---------------------------------------------------------
+
+	def _pin_stock_settings(self):
+		"""The pre-flight depends on two Stock Settings: pin them so a site's own values cannot change a result."""
+		fields = ("allow_negative_stock", "role_allowed_to_over_deliver_receive")
+		previous = {field: frappe.db.get_single_value("Stock Settings", field) for field in fields}
+		frappe.db.set_single_value("Stock Settings", {"allow_negative_stock": 0, "role_allowed_to_over_deliver_receive": ""})
+		frappe.clear_document_cache("Stock Settings", "Stock Settings")
+		frappe.db.commit()
+
+		def restore():
+			frappe.db.set_single_value("Stock Settings", previous)
+			frappe.clear_document_cache("Stock Settings", "Stock Settings")
+			frappe.db.commit()
+
+		self.addCleanup(restore)
+
+	def _staff(self, with_item_read=False):
+		"""An ordinary user who can create and submit the documents. Without Item read by default: the pre-flight
+		reads the warehouse stock for them without it."""
+		perms = {k: v for k, v in STAFF_PERMISSIONS.items() if with_item_read or k != "Item"}
+		email, _role = make_role_user(self, "Stock Staff", perms)
+		self.enqueue.reset_mock()  # the User insert reaches the patched frappe.enqueue
+		return email
+
+	def _stock_order(self, qty=3, in_stock=0):
+		"""A marketplace order for a stock item with ``in_stock`` units in its warehouse (a real Material Receipt)."""
+		item = self._track(
+			frappe.get_doc(
+				{
+					"doctype": "Item",
+					"item_code": f"TEST-STOCK-{frappe.generate_hash(length=6)}",
+					"item_group": "Products",
+					"stock_uom": "Nos",
+					"is_stock_item": 1,
+				}
+			).insert()
+		)
+		plain_item, self.item = self.item, item  # make_order sells self.item
+		try:
+			order = self._order(qty=qty)
+		finally:
+			self.item = plain_item
+		warehouse = order.items[0].warehouse
+		self._stock_items.append(item.name)
+		if in_stock:
+			from erpnext.stock.doctype.stock_entry.stock_entry_utils import make_stock_entry
+
+			entry = make_stock_entry(
+				item_code=item.name, qty=in_stock, to_warehouse=warehouse, company=self.company, rate=10
+			)
+			self._stock_entries.append(entry.name)
+		frappe.db.commit()
+		return order, warehouse
+
+	def tearDown(self):
+		super().tearDown()
+		# Posted stock rows cannot be removed through the ORM (the Material Receipt and the ledger rows of the
+		# Delivery Notes the base class cancelled): delete what these tests posted, on the test site only.
+		for entry in self._stock_entries:
+			frappe.db.delete("GL Entry", {"voucher_no": entry})
+			frappe.db.delete("Stock Entry Detail", {"parent": entry})
+			frappe.db.delete("Stock Entry", {"name": entry})
+			frappe.db.delete("Version", {"ref_doctype": "Stock Entry", "docname": entry})
+		for item in self._stock_items:
+			frappe.db.delete("Stock Ledger Entry", {"item_code": item})
+			frappe.db.delete("Repost Item Valuation", {"item_code": item})
+			frappe.db.delete("Bin", {"item_code": item})
+		frappe.db.commit()
+
+	def test_a_bulk_order_short_of_stock_is_skipped_with_no_draft_no_invoice_and_no_bosta_call(self):
+		short, _warehouse = self._stock_order(qty=3, in_stock=2)
+		self._pay(short)
+		ok = self._order()
+
+		email = self._staff(with_item_read=True)  # the bulk mapper needs Item read
+		results = [self._as(email, bulk.process_order, name) for name in (short.name, ok.name)]
+		self._keep_invoices(short)
+
+		self.assertEqual(results[0]["status"], bulk.SKIPPED, results[0])
+		self.assertIn("3 to deliver but only 2 in stock", results[0]["message"])
+		self.assertIsNone(results[0]["delivery_note"])
+		self.assertIsNone(bulk.live_note(short.name))
+		self.assertEqual(bulk._invoices(short.name, 0) + bulk._invoices(short.name, 1), [])
+		# The other order proceeds, and Bosta was only asked for it.
+		self.assertEqual(results[1]["status"], bulk.SENT, results[1])
+		self.assertEqual(self.http.sent(), [])
+		self.assertEqual(
+			[c.kwargs["delivery_note"] for c in self.enqueue.call_args_list if c.args[0].endswith("run_create")],
+			[results[1]["delivery_note"]],
+		)
+
+	def test_a_bulk_order_with_enough_stock_creates_at_bosta_and_is_submitted_as_the_requester(self):
+		order, warehouse = self._stock_order(qty=3, in_stock=5)
+		email = self._staff(with_item_read=True)  # the bulk mapper needs Item read
+
+		result = self._as(email, bulk.process_order, order.name)
+
+		self.assertEqual(result["status"], bulk.SENT, result)
+		self.assertEqual(self.enqueue.call_args.kwargs["submit_as"], email)
+		self._run_job()
+		submitted = frappe.db.get_value(
+			"Delivery Note", result["delivery_note"], ["docstatus", "custom_integration_status", "modified_by"], as_dict=True
+		)
+		self.assertEqual((submitted.docstatus, submitted.custom_integration_status), (1, "Created"))
+		self.assertEqual(len(self.http.calls_of("create")), 1)
+		# The real stock moved: 5 received, 3 delivered.
+		self.assertEqual(frappe.db.get_value("Bin", {"item_code": self._stock_items[-1], "warehouse": warehouse}, "actual_qty"), 2)
+
+	def test_the_form_submit_of_a_note_short_of_stock_is_refused_with_the_same_text_and_no_request_row(self):
+		order, _warehouse = self._stock_order(qty=3, in_stock=2)
+		note = self.make_note(order)
+		email = self._staff()
+
+		with self.assertRaises(frappe.ValidationError):
+			self._as(email, carrier_shipments.request_create, note.name)
+		bulk_message = strip_html_tags(frappe.message_log[-1].get("message") or "") if frappe.message_log else ""
+		frappe.clear_messages()
+
+		self.assertIn("3 to deliver but only 2 in stock", bulk_message)
+		self.assertFalse(
+			frappe.db.exists(
+				"Integration Request", {"reference_doctype": "Delivery Note", "reference_docname": note.name}
+			)
+		)
+		self.assertEqual(self.http.sent(), [])
+		self.assertIn(
+			frappe.db.get_value("Delivery Note", note.name, "custom_integration_status") or "", ("", "Not Created")
+		)
+		# The bulk path raises the same text before anything is committed.
+		doc = frappe.get_doc("Delivery Note", note.name)
+		with self.assertRaises(frappe.ValidationError) as caught:
+			carrier_shipments.check_deliverable(doc)
+		self.assertEqual(strip_html_tags(str(caught.exception)).strip(), bulk_message.strip())
+
+	def test_a_note_with_enough_stock_is_queued(self):
+		order, _warehouse = self._stock_order(qty=3, in_stock=3)
+		note = self.make_note(order)
+
+		self.assertTrue(carrier_shipments.request_create(note.name)["queued"])
+
+	def test_a_negative_bin_reads_as_zero_in_the_message(self):
+		order, warehouse = self._stock_order(qty=3, in_stock=0)
+		note = self.make_note(order)
+		from erpnext.stock.utils import get_bin
+
+		frappe.db.set_value("Bin", get_bin(self._stock_items[-1], warehouse).name, "actual_qty", -2)
+
+		with self.assertRaises(frappe.ValidationError) as caught:
+			carrier_shipments.check_deliverable(frappe.get_doc("Delivery Note", note.name))
+		frappe.clear_messages()
+
+		self.assertIn("3 to deliver but only 0 in stock", str(caught.exception))
+
+	def test_a_retry_with_a_stored_carrier_reference_skips_the_stock_check(self):
+		# Creation Unknown: the shipment may exist at the carrier, so the lookup-first retry must reach it.
+		order, _warehouse = self._stock_order(qty=3, in_stock=0)
+		note = self.make_note(order)
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{"custom_carrier_reference": note.name, "custom_integration_status": carrier_log.UNKNOWN},
+		)
+		frappe.db.commit()
+
+		result = carrier_shipments.request_create(note.name)
+
+		self.assertTrue(result["queued"], result)
+		self.assertTrue(self.enqueue.call_args.kwargs["lookup_first"])
+
+	def test_an_item_that_allows_negative_stock_is_not_refused(self):
+		order, _warehouse = self._stock_order(qty=3, in_stock=0)
+		note = self.make_note(order)
+		item = self._stock_items[-1]
+		frappe.db.set_value("Item", item, "allow_negative_stock", 1)
+		frappe.clear_document_cache("Item", item)
+		self.addCleanup(frappe.clear_document_cache, "Item", item)
+
+		carrier_shipments.check_deliverable(frappe.get_doc("Delivery Note", note.name))
+
+	def test_a_note_over_the_quantity_left_on_the_sales_order_is_refused(self):
+		order, _warehouse = self._stock_order(qty=3, in_stock=10)
+		note = self.make_note(order)
+		frappe.db.set_value("Delivery Note Item", note.items[0].name, {"qty": 5, "stock_qty": 5})
+		doc = frappe.get_doc("Delivery Note", note.name)
+
+		with self.assertRaises(frappe.ValidationError) as caught:
+			carrier_shipments.check_deliverable(doc)
+		frappe.clear_messages()
+
+		self.assertIn("5 to deliver but only 3 left on Sales Order", str(caught.exception))
 
 	def test_a_draft_whose_automatic_submit_failed_is_a_failure_with_the_error(self):
 		order = self._order()
