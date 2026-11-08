@@ -96,7 +96,9 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		note = self.make_note()
 		row = frappe._dict(platform="Shopify", order_code="#1234")
 		with patch.object(shipment, "_marketplace_order_row", return_value=row):
-			self.assertEqual(shipment.build_payload(note)["notes"], "Shopify #1234")
+			notes = shipment.build_payload(note)["notes"]
+			self.assertEqual(notes, "#1234")
+			self.assertNotIn("Shopify", notes)
 
 	def test_a_non_shopify_order_sends_no_notes(self):
 		note = self.make_note()
@@ -143,7 +145,9 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		note = self.make_note()
 		self._link_shopify_order(note)
 
-		self.assertEqual(shipment.build_payload(note)["notes"], "Shopify #T1")
+		notes = shipment.build_payload(note)["notes"]
+		self.assertEqual(notes, "#T1")
+		self.assertNotIn("Shopify", notes)
 
 	def test_a_return_pickup_of_a_shopify_order_sends_no_notes(self):
 		note = self.make_note()
