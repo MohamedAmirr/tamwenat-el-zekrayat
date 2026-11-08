@@ -645,13 +645,13 @@ def _marketplace_order_row(sales_order):
 
 
 def shopify_notes(sales_order):
-	"""The Bosta ``notes`` text "Shopify #1234" (the customer-facing Shopify order name), or ``None`` when the
-	Sales Order is not a Shopify order or the name is unknown. docs.yaml defines ``notes`` but does not say it
-	prints on the label."""
+	"""The Bosta ``notes`` text: only the customer-facing Shopify order name, e.g. "#1234" (no platform word),
+	or ``None`` when the Sales Order is not a Shopify order or the name is unknown. docs.yaml defines ``notes``
+	but does not say it prints on the label."""
 	row = _marketplace_order_row(sales_order)
 	if not row or row.get("platform") != "Shopify" or not cstr(row.get("order_code")).strip():
 		return None
-	return f"Shopify {cstr(row.order_code).strip()}"
+	return cstr(row.order_code).strip()
 
 
 def build_payload(doc):
