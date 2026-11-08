@@ -46,6 +46,7 @@ from marketplace_integrations.services.marketplace_attention import (
 	get_attention_items,
 )
 from marketplace_integrations.services.marketplace_outbound import platform_instruction
+from marketplace_integrations.tests.utils import make_role_user
 
 NOON_PEM = "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
 
@@ -994,6 +995,103 @@ class IntegrationTestMarketplaceAttention(IntegrationTestCase):
 
 		self.assertIn("Noon Return", doctypes)
 		self.assertIn("Marketplace Order", doctypes)
+
+	# -- sync pending too long (#487) ---------------------------------------
+
+	def make_syncing_order(self, account, minutes_old, **overrides):
+		order = self.make_order(account, erpnext_sync_status="Syncing", **overrides)
+		frappe.db.set_value(
+			"Marketplace Order",
+			order.name,
+			"creation",
+			now_datetime() - timedelta(minutes=minutes_old),
+			update_modified=False,
+		)
+		return order
+
+	def test_syncing_order_without_sales_order_older_than_the_threshold_is_listed_once(self):
+		account = self.make_talabat_account()
+		old = self.make_syncing_order(account, marketplace_attention.SYNC_PENDING_ALERT_MINUTES + 5)
+		self.make_syncing_order(account, marketplace_attention.SYNC_PENDING_ALERT_MINUTES - 10)
+		linked = self.make_syncing_order(account, 60)
+		frappe.db.set_value("Marketplace Order", linked.name, "erpnext_sales_order", "SO-NOT-REAL")
+		cancelled_in_shopify = self.make_syncing_order(account, 60, cancelled_at=now_datetime())
+		self.make_order(account, erpnext_sync_status="Synced")
+		self.make_order(account, erpnext_sync_status="Cancelled")
+
+		rows = self.items_for(account, marketplace_attention.SYNC_PENDING_TOO_LONG)
+
+		self.assertEqual([row["reference_name"] for row in rows], [old.name])
+		self.assertNotIn(cancelled_in_shopify.name, [row["reference_name"] for row in rows])
+		self.assertEqual(rows[0]["next_action"], marketplace_attention.NEXT_RETRY)
+		self.assertEqual(rows[0]["reference_doctype"], "Marketplace Order")
+
+	def test_syncing_order_inside_its_debounce_window_is_not_listed(self):
+		account = self.make_talabat_account()
+		order = self.make_syncing_order(account, marketplace_attention.SYNC_PENDING_ALERT_MINUTES + 5)
+		frappe.db.set_value(
+			"Marketplace Order",
+			order.name,
+			"sync_debounce_until",
+			now_datetime() + timedelta(minutes=5),
+			update_modified=False,
+		)
+
+		self.assertEqual(self.items_for(account, marketplace_attention.SYNC_PENDING_TOO_LONG), [])
+
+	def test_old_syncing_order_without_a_debounce_is_listed(self):
+		account = self.make_talabat_account()
+		order = self.make_syncing_order(account, marketplace_attention.SYNC_PENDING_ALERT_MINUTES + 5)
+		frappe.db.set_value("Marketplace Order", order.name, "sync_debounce_until", None, update_modified=False)
+
+		rows = self.items_for(account, marketplace_attention.SYNC_PENDING_TOO_LONG)
+
+		self.assertEqual([row["reference_name"] for row in rows], [order.name])
+
+	def test_syncing_row_clears_when_the_order_syncs_and_failure_is_a_sync_error_only(self):
+		account = self.make_talabat_account()
+		order = self.make_syncing_order(account, 60)
+		self.assertEqual(len(self.items_for(account, marketplace_attention.SYNC_PENDING_TOO_LONG)), 1)
+
+		frappe.db.set_value("Marketplace Order", order.name, "erpnext_sync_status", "Sync Error")
+		rows = self.items_for(account)
+		self.assertEqual([row["problem_type"] for row in rows], [SYNC_ERROR])
+
+		frappe.db.set_value("Marketplace Order", order.name, "erpnext_sync_status", "Synced")
+		self.assertEqual(self.items_for(account), [])
+
+	def test_syncing_rows_cover_every_platform(self):
+		talabat = self.make_talabat_account()
+		noon = self.make_noon_account()
+		self.make_syncing_order(talabat, 60)
+		self.make_syncing_order(noon, 60)
+
+		for account in (talabat, noon):
+			self.assertEqual(
+				len(self.items_for(account, marketplace_attention.SYNC_PENDING_TOO_LONG)), 1, account.platform
+			)
+
+	def test_syncing_rows_respect_the_users_readable_accounts(self):
+		talabat = self.make_talabat_account()
+		noon = self.make_noon_account()
+		mine = self.make_syncing_order(talabat, 60)
+		theirs = self.make_syncing_order(noon, 60)
+		email, _role = make_role_user(self, "Attention Staff", {})
+		frappe.get_doc("User", email).add_roles("Talabat User")
+		frappe.clear_cache(user=email)
+
+		previous_user = frappe.session.user
+		frappe.set_user(email)
+		try:
+			names = {
+				row["reference_name"]
+				for row in get_attention_items({"problem_type": marketplace_attention.SYNC_PENDING_TOO_LONG})
+			}
+		finally:
+			frappe.set_user(previous_user)
+
+		self.assertIn(mine.name, names)
+		self.assertNotIn(theirs.name, names)
 
 	# -- filters, counts, permissions ---------------------------------------
 
