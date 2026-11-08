@@ -52,7 +52,7 @@ import json
 
 import frappe
 from frappe import _
-from frappe.utils import add_to_date, cstr, get_datetime, now_datetime, strip_html_tags
+from frappe.utils import add_to_date, cstr, flt, get_datetime, now_datetime, strip_html_tags
 from frappe.utils.background_jobs import is_job_enqueued
 
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as bosta_shipment
@@ -215,6 +215,86 @@ def boot_session(bootinfo):
 # ---------------------------------------------------------------------------
 
 
+def check_deliverable(doc):
+	"""Raise (a validation error, no carrier is contacted) when ERPNext's own submit would refuse the stock rows
+	of this draft note: a row (or a Product Bundle component of its packed items, summed per item and warehouse
+	with the other rows) asking for more than the stock of its warehouse (unless negative stock is
+	allowed), or more than the Sales Order has left to deliver (its over-delivery allowance counts, and so
+	does the role allowed to over-deliver). Only stock items are judged, like ERPNext. A return is not checked
+	(it brings stock in). The stock race and reservations are not judged: they still end as a Created draft
+	(``_submit_created``). One message names every problem, so the form's Submit and the bulk run show the same
+	text."""
+	if doc.get("is_return"):
+		return
+	# ERPNext functions relied on (docs/frappe-best-practices.md, Version compatibility): the negative-stock
+	# rule and the over-delivery allowance of ``StatusUpdater``.
+	from erpnext.controllers.status_updater import get_allowance_for
+	from erpnext.stock.stock_ledger import is_negative_stock_allowed
+
+	from marketplace_integrations.services.listing_quantity import _actual_quantities
+
+	wanted, ordered = {}, {}
+
+	def want(item_code, warehouse, qty):
+		if warehouse and frappe.get_cached_value("Item", item_code, "is_stock_item"):
+			wanted[(item_code, warehouse)] = wanted.get((item_code, warehouse), 0) + flt(qty)
+
+	for row in doc.items:
+		if not row.item_code:
+			continue
+		if doc.has_product_bundle(row.item_code):
+			# ERPNext posts a Product Bundle through its packed items only (``get_item_list``): each component, in
+			# its own warehouse (the row's when empty), in stock units. The packed items are saved with the draft
+			# (the ``validate`` that inserts or saves it builds them). The parent row is not a stock movement.
+			for packed in doc.get("packed_items"):
+				if packed.parent_detail_docname == row.name and packed.parent_item == row.item_code:
+					want(packed.item_code, packed.warehouse or row.warehouse, packed.qty)
+		else:
+			want(row.item_code, row.warehouse, row.stock_qty or row.qty)
+		if row.so_detail and frappe.get_cached_value("Item", row.item_code, "is_stock_item"):
+			ordered[row.so_detail] = ordered.get(row.so_detail, 0) + flt(row.qty)
+
+	precision = frappe.get_precision("Delivery Note Item", "qty")
+
+	def text(value):
+		# 3, not 3.0; never negative
+		return ("%.*f" % (precision, max(flt(value), 0))).rstrip("0").rstrip(".") or "0"
+
+	problems = []
+	by_warehouse = {}
+	for item_code, warehouse in wanted:
+		if not is_negative_stock_allowed(item_code=item_code):
+			by_warehouse.setdefault(warehouse, []).append(item_code)
+	for warehouse, codes in by_warehouse.items():
+		in_stock = _actual_quantities(warehouse, codes)  # Bin.actual_qty clamped at 0, one query
+		for item_code in codes:
+			qty = wanted[(item_code, warehouse)]
+			if qty - flt(in_stock[item_code]) > 0.0001:
+				problems.append(
+					_("Item {0}: {1} to deliver but only {2} in stock in warehouse {3}.").format(
+						item_code, text(qty), text(in_stock[item_code]), warehouse
+					)
+				)
+	role = frappe.get_single_value("Stock Settings", "role_allowed_to_over_deliver_receive")
+	if not (role and role in frappe.get_roles()):
+		for detail, qty in ordered.items():
+			line = frappe.db.get_value(
+				"Sales Order Item", detail, ["item_code", "qty", "delivered_qty", "parent"], as_dict=True
+			)
+			if not line:
+				continue
+			allowance = get_allowance_for(line.item_code)[0]
+			left = flt(line.qty) * (100 + flt(allowance)) / 100 - flt(line.delivered_qty)
+			if qty - left > 0.0001:
+				problems.append(
+					_("Item {0}: {1} to deliver but only {2} left on Sales Order {3}.").format(
+						line.item_code, text(qty), text(left), line.parent
+					)
+				)
+	if problems:
+		frappe.throw(" ".join(problems), title=_("The Delivery Note cannot be submitted"))
+
+
 def request_create(delivery_note, modified=None, submit_as=None):
 	"""Start the create of a draft note (the API has checked the submit permission). Idempotent: a note that
 	is already Creating or Created only returns its status. When the adapter answers that it needs the
@@ -230,6 +310,10 @@ def request_create(delivery_note, modified=None, submit_as=None):
 	if modified and cstr(doc.modified) != cstr(modified) and status_of(doc) in EDITABLE_STATUSES:
 		frappe.throw(_("The Delivery Note was changed. Reload it and try again."), frappe.TimestampMismatchError)
 	if status_of(doc) not in (CREATING, CREATED):
+		# A stored carrier reference means a create was tried before (Creation Unknown, a lookup-first retry): the
+		# shipment may exist at the carrier, so the retry must reach the lookup whatever the stock is now.
+		if not cstr(doc.get("custom_carrier_reference")):
+			check_deliverable(doc)
 		needs = adapter.validate_ready(doc)
 		if needs:
 			return {"status": status_of(doc), "queued": False, **needs}
@@ -249,7 +333,10 @@ def request_create(delivery_note, modified=None, submit_as=None):
 	try:
 		if modified and cstr(locked.modified) != cstr(modified):
 			frappe.throw(_("The Delivery Note was changed. Reload it and try again."), frappe.TimestampMismatchError)
-		if adapter.validate_ready(frappe.get_doc("Delivery Note", delivery_note)):
+		locked_doc = frappe.get_doc("Delivery Note", delivery_note)
+		if not cstr(locked_doc.get("custom_carrier_reference")):
+			check_deliverable(locked_doc)
+		if adapter.validate_ready(locked_doc):
 			frappe.throw(_("The Delivery Note was changed. Reload it and try again."), frappe.TimestampMismatchError)
 	except Exception:
 		frappe.db.commit()

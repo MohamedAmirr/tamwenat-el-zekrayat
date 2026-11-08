@@ -303,7 +303,8 @@ scheduler_events = {
 	},
 	"daily": [
 		"marketplace_integrations.integrations.shopify.inventory_sync.reconcile_all_accounts",
-		"marketplace_integrations.integrations.shopify.orders.reconcile_all_accounts_orders",
+		# Shopify order reconciliation is NOT here: the 23:59 cron job
+		# (enqueue_nightly_order_reconciliation) runs it per account on the long queue (#478).
 		"marketplace_integrations.marketplace_integrations.doctype.marketplace_sync_log.marketplace_sync_log.clear_old_logs",
 		# #153 (experimental): daily scan of existing shipment AWBs against
 		# Noon's ListReturnReferences - see integrations/noon/returns.py's

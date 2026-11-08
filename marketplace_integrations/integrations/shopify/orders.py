@@ -12,9 +12,12 @@ import frappe
 import frappe.utils.data
 from frappe import _
 from frappe.utils import add_to_date, cstr, escape_html, get_datetime, now_datetime
+from rq.timeouts import BaseTimeoutException
 
 from marketplace_integrations.integrations.shopify.client import ShopifyClient
 from marketplace_integrations.integrations.shopify.constants import (
+	SHOPIFY_ORDER_IMPORT_LOCK_WAIT_ATTEMPTS,
+	SHOPIFY_ORDER_IMPORT_LOCK_WAIT_RETRY_SECONDS,
 	SHOPIFY_ORDER_LINE_ITEMS_PAGE_SIZE,
 	SHOPIFY_ORDER_RECONCILE_OVERLAP_MINUTES,
 	SHOPIFY_ORDER_REFUNDS_PAGE_SIZE,
@@ -403,7 +406,25 @@ def _needs_first_sync(order):
 	return bool(order.flags.marketplace_order_inserted) or order.erpnext_sync_status == SYNCING
 
 
-def _import_order_isolated(
+def _import_order_isolated(account, order_gid, **kwargs):
+	"""Import one order via _import_order_once(), retrying a lock wait timeout (#478).
+
+	A MariaDB lock wait timeout (1205, ``frappe.QueryTimeoutError``) is usually a transient clash
+	with a concurrent webhook import of the same order, so the order is tried again after a short
+	wait, SHOPIFY_ORDER_IMPORT_LOCK_WAIT_ATTEMPTS times in total, inside the same run. An order
+	that still times out is returned as an error like any other failure. A job timeout is never
+	caught here.
+	"""
+	for attempt in range(1, SHOPIFY_ORDER_IMPORT_LOCK_WAIT_ATTEMPTS + 1):
+		try:
+			return _import_order_once(account, order_gid, **kwargs)
+		except frappe.QueryTimeoutError as exc:
+			if attempt == SHOPIFY_ORDER_IMPORT_LOCK_WAIT_ATTEMPTS:
+				return None, str(exc)
+			time.sleep(SHOPIFY_ORDER_IMPORT_LOCK_WAIT_RETRY_SECONDS)
+
+
+def _import_order_once(
 	account,
 	order_gid,
 	bump_linked_changes=False,
@@ -416,6 +437,11 @@ def _import_order_isolated(
 	decision 6/review finding #2) - the same per-order isolation
 	run_order_import() already used, now shared by both callers rather than
 	duplicated. Returns (order_or_None, error_message_or_None).
+
+	Two exceptions are NOT turned into an error message (#478): ``frappe.QueryTimeoutError``
+	(lock wait 1205) is re-raised after this order's own savepoint rollback so
+	_import_order_isolated() can retry, and an RQ ``BaseTimeoutException`` (job timeout)
+	is re-raised untouched.
 
 	#178: when ``bump_linked_changes`` is true, the "before" evidence fingerprint
 	read and the debounce bump also run INSIDE this savepoint, so a failure in
@@ -442,7 +468,7 @@ def _import_order_isolated(
 		):
 			bump_sync_debounce(order.name, trigger_source)
 			order.flags.first_sync_scheduled = True
-		# Every path (the daily sweep too): a row this import created, and any order left
+		# Every path (the nightly sweep too): a row this import created, and any order left
 		# Syncing with no window, gets its first sync scheduled even when cancelled, since
 		# nothing else would ever pick it up.
 		elif _needs_first_sync(order):
@@ -454,6 +480,13 @@ def _import_order_isolated(
 		if skipped is not None:
 			skipped.append(order_gid)
 		return None, None
+	except BaseTimeoutException:
+		# The RQ job timeout must fail the job, not be logged as this order's error (#478).
+		raise
+	except frappe.QueryTimeoutError:
+		# Rolled back to the savepoint; _import_order_isolated() decides whether to retry.
+		frappe.db.rollback(save_point=savepoint)
+		raise
 	except Exception as exc:
 		frappe.db.rollback(save_point=savepoint)
 		return None, str(exc)
@@ -507,7 +540,7 @@ def import_orders_updated_between(
 	range import (run_order_import()) never bumps linked orders, regardless of ``trigger_source``.
 	``bump_unlinked`` (nightly catch-up and manual import) schedules the first Sales Order sync
 	for each imported order that has no Sales Order yet and is not cancelled. Independent of it,
-	EVERY import path (the daily sweep included) schedules the first sync of each order it
+	EVERY import path (the nightly sweep included) schedules the first sync of each order it
 	INSERTS, cancelled or not, and of an existing order left Syncing with no window.
 
 	``scheduled`` (an optional list) receives the name of each imported order whose first sync
@@ -692,6 +725,9 @@ def reconcile_all_accounts_orders(account_name=None, catch_up_unlinked=False):
 					failures=len(errors),
 					skipped=len(import_skipped),
 				)
+		except BaseTimeoutException:
+			# The job timeout fails the whole job visibly instead of moving on to the next account (#478).
+			raise
 		except Exception:
 			error = frappe.get_traceback()
 			if catch_up_unlinked:
