@@ -10,6 +10,7 @@
 const MARKETPLACE_ATTENTION_PROBLEM_TYPES = [
 	"Sync Error",
 	"Needs Action",
+	"Sync Pending Too Long",
 	"Unmapped Items",
 	"Order Import Error",
 	"Fulfillment Error",
