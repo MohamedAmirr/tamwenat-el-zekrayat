@@ -28,6 +28,7 @@ from marketplace_integrations.integrations.bosta.client import (
 	response_body,
 )
 from marketplace_integrations.services import carrier_log, carrier_shipments
+from marketplace_integrations.services import delivery_note_workflow as lifecycle
 
 # Bosta's own terminal states: a Delivered (45) or Canceled (49) delivery is not polled again.
 TERMINAL_STATE_CODES = (45, 49)
@@ -353,7 +354,7 @@ def _write_state(note, code, timestamp=None, fee=None, event=False):
 	# native submit fail with "modified after you opened it", and the person changed nothing. ``notify``
 	# still refreshes an open form. A submitted note keeps the bump (nothing can be submitted from it).
 	frappe.get_doc("Delivery Note", note).db_set(
-		values, update_modified=current.docstatus != 0, notify=True, commit=True
+		lifecycle.with_state(note, values), update_modified=current.docstatus != 0, notify=True, commit=True
 	)
 	# Only the CHANGE into a returned state queues the draft: states 46/60 are polled nightly, and a
 	# repeated read must not bring back a draft that staff cancelled. Never for a Customer Return Pickup: its

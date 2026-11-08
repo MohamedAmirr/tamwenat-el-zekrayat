@@ -112,11 +112,11 @@ class IntegrationTestBostaAttention(BostaFixtureMixin, IntegrationTestCase):
 		self._set(
 			note,
 			custom_integration_status="Created",
-			custom_last_integration_error="Shipment created at Bosta; the Delivery Note could not be submitted: negative stock",
+			custom_last_integration_error="Shipment created at Bosta; the Delivery Note could not be confirmed: negative stock",
 		)
 		items = self._items(note, attention.CARRIER_EXCEPTION)
 		self.assertEqual(len(items), 1)
-		self.assertIn("shipment created, Delivery Note not submitted.", items[0]["explanation"])
+		self.assertIn("shipment created, Delivery Note not confirmed.", items[0]["explanation"])
 		self.assertIn("negative stock", items[0]["explanation"])
 
 	def test_a_created_draft_older_than_15_minutes_is_flagged_but_a_fresh_one_or_a_submitted_one_is_not(self):
@@ -126,7 +126,7 @@ class IntegrationTestBostaAttention(BostaFixtureMixin, IntegrationTestCase):
 		self._set(note, modified=add_to_date(now_datetime(), minutes=-16))
 		items = self._items(note, attention.CARRIER_EXCEPTION)
 		self.assertEqual(len(items), 1)
-		self.assertIn("still a draft", items[0]["explanation"])
+		self.assertIn("is not confirmed yet", items[0]["explanation"])
 		self._set(note, docstatus=1)
 		self.assertEqual(self._items(note, attention.CARRIER_EXCEPTION), [])
 		self._set(note, docstatus=0)

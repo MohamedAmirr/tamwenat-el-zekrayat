@@ -209,7 +209,13 @@ doc_events = {
 	"Delivery Note": {
 		**_RECHECK_EVENTS,
 		**_PLATFORM_NAMING,
-		"on_submit": [_RECHECK_HANDLER, "marketplace_integrations.services.carrier_shipments.after_submit"],
+		"on_submit": [
+			_RECHECK_HANDLER,
+			# #498: the stage of a note just submitted comes from its stored statuses (the native submit
+			# would put every note in the first submitted state).
+			"marketplace_integrations.services.delivery_note_workflow.fix_state_after_submit",
+			"marketplace_integrations.services.carrier_shipments.after_submit",
+		],
 		# The guard comes first: it refuses a delete while the shipment is live.
 		"on_trash": [_CARRIER_GUARD, _RECHECK_HANDLER],
 		"before_cancel": _CARRIER_GUARD,
@@ -243,6 +249,20 @@ doc_events = {
 		],
 	},
 }
+
+# Workflow transition tasks of the "Delivery Note Lifecycle" Workflow (#498, shipped by
+# patches/v0_0/create_delivery_note_lifecycle_workflow.py): the first runs inside the transition and may refuse it,
+# the second is queued after it commits and starts the carrier shipment.
+workflow_methods = [
+	{
+		"name": "Check Carrier Shipment Request",
+		"method": "marketplace_integrations.services.delivery_note_workflow.check_shipment_request",
+	},
+	{
+		"name": "Request Carrier Shipment",
+		"method": "marketplace_integrations.services.delivery_note_workflow.start_shipment",
+	},
+]
 
 # Scheduled Tasks
 # ---------------
@@ -417,6 +437,10 @@ fixtures = [
 					"Delivery Note-main-field_order",
 					"Delivery Note-per_installed-depends_on",
 					"Delivery Note-per_returned-depends_on",
+					# #498: employees see the stage (Workflow State), never the native Draft/Submitted status.
+					"Delivery Note-status-in_list_view",
+					"Delivery Note-status-in_standard_filter",
+					"Delivery Note-status-hidden",
 					# A Noon note has no Shipping Rule (integrations/noon/delivery_note_shipment.py clears it).
 					"Delivery Note-shipping_rule-depends_on",
 					# Platform naming series (services/platform_naming.py). The options keep ERPNext's own
@@ -452,6 +476,7 @@ fixtures = [
 					# #374: the Item form's Marketplace Listings tab (stores nothing on Item)
 					"Item-custom_marketplace_listings_tab",
 					"Item-custom_marketplace_listings_html",
+					"Delivery Note-workflow_state",
 					"Delivery Note-custom_more_section",
 					"Delivery Note-custom_shipping_section",
 					"Delivery Note-custom_integration_status",

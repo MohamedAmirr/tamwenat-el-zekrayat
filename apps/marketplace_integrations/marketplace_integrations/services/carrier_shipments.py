@@ -57,6 +57,7 @@ from frappe.utils.background_jobs import is_job_enqueued
 
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as bosta_shipment
 from marketplace_integrations.integrations.noon import delivery_note_shipment as noon_shipment
+from marketplace_integrations.services import delivery_note_workflow as lifecycle
 from marketplace_integrations.services.carrier_log import (
 	CANCELLATION_PENDING,
 	CANCELLATION_UNKNOWN,
@@ -134,6 +135,8 @@ def status_of(doc_or_name):
 
 def validate_delivery_note(doc, method=None):
 	"""``validate``: refuse changes the started shipment depends on (a deliberate refusal)."""
+	# #498: the stage (Workflow State) is locked on the server too: Workflow ``allow_edit`` is browser-only.
+	lifecycle.keep_state_consistent(doc)
 	# An existing note is judged by what is stored (rows just added in the form must not take it out of
 	# the guard) and by the new copy (a person who just chose a carrier on an editable note).
 	if doc.flags.get(SKIP_FLAG):
@@ -167,7 +170,7 @@ def require_shipment_created(doc, method=None):
 	blocked = status in (CREATING, UNKNOWN) if doc.get("is_return") else status != CREATED
 	if adapter and blocked:
 		frappe.throw(
-			_("The {0} shipment of this Delivery Note is not Created yet, so it cannot be submitted.").format(
+			_("The {0} shipment of this Delivery Note is not Created yet, so it cannot be confirmed.").format(
 				adapter.SERVICE_NAME
 			),
 			title=_("{0} shipment").format(adapter.SERVICE_NAME),
@@ -292,7 +295,29 @@ def check_deliverable(doc):
 					)
 				)
 	if problems:
-		frappe.throw(" ".join(problems), title=_("The Delivery Note cannot be submitted"))
+		frappe.throw(" ".join(problems), title=_("The Delivery Note cannot be confirmed"))
+
+
+def check_ready(doc):
+	"""Raise what ``request_create`` would refuse before it contacts the carrier (the "Create Shipment" Workflow
+	transition runs this inside the transition, so a note that cannot be sent never leaves Order Received). The
+	locked check in ``request_create`` still runs once more."""
+	adapter = adapter_for(doc)
+	if not adapter:
+		frappe.throw(_("This Delivery Note has no carrier shipment."))
+	if doc.docstatus != 0 or status_of(doc) not in EDITABLE_STATUSES:
+		frappe.throw(_("The shipment of this Delivery Note was already requested."))
+	if not cstr(doc.get("custom_carrier_reference")):
+		check_deliverable(doc)
+	needs = adapter.validate_ready(doc)
+	if needs and needs.get("needs_city"):
+		frappe.throw(
+			_("{0} needs the city of the delivery address. Choose it (Pick {0} City), save the Delivery Note, then create the shipment again.").format(
+				adapter.SERVICE_NAME
+			)
+		)
+	if needs:
+		frappe.throw(_("{0} needs more information before the shipment can be created.").format(adapter.SERVICE_NAME))
 
 
 def request_create(delivery_note, modified=None, submit_as=None):
@@ -348,11 +373,14 @@ def request_create(delivery_note, modified=None, submit_as=None):
 	frappe.db.set_value(
 		"Delivery Note",
 		delivery_note,
-		{
-			"custom_integration_status": CREATING,
-			"custom_carrier_reference": reference,
-			"custom_last_integration_error": None,
-		},
+		lifecycle.with_state(
+			delivery_note,
+			{
+				"custom_integration_status": CREATING,
+				"custom_carrier_reference": reference,
+				"custom_last_integration_error": None,
+			},
+		),
 	)
 	# A return note the carrier owns is a pickup request: same machine, its own operation name.
 	operation = "Return Pickup" if doc.get("is_return") else "Create"
@@ -450,7 +478,7 @@ def _submit_created(delivery_note, submit_as, service):
 			frappe.log_error(title="Automatic submit of a Delivery Note failed", message=f"{delivery_note}\n{frappe.get_traceback()}")
 		frappe.clear_messages()
 		reason = strip_html_tags(cstr(exc)).strip()[:300] or exc.__class__.__name__
-		message = _("Shipment created at {0}; the Delivery Note could not be submitted: {1}").format(service, reason)
+		message = _("Shipment created at {0}; the Delivery Note could not be confirmed: {1}").format(service, reason)
 		frappe.set_user("Administrator")
 		frappe.db.set_value("Delivery Note", delivery_note, "custom_last_integration_error", message, update_modified=False)
 		frappe.db.commit()
@@ -470,7 +498,12 @@ def _finish(delivery_note, status, values, log, result, expected=CREATING, **log
 		frappe.db.commit()
 		return False
 	doc = frappe.get_doc("Delivery Note", delivery_note)
-	doc.db_set(dict(values, custom_integration_status=status), update_modified=True, notify=True, commit=True)
+	doc.db_set(
+		lifecycle.with_state(delivery_note, dict(values, custom_integration_status=status)),
+		update_modified=True,
+		notify=True,
+		commit=True,
+	)
 	return True
 
 
@@ -559,7 +592,10 @@ def _resolve_unknown(delivery_note, start, status, values, log, result, **log_va
 		frappe.db.commit()
 		return False
 	frappe.get_doc("Delivery Note", delivery_note).db_set(
-		dict(values, custom_integration_status=status), update_modified=True, notify=True, commit=True
+		lifecycle.with_state(delivery_note, dict(values, custom_integration_status=status)),
+		update_modified=True,
+		notify=True,
+		commit=True,
 	)
 	return True
 
@@ -619,7 +655,9 @@ def cancel(delivery_note):
 		frappe.db.commit()
 		raise
 	doc.db_set(
-		{"custom_integration_status": CANCELLATION_PENDING, "custom_last_integration_error": None},
+		lifecycle.with_state(
+			delivery_note, {"custom_integration_status": CANCELLATION_PENDING, "custom_last_integration_error": None}
+		),
 		update_modified=True,
 		notify=True,
 	)

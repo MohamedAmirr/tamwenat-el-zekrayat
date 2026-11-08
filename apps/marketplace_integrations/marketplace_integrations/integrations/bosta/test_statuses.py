@@ -429,6 +429,9 @@ class IntegrationTestBostaStatuses(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual(self._apply(event(state=24, ts=2000)), "applied")
 
 		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "modified"), before)
+		# The stage is written with the status, so an open form from before it is refused by the Workflow
+		# (not by the timestamp check); a form that already shows the stage still saves.
+		stale.workflow_state = frappe.db.get_value("Delivery Note", note.name, "workflow_state")
 		stale.submit()
 		values = frappe.db.get_value("Delivery Note", note.name, ["docstatus", "custom_shipping_status"], as_dict=True)
 		self.assertEqual(values.docstatus, 1)

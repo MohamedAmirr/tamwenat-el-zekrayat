@@ -280,6 +280,29 @@ Noon is the second adapter (#415): the old `custom_carrier_status` / `custom_car
   twice. The optional adapter hook `after_submit(doc)` runs from the neutral `on_submit`
   (`carrier_shipments.after_submit`): Bosta queues its label job there after the submit commits, which
   replaced queuing it in `after_created`.
+- **Delivery Note lifecycle Workflow (#498, epic #502).** Every Delivery Note has the Workflow "Delivery Note
+  Lifecycle" and the Custom Field `workflow_state` (label "Stage", read-only, in list view and standard filter,
+  `allow_on_submit`, fixture `Delivery Note-workflow_state`). Employees see stage names, never Draft/Submitted: the native `status`
+  field is out of the list view and the filters, and hidden on the form (three Property Setters in the fixtures).
+  Stages (docstatus): Order Received, Waiting for Goods, Shipment Requested, Shipment Created (0); Picked Up,
+  In Transit, Delivered, Returned / Failed (1); Cancelled (2). Buttons: Create Shipment (Bosta/Noon notes, not
+  returns; moves to Shipment Requested, then the async task `Request Carrier Shipment` calls
+  `carrier_shipments.request_create` as the pressing user; the sync task `Check Carrier Shipment Request` runs
+  `carrier_shipments.check_ready` inside the transition so an unsendable request never reaches Shipment
+  Requested), Confirm Delivery (non-carrier notes, and returns to Returned / Failed), Confirm Shipment (recovery
+  when the auto-submit after Created failed), Cancel (Stock Manager only). Until #500 a Bosta/Noon note is still
+  submitted by the create job once the carrier says Created, so a submitted carrier note before its first carrier
+  status maps to Picked Up (interim). `services/delivery_note_workflow.py` owns `state_for` (the one mapping
+  docstatus + `custom_integration_status` + `custom_shipping_status` + `is_return` -> stage, used by the patch and at
+  runtime), `with_state`/`sync_state` (every carrier `db_set` of a status adds the stage to the same write; used in
+  `carrier_shipments`, `integrations/bosta/statuses.py`, `integrations/noon/delivery_note_shipment.py`),
+  `keep_state_consistent` (server lock: a direct API save cannot move the stage; called from
+  `validate_delivery_note`), `fix_state_after_submit` (hook `on_submit`) and the two transition tasks
+  (`hooks.py` `workflow_methods`). The Workflow ships as data in `workflow/delivery_note_lifecycle.json` and is
+  installed, with the backfill of every existing note's stage, by the patch
+  `patches/v0_0/create_delivery_note_lifecycle_workflow.py` (refuses if another active Delivery Note Workflow
+  exists). Client: `public/js/delivery_note_shipping.js` `before_workflow_action` (carrier pre-check) and
+  `after_workflow_action` (wait dialog). Tests: `services/test_delivery_note_workflow.py`.
 - **Needs Attention** (`services/marketplace_attention.py::_collect_carrier_items`, #415) reads the Delivery
   Notes of every carrier in `CARRIERS` (platform = the carrier name, message names the carrier through the
   adapter's `SERVICE_NAME`) with neutral problem types: Carrier Creation Problem (draft in Creation

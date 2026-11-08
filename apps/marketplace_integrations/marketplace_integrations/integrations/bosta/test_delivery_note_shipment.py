@@ -494,7 +494,7 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 
 		values = stored(note, "docstatus", "custom_integration_status", "custom_last_integration_error")
 		self.assertEqual((values.docstatus, values.custom_integration_status), (0, "Created"))
-		self.assertIn("Shipment created at Bosta; the Delivery Note could not be submitted:", values.custom_last_integration_error)
+		self.assertIn("Shipment created at Bosta; the Delivery Note could not be confirmed:", values.custom_last_integration_error)
 		self.assertIn("Negative stock for ITEM-1", values.custom_last_integration_error)
 		self.assertNotIn("<b>", values.custom_last_integration_error)
 		self.assertEqual(frappe.session.user, "Administrator")
@@ -522,7 +522,7 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 
 		values = stored(note, "docstatus", "custom_integration_status", "custom_last_integration_error")
 		self.assertEqual((values.docstatus, values.custom_integration_status), (0, "Created"))
-		self.assertIn("could not be submitted", values.custom_last_integration_error)
+		self.assertIn("could not be confirmed", values.custom_last_integration_error)
 
 	def test_check_never_submits_a_note_it_finds_created(self):
 		note = self.make_note()

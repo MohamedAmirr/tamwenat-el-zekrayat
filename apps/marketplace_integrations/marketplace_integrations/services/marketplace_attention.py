@@ -724,7 +724,7 @@ def _collect_carrier_items(problem_type=None):
 				CARRIER_CANCELLED,
 				carrier,
 				row,
-				_("{0} shipment is cancelled but this Delivery Note is still submitted. Press Cancel.").format(name),
+				_("{0} shipment is cancelled but this Delivery Note is not cancelled yet. Press Cancel.").format(name),
 				seen,
 			)
 		elif (
@@ -744,9 +744,9 @@ def _collect_carrier_items(problem_type=None):
 			and problem_type in (None, CARRIER_EXCEPTION)
 		):
 			if created_draft and error:
-				explanation = _("{0}: shipment created, Delivery Note not submitted. {1}").format(name, error)
+				explanation = _("{0}: shipment created, Delivery Note not confirmed. {1}").format(name, error)
 			elif created_draft:
-				explanation = _("{0}: shipment created, but the Delivery Note is still a draft. Submit it.").format(name)
+				explanation = _("{0}: shipment created, but the Delivery Note is not confirmed yet. Press Confirm Shipment.").format(name)
 			else:
 				explanation = f"{name}: {error or shipping_status}"
 			add(CARRIER_EXCEPTION, carrier, row, explanation, seen)
@@ -821,7 +821,7 @@ def _collect_carrier_return_reviews():
 				frappe._dict(name="", platform=found[0]),
 				"Delivery Note",
 				row.name,
-				_("{0} returned shipment {1}. Check the returned goods and submit this draft return.").format(
+				_("{0} returned shipment {1}. Check the returned goods, then confirm this return.").format(
 					found[1].SERVICE_NAME, row.return_against
 				),
 				row.creation,

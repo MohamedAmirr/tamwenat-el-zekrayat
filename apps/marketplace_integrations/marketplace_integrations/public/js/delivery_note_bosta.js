@@ -103,7 +103,7 @@
 	function before_send(frm) {
 		if (frm.doc.custom_cod_confirmed) return true;
 		frappe.msgprint({
-			message: __("Confirm the COD amount before submitting: tick COD confirmed, or change the COD. 0 is allowed."),
+			message: __("Confirm the COD amount before creating the shipment: tick COD confirmed, or change the COD. 0 is allowed."),
 			indicator: "orange",
 		});
 		return false;

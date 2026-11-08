@@ -140,7 +140,7 @@ test("a submitted note cancelled at the carrier says the next Cancel makes no ca
 	const submitted = make_form({ custom_integration_status: "Cancelled", docstatus: 1 });
 	handlers.refresh(submitted);
 	assert.equal(submitted.intro.color, "orange");
-	assert.match(submitted.intro.text, /Cancelled at Bosta\. This Delivery Note is still submitted/);
+	assert.match(submitted.intro.text, /Cancelled at Bosta\. Press Cancel to cancel this Delivery Note here too/);
 	assert.match(submitted.intro.text, /Bosta will not be asked again/);
 	const draft = make_form({ custom_integration_status: "Cancelled", docstatus: 0 });
 	handlers.refresh(draft);
@@ -355,7 +355,7 @@ test("Created but still a draft without an error keeps waiting for the job, then
 	await handlers.before_submit(frm);
 	assert.equal(global.frappe.validated, false);
 	assert.equal(frm.reloads, 0);
-	assert.match(msgprints[0].message, /submitted automatically once the shipment is created/);
+	assert.match(msgprints[0].message, /moves on automatically once the shipment is created/);
 });
 
 test("submit stops and opens the city picker when the server found no city for the address", async () => {
@@ -367,7 +367,7 @@ test("submit stops and opens the city picker when the server found no city for t
 	assert.equal(frm.city_picked, 1);
 	assert.equal(frm.reloads, 0);
 	assert.equal(dialogs[0].hidden, true);
-	assert.match(alerts[0].message, /Choose the Bosta city, then submit again/);
+	assert.match(alerts[0].message, /Choose the Bosta city, then create the shipment again/);
 });
 
 test("submit stops with the carrier error when creation fails", async () => {
@@ -379,7 +379,7 @@ test("submit stops with the carrier error when creation fails", async () => {
 	assert.equal(global.frappe.validated, false);
 	assert.equal(frm.reloads, 0);
 	assert.match(msgprints[0].message, /bad phone/);
-	assert.match(msgprints[0].message, /was not submitted/);
+	assert.match(msgprints[0].message, /The Delivery Note was not changed/);
 });
 
 test("the stored carrier error is escaped where the failure is shown", async () => {
@@ -563,4 +563,43 @@ test("a second submit while a request is in flight does not start another and st
 	assert.equal(calls.length, 1);
 	await first;
 	assert.equal(global.frappe.marketplace_integrations.shipping.is_busy(frm), false);
+});
+
+test("before_workflow_action lets Create Shipment through and remembers the note for the wait dialog", async () => {
+	const { handlers, calls, dialogs } = load({
+		statuses: [{ custom_integration_status: "Created", docstatus: 0 }],
+		call_result: { status: "Creating" },
+	});
+	const frm = make_form({ custom_integration_status: "Not Created" });
+	frm.selected_workflow_action = "Create Shipment";
+	assert.equal(handlers.before_workflow_action(frm), undefined);
+	assert.equal(frm.__create_shipment_for, "MAT-DN-1");
+	frm.selected_workflow_action = null;
+	await handlers.after_workflow_action(frm);
+	assert.equal(dialogs.length > 0, true);
+	// the Workflow already queued the request: the form must not ask for it again
+	assert.equal(calls.length, 0);
+	assert.equal(frm.__create_shipment_for, null);
+});
+
+test("before_workflow_action stops Create Shipment when the carrier pre-check refuses", () => {
+	let unfrozen = 0;
+	const { handlers } = load();
+	global.frappe.dom = { unfreeze: () => unfrozen++ };
+	const frm = make_form({ custom_cod_confirmed: 0 });
+	frm.selected_workflow_action = "Create Shipment";
+	const result = handlers.before_workflow_action(frm);
+	assert.equal(result instanceof Promise, true);
+	assert.equal(unfrozen, 1);
+	assert.equal(frm.selected_workflow_action, null);
+	assert.equal(frm.__create_shipment_for, null);
+});
+
+test("other workflow actions are not touched and open no wait dialog", async () => {
+	const { handlers, dialogs } = load();
+	const frm = make_form();
+	frm.selected_workflow_action = "Confirm Delivery";
+	assert.equal(handlers.before_workflow_action(frm), undefined);
+	await handlers.after_workflow_action(frm);
+	assert.equal(dialogs.length, 0);
 });
