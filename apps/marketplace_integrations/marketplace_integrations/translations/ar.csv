@@ -1836,8 +1836,13 @@ It is not known whether {0} created the request.,من غير المعروف ما
 {0} is taking longer than expected.,{0} تستغرق وقتًا أطول من المتوقع.
 Open the Delivery Note later and check its Integration Status.,افتح مذكرة التسليم لاحقًا وتحقق من حالة التكامل.
 "{0} cancelled the shipment, but this Delivery Note could not be cancelled automatically: {1}","ألغت {0} الشحنة، لكن تعذّر إلغاء مذكرة التسليم هذه تلقائيًا: {1}"
+"Sales Invoice {0} also bills other Delivery Notes or items without one, so it is not cancelled automatically.","فاتورة المبيعات {0} تفوتر أيضًا مذكرات تسليم أخرى أو بنودًا بدون مذكرة تسليم، لذلك لا يتم إلغاؤها تلقائيًا."
+"Sales Invoice {0} is linked with {1}, so it is not cancelled automatically.","فاتورة المبيعات {0} مرتبطة بالمستند {1}، لذلك لا يتم إلغاؤها تلقائيًا."
 Delivery Note {0}: {1} cancelled the shipment but the note must be cancelled by hand. {2},مذكرة التسليم {0}: ألغت {1} الشحنة لكن يجب إلغاء المذكرة يدويًا. {2}
 Delivery Note {0} was cancelled automatically because {1} cancelled the shipment.,أُلغيت مذكرة التسليم {0} تلقائيًا لأن {1} ألغت الشحنة.
+"Sales Invoice {0} is a POS invoice or is not fully unpaid, so it is not cancelled automatically.","فاتورة المبيعات {0} فاتورة نقطة بيع أو غير مدفوعة بالكامل، لذلك لا يتم إلغاؤها تلقائيًا."
+Cancelled automatically with Delivery Note {0} because the carrier cancelled the shipment.,أُلغيت تلقائيًا مع مذكرة التسليم {0} لأن شركة الشحن ألغت الشحنة.
+Delivery Note {0} was cancelled automatically because {1} cancelled the shipment. Cancelled with it: {2},أُلغيت مذكرة التسليم {0} تلقائيًا لأن {1} ألغت الشحنة. أُلغيت معها: {2}
 The Delivery Note was already cancelled.,تم إلغاء مذكرة التسليم بالفعل.
 An invoice upload for this Delivery Note is already running. Wait for it to finish.,رفع فاتورة لمذكرة التسليم هذه قيد التنفيذ بالفعل. انتظر حتى ينتهي.
 "The return source ""Returned by Bosta"" is set by the app only. It cannot be set or cleared by hand.","مصدر المرتجع ""Returned by Bosta"" يضبطه التطبيق فقط. لا يمكن ضبطه أو مسحه يدويًا."

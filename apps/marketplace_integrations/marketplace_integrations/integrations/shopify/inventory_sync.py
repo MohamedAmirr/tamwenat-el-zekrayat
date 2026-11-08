@@ -18,11 +18,15 @@ anywhere** - both triggers are polling/cron, never a document hook.
 
 Locked decisions this implements (see the issue's "Implementation plan"):
 
-- **Quantity** (3/5): writes ``on_hand`` (Shopify derives ``available``) from
-  ``floor(max(Bin.actual_qty, 0))`` in the Item's **stock UOM** - ``sales_uom``
-  is ignored. Source: ``services/listing_quantity.py::resolve_stock_quantities()``
-  (bulk ``Bin`` reads per chunk). An Item with a Product Bundle uses the
-  bundle quantity from its components (#368); an invalid bundle is an
+- **Quantity** (3/5): writes ``available`` from
+  ``floor(max(Bin.actual_qty - Bin.reserved_qty, 0))`` in the Item's **stock
+  UOM** - ``sales_uom`` is ignored. ``reserved_qty`` is the Sales Order
+  reservation; ``reserved_stock`` (Stock Reservation Entry) is not subtracted.
+  Source: ``services/listing_quantity.py::resolve_stock_quantities(...,
+  subtract_reserved=True)`` (bulk ``Bin`` reads per chunk; other callers keep
+  the plain ``actual_qty`` read). An Item with a Product Bundle uses the
+  bundle quantity from its components, each component read as
+  ``actual_qty - reserved_qty`` (#368); an invalid bundle is an
   ``Error`` on its mapping, never pushed as 0.
 - **Skips** (6): a disabled Account, Connection, mapping, or ERPNext Item makes
   no mutation. Disabled mappings/Items are reported as ``skipped`` (never
@@ -35,7 +39,7 @@ Locked decisions this implements (see the issue's "Implementation plan"):
   an untracked inventory item gets ``inventoryItemUpdate(tracked: true)`` first
   (both deliberate, user-approved changes to Shopify configuration).
 - **Ids at sync time** (7): per chunk, one ``nodes(ids:)`` read returns each
-  variant's inventory item id, ``tracked`` flag, and the current ``on_hand`` at
+  variant's inventory item id, ``tracked`` flag, and the current ``available`` at
   the bound location - the compare value. Nothing is cached on the mapping.
 - **Compare-and-set** (8): ``inventorySetQuantities`` with
   ``changeFromQuantity`` (the only quantity-compare input in the 2026-07 API), never
@@ -128,15 +132,18 @@ quantity, updatedAt``.
 
 STILL UNVERIFIED:
 
-1. That ``InventoryLevel.quantities(names: ["on_hand"])`` returns an ``on_hand``
-   entry for a stocked level.
+0. That ``available`` is accepted as ``inventorySetQuantities`` input ``name``
+   and with ``changeFromQuantity`` (only ``on_hand`` was checked on shopify.dev;
+   the switch to ``available`` is unverified against a live store).
+1. That ``InventoryLevel.quantities(names: ["available"])`` returns an
+   ``available`` entry for a stocked level.
 2. The maximum ``quantities`` per ``inventorySetQuantities`` call (chunk size
    50 is a guess).
 3. That ``changeFromQuantity`` has the semantics ``compareQuantity`` had (the
    page gives no explanation).
 4. That ``inventoryActivate`` works for an untracked item (this module enables
    tracking first, so it never relies on it), the initial level it creates
-   (assumed ``on_hand`` 0, used as the compare value; a wrong guess surfaces as
+   (assumed ``available`` 0, used as the compare value; a wrong guess surfaces as
    ``CHANGE_FROM_QUANTITY_STALE`` and is recovered by the re-read), and its
    ``inventoryLevel { id }`` payload shape.
 5. That ``inventorySetQuantities`` is atomic when it returns userErrors (if
@@ -153,13 +160,13 @@ STILL UNVERIFIED:
    ``IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED``): not handled specially (they take
    the generic per-item fallback / Error path).
 
-Operating requirement (decision 3): because ``on_hand`` is pushed, orders must
-be marked fulfilled in Shopify (manually is fine) - v1 has no fulfillment sync,
-so ``committed`` would otherwise never clear and units are subtracted twice once
-ERPNext ships. The reverse ordering also matters: if an order is fulfilled in
-Shopify BEFORE ERPNext posts the stock-out (Delivery Note), the next sync pushes
-the higher ERPNext ``on_hand`` back until ERPNext catches up, so stock is
-briefly overstated.
+Operating note (decision 3): ``available`` is pushed with Sales Order
+reservations (``Bin.reserved_qty``) already subtracted, so Shopify's own
+``committed`` is not subtracted again and fulfilling an order in Shopify no
+longer double-subtracts. Between a Shopify order and its ERPNext Sales Order
+being submitted, the pushed value is not yet reduced; the next push after the
+Sales Order reserves the stock (or after delivery, when ``actual_qty`` drops
+and the reservation clears) converges both sides.
 """
 
 import uuid
@@ -517,7 +524,7 @@ def get_sync_status(job_id):
 
 
 def sync_account_inventory(account_name, mapping_names=None, job_id_for_result=None, owner=None, manual=False):
-	"""Background job body (the worker): push ERPNext stock to Shopify ``on_hand``
+	"""Background job body (the worker): push ERPNext stock to Shopify ``available``
 	for every given mapping (``None`` = every enabled mapping of the account).
 
 	Returns the result payload. Status/progress is written only when a
@@ -710,7 +717,7 @@ def _sync_chunk(client, account_doc, location_id, mappings, item_by_name):
 	"""Sync one chunk of mappings and persist every outcome together under one
 	savepoint/commit."""
 	item_codes = [item_by_name[mapping.item].name for mapping in mappings if mapping.item in item_by_name]
-	quantities, problems = resolve_stock_quantities(account_doc.warehouse, item_codes)
+	quantities, problems = resolve_stock_quantities(account_doc.warehouse, item_codes, subtract_reserved=True)
 	# An invalid Product Bundle is reported on its mapping and never pushed as 0.
 	problem_entries = [frappe._dict(name=mapping.name) for mapping in mappings if mapping.item in problems]
 	entries = [
@@ -820,7 +827,7 @@ def _sync_entries(client, location_id, entries, outcomes, allow_fallback=True):
 
 def _read_inventory_state(client, location_id, variant_gids):
 	"""Return ``{variant_gid: {inventory_item_id, tracked, has_level,
-	on_hand}}`` for every variant that resolved with an inventory item. Matched
+	available}}`` for every variant that resolved with an inventory item. Matched
 	by each node's own ``id`` (response order isn't guaranteed)."""
 	data = client.execute(
 		_INVENTORY_READ_QUERY,
@@ -834,7 +841,7 @@ def _read_inventory_state(client, location_id, variant_gids):
 		if not isinstance(inventory_item, dict) or not inventory_item.get("id"):
 			continue
 		level = inventory_item.get("inventoryLevel")
-		on_hand = None
+		available = None
 		if isinstance(level, dict):
 			for quantity in level.get("quantities") or []:
 				if (
@@ -843,12 +850,12 @@ def _read_inventory_state(client, location_id, variant_gids):
 					and isinstance(quantity.get("quantity"), int)
 					and not isinstance(quantity.get("quantity"), bool)
 				):
-					on_hand = quantity["quantity"]
+					available = quantity["quantity"]
 		state[node["id"]] = {
 			"inventory_item_id": inventory_item["id"],
 			"tracked": bool(inventory_item.get("tracked")),
 			"has_level": isinstance(level, dict),
-			"on_hand": on_hand,
+			"available": available,
 		}
 	return state
 
@@ -883,17 +890,17 @@ def _prepare_entry(client, location_id, entry, node):
 		entry.applied.append(APPLIED_ACTIVATION)
 		return 0
 
-	on_hand = node["on_hand"]
-	if on_hand is None:
+	available = node["available"]
+	if available is None:
 		if flipped:
 			# Tracking was just enabled; the pre-flip read may not carry a
 			# quantity. Guess 0 - a wrong guess is CHANGE_FROM_QUANTITY_STALE, which the
 			# whole-chunk re-read recovers.
 			return 0
 		raise _EntryFailed(_("Could not read the current Shopify quantity at the bound Location."))
-	if not flipped and on_hand == entry.target:
+	if not flipped and available == entry.target:
 		return None
-	return on_hand
+	return available
 
 
 def _set_quantities(client, location_id, to_set):

@@ -408,7 +408,7 @@ class IntegrationTestShopifyInventoryReadsOwnWarehouse(ShopifyStockOrderFixture,
 			"Synced",
 		)
 
-	def test_sales_order_submit_then_bin_sweep_sends_no_shopify_set(self):
+	def test_sales_order_submit_then_bin_sweep_pushes_available_minus_reserved(self):
 		self.import_and_sync()
 		self.assertEqual(self.snapshot()["actual_qty"], STOCK_QTY)
 		shopify = FakeShopify()
@@ -429,9 +429,16 @@ class IntegrationTestShopifyInventoryReadsOwnWarehouse(ShopifyStockOrderFixture,
 		self.assertEqual(calls[0].kwargs["mapping_names"], [self.mapping.name])
 		self._sync(self.account, shopify, [LOCATION], calls[0].kwargs["mapping_names"])
 
-		# ...but the target (actual_qty) is unchanged, so Shopify is not written.
-		self.assertEqual(shopify.calls_of("set"), [])
-		self.assertEqual(self.snapshot()["actual_qty"], STOCK_QTY)
+		# ...and the target is actual_qty - reserved_qty, so Shopify `available` drops by
+		# the reserved quantity while actual_qty is untouched.
+		snapshot = self.snapshot()
+		self.assertGreater(snapshot["reserved_qty"], 0)
+		self.assertEqual(snapshot["actual_qty"], STOCK_QTY)
+		sets = shopify.calls_of("set")
+		self.assertEqual(len(sets), 1)
+		self.assertEqual(
+			sets[0]["input"]["quantities"][0]["quantity"], STOCK_QTY - snapshot["reserved_qty"]
+		)
 
 
 class IntegrationTestShopifyWebhookIdempotency(ShopifyStockOrderFixture, IntegrationTestCase):
