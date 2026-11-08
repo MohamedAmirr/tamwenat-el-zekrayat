@@ -17,7 +17,7 @@ brand-new, unsaved Marketplace Account.
 
 import frappe
 
-from marketplace_integrations.integrations.shopify import products
+from marketplace_integrations.integrations.shopify import product_create, products
 
 
 @frappe.whitelist(methods=["POST"])
@@ -38,6 +38,19 @@ def get_catalog_sweep_status(job_id: str):
 	"""Poll a previously queued catalog sweep job's status/progress/result.
 	Owner-scoped: only the user who queued the sweep may read its status."""
 	return products.get_sweep_status(job_id)
+
+
+@frappe.whitelist(methods=["POST"])
+def queue_product_create(account: str, item: str):
+	"""Authorize and enqueue creating a draft Shopify product from an Item and
+	mapping it (#494). No Shopify HTTP call happens in this request."""
+	return product_create.queue_product_create(account, item)
+
+
+@frappe.whitelist()
+def get_product_create_status(job_id: str):
+	"""Poll a queued product create job. Owner-scoped."""
+	return product_create.get_product_create_status(job_id)
 
 
 @frappe.whitelist(methods=["POST"])
