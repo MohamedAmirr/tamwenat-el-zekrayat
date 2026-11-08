@@ -348,6 +348,8 @@ External Order ID,معرّف الطلب الخارجي
 Order Identity Key,مفتاح هوية الطلب
 Platform Order Reference,مرجع الطلب في المنصة
 Order Code,رمز الطلب
+Order Number,رقم الطلب
+"Numeric part of a Shopify-style order code (#25233), filled by the controller so the list can sort orders by number. 0 for other order codes. The bold flag is what puts it in the list sort selector.","الجزء الرقمي من رمز الطلب بنمط Shopify (#25233)، يملؤه النظام تلقائيًا لتمكين ترتيب القائمة حسب رقم الطلب. تكون قيمته 0 لرموز الطلبات الأخرى. علامة الخط العريض (bold) هي ما يدرج الحقل في محدد الترتيب بالقائمة."
 External Status,الحالة الخارجية
 External Financial Status,الحالة المالية الخارجية
 External Fulfillment Status,حالة التنفيذ الخارجية
