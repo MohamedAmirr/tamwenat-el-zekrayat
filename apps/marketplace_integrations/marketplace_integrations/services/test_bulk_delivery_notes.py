@@ -13,7 +13,7 @@ from unittest.mock import patch
 import frappe
 from frappe import _
 from frappe.tests import IntegrationTestCase
-from frappe.utils import nowdate, strip_html_tags
+from frappe.utils import add_days, nowdate, strip_html_tags
 
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as shipment
 from marketplace_integrations.services import bulk_delivery_notes as bulk
@@ -735,6 +735,72 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		frappe.db.commit()
 		return order, warehouse
 
+	def _stock_item(self):
+		item = self._track(
+			frappe.get_doc(
+				{
+					"doctype": "Item",
+					"item_code": f"TEST-PART-{frappe.generate_hash(length=6)}",
+					"item_group": "Products",
+					"stock_uom": "Nos",
+					"is_stock_item": 1,
+				}
+			).insert()
+		)
+		self._stock_items.append(item.name)
+		return item.name
+
+	def _bundle_order(self, bundle_qty, components, extra_rows=(), in_stock=None):
+		"""A marketplace order selling ``bundle_qty`` of a new Product Bundle (a non-stock parent) made of
+		``components`` (``{item_code: qty per bundle}``), plus ``extra_rows`` (``[(item_code, qty)]``, plain rows
+		of the same order). ``in_stock`` is ``{item_code: units}`` really received (Material Receipt) in the row
+		warehouse."""
+		from erpnext.stock.doctype.stock_entry.stock_entry_utils import make_stock_entry
+
+		parent = self._track(
+			frappe.get_doc(
+				{
+					"doctype": "Item",
+					"item_code": f"TEST-BUNDLE-{frappe.generate_hash(length=6)}",
+					"item_group": "Products",
+					"stock_uom": "Nos",
+					"is_stock_item": 0,
+				}
+			).insert()
+		)
+		self._track(
+			frappe.get_doc(
+				{
+					"doctype": "Product Bundle",
+					"new_item_code": parent.name,
+					"items": [{"item_code": code, "qty": qty} for code, qty in components.items()],
+				}
+			).insert()
+		)
+		order = frappe.get_doc(
+			{
+				"doctype": "Sales Order",
+				"customer": self.customer.name,
+				"company": self.company,
+				"delivery_date": add_days(nowdate(), 3),
+				"custom_marketplace_platform": "Shopify",
+				"shipping_address_name": self.address.name,
+				"contact_mobile": "01000000000",
+				"items": [
+					{"item_code": code, "qty": qty, "rate": 100, "delivery_date": add_days(nowdate(), 3)}
+					for code, qty in [(parent.name, bundle_qty), *extra_rows]
+				],
+			}
+		).insert()
+		order.submit()
+		self._track(order)
+		warehouse = order.items[0].warehouse
+		for code, qty in (in_stock or {}).items():
+			entry = make_stock_entry(item_code=code, qty=qty, to_warehouse=warehouse, company=self.company, rate=10)
+			self._stock_entries.append(entry.name)
+		frappe.db.commit()
+		return frappe.get_doc("Sales Order", order.name), warehouse
+
 	def tearDown(self):
 		super().tearDown()
 		# Posted stock rows cannot be removed through the ORM (the Material Receipt and the ledger rows of the
@@ -820,6 +886,64 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		note = self.make_note(order)
 
 		self.assertTrue(carrier_shipments.request_create(note.name)["queued"])
+
+	def test_a_bundle_short_of_a_component_is_skipped_by_bulk_and_refused_by_the_form_with_the_same_text(self):
+		part, other = self._stock_item(), self._stock_item()
+		# 3 bundles need 6 of `part` (2 each) and 3 of `other`; only 5 of `part` are in stock.
+		order, warehouse = self._bundle_order(3, {part: 2, other: 1}, in_stock={part: 5, other: 10})
+		self._pay(order)
+
+		email = self._staff(with_item_read=True)  # the bulk mapper needs Item read
+		result = self._as(email, bulk.process_order, order.name)
+		self._keep_invoices(order)
+
+		self.assertEqual(result["status"], bulk.SKIPPED, result)
+		self.assertIn(f"Item {part}: 6 to deliver but only 5 in stock in warehouse {warehouse}", result["message"])
+		self.assertNotIn(other, result["message"])
+		self.assertIsNone(result["delivery_note"])
+		self.assertIsNone(bulk.live_note(order.name))
+		self.assertEqual(bulk._invoices(order.name, 0) + bulk._invoices(order.name, 1), [])
+		self.assertEqual(self.http.sent(), [])
+		self.assertEqual([c for c in self.enqueue.call_args_list if c.args[0].endswith("run_create")], [])
+
+		# The form: the saved draft carries the packed items; the same text, no request row, no Bosta call.
+		note = self.make_note(order)
+		self.assertEqual(len(note.packed_items), 2)
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self._as(self._staff(), carrier_shipments.request_create, note.name)
+		frappe.clear_messages()
+		self.assertEqual(strip_html_tags(str(caught.exception)).strip(), result["message"])
+		self.assertFalse(
+			frappe.db.exists(
+				"Integration Request", {"reference_doctype": "Delivery Note", "reference_docname": note.name}
+			)
+		)
+		self.assertEqual(self.http.sent(), [])
+
+	def test_a_bundle_with_enough_component_stock_is_sent_by_bulk_and_queued_by_the_form(self):
+		part, other = self._stock_item(), self._stock_item()
+		order, _warehouse = self._bundle_order(3, {part: 2, other: 1}, in_stock={part: 6, other: 3})
+		note = self.make_note(order)
+		self.assertTrue(carrier_shipments.request_create(note.name)["queued"])
+
+		second, _warehouse = self._bundle_order(3, {part: 2, other: 1}, in_stock={part: 6, other: 3})
+		email = self._staff(with_item_read=True)
+		result = self._as(email, bulk.process_order, second.name)
+		self._keep_invoices(second)
+
+		self.assertEqual(result["status"], bulk.SENT, result)
+
+	def test_a_component_used_by_a_bundle_and_a_plain_row_is_checked_together(self):
+		part = self._stock_item()
+		# 2 bundles use 2 `part`, the plain row asks for 2 more: 4 in all, 3 in stock (each alone would pass).
+		order, warehouse = self._bundle_order(2, {part: 1}, extra_rows=[(part, 2)], in_stock={part: 3})
+		note = self.make_note(order)
+
+		with self.assertRaises(frappe.ValidationError) as caught:
+			carrier_shipments.check_deliverable(frappe.get_doc("Delivery Note", note.name))
+		frappe.clear_messages()
+
+		self.assertIn(f"Item {part}: 4 to deliver but only 3 in stock in warehouse {warehouse}", str(caught.exception))
 
 	def test_a_negative_bin_reads_as_zero_in_the_message(self):
 		order, warehouse = self._stock_order(qty=3, in_stock=0)

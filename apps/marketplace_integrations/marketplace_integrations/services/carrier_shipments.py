@@ -217,7 +217,8 @@ def boot_session(bootinfo):
 
 def check_deliverable(doc):
 	"""Raise (a validation error, no carrier is contacted) when ERPNext's own submit would refuse the stock rows
-	of this draft note: a row asking for more than the stock of its warehouse (unless negative stock is
+	of this draft note: a row (or a Product Bundle component of its packed items, summed per item and warehouse
+	with the other rows) asking for more than the stock of its warehouse (unless negative stock is
 	allowed), or more than the Sales Order has left to deliver (its over-delivery allowance counts, and so
 	does the role allowed to over-deliver). Only stock items are judged, like ERPNext. A return is not checked
 	(it brings stock in). The stock race and reservations are not judged: they still end as a Created draft
@@ -233,13 +234,24 @@ def check_deliverable(doc):
 	from marketplace_integrations.services.listing_quantity import _actual_quantities
 
 	wanted, ordered = {}, {}
+
+	def want(item_code, warehouse, qty):
+		if warehouse and frappe.get_cached_value("Item", item_code, "is_stock_item"):
+			wanted[(item_code, warehouse)] = wanted.get((item_code, warehouse), 0) + flt(qty)
+
 	for row in doc.items:
-		if not row.item_code or not frappe.get_cached_value("Item", row.item_code, "is_stock_item"):
+		if not row.item_code:
 			continue
-		if row.warehouse:
-			key = (row.item_code, row.warehouse)
-			wanted[key] = wanted.get(key, 0) + flt(row.stock_qty or row.qty)
-		if row.so_detail:
+		if doc.has_product_bundle(row.item_code):
+			# ERPNext posts a Product Bundle through its packed items only (``get_item_list``): each component, in
+			# its own warehouse (the row's when empty), in stock units. The packed items are saved with the draft
+			# (the ``validate`` that inserts or saves it builds them). The parent row is not a stock movement.
+			for packed in doc.get("packed_items"):
+				if packed.parent_detail_docname == row.name and packed.parent_item == row.item_code:
+					want(packed.item_code, packed.warehouse or row.warehouse, packed.qty)
+		else:
+			want(row.item_code, row.warehouse, row.stock_qty or row.qty)
+		if row.so_detail and frappe.get_cached_value("Item", row.item_code, "is_stock_item"):
 			ordered[row.so_detail] = ordered.get(row.so_detail, 0) + flt(row.qty)
 
 	precision = frappe.get_precision("Delivery Note Item", "qty")
