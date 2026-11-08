@@ -42,6 +42,11 @@ class _QuantityHelpers:
 				{"doctype": "Bin", "item_code": item.name, "warehouse": warehouse, "actual_qty": qty}
 			).insert()
 
+	def _set_reserved_qty(self, item, qty, warehouse=None):
+		"""Call after ``_set_actual_qty`` (the Bin must already exist)."""
+		warehouse = warehouse or self.warehouse
+		frappe.db.set_value("Bin", {"item_code": item.name, "warehouse": warehouse}, "reserved_qty", qty)
+
 
 
 class IntegrationTestListingQuantity(_QuantityHelpers, IntegrationTestCase):
@@ -234,6 +239,49 @@ class IntegrationTestBundleQuantity(_QuantityHelpers, IntegrationTestCase):
 		self._set_actual_qty(item, 7.9)
 
 		self.assertEqual(resolve_stock_quantities(self.warehouse, [item.name]), ({item.name: 7}, {}))
+
+	def test_subtract_reserved_is_opt_in_for_plain_items(self):
+		item = self._make_item("RESV")
+		self._set_actual_qty(item, 10)
+		self._set_reserved_qty(item, 4)
+
+		self.assertEqual(resolve_stock_quantities(self.warehouse, [item.name]), ({item.name: 10}, {}))
+		self.assertEqual(
+			resolve_stock_quantities(self.warehouse, [item.name], subtract_reserved=True),
+			({item.name: 6}, {}),
+		)
+		self.assertEqual(get_stock_quantities(self.warehouse, [item.name]), {item.name: 10})
+
+	def test_subtract_reserved_clamps_at_zero_and_floors(self):
+		over = self._make_item("RESVOVER")
+		frac = self._make_item("RESVFRAC")
+		self._set_actual_qty(over, 3)
+		self._set_reserved_qty(over, 5)
+		self._set_actual_qty(frac, 7.9)
+		self._set_reserved_qty(frac, 2.5)
+
+		quantities, problems = resolve_stock_quantities(
+			self.warehouse, [over.name, frac.name], subtract_reserved=True
+		)
+
+		self.assertEqual(quantities, {over.name: 0, frac.name: 5})
+		self.assertEqual(problems, {})
+
+	def test_subtract_reserved_applies_to_bundle_components(self):
+		first = self._make_item("RESVA")
+		second = self._make_item("RESVB")
+		self._set_actual_qty(first, 20)
+		self._set_reserved_qty(first, 8)  # 12 / 2 = 6
+		self._set_actual_qty(second, 9)
+		self._set_reserved_qty(second, 2)  # 7 / 1 = 7
+		parent = self._make_parent("RESVP")
+		self._make_bundle(parent, [(first.name, 2), (second.name, 1)])
+
+		self.assertEqual(self._quantities(parent), ({parent.name: 9}, {}))  # min(20/2, 9/1)
+		self.assertEqual(
+			resolve_stock_quantities(self.warehouse, [parent.name], subtract_reserved=True),
+			({parent.name: 6}, {}),  # min(12/2, 7/1)
+		)
 
 	def test_mixed_batch_splits_plain_bundle_and_problem(self):
 		plain = self._make_item("MIXPLAIN")

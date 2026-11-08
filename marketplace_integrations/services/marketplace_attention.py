@@ -60,6 +60,11 @@ Problem sources (``problem_type``):
 - Payment Entry Cancelled: cancelled mirrored Payment Entries without a
   submitted amendment and without another submitted manual Payment Entry covering the order
   for at least the amount the cancelled entry allocated (#425).
+- Sync Pending Too Long (#487): a Marketplace Order of any platform still ``Syncing`` with no Sales Order,
+  not cancelled, whose record was created more than SYNC_PENDING_ALERT_MINUTES ago (``creation``, not
+  ``received_on``: that is the platform's own time, so a back-filled order would be "old" at once). Until
+  the Sales Order is submitted the stock pushed to Shopify does not yet subtract the order. A failed sync
+  is Sync Error (a different status), so an order never shows both rows.
 """
 
 import json
@@ -81,8 +86,15 @@ from marketplace_integrations.services.sales_order_sync import (
 	NOON_INELIGIBLE_INTEGRATION_STATUS,
 )
 from marketplace_integrations.services.shopify_payments import manual_payment_totals
-from marketplace_integrations.services.sync_status import CANCELLED, NEEDS_ACTION, SYNC_ERROR, SYNCED
+from marketplace_integrations.services.sync_status import (
+	CANCELLED,
+	NEEDS_ACTION,
+	SYNC_ERROR,
+	SYNCED,
+	SYNCING,
+)
 
+SYNC_PENDING_TOO_LONG = "Sync Pending Too Long"
 UNMAPPED_ITEMS = "Unmapped Items"
 ORDER_IMPORT_ERROR = "Order Import Error"
 FULFILLMENT_ERROR = "Fulfillment Error"
@@ -103,6 +115,8 @@ PAYMENT_EXCESS = "Payment Excess"
 PAYMENT_ENTRY_CANCELLED = "Payment Entry Cancelled"
 CARRIER_STALE_DAYS = 5
 CARRIER_MAX_AGE_DAYS = 60
+#: A Syncing order with no Sales Order older than this is stuck (the debounce window is seconds).
+SYNC_PENDING_ALERT_MINUTES = 20
 #: A Created draft note older than this was not submitted by the background job (it failed or died).
 CARRIER_DRAFT_STUCK_MINUTES = 15
 #: A "Carrier Cancelled" item clears after this many days (or at once when the Delivery Note is
@@ -112,6 +126,7 @@ CARRIER_CANCELLED_DAYS = 14
 PROBLEM_TYPES = [
 	SYNC_ERROR,
 	NEEDS_ACTION,
+	SYNC_PENDING_TOO_LONG,
 	UNMAPPED_ITEMS,
 	ORDER_IMPORT_ERROR,
 	FULFILLMENT_ERROR,
@@ -181,6 +196,7 @@ def get_attention_items(filters=None):
 
 	collectors = [
 		({SYNC_ERROR, NEEDS_ACTION}, _collect_order_status_items),
+		({SYNC_PENDING_TOO_LONG}, _collect_sync_pending_items),
 		({UNMAPPED_ITEMS}, _collect_unmapped_items),
 		({ORDER_IMPORT_ERROR}, _collect_import_errors),
 		({FULFILLMENT_ERROR}, _collect_fulfillment_errors),
@@ -363,6 +379,43 @@ def _collect_order_status_items(accounts):
 				)
 			)
 	return items
+
+
+def _collect_sync_pending_items(accounts):
+	"""Orders still Syncing with no Sales Order after SYNC_PENDING_ALERT_MINUTES (#487).
+
+	An order still inside its debounce window (``sync_debounce_until`` in the future) is
+	deliberately not listed: a sync is scheduled, so it is not stuck.
+	"""
+	cutoff = add_to_date(now_datetime(), minutes=-SYNC_PENDING_ALERT_MINUTES)
+	orders = _get_orders(
+		accounts,
+		{
+			"erpnext_sync_status": SYNCING,
+			"erpnext_sales_order": ["is", "not set"],
+			"cancelled_at": ["is", "not set"],
+			"creation": ["<=", cutoff],
+		},
+		["name", "marketplace_account", "creation"],
+		or_filters=[
+			["sync_debounce_until", "is", "not set"],
+			["sync_debounce_until", "<=", cutoff],
+		],
+	)
+	return [
+		_item(
+			SYNC_PENDING_TOO_LONG,
+			accounts[order.marketplace_account],
+			"Marketplace Order",
+			order.name,
+			_("The Sales Order has not been created after {0} minutes. Retry the sync.").format(
+				SYNC_PENDING_ALERT_MINUTES
+			),
+			order.creation,
+			NEXT_RETRY,
+		)
+		for order in orders
+	]
 
 
 def _unmapped_reference_for(platform, row):

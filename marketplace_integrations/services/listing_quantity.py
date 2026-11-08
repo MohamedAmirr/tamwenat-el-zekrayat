@@ -52,21 +52,29 @@ def get_sellable_qty(item_code, warehouse, listing_uom):
 	return int((Decimal(quantities[item.name]) / factor).to_integral_value(rounding=ROUND_FLOOR))
 
 
-def _actual_quantities(warehouse, item_codes):
+def _actual_quantities(warehouse, item_codes, subtract_reserved=False):
 	"""``{item_code: Decimal}`` of ``Bin.actual_qty`` clamped at zero, one query.
-	An Item with no Bin row reads 0. Every requested code is present."""
+	An Item with no Bin row reads 0. Every requested code is present.
+
+	``subtract_reserved=True`` (opt-in, Shopify inventory sync only) reads
+	``Bin.actual_qty - Bin.reserved_qty`` instead, still clamped at zero.
+	``reserved_qty`` is the Sales Order reservation; ``reserved_stock`` (Stock
+	Reservation Entry) is deliberately not subtracted."""
 	item_codes = list(dict.fromkeys(item_codes))
 	if not item_codes:
 		return {}
 	rows = frappe.get_all(
 		"Bin",
 		filters={"warehouse": warehouse, "item_code": ["in", item_codes]},
-		fields=["item_code", "actual_qty"],
+		fields=["item_code", "actual_qty", "reserved_qty"],
 	)
-	actual_by_item = {row.item_code: row.actual_qty for row in rows}
-	return {
-		item_code: max(to_decimal(actual_by_item.get(item_code) or 0), Decimal(0)) for item_code in item_codes
-	}
+	qty_by_item = {}
+	for row in rows:
+		qty = to_decimal(row.actual_qty or 0)
+		if subtract_reserved:
+			qty -= to_decimal(row.reserved_qty or 0)
+		qty_by_item[row.item_code] = qty
+	return {item_code: max(qty_by_item.get(item_code, Decimal(0)), Decimal(0)) for item_code in item_codes}
 
 
 def get_stock_quantities(warehouse, item_codes):
@@ -112,8 +120,12 @@ def get_bundle_components(item_codes):
 	return components
 
 
-def resolve_stock_quantities(warehouse, item_codes):
+def resolve_stock_quantities(warehouse, item_codes, subtract_reserved=False):
 	"""Return ``(quantities, problems)`` for a batch of Items in ``warehouse``.
+
+	``subtract_reserved=True`` (Shopify inventory sync only) uses
+	``Bin.actual_qty - Bin.reserved_qty`` wherever ``Bin.actual_qty`` is named
+	below, for plain Items and for every bundle component alike.
 
 	``quantities`` is ``{item_code: int}`` in the Item's own stock UOM;
 	``problems`` is ``{item_code: message}`` for an invalid bundle, which is
@@ -129,7 +141,7 @@ def resolve_stock_quantities(warehouse, item_codes):
 	bundles = get_bundle_components(item_codes)
 	component_codes = sorted({row.item_code for rows in bundles.values() for row in rows})
 	plain_codes = [code for code in item_codes if code not in bundles]
-	actual = _actual_quantities(warehouse, plain_codes + component_codes)
+	actual = _actual_quantities(warehouse, plain_codes + component_codes, subtract_reserved=subtract_reserved)
 	component_items = {}
 	nested = set()
 	if component_codes:

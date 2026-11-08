@@ -96,10 +96,12 @@ SHOPIFY_INVENTORY_SYNC_CHUNK_SIZE = SHOPIFY_NODES_LOOKUP_CHUNK_SIZE
 # mappings Error (#107 decision 8).
 SHOPIFY_INVENTORY_MAX_STALE_RETRIES = 3
 
-# The quantity name written. `on_hand` (not `available`) so Shopify derives
-# `available = on_hand - committed` itself (#107 decision 3). Verified as a
-# valid `InventorySetQuantitiesInput.name` value on shopify.dev 2026-09-24.
-SHOPIFY_INVENTORY_QUANTITY_NAME = "on_hand"
+# The quantity name written: `available` = ERPNext actual_qty - reserved_qty
+# (Sales Order reservations already subtracted on our side). Previously
+# `on_hand` (#107 decision 3). VERIFIED against the shopify.dev enum on
+# 2026-10-11: the name may be `available` or `on_hand`. NOT tested live: that
+# `available` works with `changeFromQuantity` and `quantities(names: ["available"])`.
+SHOPIFY_INVENTORY_QUANTITY_NAME = "available"
 
 # `InventorySetQuantitiesInput.reason` (String!). VERIFIED 2026-09-24
 # (shopify.dev `mutations/inventorySetQuantities`): "correction" is a documented
