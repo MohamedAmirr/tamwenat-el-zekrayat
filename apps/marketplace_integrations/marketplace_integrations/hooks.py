@@ -337,6 +337,10 @@ scheduler_events = {
 # with setdefault, not a dict literal key, so it merges into the Shopify sweep's
 # cron entry if both constants ever share the same expression (as they do today)
 # instead of silently overwriting it.
+# #499: retry of Waiting for Stock Shopify orders on the same 2-minute tick (one deduplicated short job).
+scheduler_events["cron"].setdefault(SHOPIFY_INVENTORY_SWEEP_CRON, []).append(
+	"marketplace_integrations.services.order_reservation.sweep_changed_bins"
+)
 scheduler_events["cron"].setdefault(NOON_INVENTORY_SWEEP_CRON, []).append(
 	"marketplace_integrations.integrations.noon.sweep.sweep_changed_bins"
 )
@@ -471,6 +475,7 @@ fixtures = [
 					"Sales Order-custom_marketplace_order_html",
 					"Sales Order-custom_shipping_status_summary",
 					"Sales Order-custom_earliest_delivery_date",
+					"Sales Order-custom_order_stage",
 					"Payment Entry-custom_marketplace_order",
 					"Payment Entry-custom_marketplace_transaction_id",
 					# #374: the Item form's Marketplace Listings tab (stores nothing on Item)

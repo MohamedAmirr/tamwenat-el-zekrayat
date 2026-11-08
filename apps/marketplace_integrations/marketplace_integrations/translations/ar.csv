@@ -1986,3 +1986,9 @@ The shipment of this Delivery Note was already requested.,سبق طلب شحنة
 "{0} needs the city of the delivery address. Choose it (Pick {0} City), save the Delivery Note, then create the shipment again.","تحتاج {0} إلى مدينة عنوان التسليم. اخترها (اختيار مدينة {0})، ثم احفظ مذكرة التسليم وأنشئ الشحنة مرة أخرى."
 {0} needs more information before the shipment can be created.,تحتاج {0} إلى مزيد من المعلومات قبل إنشاء الشحنة.
 The shipment request was not sent: {0},لم يتم إرسال طلب الشحنة: {0}
+Order Stage,مرحلة الطلب
+Waiting for Stock,بانتظار المخزون
+Locked,مقفل
+Closed,مغلق
+Waiting for Stock: Sales Order {0} cannot be reserved in full.,بانتظار المخزون: لا يمكن حجز أمر البيع {0} بالكامل.
+"Item {0}: needed {1}, available {2}","الصنف {0}: المطلوب {1}، المتاح {2}"

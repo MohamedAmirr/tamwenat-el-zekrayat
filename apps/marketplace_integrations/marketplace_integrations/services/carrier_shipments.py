@@ -224,7 +224,7 @@ def check_deliverable(doc):
 	with the other rows) asking for more than the stock of its warehouse (unless negative stock is
 	allowed), or more than the Sales Order has left to deliver (its over-delivery allowance counts, and so
 	does the role allowed to over-deliver). Only stock items are judged, like ERPNext. A return is not checked
-	(it brings stock in). The stock race and reservations are not judged: they still end as a Created draft
+	(it brings stock in). Stock Reservation Entries of OTHER orders are subtracted from the stock of a warehouse (those of the note's own Sales Orders are not). The stock race is not judged: it still ends as a Created draft
 	(``_submit_created``). One message names every problem, so the form's Submit and the bulk run show the same
 	text."""
 	if doc.get("is_return"):
@@ -234,8 +234,10 @@ def check_deliverable(doc):
 	from erpnext.controllers.status_updater import get_allowance_for
 	from erpnext.stock.stock_ledger import is_negative_stock_allowed
 
+	from marketplace_integrations.services import order_reservation
 	from marketplace_integrations.services.listing_quantity import _actual_quantities
 
+	own_orders = {row.against_sales_order for row in doc.items if row.get("against_sales_order")}
 	wanted, ordered = {}, {}
 
 	def want(item_code, warehouse, qty):
@@ -270,7 +272,10 @@ def check_deliverable(doc):
 			by_warehouse.setdefault(warehouse, []).append(item_code)
 	for warehouse, codes in by_warehouse.items():
 		in_stock = _actual_quantities(warehouse, codes)  # Bin.actual_qty clamped at 0, one query
+		# Other orders' Stock Reservation Entries are not this note's stock (#499); its own orders' are.
+		held = order_reservation.reserved_by_others(warehouse, codes, own_orders)
 		for item_code in codes:
+			in_stock[item_code] = max(flt(in_stock[item_code]) - held[item_code], 0)
 			qty = wanted[(item_code, warehouse)]
 			if qty - flt(in_stock[item_code]) > 0.0001:
 				problems.append(

@@ -309,6 +309,7 @@ def _sync_sales_order(marketplace_order, trigger_source):
 		result = _save_success(order, current_hash, sales_order, updated=False, snapshot=snapshot)
 		result = _flag_compensating_evidence_on_new_order(order, sales_order, snapshot) or result
 		_create_sync_log(order, trigger_source, "Success", snapshot, result)
+		_reserve_new_shopify_order(order, sales_order)
 		return result
 	except (SyncBlocker, SalesOrderLinesMismatch) as exc:
 		# SalesOrderLinesMismatch carries a specific, user-actionable message.
@@ -346,6 +347,24 @@ def _sync_sales_order(marketplace_order, trigger_source):
 		# transaction. It must never change the outcome of the Sales Order sync.
 		if allow_payment_mirroring:
 			_mirror_shopify_payments_independently(order.name, trigger_source)
+
+
+def _reserve_new_shopify_order(order, sales_order):
+	"""#499: reserve the whole new Shopify order or put it in Waiting for Stock (draft Delivery Note when
+	reserved). Never changes the outcome of the sync: a failure here is logged and rolled back to its own
+	savepoint, and the sweep retries the order only if it reached Waiting for Stock."""
+	if order.platform != "Shopify":
+		return
+	from marketplace_integrations.services import order_reservation
+
+	frappe.db.savepoint("marketplace_order_reservation_call")
+	try:
+		order_reservation.reserve_or_wait(sales_order.name)
+	except Exception:
+		frappe.db.rollback(save_point="marketplace_order_reservation_call")
+		frappe.log_error(
+			title="Shopify order reservation failed", message=f"{sales_order.name}\n{frappe.get_traceback()}"
+		)
 
 
 def is_transient_failure(exc):
