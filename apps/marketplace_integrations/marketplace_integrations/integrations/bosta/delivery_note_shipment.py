@@ -634,10 +634,30 @@ def package_details(doc):
 	return {"itemsCount": max(1, cint(round(sum(flt(row.qty) for row in rows)))), "description": description}
 
 
+def _marketplace_order_row(sales_order):
+	"""``platform`` and ``order_code`` of the Sales Order's Marketplace Order, else ``None``."""
+	marketplace_order = (
+		frappe.db.get_value("Sales Order", sales_order, "custom_marketplace_order") if sales_order else None
+	)
+	if not marketplace_order:
+		return None
+	return frappe.db.get_value("Marketplace Order", marketplace_order, ["platform", "order_code"], as_dict=True)
+
+
+def shopify_notes(sales_order):
+	"""The Bosta ``notes`` text "Shopify #1234" (the customer-facing Shopify order name), or ``None`` when the
+	Sales Order is not a Shopify order or the name is unknown. docs.yaml defines ``notes`` but does not say it
+	prints on the label."""
+	row = _marketplace_order_row(sales_order)
+	if not row or row.get("platform") != "Shopify" or not cstr(row.get("order_code")).strip():
+		return None
+	return f"Shopify {cstr(row.order_code).strip()}"
+
+
 def build_payload(doc):
 	"""The create body: Bosta's required fields plus, for a delivery, the parcel contents
-	(``specs.packageDetails``). The drop-off address is the city code and the first line; Bosta resolves the
-	district."""
+	(``specs.packageDetails``) and, for a Shopify delivery, ``notes``. The drop-off address is the city code
+	and the first line; Bosta resolves the district."""
 	order = sales_order_of(doc)
 	settings = BostaClient().get_settings()
 	reference = cstr(doc.custom_carrier_reference) or doc.name
@@ -662,6 +682,9 @@ def build_payload(doc):
 		# What is in the parcel (docs.yaml: ``specs.packageDetails.itemsCount`` / ``description``), shown on
 		# the AWB and in the courier's app. A return pickup sends none (no ``returnSpecs`` either).
 		payload["specs"] = {"packageDetails": details}
+	notes = None if is_pickup else shopify_notes(order)
+	if notes:
+		payload["notes"] = notes
 	return payload
 
 

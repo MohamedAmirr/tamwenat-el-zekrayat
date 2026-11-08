@@ -722,7 +722,11 @@ def _auto_cancel(delivery_note):
 		return
 	service = adapter.SERVICE_NAME
 	try:
-		# The job runs as the system: the cancel does not depend on whoever read the carrier.
+		# The job runs as the system: the cancel does not depend on whoever read the carrier. The invoice
+		# cancels and the note cancel share this transaction: any failure below rolls both back.
+		cancelled_invoices = _cancel_linked_sales_invoices(doc)
+		if cancelled_invoices:
+			doc.reload()  # the invoice cancel rewrote the note's billing status
 		_check_native_cancel_not_blocked(doc)
 		doc.flags.ignore_permissions = True
 		doc.cancel()
@@ -747,11 +751,90 @@ def _auto_cancel(delivery_note):
 		return
 	frappe.db.commit()
 	adapter.after_cancelled(delivery_note)
-	_notify(
-		doc,
-		_("Delivery Note {0} was cancelled automatically because {1} cancelled the shipment.").format(delivery_note, service),
-	)
+	if cancelled_invoices:
+		subject = _("Delivery Note {0} was cancelled automatically because {1} cancelled the shipment. Cancelled with it: {2}").format(
+			delivery_note, service, ", ".join(cancelled_invoices)
+		)
+	else:
+		subject = _("Delivery Note {0} was cancelled automatically because {1} cancelled the shipment.").format(delivery_note, service)
+	_notify(doc, subject)
 	frappe.db.commit()
+
+
+def _cancel_linked_sales_invoices(doc):
+	"""Cancel, natively, the submitted Sales Invoices that bill this note (Sales Invoice Item.delivery_note), so
+	the note's own cancel is no longer blocked by them. Called only by the automatic cancel, in the same
+	transaction as the note cancel (nothing is committed here). A return note's invoice is a credit note and is
+	cancelled the same way.
+
+	Each invoice is locked first, then refused (``frappe.ValidationError``, nothing is cancelled and the caller
+	rolls back) when it also bills another note or a line without a note (cancelling it would undo more than
+	this shipment), is a POS invoice, or is not exactly unpaid (``outstanding_amount`` differs from its total;
+	credit notes carry negative totals, so the same test holds). A submitted Payment Entry, Journal Entry or
+	Sales Return against it is checked first only to name the linked document in the message. The payment
+	check is explicit because ERPNext's native cancel does not refuse it: with Accounts Settings "Unlink
+	Payment on Cancellation of Invoice" on (the default) it cancels the invoice and silently unlinks the
+	payment, so the money would be left unallocated.
+
+	Each cancelled invoice gets a comment naming the note. Returns the cancelled invoice names."""
+	invoices = sorted(
+		frappe.get_all(
+			"Sales Invoice Item",
+			filters={"delivery_note": doc.name, "docstatus": 1, "parenttype": "Sales Invoice"},
+			pluck="parent",
+			distinct=True,
+		)
+	)
+	for name in invoices:
+		# Lock first: a payment entered meanwhile waits for this transaction instead of slipping past the checks.
+		values = frappe.db.get_value(
+			"Sales Invoice",
+			name,
+			["outstanding_amount", "is_pos", "rounded_total", "grand_total"],
+			as_dict=True,
+			for_update=True,
+		)
+		line = {"parent": name, "parenttype": "Sales Invoice"}
+		if frappe.db.count("Sales Invoice Item", {**line, "delivery_note": ["!=", doc.name]}) or frappe.db.count(
+			"Sales Invoice Item", {**line, "delivery_note": ["is", "not set"]}
+		):
+			frappe.throw(
+				_("Sales Invoice {0} also bills other Delivery Notes or items without one, so it is not cancelled automatically.").format(name)
+			)
+		linked = (
+			frappe.get_all(
+				"Payment Entry Reference",
+				filters={"reference_doctype": "Sales Invoice", "reference_name": name, "docstatus": 1},
+				pluck="parent",
+				limit=1,
+			)
+			or frappe.get_all(
+				"Journal Entry Account",
+				filters={"reference_type": "Sales Invoice", "reference_name": name, "docstatus": 1},
+				pluck="parent",
+				limit=1,
+			)
+			or frappe.get_all("Sales Invoice", filters={"return_against": name, "docstatus": 1}, pluck="name", limit=1)
+		)
+		if linked:
+			frappe.throw(
+				_("Sales Invoice {0} is linked with {1}, so it is not cancelled automatically.").format(name, linked[0])
+			)
+		precision = frappe.get_precision("Sales Invoice", "outstanding_amount")
+		total = values.rounded_total or values.grand_total
+		if values.is_pos or flt(values.outstanding_amount, precision) != flt(total, precision):
+			frappe.throw(
+				_("Sales Invoice {0} is a POS invoice or is not fully unpaid, so it is not cancelled automatically.").format(name)
+			)
+	for name in invoices:
+		invoice = frappe.get_doc("Sales Invoice", name)
+		invoice.flags.ignore_permissions = True
+		invoice.cancel()
+		invoice.add_comment(
+			"Comment",
+			_("Cancelled automatically with Delivery Note {0} because the carrier cancelled the shipment.").format(doc.name),
+		)
+	return invoices
 
 
 def _submitter(doc):
