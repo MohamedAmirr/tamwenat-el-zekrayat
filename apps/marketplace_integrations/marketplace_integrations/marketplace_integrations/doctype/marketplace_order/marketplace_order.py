@@ -2,6 +2,7 @@
 # For license information, please see license.txt
 
 import hashlib
+import re
 
 import frappe
 from frappe import _
@@ -18,6 +19,15 @@ def compute_order_identity_key(marketplace_account, external_order_id):
 			_("Marketplace Account and External Order ID are required to compute the order identity key.")
 		)
 	return hashlib.sha256(f"{marketplace_account}\x00{external_order_id}".encode()).hexdigest()
+
+
+def compute_order_number(order_code):
+	"""Return the integer of a pure Shopify-style ``#<digits>`` order code, else None.
+
+	Backs the numeric list sort: order_code is text, so '#9' sorts after '#10000'.
+	"""
+	match = re.fullmatch(r"#(\d{1,9})", cstr(order_code).strip())
+	return int(match.group(1)) if match else None
 
 
 class MarketplaceOrder(Document):
@@ -44,6 +54,8 @@ class MarketplaceOrder(Document):
 		if not cstr(self.platform_order_reference).strip():
 			self.platform_order_reference = self.external_order_id
 		self.order_identity_key = compute_order_identity_key(self.marketplace_account, self.external_order_id)
+		# Int columns are NOT NULL (default 0): 0 means "no numeric order code".
+		self.order_number = compute_order_number(self.order_code) or 0
 		# The echo-guard marker is one-way (#181): it is written with update_modified=False,
 		# so a copy loaded before it was set can still be saved and would write NULL back,
 		# making the planner reopen and cancel the Closed Sales Order.  Clearing it goes
