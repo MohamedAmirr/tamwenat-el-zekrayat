@@ -9,12 +9,15 @@ docs/frappe-conventions.md's "A test module that lives outside any doctype/
 folder" note) - fixture documents (Marketplace Account, Item) are built
 directly, same as always."""
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
+from rq.timeouts import BaseTimeoutException, JobTimeoutException
 
 from marketplace_integrations.integrations.shopify import orders
+from marketplace_integrations.integrations.shopify.constants import SHOPIFY_ORDER_IMPORT_LOCK_WAIT_ATTEMPTS
 from marketplace_integrations.integrations.shopify.test_products import make_shopify_account
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_account.test_marketplace_account import (
 	STAND_IN_CONNECTION,
@@ -1055,3 +1058,88 @@ class IntegrationTestQueueOrderImportDateRange(IntegrationTestCase):
 	def test_a_second_import_for_the_same_account_is_rejected(self):
 		with self.assertRaisesRegex(frappe.ValidationError, "already running"):
 			self.queue("2026-02-01T00:00:00Z", "2026-02-02T00:00:00Z", queued=False)
+
+
+class IntegrationTestOrderImportLockWaitRetry(IntegrationTestCase):
+	"""#478: a lock wait timeout (1205) on one order is retried in the same run, a job timeout is never
+	logged as that order's error, and the scheduled reconcile is registered only once a night. Nothing
+	is written: import_order() is mocked."""
+
+	ACCOUNT = SimpleNamespace(name="Lock Wait Retry Account")
+	GID = "gid://shopify/Order/478"
+
+	def _import(self, side_effect):
+		with (
+			patch.object(orders, "import_order", side_effect=side_effect) as mocked,
+			patch.object(orders.time, "sleep") as sleep,
+		):
+			result = orders._import_order_isolated(self.ACCOUNT, self.GID)
+		return result, mocked, sleep
+
+	def test_lock_wait_then_success_imports_without_a_manual_step(self):
+		order = SimpleNamespace(
+			name="MO-1",
+			erpnext_sales_order=None,
+			sync_debounce_until=None,
+			erpnext_sync_status="Synced",
+			flags=frappe._dict(),
+		)
+		result, mocked, sleep = self._import([frappe.QueryTimeoutError("1205"), order])
+		self.assertEqual(result[1], None)
+		self.assertIs(result[0], order)
+		self.assertEqual(mocked.call_count, 2)
+		sleep.assert_called_once()
+
+	def test_retry_cap_is_respected_and_the_failure_is_returned(self):
+		result, mocked, sleep = self._import(frappe.QueryTimeoutError("1205 lock wait"))
+		self.assertIsNone(result[0])
+		self.assertIn("1205 lock wait", result[1])
+		self.assertEqual(mocked.call_count, SHOPIFY_ORDER_IMPORT_LOCK_WAIT_ATTEMPTS)
+		self.assertEqual(sleep.call_count, SHOPIFY_ORDER_IMPORT_LOCK_WAIT_ATTEMPTS - 1)
+
+	def test_other_errors_are_not_retried(self):
+		result, mocked, _sleep = self._import(frappe.ValidationError("bad"))
+		self.assertIsNone(result[0])
+		self.assertEqual(mocked.call_count, 1)
+
+	def test_job_timeout_propagates(self):
+		for exc in (JobTimeoutException("timed out"), BaseTimeoutException("timed out")):
+			with (
+				patch.object(orders, "import_order", side_effect=exc) as mocked,
+				patch.object(orders.time, "sleep") as sleep,
+				self.assertRaises(BaseTimeoutException),
+			):
+				orders._import_order_isolated(self.ACCOUNT, self.GID)
+			# A job timeout is never retried.
+			self.assertEqual(mocked.call_count, 1)
+			sleep.assert_not_called()
+
+	def test_nightly_reconcile_cron_is_still_registered(self):
+		cron = frappe.get_hooks("scheduler_events").get("cron", {})
+		self.assertIn(
+			"marketplace_integrations.services.marketplace_order_reconciliation.enqueue_nightly_order_reconciliation",
+			cron.get("59 23 * * *", []),
+		)
+
+	def test_account_loop_does_not_swallow_a_job_timeout(self):
+		account = SimpleNamespace(name="x", connection="y")
+		with (
+			patch.object(
+				frappe,
+				"get_all",
+				return_value=[SimpleNamespace(name="x", shopify_orders_reconciled_through=None)],
+			),
+			patch.object(frappe, "get_doc", return_value=account),
+			patch.object(orders, "clamp_listing_start", return_value=None),
+			patch.object(orders, "_as_shopify_timestamp", return_value=""),
+			patch.object(orders, "ShopifyClient"),
+			patch.object(orders, "import_orders_updated_between", side_effect=JobTimeoutException("t")),
+		):
+			with self.assertRaises(BaseTimeoutException):
+				orders.reconcile_all_accounts_orders()
+
+	def test_order_reconcile_is_not_registered_daily(self):
+		daily = frappe.get_hooks("scheduler_events").get("daily", [])
+		self.assertNotIn(
+			"marketplace_integrations.integrations.shopify.orders.reconcile_all_accounts_orders", daily
+		)
