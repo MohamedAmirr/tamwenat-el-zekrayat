@@ -90,6 +90,72 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 			with self.assertRaises(frappe.ValidationError):
 				self.make_note()
 
+	# -- notes: the Shopify order name ---------------------------------------------------------
+
+	def test_a_shopify_order_sends_its_name_as_notes(self):
+		note = self.make_note()
+		row = frappe._dict(platform="Shopify", order_code="#1234")
+		with patch.object(shipment, "_marketplace_order_row", return_value=row):
+			notes = shipment.build_payload(note)["notes"]
+			self.assertEqual(notes, "#1234")
+			self.assertNotIn("Shopify", notes)
+
+	def test_a_non_shopify_order_sends_no_notes(self):
+		note = self.make_note()
+		self.assertNotIn("notes", shipment.build_payload(note))
+		row = frappe._dict(platform="Talabat", order_code="T-1")
+		with patch.object(shipment, "_marketplace_order_row", return_value=row):
+			self.assertNotIn("notes", shipment.build_payload(note))
+		row = frappe._dict(platform="Shopify", order_code="")
+		with patch.object(shipment, "_marketplace_order_row", return_value=row):
+			self.assertNotIn("notes", shipment.build_payload(note))
+
+	def _link_shopify_order(self, note):
+		"""A real Marketplace Order (Shopify, "#T1") linked from the note's Sales Order; removed on cleanup."""
+		suffix = frappe.generate_hash(length=8)
+		from marketplace_integrations.integrations.shopify.test_products import make_shopify_account
+
+		account = make_shopify_account(f"Bosta Notes {suffix}")
+		connection = account.connection
+		order = frappe.get_doc(
+			{
+				"doctype": "Marketplace Order",
+				"marketplace_account": account.name,
+				"external_order_id": f"bosta-notes-{suffix}",
+				"order_code": "#T1",
+			}
+		)
+		order.flags.skip_sync_status_update = True
+		order.insert()
+		sales_order = shipment.sales_order_of(note)
+		frappe.db.set_value("Sales Order", sales_order, "custom_marketplace_order", order.name)
+
+		def cleanup():
+			frappe.db.set_value("Sales Order", sales_order, "custom_marketplace_order", None)
+			frappe.db.delete("Marketplace Order", {"marketplace_account": account.name})
+			frappe.delete_doc("Marketplace Account", account.name, force=True)
+			if frappe.db.exists("Shopify Connection", connection):
+				frappe.delete_doc("Shopify Connection", connection, ignore_permissions=True, force=True)
+			frappe.db.commit()
+
+		self.addCleanup(cleanup)
+		frappe.db.commit()
+
+	def test_a_real_shopify_marketplace_order_sends_its_order_code_as_notes(self):
+		note = self.make_note()
+		self._link_shopify_order(note)
+
+		notes = shipment.build_payload(note)["notes"]
+		self.assertEqual(notes, "#T1")
+		self.assertNotIn("Shopify", notes)
+
+	def test_a_return_pickup_of_a_shopify_order_sends_no_notes(self):
+		note = self.make_note()
+		self._link_shopify_order(note)
+		note.is_return = 1
+
+		self.assertNotIn("notes", shipment.build_payload(note))
+
 	# -- COD: default until confirmed ---------------------------------------------------------
 
 	def test_the_default_cod_is_recalculated_on_every_save_until_it_is_confirmed(self):

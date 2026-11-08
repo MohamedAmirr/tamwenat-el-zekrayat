@@ -303,6 +303,235 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 		carrier_shipments.run_auto_cancel(note.name)
 		self.assertEqual(stored(note, "docstatus").docstatus, 0)
 
+	def _invoice_of(self, note):
+		from erpnext.stock.doctype.delivery_note.delivery_note import make_sales_invoice
+
+		invoice = make_sales_invoice(note.name)
+		invoice.insert()
+		invoice.submit()
+		frappe.db.commit()
+		return invoice
+
+	def _drop_invoice(self, invoice, *payments, journals=()):
+		"""Tear-down for the tests that bill a note: the invoice (and its payments and journals) block deleting
+		the note. Removes everything they leave behind: ledger rows, Version and Comment rows."""
+		documents = [
+			*[("Payment Entry", p) for p in payments],
+			*[("Journal Entry", j) for j in journals],
+			("Sales Invoice", invoice.name),
+		]
+		for doctype, name in documents:
+			if frappe.db.get_value(doctype, name, "docstatus") == 1:
+				frappe.get_doc(doctype, name).cancel()
+			frappe.delete_doc(doctype, name, force=True, ignore_permissions=True, delete_permanently=True)
+		for doctype, name in documents:
+			frappe.db.delete("GL Entry", {"voucher_no": name})
+			frappe.db.delete("Payment Ledger Entry", {"voucher_no": name})
+			frappe.db.delete("Payment Ledger Entry", {"against_voucher_no": name})
+			frappe.db.delete("Version", {"ref_doctype": doctype, "docname": name})
+			frappe.db.delete("Comment", {"reference_doctype": doctype, "reference_name": name})
+		# delete_doc also leaves a nameless "Deleted" comment per document type.
+		for doctype in {doctype for doctype, _ in documents}:
+			filters = {"comment_type": "Deleted", "reference_doctype": doctype}
+			if self._error_log_floor:
+				filters["creation"] = [">=", self._error_log_floor]
+			frappe.db.delete("Comment", filters)
+		frappe.db.commit()
+
+	def _run_cancel_refused(self, note, invoice, *needles):
+		"""The automatic cancel is refused: nothing is cancelled, the reason is stored and named."""
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Cancelled")
+		with patch(self._NOTIFY) as notify:
+			carrier_shipments.run_auto_cancel(note.name)
+
+		values = stored(note, "docstatus", "custom_last_integration_error")
+		self.assertEqual(values.docstatus, 1)
+		self.assertEqual(frappe.db.get_value("Sales Invoice", invoice.name, "docstatus"), 1)
+		for needle in needles:
+			self.assertIn(needle, values.custom_last_integration_error)
+		self.assertEqual(notify.call_count, 1)
+
+	def test_a_carrier_cancelled_note_cancels_its_submitted_sales_invoice_first_without_a_carrier_call(self):
+		note = self._live()
+		self._submit(note)
+		invoice = self._invoice_of(note)
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Cancelled")
+		try:
+			with patch(self._NOTIFY) as notify:
+				carrier_shipments.run_auto_cancel(note.name)
+
+			self.assertEqual(stored(note, "docstatus").docstatus, 2)
+			self.assertEqual(frappe.db.get_value("Sales Invoice", invoice.name, "docstatus"), 2)
+			self.assertEqual(self._sent_kinds(), [], "the carrier is never called")
+			# accounts are told: a comment on the invoice and the invoice named in the notification
+			comments = frappe.get_all(
+				"Comment",
+				filters={"reference_doctype": "Sales Invoice", "reference_name": invoice.name, "comment_type": "Comment"},
+				pluck="content",
+			)
+			self.assertEqual(len(comments), 1)
+			self.assertIn(note.name, comments[0])
+			self.assertIn(invoice.name, notify.call_args.args[1]["subject"])
+		finally:
+			self._drop_invoice(invoice)
+
+	def test_a_manual_cancel_of_a_note_with_a_linked_invoice_is_still_refused(self):
+		note = self._live()
+		self._submit(note)
+		invoice = self._invoice_of(note)
+		try:
+			with self.assertRaises(frappe.ValidationError):
+				frappe.get_doc("Delivery Note", note.name).cancel()
+			frappe.db.rollback()
+			self.assertEqual(frappe.db.get_value("Sales Invoice", invoice.name, "docstatus"), 1)
+			self.assertEqual(stored(note, "docstatus").docstatus, 1)
+		finally:
+			self._drop_invoice(invoice)
+
+	def test_the_credit_note_of_a_return_pickup_is_cancelled_with_the_return_note(self):
+		from erpnext.controllers.sales_and_purchase_return import make_return_doc
+
+		original = self._live()
+		self._submit(original)
+		ret = make_return_doc("Delivery Note", original.name)
+		ret.custom_return_source = shipment.RETURN_PICKUP
+		ret.transporter = self.supplier
+		ret.custom_cod_confirmed = 1
+		ret.insert()
+		ret.submit()
+		frappe.db.set_value(
+			"Delivery Note",
+			ret.name,
+			{"custom_integration_status": "Cancelled", "custom_carrier_delivery_id": "DELIVERY-2"},
+		)
+		frappe.db.commit()
+		credit_note = self._invoice_of(ret)
+		self.assertEqual(frappe.db.get_value("Sales Invoice", credit_note.name, "is_return"), 1)
+		try:
+			with patch(self._NOTIFY) as notify:
+				carrier_shipments.run_auto_cancel(ret.name)
+
+			self.assertEqual(frappe.db.get_value("Delivery Note", ret.name, "docstatus"), 2)
+			self.assertEqual(frappe.db.get_value("Sales Invoice", credit_note.name, "docstatus"), 2)
+			self.assertIn(credit_note.name, notify.call_args.args[1]["subject"])
+		finally:
+			self._drop_invoice(credit_note)
+
+	def test_an_invoice_that_also_bills_another_note_or_a_line_without_one_is_refused(self):
+		note = self._live()
+		self._submit(note)
+		other = self.make_note()
+		invoice = self._invoice_of(note)
+		try:
+			for value in (other.name, None):
+				with self.subTest(value):
+					# a second line, billing another note or none, next to the line that bills this note
+					extra = frappe.copy_doc(invoice.items[0])
+					extra.update({"parent": invoice.name, "parenttype": "Sales Invoice", "parentfield": "items"})
+					extra.delivery_note = value
+					extra.dn_detail = None
+					extra.idx = 2
+					extra.docstatus = 1
+					extra.db_insert()
+					frappe.db.commit()
+					try:
+						self._run_cancel_refused(note, invoice, "also bills other Delivery Notes")
+					finally:
+						frappe.db.delete("Sales Invoice Item", {"name": extra.name})
+						frappe.db.set_value("Delivery Note", note.name, "custom_last_integration_error", None)
+						frappe.db.commit()
+		finally:
+			self._drop_invoice(invoice)
+
+	def test_an_invoice_with_a_journal_entry_against_it_is_refused(self):
+		note = self._live()
+		self._submit(note)
+		invoice = self._invoice_of(note)
+		journal = frappe.get_doc(
+			{
+				"doctype": "Journal Entry",
+				"company": self.company,
+				"posting_date": frappe.utils.nowdate(),
+				"voucher_type": "Credit Note",
+				"accounts": [
+					{"account": invoice.items[0].income_account, "debit_in_account_currency": 10},
+					{
+						"account": invoice.debit_to,
+						"party_type": "Customer",
+						"party": invoice.customer,
+						"credit_in_account_currency": 10,
+						"reference_type": "Sales Invoice",
+						"reference_name": invoice.name,
+					},
+				],
+			}
+		).insert()
+		journal.submit()
+		frappe.db.commit()
+		try:
+			self._run_cancel_refused(note, invoice, journal.name)
+		finally:
+			self._drop_invoice(invoice, journals=[journal.name])
+
+	def test_a_pos_or_not_fully_unpaid_invoice_is_refused(self):
+		note = self._live()
+		self._submit(note)
+		invoice = self._invoice_of(note)
+		total = frappe.db.get_value("Sales Invoice", invoice.name, "grand_total")
+		try:
+			for field, value in (("is_pos", 1), ("outstanding_amount", total - 1)):
+				with self.subTest(field):
+					frappe.db.set_value("Sales Invoice", invoice.name, field, value)
+					frappe.db.commit()
+					self._run_cancel_refused(note, invoice, "not fully unpaid")
+					frappe.db.set_value("Sales Invoice", invoice.name, {"is_pos": 0, "outstanding_amount": total})
+					frappe.db.set_value("Delivery Note", note.name, "custom_last_integration_error", None)
+					frappe.db.commit()
+		finally:
+			self._drop_invoice(invoice)
+
+	def test_an_invoice_with_a_payment_entry_blocks_everything_and_records_the_reason(self):
+		from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
+
+		note = self._live()
+		self._submit(note)
+		invoice = self._invoice_of(note)
+		payment = get_payment_entry("Sales Invoice", invoice.name)
+		payment.reference_no = "TEST-REF"
+		payment.reference_date = frappe.utils.nowdate()
+		payment.insert()
+		payment.submit()
+		frappe.db.commit()
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Cancelled")
+		try:
+			with patch(self._NOTIFY) as notify:
+				carrier_shipments.run_auto_cancel(note.name)
+
+			values = stored(note, "docstatus", "custom_last_integration_error")
+			self.assertEqual(values.docstatus, 1)
+			self.assertEqual(frappe.db.get_value("Sales Invoice", invoice.name, "docstatus"), 1)
+			self.assertIn(payment.name, values.custom_last_integration_error)
+			self.assertEqual(notify.call_count, 1)
+		finally:
+			self._drop_invoice(invoice, payment.name)
+
+	def test_a_failing_note_cancel_rolls_the_invoice_cancel_back(self):
+		note = self._live()
+		self._submit(note)
+		invoice = self._invoice_of(note)
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Cancelled")
+		try:
+			with (
+				patch.object(carrier_shipments, "_check_native_cancel_not_blocked", side_effect=frappe.ValidationError("Return")),
+				patch(self._NOTIFY),
+			):
+				carrier_shipments.run_auto_cancel(note.name)
+
+			self.assertEqual(stored(note, "docstatus").docstatus, 1)
+			self.assertEqual(frappe.db.get_value("Sales Invoice", invoice.name, "docstatus"), 1)
+		finally:
+			self._drop_invoice(invoice)
+
 	def test_the_recipients_are_the_submitter_and_enabled_stock_managers_once_each(self):
 		note = self._live()
 		doc = self._submit(note)

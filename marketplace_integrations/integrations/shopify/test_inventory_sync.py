@@ -38,8 +38,8 @@ class FakeShopify:
 
 	CAUTION - circular validation: by default this fake bakes in the SAME
 	assumptions the code under test makes (userErrors apply nothing, a freshly
-	activated level starts at on_hand 0, the stale code is CHANGE_FROM_QUANTITY_STALE, and
-	reads always carry an on_hand entry). The switches below (partial_apply,
+	activated level starts at available 0, the stale code is CHANGE_FROM_QUANTITY_STALE, and
+	reads always carry an available entry; the stored quantity key is still named on_hand). The switches below (partial_apply,
 	activate_starts_at, stale_code, error injection) make it behave differently
 	so the tests are not only agreeing with the code's own guesses."""
 
@@ -155,7 +155,9 @@ class FakeShopify:
 				if state["has_level"]:
 					quantities = []
 					if state["on_hand"] is not None:
-						quantities = [{"name": "on_hand", "quantity": state["on_hand"]}]
+						# state key "on_hand" is the fake's stored level quantity; the
+						# code under test reads/writes the Shopify `available` name.
+						quantities = [{"name": "available", "quantity": state["on_hand"]}]
 					level = {"quantities": quantities}
 				nodes.append(
 					{
@@ -277,6 +279,28 @@ class IntegrationTestQuantityMapping(InventoryFixtureMixin, IntegrationTestCase)
 		self.assertEqual(self.shopify.variants[mapping.external_reference]["on_hand"], 0)
 		self.assertEqual(self.shopify.calls_of("set")[0]["input"]["quantities"][0]["quantity"], 0)
 
+	def _reserve(self, mapping, reserved_qty):
+		frappe.db.set_value(
+			"Bin", {"item_code": mapping.item, "warehouse": self.warehouse}, "reserved_qty", reserved_qty
+		)
+
+	def test_sends_actual_minus_reserved_as_available(self):
+		mapping = self._one(10, shopify_on_hand=0)
+		self._reserve(mapping, 4)
+
+		self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.calls_of("set")[0]["input"]["quantities"][0]["quantity"], 6)
+		self.assertEqual(self.shopify.variants[mapping.external_reference]["on_hand"], 6)
+
+	def test_reserved_above_actual_sends_zero(self):
+		mapping = self._one(3, shopify_on_hand=2)
+		self._reserve(mapping, 5)
+
+		self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.calls_of("set")[0]["input"]["quantities"][0]["quantity"], 0)
+
 	def test_fractional_stock_is_floored_to_an_int(self):
 		mapping = self._one(7.9)
 
@@ -286,13 +310,14 @@ class IntegrationTestQuantityMapping(InventoryFixtureMixin, IntegrationTestCase)
 		self.assertEqual(sent, 7)
 		self.assertIsInstance(sent, int)
 
-	def test_sends_on_hand_with_location_reason_reference_and_change_from_quantity(self):
+	def test_sends_available_with_location_reason_reference_and_change_from_quantity(self):
 		mapping = self._one(10, shopify_on_hand=3)
 
 		self._sync([mapping.name])
 
+		self.assertEqual(self.shopify.calls_of("read")[0]["names"], ["available"])
 		set_input = self.shopify.calls_of("set")[0]["input"]
-		self.assertEqual(set_input["name"], "on_hand")
+		self.assertEqual(set_input["name"], "available")
 		self.assertTrue(set_input["reason"])
 		self.assertTrue(set_input["referenceDocumentUri"])
 		self.assertNotIn("ignoreCompareQuantity", set_input)
@@ -782,6 +807,15 @@ class IntegrationTestBundleItems(InventoryFixtureMixin, IntegrationTestCase):
 
 		self.assertEqual((payload["succeeded"], payload["skipped_mappings"], payload["failed"]), (1, 0, 0))
 		self.assertEqual(self.shopify.variants[mapping.external_reference]["on_hand"], 5)
+
+	def test_bundle_parent_subtracts_reserved_component_stock(self):
+		part = self._make_item(f"ReservedPart{random.randint(0, 10**6)}", qty=11)
+		frappe.db.set_value("Bin", {"item_code": part, "warehouse": self.warehouse}, "reserved_qty", 3)
+		mapping = self._bundle_mapping([(part, 2)], on_hand=1)
+
+		self._sync([mapping.name])
+
+		self.assertEqual(self.shopify.variants[mapping.external_reference]["on_hand"], 4)  # (11 - 3) / 2
 
 	def test_bundle_with_no_components_is_an_error_and_not_pushed_as_zero(self):
 		mapping = self._bundle_mapping([], on_hand=3)
