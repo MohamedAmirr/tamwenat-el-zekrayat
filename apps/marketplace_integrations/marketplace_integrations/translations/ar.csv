@@ -1405,11 +1405,8 @@ There are no item changes to send to Shopify.,لا توجد تغييرات عل�
 The Shopify fulfillment state for a changed line is unknown; refresh it first.,حالة تنفيذ Shopify لأحد السطور المعدلة غير معروفة؛ حدّث الطلب أولاً.
 A changed Shopify line is fulfilled or has an unknown fulfillment state.,تم تنفيذ سطر Shopify معدل أو أن حالة تنفيذه غير معروفة.
 A changed line already has delivered quantity or a billed amount.,يحتوي سطر معدل بالفعل على كمية مسلّمة أو مبلغ مفوتر.
-Send item changes to Shopify,إرسال تغييرات العناصر إلى Shopify
 Remove,إزالة
-Shopify will update these item quantities. The customer will not be notified.,سيحدّث Shopify كميات هذه العناصر. لن يتم إشعار العميل.
 Send to Shopify,إرسال إلى Shopify
-Sending item changes to Shopify...,جارٍ إرسال تغييرات العناصر إلى Shopify...
 Item changes sent to Shopify.,تم إرسال تغييرات العناصر إلى Shopify.
 No Shopify item changes are ready to send.,لا توجد تغييرات عناصر جاهزة للإرسال إلى Shopify.
 Shopify returned no order after committing the item changes.,لم يُرجع Shopify طلبًا بعد اعتماد تغييرات العناصر.
@@ -1439,8 +1436,6 @@ This Marketplace Order has no Shopify item edit marker to clear.,لا توجد �
 ERPNext's item edit may not have reached the marketplace (the outcome is unknown); check the order in the marketplace.,قد لا يكون تعديل العناصر من ERPNext قد وصل إلى السوق (النتيجة غير معروفة)؛ راجع الطلب في السوق.
 ERPNext's items do not match the order Shopify now shows; review the order.,عناصر ERPNext لا تطابق الطلب الذي يعرضه Shopify الآن؛ راجع الطلب.
 "Items and shipping total, before tax: {0} → {1}",إجمالي العناصر والشحن قبل الضريبة: {0} → {1}
-Item changes blocked,تغييرات العناصر محظورة
-Item changes cannot be sent to Shopify,لا يمكن إرسال تغييرات العناصر إلى Shopify
 Clear edit marker,مسح علامة التعديل
 Clear the marker of the item edit sent to Shopify? Do this only after you checked in Shopify what happened to that edit.,هل تريد مسح علامة تعديل العناصر المرسل إلى Shopify؟ افعل ذلك فقط بعد التحقق في Shopify مما حدث لهذا التعديل.
 Edit marker cleared.,تم مسح علامة التعديل.
@@ -1517,7 +1512,7 @@ ERPNext's items do not match the order the marketplace now shows; review the ord
 Expected Change Hash,بصمة التغيير المتوقع
 Expected Change Scope,نطاق التغيير المتوقع
 Last Imported On,آخر استيراد في
-Internal: when a pull last imported this order successfully, even if nothing changed (services/marketplace_orders.py). Recovery signal for Order Import failures.,داخلي: وقت آخر استيراد ناجح لهذا الطلب حتى لو لم يتغير شيء (services/marketplace_orders.py). إشارة تعافي لإخفاقات استيراد الطلبات.
+"Internal: when a pull last imported this order successfully, even if nothing changed (services/marketplace_orders.py). Recovery signal for Order Import failures.",داخلي: وقت آخر استيراد ناجح لهذا الطلب حتى لو لم يتغير شيء (services/marketplace_orders.py). إشارة تعافي لإخفاقات استيراد الطلبات.
 "This order was never synced to ERPNext before the sync status update, and it is old or not eligible for an automatic sync. Review it, then use Retry Sync if it is still needed.",لم تتم مزامنة هذا الطلب مع ERPNext قبل تحديث حالة المزامنة، وهو قديم أو غير مؤهل للمزامنة التلقائية. راجعه ثم استخدم إعادة محاولة المزامنة إذا كان لا يزال مطلوبا.
 Every unit of the Noon order was cancelled before an ERPNext Sales Order was created; no Sales Order is needed.,تم إلغاء جميع وحدات طلب Noon قبل إنشاء أمر بيع في ERPNext؛ لا حاجة إلى أمر بيع.
 Import Credentials File,استيراد ملف الاعتماد
@@ -1705,9 +1700,10 @@ Returned by Bosta,أعادته Bosta
 Edit,تعديل
 "Choose the {0} city, then create the shipment again.",اختر مدينة {0} ثم أنشئ الشحنة مرة أخرى.
 Carrier Return Review,مراجعة مرتجع شركة الشحن
-{0} returned shipment {1}. Check the returned goods, then confirm this return.,أعادت {0} الشحنة {1}. افحص البضاعة المرتجعة ثم أكّد هذا المرتجع.
+"{0} returned shipment {1}. Check the returned goods, then confirm this return.",أعادت {0} الشحنة {1}. افحص البضاعة المرتجعة ثم أكّد هذا المرتجع.
 The receiver phone and shipping address cannot be changed after the Bosta shipment was started. Use Edit Bosta Shipment.,لا يمكن تغيير هاتف المستلم وعنوان الشحن بعد بدء شحنة Bosta. استخدم تعديل شحنة Bosta.
 "The {0} shipment of this Delivery Note is not Created yet, so it cannot be confirmed.",شحنة {0} الخاصة بمذكرة التسليم هذه لم تُنشأ بعد، لذلك لا يمكن تأكيدها.
+The Delivery Note is submitted when {0} picks the shipment up.,يتم اعتماد مذكرة التسليم عندما يستلم {0} الشحنة.
 "This Delivery Note has a {0} shipment ({1}). Cancel the shipment at {0} first (Cancel {0} Shipment, or Cancel on a submitted note).",لهذه المذكرة شحنة {0} ({1}). ألغِ الشحنة في {0} أولًا (إلغاء شحنة {0}، أو إلغاء المذكرة إذا كانت مُرحَّلة).
 Unexpected error while sending the shipment to {0}; see the Error Log. It may or may not have reached {0}.,خطأ غير متوقع أثناء إرسال الشحنة إلى {0}؛ راجع سجل الأخطاء. قد تكون وصلت إلى {0} وقد لا تكون.
 The shipment is still being sent to {0}. Check again in a few minutes.,ما زالت الشحنة قيد الإرسال إلى {0}. تحقق مرة أخرى بعد بضع دقائق.
@@ -1765,7 +1761,7 @@ This draft holds a Noon shipment ({0}). Check it in Noon before sending or delet
 Noon Fulfillment System Code,رمز نظام التنفيذ في Noon
 Noon Warehouse Active,مستودع Noon نشط
 Noon Warehouse Checked On,تاريخ فحص مستودع Noon
-Stored by Check Noon Warehouse. Noon shipments, Out of Stock and invoices need the value fbpi.,تُحفَظ بزر فحص مستودع Noon. تحتاج شحنات Noon وإنفاد المخزون والفواتير إلى القيمة fbpi.
+"Stored by Check Noon Warehouse. Noon shipments, Out of Stock and invoices need the value fbpi.",تُحفَظ بزر فحص مستودع Noon. تحتاج شحنات Noon وإنفاد المخزون والفواتير إلى القيمة fbpi.
 Check Noon Warehouse,فحص مستودع Noon
 Save the Marketplace Account first.,احفظ حساب السوق أولًا.
 Checking the Noon warehouse...,جارٍ فحص مستودع Noon...
@@ -1824,7 +1820,7 @@ The returned COD and return source cannot be changed after the Bosta return pick
 Choose Customer Return Pickup to ask Bosta to collect the goods from the customer.,اختر استلام مرتجع العميل لطلب من Bosta استلام البضاعة من العميل.
 The amount Bosta hands to the customer at pickup (zero or more). Sent to Bosta as a negative COD.,المبلغ الذي تسلّمه Bosta للعميل عند الاستلام (صفر أو أكثر). يُرسل إلى Bosta كمبلغ دفع عند الاستلام سالب.
 Request Bosta Return Pickup,طلب استلام المرتجع من Bosta
-Save the Delivery Note first, then request the pickup.,احفظ مذكرة التسليم أولًا ثم اطلب الاستلام.
+"Save the Delivery Note first, then request the pickup.",احفظ مذكرة التسليم أولًا ثم اطلب الاستلام.
 Please wait. Sending the return pickup request to {0}.,يرجى الانتظار. يجري إرسال طلب استلام المرتجع إلى {0}.
 A shipping request is still running.,طلب شحن ما زال قيد التنفيذ.
 carrier,شركة الشحن
@@ -1929,8 +1925,6 @@ Sales Invoice {0} still has an outstanding amount while Sales Order {1} also has
 Sales Order {0} has a draft Sales Invoice. Submit or delete it first.,لأمر البيع {0} فاتورة مبيعات مسودة. سجّلها أو احذفها أولًا.
 The recorded payment of Sales Order {0} covers its total except a rounding difference; settle the difference first.,الدفعة المسجلة لأمر البيع {0} تغطي إجماليه عدا فرق التقريب؛ سوِّ الفرق أولًا.
 The bulk run stopped unexpectedly: {0},توقف التشغيل الجماعي بشكل غير متوقع: {0}
-Bosta accepted the shipment but Delivery Note {0} is still a draft: {1},قبلت Bosta الشحنة لكن مذكرة التسليم {0} ما زالت مسودة: {1}
-Bosta accepted the shipment and Delivery Note {0} is still being submitted. Check the Delivery Note list later.,قبلت Bosta الشحنة وما زالت مذكرة التسليم {0} قيد التسجيل. تحقق من قائمة مذكرات التسليم لاحقًا.
 The Delivery Note cannot be confirmed,لا يمكن تأكيد مذكرة التسليم
 Item {0}: {1} to deliver but only {2} in stock in warehouse {3}.,الصنف {0}: المطلوب تسليمه {1} لكن المتوفر في المخزون {2} فقط في المستودع {3}.
 Item {0}: {1} to deliver but only {2} left on Sales Order {3}.,الصنف {0}: المطلوب تسليمه {1} لكن المتبقي على أمر البيع {3} هو {2} فقط.
@@ -1992,3 +1986,89 @@ Locked,مقفل
 Closed,مغلق
 Waiting for Stock: Sales Order {0} cannot be reserved in full.,بانتظار المخزون: لا يمكن حجز أمر البيع {0} بالكامل.
 "Item {0}: needed {1}, available {2}","الصنف {0}: المطلوب {1}، المتاح {2}"
+{0} picked the shipment up; the Delivery Note could not be confirmed: {1},استلمت {0} الشحنة؛ تعذّر تأكيد مذكرة التسليم: {1}
+Picked Up Not Submitted,تم الاستلام ولم تُسجَّل المذكرة
+"{0}: picked up, Delivery Note not submitted. {1}",{0}: تم استلام الشحنة ولم تُسجَّل مذكرة التسليم. {1}
+"{0}: picked up, but the Delivery Note is not submitted yet.",{0}: تم استلام الشحنة لكن مذكرة التسليم لم تُسجَّل بعد.
+This Delivery Note is not waiting to be submitted after a pickup.,مذكرة التسليم هذه لا تنتظر التسجيل بعد الاستلام.
+Bosta reports this shipment as {0}. Wait for Bosta to return the shipment to you.,أفادت Bosta بأن حالة هذه الشحنة {0}. انتظر حتى تعيد Bosta الشحنة إليك.
+Queueing the Delivery Note submit...,جارٍ جدولة تسجيل مذكرة التسليم...
+The Delivery Note submit was queued. Refresh in a moment.,تمت جدولة تسجيل مذكرة التسليم. حدّث بعد قليل.
+"The carrier already has this order (Delivery Note {0}), so its items can no longer be changed.","الناقل استلم هذا الطلب بالفعل (مذكرة التسليم {0})، لذلك لم يعد ممكنًا تغيير أصنافه."
+Order items are locked,أصناف الطلب مقفلة
+The order would no longer be fully reserved: {0},لن يبقى الطلب محجوزًا بالكامل: {0}
+Not enough stock,المخزون غير كافٍ
+Send the item quantities as a list.,أرسل كميات الأصناف على شكل قائمة.
+{0} is not an item row of this Sales Order.,{0} ليس صفًا من أصناف أمر البيع هذا.
+"The item of row {0} cannot be changed. Set its quantity to 0 and add the other item.","لا يمكن تغيير صنف الصف {0}. اجعل كميته 0 وأضف الصنف الآخر."
+Choose the item of the new row.,اختر صنف الصف الجديد.
+Item {0} is already in the order. Change its quantity instead.,الصنف {0} موجود بالفعل في الطلب. غيّر كميته بدلًا من ذلك.
+"The Marketplace Account has no ERPNext Selling Price List, so a new item cannot be priced.","ليس لحساب السوق قائمة أسعار بيع في ERPNext، لذلك لا يمكن تسعير صنف جديد."
+Each item must have a row name or an item code and a quantity.,يجب أن يحتوي كل صنف على اسم صف أو رمز صنف وكمية.
+Shipment Requested By,طلب الشحنة بواسطة
+Item quantities cannot be negative.,لا يمكن أن تكون كميات الأصناف سالبة.
+Removing every item would cancel the order. Cancel the order instead.,حذف كل الأصناف يعني إلغاء الطلب. ألغِ الطلب بدلًا من ذلك.
+Sales Order {0} is not linked to a Shopify order.,أمر البيع {0} غير مرتبط بطلب Shopify.
+Not enough free stock to keep the whole order reserved: {0},لا يوجد مخزون حر كافٍ لإبقاء الطلب كله محجوزًا: {0}
+Delivery Note {0} would have no items left.,لن تبقى أي أصناف في مذكرة التسليم {0}.
+"{0} The marketplace changed the order after that, so ERPNext was not updated. Review the order with the carrier.","{0} غيّر السوق الطلب بعد ذلك، لذلك لم يُحدَّث ERPNext. راجع الطلب مع الناقل."
+"The marketplace changed an order that is already with the carrier, so ERPNext was not updated.","غيّر السوق طلبًا موجودًا لدى الناقل بالفعل، لذلك لم يُحدَّث ERPNext."
+This order cannot be edited,لا يمكن تعديل هذا الطلب
+"Shopify accepted the change, but ERPNext could not be updated: {0}. ERPNext follows Shopify automatically; use Retry Sync on the Marketplace tab to do it now.","قبلت Shopify التغيير، لكن تعذّر تحديث ERPNext: {0}. يتبع ERPNext الطلب في Shopify تلقائيًا؛ استخدم إعادة محاولة المزامنة في تبويب السوق لتنفيذ ذلك الآن."
+Send the changes to Shopify,إرسال التغييرات إلى Shopify
+"Shopify is updated first, then this order. The customer will not be notified.","يُحدَّث Shopify أولًا ثم هذا الطلب. لن يُبلَّغ العميل."
+Sending the changes to Shopify...,جارٍ إرسال التغييرات إلى Shopify...
+Checking the changes...,جارٍ فحص التغييرات...
+Checking the order...,جارٍ فحص الطلب...
+Edit Order,تعديل الطلب
+"Change an item quantity, set it to 0 to remove the item, or add a row for a new item. The change goes to Shopify first.","غيّر كمية صنف، أو اجعلها 0 لإزالته، أو أضف صفًا لصنف جديد. يذهب التغيير إلى Shopify أولًا."
+Review,مراجعة
+Shopify raised an item quantity but there is not enough stock. ERPNext keeps the old quantities until the stock is available.,رفعت Shopify كمية صنف لكن المخزون غير كافٍ. يُبقي ERPNext الكميات القديمة حتى يتوفر المخزون.
+Item Name,اسم الصنف
+"The Bosta shipment of Delivery Note {0} is {1}. Wait for the result, or check it with Bosta, before editing the order.","شحنة Bosta الخاصة بمذكرة التسليم {0} حالتها {1}. انتظر النتيجة أو تحقق منها مع Bosta قبل تعديل الطلب."
+"The COD of Delivery Note {0} differs from the COD Bosta has. Fix it first (Needs Attention, Bosta COD Differs).","مبلغ التحصيل في مذكرة التسليم {0} يختلف عن المبلغ لدى Bosta. أصلحه أولًا (يحتاج انتباه، اختلاف مبلغ التحصيل لدى Bosta)."
+"Delivery Note {0} ships only part of the order, so its Bosta COD cannot be updated by an edit.","مذكرة التسليم {0} تشحن جزءًا من الطلب فقط، لذلك لا يمكن تحديث مبلغ التحصيل لدى Bosta بالتعديل."
+"Bosta COD of Delivery Note {0}: {1} to {2}. Bosta is updated first.","مبلغ التحصيل لدى Bosta لمذكرة التسليم {0}: من {1} إلى {2}. يُحدَّث Bosta أولًا."
+The saved Bosta label is replaced by a new one that shows the new COD.,يُستبدل ملصق Bosta المحفوظ بملصق جديد يعرض مبلغ التحصيل الجديد.
+Bosta did not accept the new COD: {0}. Nothing was changed.,لم يقبل Bosta مبلغ التحصيل الجديد: {0}. لم يتغير شيء.
+Bosta COD,مبلغ التحصيل لدى Bosta
+"Could not confirm that Bosta updated the COD. Shopify and the order were not changed. Delivery Note {0} is listed in Needs Attention as Bosta COD Differs: Retry there puts the old COD back.","تعذر التأكد من أن Bosta حدّث مبلغ التحصيل. لم يتغير Shopify ولا الطلب. مذكرة التسليم {0} مدرجة في يحتاج انتباه باسم اختلاف مبلغ التحصيل لدى Bosta: إعادة المحاولة هناك تعيد المبلغ القديم."
+"Bosta still has the new COD of Delivery Note {0}. It is listed in Needs Attention as Bosta COD Differs: use Retry there to put {1} back.","ما زال لدى Bosta مبلغ التحصيل الجديد لمذكرة التسليم {0}. هي مدرجة في يحتاج انتباه باسم اختلاف مبلغ التحصيل لدى Bosta: استخدم إعادة المحاولة هناك لإعادة {1}."
+Bosta COD Differs,اختلاف مبلغ التحصيل لدى Bosta
+Order Lifecycle Mismatch,عدم تطابق دورة حياة الطلب
+Lifecycle Check,فحص دورة الحياة
+"Bosta was last sent the COD {0}, but the Delivery Note has {1}.","آخر مبلغ تحصيل أُرسل إلى Bosta هو {0}، لكن مذكرة التسليم تحمل {1}."
+Cancel the shipment at the carrier,إلغاء الشحنة لدى الناقل
+Delete the draft Delivery Note,حذف مسودة مذكرة التسليم
+Cancel the Sales Order,إلغاء أمر البيع
+Cancel the order on Shopify,إلغاء الطلب على Shopify
+"The carrier already has this order (Delivery Note {0}). It can no longer be cancelled here: create a Sales Return against the Delivery Note.","الناقل استلم هذا الطلب (مذكرة التسليم {0}). لم يعد ممكنًا إلغاؤه من هنا: أنشئ مرتجع مبيعات على مذكرة التسليم."
+"The order cannot be cancelled on Shopify: {0} Nothing was cancelled.","لا يمكن إلغاء الطلب على Shopify: {0} لم يُلغَ شيء."
+"The shipment of Delivery Note {0} has an unknown result. Check it with the carrier on the Delivery Note first.","نتيجة شحنة مذكرة التسليم {0} غير معروفة. تحقق منها مع الناقل من مذكرة التسليم أولًا."
+The carrier did not cancel the shipment of Delivery Note {0}: {1},لم يلغِ الناقل شحنة مذكرة التسليم {0}: {1}
+The carrier gave no reason.,لم يذكر الناقل سببًا.
+"Delivery Note {0} also holds items of other orders, so it is not deleted.","تحتوي مذكرة التسليم {0} أيضًا على أصناف طلبات أخرى، لذلك لم تُحذف."
+Draft Delivery Note {0} was deleted when the order was cancelled. Carrier tracking number: {1}.,حُذفت مسودة مذكرة التسليم {0} عند إلغاء الطلب. رقم تتبع الناقل: {1}.
+"Delivery Note {0} is in the stage {1}, but its statuses lead to {2}.","مذكرة التسليم {0} في المرحلة {1}، لكن حالاتها تؤدي إلى {2}."
+Sales Order {0} and Shopify have different item quantities: {1},أمر البيع {0} وShopify لديهما كميات أصناف مختلفة: {1}
+"Sales Order {0} has the total {1} but Shopify has {2} (items {3}, shipping {4}, taxes {5}, discounts {6}).","إجمالي أمر البيع {0} هو {1} بينما إجمالي Shopify هو {2} (الأصناف {3}، الشحن {4}، الضرائب {5}، الخصومات {6})."
+Draft Delivery Note {0} does not match Sales Order {1}: {2},مسودة مذكرة التسليم {0} لا تطابق أمر البيع {1}: {2}
+"The shipment at the carrier is cancelled, the draft Delivery Note is deleted, the Sales Order is cancelled and the order is cancelled on {0}. This cannot be undone.","تُلغى الشحنة لدى الناقل، وتُحذف مسودة مذكرة التسليم، ويُلغى أمر البيع، ويُلغى الطلب على {0}. لا يمكن التراجع عن ذلك."
+Cancelling the order...,جارٍ إلغاء الطلب...
+The order was cancelled.,تم إلغاء الطلب.
+The order was not fully cancelled,لم يكتمل إلغاء الطلب
+"Done:",تم:
+"The cancellation stopped at: {0}",توقف الإلغاء عند: {0}
+Everything before this step stays done. Press Cancel Order again to continue from this step.,تبقى كل الخطوات السابقة منفذة. اضغط إلغاء الطلب مرة أخرى للمتابعة من هذه الخطوة.
+Updating the COD at Bosta...,جارٍ تحديث مبلغ التحصيل لدى Bosta...
+Bosta has the COD of the Delivery Note.,مبلغ التحصيل في مذكرة التسليم أصبح لدى Bosta.
+Sales Invoice {0} is submitted for this order. Cancel the invoice first. Nothing was cancelled.,فاتورة المبيعات {0} معتمدة لهذا الطلب. ألغِ الفاتورة أولًا. لم يُلغَ شيء.
+Payment Entry {0} is linked to this order. Cancel or unlink it first. Nothing was cancelled.,قيد الدفع {0} مرتبط بهذا الطلب. ألغِه أو افصله أولًا. لم يُلغَ شيء.
+"The items of a Shopify order are changed with Edit Order, which sends the change to Shopify first.","تُعدَّل أصناف طلب Shopify بواسطة تعديل الطلب، الذي يرسل التغيير إلى Shopify أولًا."
+"Sales Order {0} has more than one draft Delivery Note ({1}), so its items cannot be changed here. Keep one Delivery Note for the whole order first.","لأمر البيع {0} أكثر من مذكرة تسليم مسودة ({1})، لذلك لا يمكن تغيير أصنافه من هنا. أبقِ مذكرة تسليم واحدة للطلب كله أولًا."
+"Delivery Note {0} does not ship the whole order on its own, so the items of the order cannot be changed here. Make it ship the whole order, or delete it, first.","مذكرة التسليم {0} لا تشحن الطلب كله بمفردها، لذلك لا يمكن تغيير أصناف الطلب من هنا. اجعلها تشحن الطلب كله أو احذفها أولًا."
+"The Bosta shipment of Delivery Note {0} is {1}, so its COD cannot be updated yet. Wait for the result, or check it with Bosta.","شحنة Bosta الخاصة بمذكرة التسليم {0} حالتها {1}، لذلك لا يمكن تحديث مبلغ التحصيل بعد. انتظر النتيجة أو تحقق منها مع Bosta."
+"Delivery Note {0} also holds items of other orders, so it is not deleted. Nothing was cancelled.","تحتوي مذكرة التسليم {0} أيضًا على أصناف طلبات أخرى، لذلك لن تُحذف. لم يُلغَ شيء."
+"Delivery Note {0} is linked with {1} {2}, so it cannot be deleted. Nothing was cancelled.","مذكرة التسليم {0} مرتبطة بـ {1} {2}، لذلك لا يمكن حذفها. لم يُلغَ شيء."
+"Delivery Note {0} ships one item of the order in more than one row (for example by batch), so the items of the order cannot be changed here. Merge those rows into one first.","تشحن مذكرة التسليم {0} صنفًا واحدًا من الطلب في أكثر من صف (مثلًا بحسب الدفعة)، لذلك لا يمكن تغيير أصناف الطلب من هنا. ادمج هذه الصفوف في صف واحد أولًا."
+"An item edit of order {0} is not settled with Shopify yet, so the COD is not sent again. Check the order in Shopify, clear the edit marker on the Marketplace Order, then retry.","تعديل أصناف الطلب {0} لم يُحسم مع Shopify بعد، لذلك لن يُرسل مبلغ التحصيل مرة أخرى. تحقق من الطلب في Shopify وامسح علامة التعديل في طلب السوق ثم أعد المحاولة."

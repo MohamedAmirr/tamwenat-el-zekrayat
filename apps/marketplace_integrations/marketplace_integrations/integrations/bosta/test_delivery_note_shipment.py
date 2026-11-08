@@ -444,7 +444,7 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		carrier_shipments.run_create(note.name, kwargs["log"], kwargs["lookup_first"], kwargs["submit_as"])
 		return kwargs
 
-	def test_the_job_submits_the_created_note_as_the_user_who_requested_it(self):
+	def test_the_pickup_job_submits_the_created_note_as_the_user_who_requested_it(self):
 		note = self.make_note()
 		# Sales User too: ERPNext reads the customer's Address on every Delivery Note save, and Stock roles cannot.
 		email = self.make_user("Stock Manager", "Sales User")
@@ -460,6 +460,11 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 
 		with patch.object(frappe.model.document.Document, "_save", autospec=True, side_effect=save_with_version):
 			kwargs = self._start_as(note, email)
+			# #500: the create job leaves a Created draft; Bosta's pickup event queues the submit job
+			self.assertEqual(stored(note, "docstatus").docstatus, 0)
+			self.assertEqual(stored(note, "custom_shipment_requested_by").custom_shipment_requested_by, email)
+			frappe.db.set_value("Delivery Note", note.name, "custom_shipping_status", "Picked up from business")
+			carrier_shipments.run_submit_at_pickup(note.name)
 
 		self.assertEqual(kwargs["submit_as"], email)
 		values = stored(note, "docstatus", "custom_integration_status", "custom_last_integration_error")
@@ -471,6 +476,27 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		# on_submit still queues the label job (after the submit commits)
 		jobs = [call.args[0] for call in self.enqueue.call_args_list if call.args]
 		self.assertIn("marketplace_integrations.integrations.bosta.delivery_note_shipment.run_fetch_label", jobs)
+
+	def test_the_pickup_submit_locks_the_sales_order_before_the_delivery_note(self):
+		"""Same order as Edit Order (``order_edit.apply_edit``), so the two cannot deadlock."""
+		note = self.make_note()
+		email = self.make_user("Stock Manager", "Sales User")
+		self.http.queue["create"].append(created("TRK-1", "DELIVERY-1"))
+		self._start_as(note, email)
+		frappe.db.set_value("Delivery Note", note.name, "custom_shipping_status", "Picked up from business")
+		locks = []
+		real_get_value = frappe.db.get_value
+
+		def spy(doctype, *args, **kwargs):
+			if kwargs.get("for_update"):
+				locks.append(doctype)
+			return real_get_value(doctype, *args, **kwargs)
+
+		with patch.object(frappe.db, "get_value", side_effect=spy):
+			carrier_shipments.run_submit_at_pickup(note.name)
+
+		self.assertIn("Sales Order", locks)
+		self.assertLess(locks.index("Sales Order"), locks.index("Delivery Note"))
 
 	def test_a_job_without_submit_as_leaves_the_created_note_a_draft(self):
 		note = self.make_note()
@@ -486,15 +512,17 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		email = self.make_user("Stock Manager", "Sales User")
 		self.http.queue["create"].append(created("TRK-1", "DELIVERY-1"))
 
+		self._start_as(note, email)
+		frappe.db.set_value("Delivery Note", note.name, "custom_shipping_status", "Picked up from business")
 		with patch(
 			"erpnext.stock.doctype.delivery_note.delivery_note.DeliveryNote.on_submit",
 			side_effect=frappe.ValidationError("Negative stock for <b>ITEM-1</b>"),
 		):
-			self._start_as(note, email)
+			carrier_shipments.run_submit_at_pickup(note.name)
 
 		values = stored(note, "docstatus", "custom_integration_status", "custom_last_integration_error")
 		self.assertEqual((values.docstatus, values.custom_integration_status), (0, "Created"))
-		self.assertIn("Shipment created at Bosta; the Delivery Note could not be confirmed:", values.custom_last_integration_error)
+		self.assertIn("Bosta picked the shipment up; the Delivery Note could not be confirmed:", values.custom_last_integration_error)
 		self.assertIn("Negative stock for ITEM-1", values.custom_last_integration_error)
 		self.assertNotIn("<b>", values.custom_last_integration_error)
 		self.assertEqual(frappe.session.user, "Administrator")
@@ -506,6 +534,8 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		# The API would have refused this user; a job started for him still must not submit as the system.
 		carrier_shipments.request_create(note.name, submit_as=email)
 		kwargs = self.enqueue.call_args.kwargs
+		carrier_shipments.run_create(note.name, kwargs["log"], kwargs["lookup_first"], kwargs["submit_as"])
+		frappe.db.set_value("Delivery Note", note.name, "custom_shipping_status", "Picked up from business")
 
 		real_check = frappe.model.document.Document.check_permission
 
@@ -518,7 +548,7 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		with patch.object(
 			frappe.model.document.Document, "check_permission", autospec=True, side_effect=refuse_delivery_notes
 		):
-			carrier_shipments.run_create(note.name, kwargs["log"], kwargs["lookup_first"], kwargs["submit_as"])
+			carrier_shipments.run_submit_at_pickup(note.name)
 
 		values = stored(note, "docstatus", "custom_integration_status", "custom_last_integration_error")
 		self.assertEqual((values.docstatus, values.custom_integration_status), (0, "Created"))
@@ -544,7 +574,10 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 
 		self._start(note)
 
-		self.assertIsNone(self.enqueue.call_args.kwargs["submit_as"])
+		# The last enqueue is now the label job (#500: queued by ``after_created``); look at the create job.
+		create_calls = [c for c in self.enqueue.call_args_list if "submit_as" in c.kwargs]
+		self.assertTrue(create_calls)
+		self.assertIsNone(create_calls[-1].kwargs["submit_as"])
 		self.assertEqual(stored(note, "docstatus", "custom_integration_status").docstatus, 0)
 
 	def test_a_confirmed_zero_cod_is_sent_as_zero_and_the_differs_hint_does_not_block_it(self):
@@ -557,7 +590,7 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 
 		self.assertEqual(self.http.calls_of("create")[0]["cod"], 0)
 		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Created")
-		frappe.get_doc("Delivery Note", note.name).submit()
+		self.submit_note(note.name)
 		self.assertEqual(stored(note, "docstatus", "custom_cod_amount").custom_cod_amount, 0)
 
 	def test_a_definitive_refusal_is_creation_failed_and_the_message_is_stored_raw(self):
@@ -751,8 +784,65 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "docstatus"), 0)
 
 		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Created")
-		frappe.get_doc("Delivery Note", note.name).submit()
+		self.submit_note(note.name)
 		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "docstatus"), 1)
+
+	def test_a_created_bosta_draft_cannot_be_submitted_by_hand_before_the_pickup(self):
+		note = self.make_note()
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Created")
+
+		with self.assertRaises(frappe.ValidationError) as caught:
+			frappe.get_doc("Delivery Note", note.name).submit()
+
+		self.assertIn("The Delivery Note is submitted when Bosta picks the shipment up.", str(caught.exception))
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "docstatus"), 0)
+
+	def test_the_pickup_job_submits_the_created_draft_and_a_failure_queues_the_next_attempt(self):
+		note = self.make_note()
+		email = self.make_user("Stock Manager", "Sales User")
+		self.http.queue["create"].append(created("TRK-1", "DELIVERY-1"))
+		self._start_as(note, email)
+		frappe.db.set_value("Delivery Note", note.name, "custom_shipping_status", "Picked up from business")
+		self.enqueue.reset_mock()
+
+		with patch(
+			"erpnext.stock.doctype.delivery_note.delivery_note.DeliveryNote.on_submit",
+			side_effect=frappe.ValidationError("Negative stock for <b>ITEM-1</b>"),
+		):
+			carrier_shipments.run_submit_at_pickup(note.name)
+
+		self.assertEqual(stored(note, "docstatus").docstatus, 0)
+		retry = self.enqueue.call_args
+		self.assertTrue(retry.args[0].endswith("run_submit_at_pickup"))
+		self.assertEqual((retry.kwargs["queue"], retry.kwargs["attempt"]), ("long", 2))
+		self.assertEqual(retry.kwargs["job_id"], carrier_shipments.PICKUP_SUBMIT_JOB.format(note.name, 2))
+
+		# the retry (no sleep in the test) succeeds
+		with patch.object(carrier_shipments.time, "sleep") as sleep:
+			carrier_shipments.run_submit_at_pickup(note.name, attempt=2)
+		sleep.assert_called_once_with(carrier_shipments.PICKUP_SUBMIT_PAUSE_SECONDS)
+		self.assertEqual(stored(note, "docstatus").docstatus, 1)
+		self.assertFalse(stored(note, "custom_last_integration_error").custom_last_integration_error)
+
+	def test_the_last_pickup_attempt_queues_nothing_more(self):
+		note = self.make_note()
+		email = self.make_user("Stock Manager", "Sales User")
+		self.http.queue["create"].append(created("TRK-1", "DELIVERY-1"))
+		self._start_as(note, email)
+		self.enqueue.reset_mock()
+
+		with (
+			patch(
+				"erpnext.stock.doctype.delivery_note.delivery_note.DeliveryNote.on_submit",
+				side_effect=frappe.ValidationError("Negative stock"),
+			),
+			patch.object(carrier_shipments.time, "sleep"),
+		):
+			carrier_shipments.run_submit_at_pickup(note.name, attempt=carrier_shipments.PICKUP_SUBMIT_ATTEMPTS)
+
+		self.assertEqual(stored(note, "docstatus").docstatus, 0)
+		self.assertFalse(self.enqueue.called)
+		self.assertIn("could not be confirmed", stored(note, "custom_last_integration_error").custom_last_integration_error)
 
 	def test_a_stale_copy_cannot_submit_past_the_stored_status(self):
 		note = self.make_note()
@@ -792,7 +882,7 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		doc.custom_bosta_city_name = "Dokki &amp; Giza"
 		doc.custom_cod_amount = frappe.utils.flt(doc.custom_cod_amount) + 0.001
 
-		doc.submit()
+		self.submit_note(doc)
 
 		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "docstatus"), 1)
 		self.assertEqual(stored(note, "custom_bosta_city_name").custom_bosta_city_name, "Dokki & Giza")
@@ -860,7 +950,7 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 			update_modified=False,
 		)
 
-		stale.submit()
+		self.submit_note(stale)
 
 		values = stored(note, "docstatus", "custom_shipping_label", "custom_shipping_status", "custom_integration_status")
 		self.assertEqual(values.docstatus, 1)
@@ -1168,6 +1258,40 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		values = stored(note, "modified", "custom_shipping_label")
 		self.assertTrue(values.custom_shipping_label)
 		self.assertEqual(values.modified, before)
+
+	def test_a_label_requested_for_an_older_cod_is_not_stored_when_the_cod_moved_on(self):
+		"""Two refresh jobs can finish out of order: the COD is checked again under the lock right before storing."""
+		import base64
+		from types import SimpleNamespace
+
+		from marketplace_integrations.integrations.bosta import labels
+
+		note = self.make_note()
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{
+				"custom_integration_status": "Created",
+				"lr_no": "TRK-1",
+				"custom_carrier_request_snapshot": json.dumps({"cod": 20}),
+			},
+		)
+		frappe.db.commit()
+		response = SimpleNamespace(status_code=200, content=base64.b64encode(b"%PDF-1.7\nlabel"))
+		client = SimpleNamespace(get_a4_arabic_awb=lambda numbers: response)
+		file_doc = SimpleNamespace(file_url="/private/files/bosta-awb.pdf", file_name="bosta-awb.pdf")
+
+		with (
+			patch.object(labels, "BostaClient", return_value=client),
+			patch.object(labels, "is_success_response", return_value=True),
+			patch.object(labels, "save_file", return_value=file_doc) as save,
+		):
+			self.assertIsNone(labels.create_a4_arabic_label(note.name, replace=True, cod=10))
+			save.assert_not_called()
+			self.assertTrue(labels.create_a4_arabic_label(note.name, replace=True, cod=20))
+			save.assert_called_once()
+
+		self.assertEqual(stored(note, "custom_shipping_label").custom_shipping_label, file_doc.file_url)
 
 	# -- log hygiene -------------------------------------------------------------------------
 

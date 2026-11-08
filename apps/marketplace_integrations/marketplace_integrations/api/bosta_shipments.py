@@ -117,6 +117,14 @@ def get_edit_values(delivery_note: str):
 
 
 @frappe.whitelist(methods=["POST"])
+def retry_cod_update(delivery_note: str):
+	"""Needs Attention "Bosta COD Differs" Retry (#501): send the Delivery Note's COD to Bosta again (needs write
+	permission on the note). Raises Bosta's reason when it refused or did not answer; the row stays."""
+	_bosta_note(delivery_note, "write")
+	return editing.sync_cod(delivery_note)
+
+
+@frappe.whitelist(methods=["POST"])
 def edit_shipment(delivery_note: str, receiver_phone: str, city_id: str, address_first_line: str):
 	"""Send a changed receiver phone and drop-off address to Bosta (needs write permission on the note)."""
 	_bosta_note(delivery_note, "write")

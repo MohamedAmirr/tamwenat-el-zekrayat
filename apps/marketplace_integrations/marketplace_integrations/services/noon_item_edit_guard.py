@@ -41,20 +41,25 @@ ROW_DOCTYPE = "Sales Order Item"
 COMPARED_NUMBERS = ("qty", "rate", "conversion_factor", "stock_qty")
 
 
-def block_row_change(doc, method=None):
-	"""``before_update_after_submit``: refuse a changed item, uom, quantity, rate or pack size of an existing row."""
+def row_changed(doc):
+	"""True when the stored row differs from ``doc`` in item, uom, quantity, rate or pack size (shared with
+	``services/order_edit.py``, the Shopify lock after pickup)."""
 	if not doc.get("name"):
-		return
+		return False
 	before = frappe.db.get_value(ROW_DOCTYPE, doc.name, ["item_code", *COMPARED_NUMBERS, "uom"], as_dict=True)
 	if not before:
-		return  # not stored yet: a new row, handled by block_row_add
-	if (
+		return False  # not stored yet: a new row, handled by block_row_add
+	return not (
 		before.item_code == doc.item_code
 		and before.uom == doc.uom
 		and all(flt(before[field], 6) == flt(doc.get(field), 6) for field in COMPARED_NUMBERS)
-	):
-		return
-	_refuse_if_locked(doc)
+	)
+
+
+def block_row_change(doc, method=None):
+	"""``before_update_after_submit``: refuse a changed item, uom, quantity, rate or pack size of an existing row."""
+	if row_changed(doc):
+		_refuse_if_locked(doc)
 
 
 def block_row_add(doc, method=None):

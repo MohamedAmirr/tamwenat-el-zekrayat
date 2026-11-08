@@ -80,6 +80,54 @@ BOSTA_STATE_NAMES = {
 	105: "On hold",
 }
 
+#: THE ONE table of a Bosta state code -> Delivery Note stage (#500; ``delivery_note_workflow.state_for`` reads it
+#: for a submitted note, ``_write_state`` for the pickup submit). Open decision T9 of epic #502: which codes count
+#: as Picked Up and which as In Transit was not given in the repo, so this is the proposed table, to be confirmed:
+#:
+#: - Shipment Created (still a draft, nothing is submitted): 10 Pickup requested, 11 Waiting for route, 20 Route
+#:   Assigned, 22 Picking up from consignee, 40 Picking up (the courier has not collected it from the merchant)
+#: - Picked Up (the first code that submits the draft): 21 Picked up from business, 23 Picked up from consignee,
+#:   41 Picked up
+#: - In Transit: 24 Received at warehouse, 25 Fulfilled, 30 In transit between Hubs and the exception family
+#:   47, 102, 103, 105 (``PROBLEM_STATE_CODES`` without Lost/Damaged; they are the only codes allowed to move a
+#:   stage backwards, see ``STAGE_RANK``)
+#: - Delivered: 45
+#: - Returned / Failed: 46, 60 (returned), 48 Terminated, 49 Canceled, 100 Lost, 101 Damaged
+#: 104 Archived has no stage (the stored stage stays).
+STAGE_BY_CODE = {
+	**dict.fromkeys((10, 11, 20, 22, 40), lifecycle.SHIPMENT_CREATED),
+	**dict.fromkeys((21, 23, 41), lifecycle.PICKED_UP),
+	**dict.fromkeys((24, 25, 30, 47, 102, 103, 105), lifecycle.IN_TRANSIT),
+	45: lifecycle.DELIVERED,
+	**dict.fromkeys((46, 60, 48, 49, 100, 101), lifecycle.RETURNED_FAILED),
+}
+#: A stage never moves to a lower rank (an old or repeated event cannot pull a note back), except for the
+#: exception codes ``EXCEPTION_CODES`` and a Delivered (45) after Lost / Damaged (``may_move_back``).
+STAGE_RANK = {
+	lifecycle.SHIPMENT_CREATED: 0,
+	lifecycle.PICKED_UP: 1,
+	lifecycle.IN_TRANSIT: 2,
+	lifecycle.DELIVERED: 3,
+	lifecycle.RETURNED_FAILED: 4,
+}
+EXCEPTION_CODES = (47, 102, 103, 105)
+#: Codes that mean the courier has the parcel: entering one submits the draft (a cancel code on a draft cancels the
+#: shipment instead, see ``_write_state``).
+PICKUP_CODES = tuple(
+	code
+	for code, stage in STAGE_BY_CODE.items()
+	if stage != lifecycle.SHIPMENT_CREATED and code not in (48, 49)
+)
+
+
+def stage_for_name(shipping_status):
+	"""The stage of a Bosta Shipping Status name (``custom_shipping_status``), else ``None``."""
+	for code, name in BOSTA_STATE_NAMES.items():
+		if name == shipping_status:
+			return STAGE_BY_CODE.get(code)
+	return None
+
+
 DOCUMENTED_DELIVERY_TYPES = {
 	"SEND",
 	"EXCHANGE",
@@ -281,6 +329,30 @@ def replay_pending_events(delivery_id=None):
 		_apply_event(row.name)
 
 
+def may_move_back(code, previous_state=""):
+	"""Whether Bosta state ``code`` may move a stage to a lower rank: the exception codes, and Delivered (45) for a
+	parcel that was reported Lost or Damaged (100/101, stage Returned / Failed) and then found and delivered."""
+	return code in EXCEPTION_CODES or (
+		code == 45 and cstr(previous_state) in (BOSTA_STATE_NAMES[100], BOSTA_STATE_NAMES[101])
+	)
+
+
+def _forward_only(stored_stage, values, code, previous_state=""):
+	"""``values`` with the stage kept when the table would move it to a lower rank (``STAGE_RANK``). Only the
+	codes of ``may_move_back`` may move a stage backwards. A stage outside the ranked ones (Order Received,
+	Cancelled ...) is never held. ``previous_state``: the shipping status the note had before this write."""
+	new = values.get(lifecycle.FIELD)
+	if (
+		new
+		and not may_move_back(code, previous_state)
+		and stored_stage in STAGE_RANK
+		and new in STAGE_RANK
+		and STAGE_RANK[new] < STAGE_RANK[stored_stage]
+	):
+		return {**values, lifecycle.FIELD: stored_stage}
+	return values
+
+
 def _write_state(note, code, timestamp=None, fee=None, event=False):
 	"""Write a Bosta state onto a note: commit, take the row lock as the next statement, compare and write
 	inside that one lock (a late event cannot overwrite a newer one). Created + Canceled/Terminated by
@@ -301,6 +373,7 @@ def _write_state(note, code, timestamp=None, fee=None, event=False):
 			"custom_shipping_status",
 			"custom_last_integration_error",
 			"is_return",
+			*([lifecycle.FIELD] if lifecycle.is_installed() else []),
 		],
 		as_dict=True,
 		for_update=True,
@@ -354,8 +427,22 @@ def _write_state(note, code, timestamp=None, fee=None, event=False):
 	# native submit fail with "modified after you opened it", and the person changed nothing. ``notify``
 	# still refreshes an open form. A submitted note keeps the bump (nothing can be submitted from it).
 	frappe.get_doc("Delivery Note", note).db_set(
-		lifecycle.with_state(note, values), update_modified=current.docstatus != 0, notify=True, commit=True
+		_forward_only(current.get(lifecycle.FIELD), lifecycle.with_state(note, values), code, previous_state),
+		update_modified=current.docstatus != 0,
+		notify=True,
+		commit=True,
 	)
+	if (
+		code in PICKUP_CODES
+		and current.docstatus == 0
+		and not current.is_return
+		and values.get("custom_integration_status", status) == shipment.CREATED
+	):
+		# #500: the courier has the parcel. Entering a pickup code submits the draft as its requester, in a short
+		# deduplicated job after this commit (a repeated code queues nothing new while one is pending, and the job
+		# re-reads the note). The stage stays Shipment Created until that submit sets it from the table.
+		carrier_shipments.queue_submit_at_pickup(note)
+		frappe.db.commit()
 	# Only the CHANGE into a returned state queues the draft: states 46/60 are polled nightly, and a
 	# repeated read must not bring back a draft that staff cancelled. Never for a Customer Return Pickup: its
 	# returned state means the goods reached the merchant, and the note is already the return.

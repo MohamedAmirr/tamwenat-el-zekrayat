@@ -23,6 +23,9 @@ const MARKETPLACE_ATTENTION_PROBLEM_TYPES = [
 	"Carrier Status Stale",
 	"Carrier Cancelled",
 	"Carrier Return Review",
+	"Picked Up Not Submitted",
+	"Bosta COD Differs",
+	"Order Lifecycle Mismatch",
 	"Payment Error",
 	"Payment Excess",
 	"Payment Entry Cancelled",
@@ -58,6 +61,16 @@ if (typeof frappe !== "undefined") {
 				.on("click.attention", "[data-attention-retry]", function (event) {
 					event.preventDefault();
 					retry_order_sync($(this).attr("data-attention-retry"), report);
+				})
+				.off("click.attention-submit")
+				.on("click.attention-submit", "[data-attention-retry-submit]", function (event) {
+					event.preventDefault();
+					retry_pickup_submit($(this).attr("data-attention-retry-submit"), report);
+				})
+				.off("click.attention-cod")
+				.on("click.attention-cod", "[data-attention-retry-cod]", function (event) {
+					event.preventDefault();
+					retry_cod_update($(this).attr("data-attention-retry-cod"), report);
 				});
 		},
 		formatter(value, row, column, data, default_formatter) {
@@ -113,6 +126,14 @@ function to_slug(doctype) {
 // existing mapping opens so it can be enabled.
 function next_action_html(data) {
 	const label = frappe.utils.escape_html(__(data.next_action || ""));
+	if (data.next_action === "Retry" && data.problem_type === "Bosta COD Differs") {
+		// #501: send the Delivery Note's COD to Bosta again
+		return `<a href="#" data-attention-retry-cod="${frappe.utils.escape_html(data.reference_name)}">${label}</a>`;
+	}
+	if (data.next_action === "Retry" && data.reference_doctype === "Delivery Note") {
+		// #500: the pickup submit of a Created draft, not an order sync
+		return `<a href="#" data-attention-retry-submit="${frappe.utils.escape_html(data.reference_name)}">${label}</a>`;
+	}
 	if (data.next_action === "Retry") {
 		return `<a href="#" data-attention-retry="${frappe.utils.escape_html(data.reference_name)}">${label}</a>`;
 	}
@@ -129,6 +150,43 @@ function next_action_html(data) {
 		href = `/app/${to_slug(data.reference_doctype)}/${encodeURIComponent(data.reference_name)}`;
 	}
 	return `<a href="${frappe.utils.escape_html(href)}">${label}</a>`;
+}
+
+// #500: queues the submit of a Created draft Delivery Note whose carrier picked it up. The job runs in the
+// background, so the row stays until the note is submitted; the alert says it was queued, not done.
+function retry_pickup_submit(delivery_note, report) {
+	frappe
+		.call({
+			method: "marketplace_integrations.api.carrier_shipments.retry_pickup_submit",
+			type: "POST",
+			args: { delivery_note },
+			freeze: true,
+			freeze_message: __("Queueing the Delivery Note submit..."),
+		})
+		.then(() => {
+			frappe.show_alert({
+				message: __("The Delivery Note submit was queued. Refresh in a moment."),
+				indicator: "green",
+			});
+			report.refresh();
+		});
+}
+
+// #501: sends the Delivery Note's COD to Bosta again. A refusal is raised by the server and shown by Frappe; the
+// row stays until Bosta holds the note's COD.
+function retry_cod_update(delivery_note, report) {
+	frappe
+		.call({
+			method: "marketplace_integrations.api.bosta_shipments.retry_cod_update",
+			type: "POST",
+			args: { delivery_note },
+			freeze: true,
+			freeze_message: __("Updating the COD at Bosta..."),
+		})
+		.then(() => {
+			frappe.show_alert({ message: __("Bosta has the COD of the Delivery Note."), indicator: "green" });
+			report.refresh();
+		});
 }
 
 // Existing explicit sync endpoint. An expected blocker is returned as

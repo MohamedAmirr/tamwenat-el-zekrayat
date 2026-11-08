@@ -981,10 +981,22 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		self.addCleanup(frappe.db.delete, "Integration Request", {"reference_docname": note.name, "custom_operation_type": "Invoice"})
 		return note
 
-	def _loose_pdf(self):
-		return frappe.get_doc(
-			{"doctype": "File", "file_name": "shipment-invoice.pdf", "content": self._PDF, "is_private": 1}
+	def _loose_file(self, file_name, content):
+		"""A File with no attachment. Earlier commits in these tests persist it, so it is deleted explicitly."""
+		file_doc = frappe.get_doc(
+			{"doctype": "File", "file_name": file_name, "content": content, "is_private": 1}
 		).insert()
+		self.addCleanup(self._delete_file, file_doc.name)
+		return file_doc
+
+	@staticmethod
+	def _delete_file(name):
+		if frappe.db.exists("File", name):
+			frappe.delete_doc("File", name, force=True, ignore_permissions=True)
+			frappe.db.commit()
+
+	def _loose_pdf(self):
+		return self._loose_file("shipment-invoice.pdf", self._PDF)
 
 	def _press(self, note, file_doc, key=None, invoice_nr="INV-1"):
 		with patch("marketplace_integrations.integrations.noon.delivery_note_shipment.frappe.enqueue") as enqueue:
@@ -1145,9 +1157,7 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 				noon.upload_invoice_for_note(note.name, self._loose_pdf().file_url, "INV-1", "")
 			with self.assertRaises(frappe.ValidationError):
 				noon.upload_invoice_for_note(note.name, self._loose_pdf().file_url, "INV-1", "2026-11-01", "bad key!")
-			not_pdf = frappe.get_doc(
-				{"doctype": "File", "file_name": "x.bin", "content": b"not a pdf", "is_private": 1}
-			).insert()
+			not_pdf = self._loose_file("x.bin", b"not a pdf")
 			with self.assertRaises(frappe.ValidationError):
 				noon.upload_invoice_for_note(note.name, not_pdf.file_url, "INV-1", "2026-11-01")
 		enqueue.assert_not_called()

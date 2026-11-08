@@ -40,15 +40,22 @@ An adapter is a module exposing (the contract; a contract test checks every adap
   wrote the Integration Status Cancelled it calls ``cancel_after_carrier_cancelled`` (every path that reads
   the carrier does: webhook, nightly job, Refresh).
 - ``after_submit(doc)``: optional; work queued after the note is submitted (``on_submit``). Must not raise.
+- ``SUBMIT_AT_PICKUP``: optional, True for an adapter whose note stays a draft until the carrier's pickup event
+  (#500): the create job then does not submit, ``request_create`` records who asked
+  (``custom_shipment_requested_by``) and the carrier's status code of the pickup queues ``run_submit_at_pickup``
+  (the code table lives in the adapter's status module). ``after_pickup_submit(delivery_note)``: optional, work
+  after that submit succeeded.
 - ``reconcile()``: the nightly job of this carrier.
 - ``refuse_sales_order_cancel(order)``: Sales Order ``before_cancel``.
 - ``problem_states()``: ``{problem_type: [shipping statuses]}`` for Needs Attention (the exception and return
-  types only; the other types come from ``custom_integration_status``).
+  types only; the other types come from ``custom_integration_status``). An adapter with ``SUBMIT_AT_PICKUP`` also
+  lists its pickup statuses under "Picked Up Not Submitted" (a Created draft still in one of them).
 - ``terminal_states(is_return=False)``: the shipping statuses that never change again (not a stale status);
   ``is_return`` is True for a return note the carrier owns (a pickup ends at different states).
 """
 
 import json
+import time
 
 import frappe
 from frappe import _
@@ -173,6 +180,17 @@ def require_shipment_created(doc, method=None):
 			_("The {0} shipment of this Delivery Note is not Created yet, so it cannot be confirmed.").format(
 				adapter.SERVICE_NAME
 			),
+			title=_("{0} shipment").format(adapter.SERVICE_NAME),
+		)
+	if (
+		adapter
+		and getattr(adapter, "SUBMIT_AT_PICKUP", False)
+		and not doc.get("is_return")
+		and not doc.flags.get(PICKUP_SUBMIT_FLAG)
+	):
+		# #500: the carrier's pickup event submits the note (the job sets the flag); nobody submits it before.
+		frappe.throw(
+			_("The Delivery Note is submitted when {0} picks the shipment up.").format(adapter.SERVICE_NAME),
 			title=_("{0} shipment").format(adapter.SERVICE_NAME),
 		)
 
@@ -375,18 +393,15 @@ def request_create(delivery_note, modified=None, submit_as=None):
 	# the log rows). It is stored from the first attempt on and cleared on an amended note.
 	previous = cstr(frappe.db.get_value("Delivery Note", delivery_note, "custom_carrier_reference"))
 	reference = previous or doc.name
-	frappe.db.set_value(
-		"Delivery Note",
-		delivery_note,
-		lifecycle.with_state(
-			delivery_note,
-			{
-				"custom_integration_status": CREATING,
-				"custom_carrier_reference": reference,
-				"custom_last_integration_error": None,
-			},
-		),
-	)
+	started = {
+		"custom_integration_status": CREATING,
+		"custom_carrier_reference": reference,
+		"custom_last_integration_error": None,
+	}
+	if submit_as and not doc.get("is_return") and getattr(adapter, "SUBMIT_AT_PICKUP", False):
+		# #500: the person who asked for the shipment is who the pickup event submits the note as.
+		started["custom_shipment_requested_by"] = submit_as
+	frappe.db.set_value("Delivery Note", delivery_note, lifecycle.with_state(delivery_note, started))
 	# A return note the carrier owns is a pickup request: same machine, its own operation name.
 	operation = "Return Pickup" if doc.get("is_return") else "Create"
 	log = open_log(
@@ -444,7 +459,8 @@ def run_create(delivery_note, log=None, lookup_first=True, submit_as=None):
 			delivery_id=values.get("custom_carrier_delivery_id"),
 		):
 			adapter.after_created(delivery_note, data)
-			if submit_as:
+			if submit_as and not getattr(adapter, "SUBMIT_AT_PICKUP", False):
+				# Submitted as soon as Created, unless the carrier's note stays a draft until its pickup event (#500).
 				_submit_created(delivery_note, submit_as, adapter.SERVICE_NAME)
 	except Failed as failure:
 		_finish(delivery_note, FAILED, {"custom_last_integration_error": cstr(failure)}, log, "Failed", error=cstr(failure))
@@ -460,13 +476,98 @@ def run_create(delivery_note, log=None, lookup_first=True, submit_as=None):
 		_finish(delivery_note, UNKNOWN, {"custom_last_integration_error": message}, log, "Unknown", error=message)
 
 
-def _submit_created(delivery_note, submit_as, service):
-	"""Submit a note whose shipment is Created, as the user who pressed Submit (never as the system: the
-	Authorization Control and credit limit rules judge the requester). Never raises: a failure leaves a Draft
-	note that is Created, with the reason in ``custom_last_integration_error`` (Needs Attention); the person
-	can submit it by hand."""
-	# Commit, then lock as the very next statement (MariaDB snapshot isolation).
+PICKUP_SUBMIT_JOB = "pickup-submit|{}|{}"
+#: Set on the document by the pickup job: the only submit of a ``SUBMIT_AT_PICKUP`` note that
+#: ``require_shipment_created`` lets through.
+PICKUP_SUBMIT_FLAG = "pickup_submit"
+#: The pickup submit is tried this many times, each retry a separate job on the long queue that pauses first (a
+#: bounded wait that must not hold a short-queue worker; this Frappe has no delayed enqueue). After the last failure
+#: the error stays stored for the form and Needs Attention (Retry).
+PICKUP_SUBMIT_ATTEMPTS = 3
+PICKUP_SUBMIT_PAUSE_SECONDS = 30
+
+
+def queue_submit_at_pickup(delivery_note, attempt=1):
+	"""Queue the deduplicated job that submits a Created draft whose carrier picked it up (#500). Attempt 1 runs on
+	the short queue; a retry (``attempt`` > 1) runs on the long queue and waits first. Queued after the caller's
+	commit; the job decides again from the stored row, so a repeat is harmless."""
+	frappe.enqueue(
+		"marketplace_integrations.services.carrier_shipments.run_submit_at_pickup",
+		queue="short" if attempt <= 1 else "long",
+		timeout=300,
+		job_id=PICKUP_SUBMIT_JOB.format(delivery_note, attempt),
+		deduplicate=True,
+		enqueue_after_commit=True,
+		delivery_note=delivery_note,
+		attempt=attempt,
+	)
+
+
+def run_submit_at_pickup(delivery_note, attempt=1):
+	"""The job: submit the Created draft as ``custom_shipment_requested_by`` (never as the system, no
+	``ignore_permissions``: the Authorization Control and credit limit rules judge the requester), then, when the
+	carrier already reported the goods returned, queue the draft return exactly as a submitted note would. When the
+	submit fails and ``attempt`` is below ``PICKUP_SUBMIT_ATTEMPTS`` the next attempt is queued."""
+	frappe.set_user("Administrator")
+	if attempt > 1:
+		# a transient cause (a stock race, a lock) may be gone shortly; this is a long-queue worker
+		time.sleep(PICKUP_SUBMIT_PAUSE_SECONDS)
+	values = frappe.db.get_value(
+		"Delivery Note",
+		delivery_note,
+		["custom_shipment_requested_by", "docstatus", "custom_integration_status", "custom_shipping_status", "is_return"],
+		as_dict=True,
+	)
+	if not values or values.docstatus != 0 or cstr(values.custom_integration_status) != CREATED or values.is_return:
+		return
+	adapter = _adapter_of(delivery_note)
+	# No requester recorded (a note whose shipment was started before #500): the note's owner.
+	requester = cstr(values.custom_shipment_requested_by) or frappe.db.get_value("Delivery Note", delivery_note, "owner")
+	_submit_created(
+		delivery_note,
+		requester,
+		adapter.SERVICE_NAME,
+		_("{0} picked the shipment up; the Delivery Note could not be confirmed: {1}"),
+		pickup=True,
+	)
+	docstatus = frappe.db.get_value("Delivery Note", delivery_note, "docstatus")
+	if docstatus == 0 and attempt < PICKUP_SUBMIT_ATTEMPTS:
+		queue_submit_at_pickup(delivery_note, attempt + 1)
+		frappe.db.commit()
+	elif docstatus == 1:
+		after = getattr(adapter, "after_pickup_submit", None)
+		if after:
+			after(delivery_note)
+			frappe.db.commit()
+
+
+def _submit_created(delivery_note, submit_as, service, failure=None, pickup=False):
+	"""Submit a note whose shipment is Created, as ``submit_as`` (the requester the shipment was started for; never as
+	the system: the Authorization Control and credit limit rules judge that user). Never raises: a failure leaves a Draft
+	note that is Created, with the reason in ``custom_last_integration_error`` (Needs Attention); a note can
+	be submitted by hand, except one that waits for the carrier's pickup event, which only the pickup job submits (Retry in Needs Attention queues it again).
+	``failure`` is the translated message template ``{0}`` service, ``{1}`` reason. ``pickup``: the submit of
+	the pickup job, the only one ``require_shipment_created`` allows for a note that waits for its pickup."""
+	# Lock order, the same as ``order_edit.apply_edit``: the Sales Order rows first, then the note. Read the orders
+	# of the note and commit, then lock as the very next statement (MariaDB snapshot isolation), so a submit and an
+	# Edit Order of the same order wait for each other instead of deadlocking.
 	frappe.db.commit()
+	orders = sorted(
+		{
+			name
+			for name in frappe.get_all(
+				"Delivery Note Item",
+				filters={"parent": delivery_note, "parenttype": "Delivery Note"},
+				pluck="against_sales_order",
+				parent_doctype="Delivery Note",
+				limit_page_length=0,
+			)
+			if name
+		}
+	)
+	frappe.db.commit()
+	for name in orders:
+		frappe.db.get_value("Sales Order", name, "name", for_update=True)
 	locked = frappe.db.get_value(
 		"Delivery Note", delivery_note, ["docstatus", "custom_integration_status"], as_dict=True, for_update=True
 	)
@@ -475,15 +576,25 @@ def _submit_created(delivery_note, submit_as, service):
 		return
 	try:
 		frappe.set_user(submit_as)
-		frappe.get_doc("Delivery Note", delivery_note).submit()
+		note = frappe.get_doc("Delivery Note", delivery_note)
+		if pickup:
+			note.flags[PICKUP_SUBMIT_FLAG] = True
+		note.submit()
 		frappe.db.commit()
+		if failure:
+			# A retry that worked: the earlier "could not be confirmed" reason no longer applies.
+			frappe.set_user("Administrator")
+			frappe.db.set_value("Delivery Note", delivery_note, "custom_last_integration_error", None, update_modified=False)
+			frappe.db.commit()
 	except Exception as exc:
 		frappe.db.rollback()
 		if not isinstance(exc, frappe.ValidationError):
 			frappe.log_error(title="Automatic submit of a Delivery Note failed", message=f"{delivery_note}\n{frappe.get_traceback()}")
 		frappe.clear_messages()
 		reason = strip_html_tags(cstr(exc)).strip()[:300] or exc.__class__.__name__
-		message = _("Shipment created at {0}; the Delivery Note could not be confirmed: {1}").format(service, reason)
+		message = (failure or _("Shipment created at {0}; the Delivery Note could not be confirmed: {1}")).format(
+			service, reason
+		)
 		frappe.set_user("Administrator")
 		frappe.db.set_value("Delivery Note", delivery_note, "custom_last_integration_error", message, update_modified=False)
 		frappe.db.commit()

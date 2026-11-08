@@ -60,31 +60,13 @@ STATE_DOCSTATUS = {
 	CANCELLED: 2,
 }
 
-# Carrier shipping statuses (``custom_shipping_status`` Select options) of a SUBMITTED note. Anything not listed
-# is a carrier note that is not yet in transit and stays Picked Up (the interim label until #500 keeps the note a
-# draft until the pickup). Which Bosta codes are Picked Up or In Transit, and whether an Exception may move a
-# note backwards, is an open decision of the epic (T9): this table is the interim answer.
+# Shipping statuses (``custom_shipping_status`` Select options) of a SUBMITTED note. Bosta's names are mapped by
+# the ONE table in ``integrations/bosta/statuses.py`` (``STAGE_BY_CODE``, #500). Noon's are listed here. Anything
+# not listed is a carrier note whose carrier has the parcel and stays Picked Up (a submitted Bosta note is picked
+# up by definition: only the pickup submits it).
 DELIVERED_STATUSES = ("Delivered",)
-RETURNED_FAILED_STATUSES = (
-	"Returned to business",
-	"Returned to stock",
-	"Lost",
-	"Damaged",
-	"Terminated",
-	"Canceled",
-	"Cancelled",
-	"Out of Stock",
-)
-IN_TRANSIT_STATUSES = (
-	"Received at warehouse",
-	"Fulfilled",
-	"In transit between Hubs",
-	"Exception",
-	"Investigation",
-	"Awaiting your action",
-	"On hold",
-	"Shipped",
-)
+NOON_RETURNED_FAILED_STATUSES = ("Cancelled", "Out of Stock")
+NOON_IN_TRANSIT_STATUSES = ("Shipped",)
 
 #: Set on the document by the Workflow task of a transition: a draft-to-draft stage change is only legitimate
 #: through a Workflow action.
@@ -105,12 +87,19 @@ def state_for(docstatus, integration_status="", shipping_status="", is_return=Fa
 	# submitted
 	if cint(is_return):
 		return RETURNED_FAILED
+	from marketplace_integrations.integrations.bosta import statuses
+
 	if shipping in DELIVERED_STATUSES:
 		return DELIVERED
-	if shipping in RETURNED_FAILED_STATUSES:
+	if shipping in NOON_RETURNED_FAILED_STATUSES:
 		return RETURNED_FAILED
-	if shipping in IN_TRANSIT_STATUSES:
+	if shipping in NOON_IN_TRANSIT_STATUSES:
 		return IN_TRANSIT
+	bosta_stage = statuses.stage_for_name(shipping)
+	if bosta_stage:
+		# a submitted note never gets a draft-only stage (a Bosta status that maps to Shipment Created): the carrier
+		# has the parcel, so at least Picked Up
+		return bosta_stage if STATE_DOCSTATUS.get(bosta_stage) == 1 else PICKED_UP
 	if shipping or integration not in ("", NOT_CREATED, FAILED):
 		return PICKED_UP
 	# no carrier involved: a person confirmed the delivery
@@ -220,8 +209,9 @@ def check_shipment_request(doc):
 
 def start_shipment(doc):
 	"""Transition task (asynchronous, queued after the transition commits, runs as the user who pressed the
-	button): start the carrier create through the same path as before. The note is submitted by the job as that
-	user once the carrier confirms Created (unchanged until #500). A refusal that only the locked check can see
+	button): start the carrier create through the same path as before. A Noon note is submitted by the job as that
+	user once the carrier confirms Created; a Bosta note stays a draft until Bosta picks the parcel up (#500), then
+	the pickup job submits it as the user recorded as requester. A refusal that only the locked check can see
 	(the stock changed meanwhile) puts the note back to the stage its statuses lead to, with the reason."""
 	from marketplace_integrations.services import carrier_shipments
 

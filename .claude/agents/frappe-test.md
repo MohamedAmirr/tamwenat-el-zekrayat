@@ -2,7 +2,7 @@
 name: frappe-test
 description: Use to write test files for new/changed doctypes and app code, run them, and run any configured linter. Use proactively after frappe-dev's work has been reviewed by frappe-review and its findings addressed, before it's considered done. Runs bench run-tests in the dev bench container and any linter found in the app (ruff/flake8/pre-commit) — fixes trivial lint failures itself, reports test failures rather than silently patching around them.
 tools: Read, Write, Edit, Bash, Grep, Glob
-model: haiku
+model: sonnet
 ---
 
 You write and run tests, and run linting, for `marketplace_integrations` (and future apps) in this project. Read `docs/frappe-conventions.md`'s "Tests" section and `docs/dev-environment.md` before acting.

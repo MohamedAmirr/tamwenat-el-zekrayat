@@ -43,8 +43,20 @@ class TestStatusMapping(IntegrationTestCase):
 
 	def test_every_listed_shipping_status_is_a_real_select_option(self):
 		options = (frappe.get_meta("Delivery Note").get_field("custom_shipping_status").options or "").split("\n")
-		listed = lifecycle.DELIVERED_STATUSES + lifecycle.RETURNED_FAILED_STATUSES + lifecycle.IN_TRANSIT_STATUSES
+		listed = (
+			lifecycle.DELIVERED_STATUSES
+			+ lifecycle.NOON_RETURNED_FAILED_STATUSES
+			+ lifecycle.NOON_IN_TRANSIT_STATUSES
+		)
 		self.assertFalse([status for status in listed if status not in options])
+
+	def test_a_submitted_note_never_gets_a_draft_only_stage(self):
+		# Bosta statuses that map to Shipment Created (a draft stage) give a submitted note at least Picked Up
+		for status in ("Pickup requested", "Waiting for route", "Route Assigned", "Picking up from consignee", "Picking up"):
+			self.assertEqual(lifecycle.state_for(1, "Created", status), lifecycle.PICKED_UP, status)
+			self.assertEqual(lifecycle.STATE_DOCSTATUS[lifecycle.state_for(1, "Created", status)], 1)
+		# a draft keeps the draft stage
+		self.assertEqual(lifecycle.state_for(0, "Created", "Route Assigned"), lifecycle.SHIPMENT_CREATED)
 
 	def test_an_untouched_draft_keeps_waiting_for_goods(self):
 		row = {"docstatus": 0, "custom_integration_status": "Not Created", lifecycle.FIELD: lifecycle.WAITING_FOR_GOODS}
@@ -66,6 +78,13 @@ class TestShippedWorkflow(IntegrationTestCase):
 		condition = next(t["condition"] for t in self.spec["transitions"] if t["action"] == "Create Shipment")
 		for adapter in carrier_shipments.CARRIERS.values():
 			self.assertIn(adapter.SHIPPING_CARRIER, condition)
+
+	def test_confirm_shipment_is_not_offered_for_a_carrier_that_submits_at_pickup(self):
+		"""``require_shipment_created`` refuses a hand submit of such a note, so the action must not be offered."""
+		condition = next(t["condition"] for t in self.spec["transitions"] if t["action"] == "Confirm Shipment")
+		for adapter in carrier_shipments.CARRIERS.values():
+			if getattr(adapter, "SUBMIT_AT_PICKUP", False):
+				self.assertIn(f'doc.transporter_name != "{adapter.SHIPPING_CARRIER}"', condition)
 
 	def test_only_stock_managers_cancel(self):
 		cancel = [t for t in self.spec["transitions"] if t["action"] == "Cancel"]

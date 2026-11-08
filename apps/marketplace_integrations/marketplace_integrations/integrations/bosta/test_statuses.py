@@ -432,7 +432,7 @@ class IntegrationTestBostaStatuses(BostaFixtureMixin, IntegrationTestCase):
 		# The stage is written with the status, so an open form from before it is refused by the Workflow
 		# (not by the timestamp check); a form that already shows the stage still saves.
 		stale.workflow_state = frappe.db.get_value("Delivery Note", note.name, "workflow_state")
-		stale.submit()
+		self.submit_note(stale)  # the pickup job's flag: no hand submit of a Created Bosta draft (#500)
 		values = frappe.db.get_value("Delivery Note", note.name, ["docstatus", "custom_shipping_status"], as_dict=True)
 		self.assertEqual(values.docstatus, 1)
 		self.assertTrue(values.custom_shipping_status)

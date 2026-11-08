@@ -20,12 +20,12 @@ one order never stops the others. Per order (``ship_order``):
    no invoice, no Bosta call).
 4. After the commit (no lock held): the same ``carrier_shipments.request_create`` the form's Submit uses,
    with ``submit_as`` the requesting user. It runs the adapter guards (``validate_ready``) and queues the
-   Bosta create job, which submits the note once Bosta confirms Created. THIS MODULE NEVER SUBMITS A
-   DELIVERY NOTE and never calls Bosta itself.
+   Bosta create job, which leaves the note a draft (Shipment Created) until Bosta's pickup event submits it
+   (#500). THIS MODULE NEVER SUBMITS A DELIVERY NOTE and never calls Bosta itself.
 5. When every order was handled the job watches the queued notes for a bounded time (``WAIT_SECONDS``): a
-   note whose Integration Status reached Created is "accepted by Bosta"; Failed / Unknown is a failure with
-   Bosta's reason; a note still Creating when the wait ends is reported "still creating", and a note Created at
-   Bosta that is still a draft with no stored error "still being submitted" (the submit job is late, not failed).
+   note whose Integration Status reached Created is "accepted by Bosta" (#500: the draft is the end state);
+   Failed / Unknown is a failure with Bosta's reason; a note still Creating when the wait ends is reported
+   "still creating".
 
 Progress and summary go to the requesting user on the realtime event ``EVENT`` (one payload shape, ``stage``
 "creating" / "waiting" / "done"); the final summary is also kept as a native Notification Log.
@@ -204,7 +204,6 @@ def wait_for_bosta(rows, on_change):
 	Unknown, or ``WAIT_SECONDS`` pass (the rest are "still creating"). Only reads the Integration Status: no
 	call to Bosta, nothing is created or submitted here. ``on_change`` is called after every change."""
 	deadline = time.monotonic() + WAIT_SECONDS
-	drafts = {}  # Created at Bosta but not submitted yet: delivery note -> the stored error, if any
 	while True:
 		changed = False
 		# A new read view each round, or the job would not see the status the create job commits.
@@ -220,18 +219,8 @@ def wait_for_bosta(rows, on_change):
 			)
 			status = cstr(values.custom_integration_status) if values else ""
 			if status == carrier_log.CREATED:
-				error = strip_html_tags(cstr(values.custom_last_integration_error)).strip()
-				if values.docstatus == 1:
-					row["status"], row["message"] = ACCEPTED, _("Accepted by Bosta")
-				elif error:
-					# The automatic submit failed (stock, credit limit, authorization ...): the draft stays.
-					row["status"] = FAILED
-					row["message"] = _(
-						"Bosta accepted the shipment but Delivery Note {0} is still a draft: {1}"
-					).format(row["delivery_note"], error[:300])
-				else:
-					drafts[row["delivery_note"]] = True
-					continue
+				# #500: a Bosta note stays a draft until pickup, so Created at Bosta is the accepted end state.
+				row["status"], row["message"] = ACCEPTED, _("Accepted by Bosta")
 			elif status and status != carrier_log.CREATING:
 				reason = strip_html_tags(cstr(values.custom_last_integration_error)).strip() or _(status)
 				row["status"] = FAILED
@@ -248,13 +237,7 @@ def wait_for_bosta(rows, on_change):
 				if row["status"] != SENT:
 					continue
 				row["status"] = STILL_CREATING
-				if drafts.get(row["delivery_note"]):
-					# Created, no error: the submit job is only late, not failed.
-					row["message"] = _(
-						"Bosta accepted the shipment and Delivery Note {0} is still being submitted. Check the Delivery Note list later."
-					).format(row["delivery_note"])
-				else:
-					row["message"] = _("Still creating at Bosta. Check the Delivery Note list later.")
+				row["message"] = _("Still creating at Bosta. Check the Delivery Note list later.")
 			return
 		time.sleep(POLL_SECONDS)
 
@@ -560,7 +543,7 @@ def _make_paid_invoice(order):
 def _make_note(order, cod):
 	"""The draft Delivery Note: ERPNext's mapper, transporter Bosta, the COD confirmed. The adapter's own
 	``guard_changes`` (run by ``insert``) applies the COD rule and limit; nothing is copied from it. It is
-	left a draft: only the Bosta job submits it, once the shipment is Created."""
+	left a draft: the Bosta pickup event submits it (``statuses._write_state``, #500)."""
 	from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
 
 	note = make_delivery_note(order.name)

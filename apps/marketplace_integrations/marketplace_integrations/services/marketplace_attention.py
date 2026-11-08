@@ -52,6 +52,12 @@ Problem sources (``problem_type``):
   CARRIER_STALE_DAYS. The message names the carrier (the adapter's ``SERVICE_NAME``). A carrier is not a
   Marketplace Account, so these rows have the carrier name as platform and no account; they appear when no
   account filter is set and the platform filter is blank or a carrier in ``CARRIERS``.
+- Bosta COD Differs (#501): one row per live Bosta Delivery Note whose request snapshot holds another COD than the
+  note (a failed revert after Shopify rejected an edit, an unknown answer, or an edit that came from Shopify).
+  Retry sends the note's COD to Bosta again. Computed live from the note.
+- Order Lifecycle Mismatch (#501): one row per open mismatch found by the nightly read-only lifecycle
+  reconciliation (``order_lifecycle_reconciliation``), stored as Marketplace Sync Log rows of sync type Lifecycle
+  Check; the row is a Marketplace Order reference and clears when the next run no longer finds the mismatch.
 - Payment Error: Shopify Payment Sync Log Error/Invalid rows keyed by order and
   transaction, hidden by a later Success for the same pair; a duplicate-guard row is also
   hidden once no manual Payment Entry covers the required amount any more (#425).
@@ -107,6 +113,14 @@ CARRIER_RETURN = "Carrier Return"
 CARRIER_STATUS_STALE = "Carrier Status Stale"
 CARRIER_CANCELLED = "Carrier Cancelled"
 CARRIER_RETURN_REVIEW = "Carrier Return Review"
+#: #500: a Created draft of a carrier that submits at pickup (``SUBMIT_AT_PICKUP``) whose carrier already has the
+#: parcel but the note is still a draft. The adapter's ``problem_states`` lists the pickup shipping statuses.
+PICKED_UP_NOT_SUBMITTED = "Picked Up Not Submitted"
+#: #501: the COD Bosta was last sent is not the COD of the Delivery Note (a failed or unknown COD update, or a change
+#: that came from Shopify). Computed live; Retry sends the note's COD again (``api.bosta_shipments.retry_cod_update``).
+BOSTA_COD_DIFFERS = "Bosta COD Differs"
+#: #501: a mismatch the nightly lifecycle reconciliation found (``services/order_lifecycle_reconciliation.py``).
+ORDER_LIFECYCLE_MISMATCH = "Order Lifecycle Mismatch"
 #: The role that checks the goods of a draft return a returned shipment created (informational: the
 #: list itself is scoped by Delivery Note read permission).
 CARRIER_RETURN_REVIEW_ROLE = "Stock User"
@@ -117,7 +131,8 @@ CARRIER_STALE_DAYS = 5
 CARRIER_MAX_AGE_DAYS = 60
 #: A Syncing order with no Sales Order older than this is stuck (the debounce window is seconds).
 SYNC_PENDING_ALERT_MINUTES = 20
-#: A Created draft note older than this was not submitted by the background job (it failed or died).
+#: A Created draft note older than this was not submitted by the background job (it failed or died). Only for a
+#: carrier whose create job submits (Noon); a Bosta draft waits for the pickup (#500) and is not a problem by age.
 CARRIER_DRAFT_STUCK_MINUTES = 15
 #: A "Carrier Cancelled" item clears after this many days (or at once when the Delivery Note is
 #: cancelled in ERPNext: the list reads docstatus < 2 only).
@@ -139,6 +154,9 @@ PROBLEM_TYPES = [
 	CARRIER_STATUS_STALE,
 	CARRIER_CANCELLED,
 	CARRIER_RETURN_REVIEW,
+	PICKED_UP_NOT_SUBMITTED,
+	BOSTA_COD_DIFFERS,
+	ORDER_LIFECYCLE_MISMATCH,
 	PAYMENT_ERROR,
 	PAYMENT_EXCESS,
 	PAYMENT_ENTRY_CANCELLED,
@@ -181,6 +199,8 @@ def get_attention_items(filters=None):
 		CARRIER_STATUS_STALE,
 		CARRIER_CANCELLED,
 		CARRIER_RETURN_REVIEW,
+		PICKED_UP_NOT_SUBMITTED,
+		BOSTA_COD_DIFFERS,
 	}
 	if (
 		not filters.account
@@ -188,6 +208,8 @@ def get_attention_items(filters=None):
 		and filters.problem_type in (None, "", *carrier_types)
 	):
 		items.extend(_collect_carrier_items(filters.problem_type))
+		if filters.problem_type in (None, "", BOSTA_COD_DIFFERS):
+			items.extend(_collect_bosta_cod_differs())
 	# Noon is both a carrier and a marketplace: its account rollups (pending Out of Stock, outdated invoices)
 	# must stay for the platform filter "Noon". A carrier with no account (Bosta) simply finds none.
 	accounts = _get_accounts(filters)
@@ -203,6 +225,7 @@ def get_attention_items(filters=None):
 		({WEBHOOK_RETRIES_EXHAUSTED}, _collect_exhausted_webhooks),
 		({NOON_FULFILLMENT}, _collect_noon_rollups),
 		({NOON_RETURN_UNLINKED}, _collect_unlinked_noon_returns),
+		({ORDER_LIFECYCLE_MISMATCH}, _collect_lifecycle_mismatches),
 	]
 	for types, collector in collectors:
 		if not accounts or (filters.problem_type and filters.problem_type not in types):
@@ -617,6 +640,16 @@ def _collect_carrier_items(problem_type=None):
 					"custom_last_integration_error": ["is", "set"],
 				}
 		)
+	if problem_type in (None, PICKED_UP_NOT_SUBMITTED) and statuses_of(PICKED_UP_NOT_SUBMITTED):
+		# #500: the carrier has the parcel, the note is still a draft (the pickup submit failed or has not run).
+		collect(
+			{
+				"custom_integration_status": carrier_log.CREATED,
+				"docstatus": 0,
+				"is_return": 0,
+				"custom_shipping_status": ["in", statuses_of(PICKED_UP_NOT_SUBMITTED)],
+			}
+		)
 	if problem_type in (None, CARRIER_STATUS_STALE):
 		collect(
 			{**shipped, "custom_integration_status": carrier_log.CREATED, "creation": [">=", recent]},
@@ -679,7 +712,7 @@ def _collect_carrier_items(problem_type=None):
 			)
 		}
 
-	def add(kind, carrier, row, explanation, when, **extra):
+	def add(kind, carrier, row, explanation, when, next_action=NEXT_OPEN_SHIPMENT, **extra):
 		items.append(
 			_item(
 				kind,
@@ -688,7 +721,7 @@ def _collect_carrier_items(problem_type=None):
 				row.name,
 				explanation,
 				when,
-				NEXT_OPEN_SHIPMENT,
+				next_action,
 				**extra,
 			)
 		)
@@ -735,11 +768,28 @@ def _collect_carrier_items(problem_type=None):
 		):
 			add(CARRIER_CANCELLED, carrier, row, _("{0} cancelled this delivery.").format(name), seen)
 		created_draft = status == carrier_log.CREATED and row.docstatus == 0
+		# #500: a carrier that submits at pickup keeps the Created draft by design; it is a problem only once the
+		# carrier has the parcel ("Picked up but not submitted"), never by age.
+		submits_at_pickup = bool(getattr(adapter, "SUBMIT_AT_PICKUP", False))
+		picked_up_draft = (
+			created_draft
+			and submits_at_pickup
+			and not row.is_return
+			and shipping_status in states[carrier].get(PICKED_UP_NOT_SUBMITTED, [])
+		)
+		if picked_up_draft and problem_type in (None, PICKED_UP_NOT_SUBMITTED):
+			if error:
+				explanation = _("{0}: picked up, Delivery Note not submitted. {1}").format(name, error)
+			else:
+				explanation = _("{0}: picked up, but the Delivery Note is not submitted yet.").format(name)
+			add(PICKED_UP_NOT_SUBMITTED, carrier, row, explanation, seen, next_action=NEXT_RETRY)
 		if (
-			(
+			# Lost / Damaged keep their Carrier Exception row beside "Picked up but not submitted"
+			(not picked_up_draft or shipping_status in ("Lost", "Damaged"))
+			and (
 				(shipping_status in states[carrier].get(CARRIER_EXCEPTION, []) and status != carrier_log.CANCELLED)
 				or (status == carrier_log.CREATED and error)
-				or (created_draft and get_datetime(row.modified) <= draft_cutoff)
+				or (created_draft and not submits_at_pickup and get_datetime(row.modified) <= draft_cutoff)
 			)
 			and problem_type in (None, CARRIER_EXCEPTION)
 		):
@@ -777,6 +827,90 @@ def _collect_carrier_items(problem_type=None):
 				_("{0} has not updated this shipment for 5 days.").format(name),
 				seen,
 			)
+	return items
+
+
+def _collect_bosta_cod_differs():
+	"""One row per live Bosta Delivery Note whose request snapshot holds another COD than the note
+	(``editing.cod_differs``, #501). The next action is Retry (the note's COD is sent again). Read with the
+	caller's permissions (``get_list``). A note whose shipment ended (a terminal Bosta status) is not listed."""
+	if not frappe.has_permission("Delivery Note", "read"):
+		return []
+	from marketplace_integrations.integrations.bosta import delivery_note_shipment as bosta
+	from marketplace_integrations.integrations.bosta import editing, statuses
+
+	supplier = bosta.bosta_supplier()
+	if not supplier:
+		return []
+	rows = frappe.get_list(
+		"Delivery Note",
+		filters={
+			"docstatus": ["<", 2],
+			"is_return": 0,
+			"transporter": supplier,
+			"custom_integration_status": carrier_log.CREATED,
+			"custom_shipping_status": ["not in", statuses.terminal_state_names(False)],
+		},
+		fields=["name", "custom_cod_amount", "custom_carrier_request_snapshot", "custom_last_sync_at", "modified"],
+		limit_page_length=0,
+	)
+	items = []
+	for row in rows:
+		if not editing.cod_differs(row.custom_cod_amount, row.custom_carrier_request_snapshot):
+			continue
+		items.append(
+			_item(
+				BOSTA_COD_DIFFERS,
+				frappe._dict(name="", platform=bosta.SERVICE_NAME),
+				"Delivery Note",
+				row.name,
+				_("Bosta was last sent the COD {0}, but the Delivery Note has {1}.").format(
+					f"{editing.snapshot_cod(row.custom_carrier_request_snapshot):.2f}",
+					f"{flt(row.custom_cod_amount):.2f}",
+				),
+				row.modified,
+				NEXT_RETRY,
+			)
+		)
+	return items
+
+
+def _collect_lifecycle_mismatches(accounts):
+	"""One row per open mismatch of the nightly lifecycle reconciliation (#501): a Marketplace Sync Log row of
+	sync type Lifecycle Check with status Error, written by ``order_lifecycle_reconciliation``. The text is built
+	here, in the reader's language."""
+	from marketplace_integrations.services import order_lifecycle_reconciliation as reconciliation
+
+	logs = frappe.get_list(
+		"Marketplace Sync Log",
+		filters={
+			"sync_type": reconciliation.SYNC_TYPE,
+			"status": "Error",
+			"marketplace_account": ["in", list(accounts)],
+		},
+		fields=["name", "marketplace_account", "marketplace_order", "request_data", "attempted_at", "creation"],
+		order_by="attempted_at desc, creation desc",
+		limit_page_length=0,
+	)
+	items = []
+	seen = set()
+	for log in logs:
+		data = _parse_request_data(log.request_data)
+		kind = data.get("kind")
+		if kind not in reconciliation.KINDS or not log.marketplace_order or data.get("key") in seen:
+			continue
+		seen.add(data.get("key"))
+		items.append(
+			_item(
+				ORDER_LIFECYCLE_MISMATCH,
+				accounts[log.marketplace_account],
+				"Marketplace Order",
+				log.marketplace_order,
+				reconciliation.describe(kind, data.get("args")),
+				log.attempted_at or log.creation,
+				NEXT_OPEN_ORDER,
+			)
+		)
 	return items
 
 

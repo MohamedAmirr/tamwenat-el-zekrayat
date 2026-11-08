@@ -226,16 +226,30 @@ doc_events = {
 	"Payment Entry": _RECHECK_EVENTS,
 	# #368: Noon has no order update, so item rows of a submitted Noon Sales Order are locked. The check
 	# is on the rows because update_child_qty_rate changes them before it saves the parent.
+	# #500: the same rows are locked for Shopify orders from the pickup on (a submitted Delivery Note exists), and
+	# the Sales Order on_update_after_submit hook below refuses an edit that would leave the reservation partial.
 	"Sales Order Item": {
-		"before_update_after_submit": "marketplace_integrations.services.noon_item_edit_guard.block_row_change",
-		"before_insert": "marketplace_integrations.services.noon_item_edit_guard.block_row_add",
-		"on_trash": "marketplace_integrations.services.noon_item_edit_guard.block_row_remove",
+		"before_update_after_submit": [
+			"marketplace_integrations.services.noon_item_edit_guard.block_row_change",
+			"marketplace_integrations.services.order_edit.guard_row_change",
+		],
+		"before_insert": [
+			"marketplace_integrations.services.noon_item_edit_guard.block_row_add",
+			"marketplace_integrations.services.order_edit.guard_row_add",
+		],
+		"on_trash": [
+			"marketplace_integrations.services.noon_item_edit_guard.block_row_remove",
+			"marketplace_integrations.services.order_edit.guard_row_remove",
+		],
 	},
 	"Sales Order": {
 		**_PLATFORM_NAMING,
 		# #393: ERPNext only blocks on submitted links; a draft Delivery Note with a live Noon shipment must block too.
 		"before_cancel": "marketplace_integrations.services.carrier_shipments.refuse_sales_order_cancel",
-		"on_update_after_submit": _RECHECK_HANDLER,
+		"on_update_after_submit": [
+			_RECHECK_HANDLER,
+			"marketplace_integrations.services.order_edit.guard_reservation",
+		],
 		"on_cancel": _RECHECK_HANDLER,
 		# #413: the Bosta count summary is written by the app only; an older form copy must not overwrite it.
 		"validate": [
@@ -290,7 +304,7 @@ workflow_methods = [
 # test_no_catalog_document_events_are_registered depends on this app registering
 # no doc_events for the catalog doctypes; do not add one for them here. The
 # only doc_events are the #364 Marketplace Order re-check handlers, the #368 Noon Sales
-# Order Item row check, the #391/#393 Delivery Note and Sales Order carrier handlers and the platform
+# Order Item row check (and the #500 Shopify one), the #391/#393 Delivery Note and Sales Order carrier handlers and the platform
 # naming series before_naming hook above.
 scheduler_events = {
 	# #367: the four hourly jobs run at staggered minutes instead of all at :00, where
@@ -313,6 +327,10 @@ scheduler_events = {
 		"59 23 * * *": [
 			"marketplace_integrations.services.marketplace_order_reconciliation.enqueue_nightly_order_reconciliation",
 			"marketplace_integrations.services.carrier_shipments.reconcile_open_notes",
+		],
+		# #501: read-only lifecycle reconciliation, after the Shopify and carrier jobs above have stored their data.
+		"30 1 * * *": [
+			"marketplace_integrations.services.order_lifecycle_reconciliation.enqueue_nightly",
 		],
 		SHOPIFY_INVENTORY_SWEEP_CRON: [
 			"marketplace_integrations.integrations.shopify.inventory_sync.sweep_changed_bins",
@@ -497,6 +515,7 @@ fixtures = [
 					"Delivery Note-custom_shipping_label",
 					"Delivery Note-custom_last_sync_at",
 					"Delivery Note-custom_bosta_last_event_at",
+					"Delivery Note-custom_shipment_requested_by",
 					"Delivery Note-custom_actual_shipping_cost",
 					"Delivery Note-custom_actual_cost_received_on",
 					"Delivery Note-custom_return_source",

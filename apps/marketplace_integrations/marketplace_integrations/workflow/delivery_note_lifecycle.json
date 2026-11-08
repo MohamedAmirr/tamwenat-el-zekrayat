@@ -52,7 +52,7 @@
    "action": "Confirm Shipment",
    "next_state": "Picked Up",
    "allowed": "Stock User",
-   "condition": "not doc.is_return"
+   "condition": "not doc.is_return and doc.transporter_name != \"Bosta\""
   },
   {"state": "Picked Up", "action": "Cancel", "next_state": "Cancelled", "allowed": "Stock Manager"},
   {"state": "In Transit", "action": "Cancel", "next_state": "Cancelled", "allowed": "Stock Manager"},

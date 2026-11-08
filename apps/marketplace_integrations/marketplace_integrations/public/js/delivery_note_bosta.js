@@ -279,7 +279,21 @@
 		}, PREFILL_DELAY_MS);
 	}
 
+	// Bosta says the parcel is Lost or Damaged (draft or submitted note): red banner and indicator (#500); it
+	// replaces the shipping intro. Staff wait for Bosta to return the shipment.
+	const LOST_STATUSES = ["Lost", "Damaged"];
+	function show_lost_banner(frm) {
+		const status = frm.doc.custom_shipping_status;
+		if (frm.is_new() || frm.doc.docstatus > 1 || frm.doc.is_return || !LOST_STATUSES.includes(status)) return;
+		const text = frappe.utils.escape_html(__(status));
+		frm.set_intro(
+			__("Bosta reports this shipment as {0}. Wait for Bosta to return the shipment to you.", [text]),
+			"red"
+		);
+	}
+
 	function refresh(frm) {
+		show_lost_banner(frm);
 		ensure_state(frm);
 		set_cod_state(frm);
 		show_cod_hint(frm);
@@ -634,6 +648,8 @@
 		refresh,
 		pick_city,
 		add_buttons,
+		// #500: the note stays a draft after Created; Bosta's pickup event submits it.
+		draft_until_pickup: true,
 		// Sent to Bosta; after the start only Edit Bosta Shipment changes them.
 		locked_fields: ["contact_mobile", "shipping_address_name", "shipping_address"],
 	};

@@ -265,6 +265,17 @@ test("submit of a note already Created continues without a dialog", () => {
 	assert.equal(global.frappe.validated, true);
 });
 
+test("a Created note of a carrier that submits at pickup is not submitted by hand", () => {
+	const { shipping, handlers, dialogs, msgprints } = load();
+	shipping.register_carrier("Bosta", { draft_until_pickup: true });
+	const frm = make_form({ custom_integration_status: "Created" });
+	assert.equal(handlers.before_submit(frm), undefined);
+	assert.equal(dialogs.length, 0);
+	assert.equal(global.frappe.validated, false);
+	assert.equal(msgprints.length, 1);
+	assert.match(msgprints[0].message, /The Delivery Note is submitted when Bosta picks the shipment up\./);
+});
+
 test("submit of a note no carrier owns is left alone", () => {
 	const { handlers, calls } = load();
 	assert.equal(handlers.before_submit(make_form({ transporter_name: "Noon" })), undefined);

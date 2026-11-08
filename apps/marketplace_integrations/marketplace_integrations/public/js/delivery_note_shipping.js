@@ -83,9 +83,12 @@
 		if (status === CREATING) {
 			frm.set_intro(__("Sending the shipment to {0}...", [name]), "blue");
 		} else if (status === CREATED) {
+			// a draft with a stored error: the pickup submit failed (#500), the reason is shown
+			const submit_error = frm.doc.docstatus === 0 && error;
 			frm.set_intro(
-				__("{0} shipment created. Tracking number: {1}", [name, escape(frm.doc.lr_no || "")]),
-				"green"
+				__("{0} shipment created. Tracking number: {1}", [name, escape(frm.doc.lr_no || "")]) +
+					(submit_error ? `<br>${error}` : ""),
+				submit_error ? "red" : "green"
 			);
 		} else if (status === UNKNOWN) {
 			frm.set_intro(
@@ -112,7 +115,8 @@
 		// text carries the state, the colour is only extra
 		frm.dashboard.add_indicator(
 			__("Shipping status: {0}", [frappe.utils.escape_html(__(status))]),
-			"blue"
+			// a shipment the carrier reports Lost or Damaged (#500): red
+			!frm.doc.is_return && ["Lost", "Damaged"].includes(status) ? "red" : "blue"
 		);
 	}
 
@@ -237,8 +241,18 @@
 		const carrier = carrier_name(frm);
 		// A return is submitted without waiting: submitting it is the receipt; its pickup is its own button.
 		if (!carrier || frm.doc.is_return) return;
-		if (status_of(frm) === CREATED) return;
 		const hooks = carriers[carrier];
+		if (status_of(frm) === CREATED) {
+			if (hooks.draft_until_pickup) {
+				// the server refuses a hand submit too (carrier_shipments.require_shipment_created)
+				frappe.msgprint({
+					message: frappe.utils.escape_html(__("The Delivery Note is submitted when {0} picks the shipment up.", [carrier])),
+					indicator: "orange",
+				});
+				frappe.validated = false;
+			}
+			return;
+		}
 		if (frm.is_dirty()) {
 			frappe.msgprint({ message: __("Save the Delivery Note first, then create the shipment."), indicator: "orange" });
 			frappe.validated = false;
@@ -365,7 +379,8 @@
 							}
 							if (status === CREATED) {
 								// a pickup request ends at Created; a delivery ends when the job has submitted the note
-								if (!submitting || row.docstatus === 1) return finish(true);
+								// (#500: a carrier that keeps the note a draft until its pickup ends here too)
+								if (!submitting || row.docstatus === 1 || hooks.draft_until_pickup) return finish(true);
 								// Created but still a draft with an error: the job's submit failed
 								if (row.custom_last_integration_error) {
 									return finish(false, SUBMIT_FAILED, row.custom_last_integration_error);

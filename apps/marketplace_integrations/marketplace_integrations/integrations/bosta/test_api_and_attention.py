@@ -103,9 +103,15 @@ class IntegrationTestBostaAttention(BostaFixtureMixin, IntegrationTestCase):
 			custom_carrier_delivery_id="D-1",
 			custom_shipping_status=BOSTA_STATE_NAMES[47],
 		)
+		# #500: a picked-up DRAFT is listed once, as "Picked Up Not Submitted" (Exception is a pickup status); the
+		# Carrier Exception row is for a submitted note (only Lost/Damaged keep both rows on a draft).
+		self.assertEqual(self._items(note, attention.CARRIER_EXCEPTION), [])
+		self.assertEqual(len(self._items(note, attention.PICKED_UP_NOT_SUBMITTED)), 1)
+		self._set(note, docstatus=1)
 		self.assertEqual(len(self._items(note, attention.CARRIER_EXCEPTION)), 1)
 		self._set(note, custom_integration_status="Cancelled")
 		self.assertEqual(self._items(note, attention.CARRIER_EXCEPTION), [])
+		self._set(note, docstatus=0)
 
 	def test_a_created_draft_with_a_submit_error_says_the_note_was_not_submitted(self):
 		note = self.make_note()
@@ -119,16 +125,21 @@ class IntegrationTestBostaAttention(BostaFixtureMixin, IntegrationTestCase):
 		self.assertIn("shipment created, Delivery Note not confirmed.", items[0]["explanation"])
 		self.assertIn("negative stock", items[0]["explanation"])
 
-	def test_a_created_draft_older_than_15_minutes_is_flagged_but_a_fresh_one_or_a_submitted_one_is_not(self):
+	def test_a_created_bosta_draft_is_never_flagged_by_age_only_once_picked_up(self):
+		# #500: Bosta keeps the Created draft by design until its pickup event, so an old draft is not a problem
 		note = self.make_note()
 		self._set(note, custom_integration_status="Created", custom_carrier_delivery_id="D-1")
 		self.assertEqual(self._items(note, attention.CARRIER_EXCEPTION), [])
 		self._set(note, modified=add_to_date(now_datetime(), minutes=-16))
-		items = self._items(note, attention.CARRIER_EXCEPTION)
-		self.assertEqual(len(items), 1)
-		self.assertIn("is not confirmed yet", items[0]["explanation"])
-		self._set(note, docstatus=1)
 		self.assertEqual(self._items(note, attention.CARRIER_EXCEPTION), [])
+		self.assertEqual(self._items(note, attention.PICKED_UP_NOT_SUBMITTED), [])
+		# picked up but still a draft: the job did not submit it
+		self._set(note, custom_shipping_status=BOSTA_STATE_NAMES[21])
+		items = self._items(note, attention.PICKED_UP_NOT_SUBMITTED)
+		self.assertEqual(len(items), 1)
+		self.assertIn("picked up", items[0]["explanation"])
+		self._set(note, docstatus=1)
+		self.assertEqual(self._items(note, attention.PICKED_UP_NOT_SUBMITTED), [])
 		self._set(note, docstatus=0)
 
 	def test_a_return_state_without_a_return_note_is_listed(self):

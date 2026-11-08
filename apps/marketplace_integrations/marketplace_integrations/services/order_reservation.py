@@ -1,12 +1,11 @@
 # Copyright (c) 2026, Tamwenat El Zekrayat and contributors
 # For license information, please see license.txt
 
-"""Stock Reservation of a Shopify Sales Order, Waiting for Stock and the automatic draft Delivery Note
-(epic #502, issue #499).
+"""Stock Reservation of a Shopify Sales Order and Waiting for Stock (epic #502, issue #499).
 
 ``reserve_or_wait(sales_order)``: the whole order is reserved in the warehouse of its rows (the Marketplace
-Account's warehouse) or nothing is. When every stock row is fully reserved, a draft Delivery Note is made
-(transporter Bosta, workflow stage Order Received) and the stage of the Sales Order is Confirmed. When any row is
+Account's warehouse) or nothing is. When every stock row is fully reserved the stage of the Sales Order is
+Confirmed; no Delivery Note is made automatically (rolled back by decision: a person creates it). When any row is
 short, the reservation is rolled back, the stage is Waiting for Stock and ONE open ToDo for the Stock Manager role
 lists item, quantity needed and quantity available. ``sweep_changed_bins`` retries those orders through the same
 function when a Bin they need changed. Shopify only: Noon, Talabat and InstaShop never reach this module.
@@ -19,7 +18,7 @@ ERPNext behaviour relied on (ERPNext 16.51.1 dev; docs/frappe-best-practices.md,
 - The availability query takes no lock when no reservation row exists yet, so the Bin rows of the order are
   locked ``FOR UPDATE`` in sorted order first (two orders for the last unit: exactly one wins, no deadlock).
 - A Product Bundle parent is a non-stock item and is never reserved. An order with a Product Bundle row is left
-  alone here (no reservation, no automatic note): how bundles are reserved is an open decision of the epic.
+  alone here (no reservation): how bundles are reserved is an open decision of the epic.
 - ``Stock Reservation Entry`` changes ``Bin.reserved_stock``, not ``Bin.reserved_qty``, so the Shopify
   available quantity (``listing_quantity``, which subtracts ``reserved_qty``) is unaffected.
 - ``Stock Settings.enable_stock_reservation`` must be on. This module never flips that global setting: when it
@@ -48,14 +47,12 @@ SWEEP_JOB_ID = "marketplace_integrations:order_reservation_sweep"
 _WATERMARK_KEY = "marketplace_integrations:order_reservation_sweep_watermark"
 _DISABLED_LOG_KEY = "marketplace_integrations:order_reservation_disabled_logged_date"
 _SAVEPOINT = "marketplace_order_reservation"
-_NOTE_SAVEPOINT = "marketplace_order_reservation_note"
 
 # Results (returned for tests and logs)
 SKIPPED = "skipped"
 DISABLED = "disabled"
 WAITING = "waiting"
 RESERVED = "reserved"
-NOTE_CREATED = "note_created"
 
 
 def reservation_enabled():
@@ -77,11 +74,20 @@ def set_stage(sales_order, stage):
 # ---------------------------------------------------------------------------
 
 
-def reserve_or_wait(sales_order_name):
-	"""Reserve the whole order or put it in Waiting for Stock; create the draft Delivery Note when reserved.
+def reserve_or_wait(sales_order_name, refuse_partial=False, keep_reservation=False):
+	"""Reserve the whole order or put it in Waiting for Stock.
 
-	Idempotent: a second run reserves nothing twice, makes no second note and no second ToDo. Does not commit
-	(the caller does); the Bin and Sales Order row locks live until then. Returns one of the result constants."""
+	Idempotent: a second run reserves nothing twice and makes no second ToDo. Does not commit
+	(the caller does); the Bin and Sales Order row locks live until then. Returns one of the result constants.
+
+	``refuse_partial`` (a person's edit of a reserved order, #500): a shortfall raises a validation error
+	instead of moving the order to Waiting for Stock, so the caller's transaction undoes the edit. Without it,
+	a shortfall also cancels any partial reservation the edit left (ERPNext re-reserves per row after
+	``update_child_qty_rate``), so the order is never partly reserved.
+
+	``keep_reservation`` (a person's edit of an order that is already Waiting for Stock because Shopify raised a
+	quantity, #500): a shortfall leaves the Stock Reservation Entries as they are (nothing is released) and only
+	keeps the stage and the ToDo."""
 	if not reservation_enabled():
 		_log_disabled_once()
 		return DISABLED
@@ -104,14 +110,18 @@ def reserve_or_wait(sales_order_name):
 		raise
 	if short:
 		frappe.db.rollback(save_point=_SAVEPOINT)
+		if refuse_partial:
+			frappe.throw(_describe_shortfall(_available_for(short)), title=_("Not enough stock"))
 		# the rollback also undid reserve_stock on the in-memory rows' db values; nothing else to restore
+		if not keep_reservation:
+			_release_reservations(order.name)
 		set_stage(order.name, WAITING_FOR_STOCK)
 		_open_todo(order.name, _available_for(short))
 		return WAITING
 
 	set_stage(order.name, CONFIRMED)
 	_close_todo(order.name)
-	return _make_note_if_none(order)
+	return RESERVED
 
 
 def _eligible(order):
@@ -179,12 +189,92 @@ def _shortfalls(order, rows):
 def _available_for(short):
 	"""``[(item_code, needed, available)]`` after the rollback: the stock free to reserve, other reservations
 	already subtracted. Needed is the row's whole stock quantity."""
-	from erpnext.stock.doctype.stock_reservation_entry.stock_reservation_entry import get_available_qty_to_reserve
+	from erpnext.stock.doctype.stock_reservation_entry.stock_reservation_entry import (
+		get_available_qty_to_reserve,
+	)
 
 	return [
 		(row.item_code, flt(row.stock_qty), max(flt(get_available_qty_to_reserve(row.item_code, row.warehouse)), 0))
 		for row, _unreserved in short
 	]
+
+
+def _describe_shortfall(lines):
+	"""``lines``: ``[(item_code, needed, available)]``. Plain text for an error."""
+	return "; ".join(
+		_("Item {0}: needed {1}, available {2}").format(item, _fmt(needed), _fmt(available))
+		for item, needed, available in lines
+	)
+
+
+def _release_reservations(sales_order):
+	"""Cancel the order's Stock Reservation Entries that nothing was delivered against (a partial reservation
+	left by ERPNext's per-row re-reservation after an edit). System write: the caller has authorized the edit."""
+	for name in frappe.get_all(
+		"Stock Reservation Entry",
+		filters={"voucher_type": "Sales Order", "voucher_no": sales_order, "docstatus": 1, "delivered_qty": 0},
+		pluck="name",
+		order_by="creation desc",
+		limit_page_length=0,
+	):
+		entry = frappe.get_doc("Stock Reservation Entry", name)
+		entry.flags.ignore_permissions = True
+		entry.cancel()
+
+
+def hold_for_edit(sales_order, short):
+	"""Shopify raised a quantity the stock cannot cover (#500): the stage becomes Waiting for Stock and ONE Stock
+	Manager ToDo lists item, needed and available. The order's own reservation (the old quantities) is kept.
+	``short``: the result of ``edit_shortfalls``. Does not commit."""
+	set_stage(sales_order, WAITING_FOR_STOCK)
+	_open_todo(sales_order, short)
+
+
+def edit_shortfalls(order, new_qty, added=(), lock=False):
+	"""Dry run of an edit (#500): ``[(item_code, needed_extra, available)]`` of the (item, warehouse) pairs for
+	which the order would need more free stock than exists.
+
+	``order`` is the Sales Order document as stored, ``new_qty`` ``{row name: new quantity}`` (a row missing from
+	it keeps its quantity; 0 releases the row). The extra need of a pair is its new total stock quantity minus
+	what the order's rows hold in Stock Reservation Entries now, so a smaller row and a bigger one of the same
+	pair net out. The free stock is ERPNext's ``get_available_qty_to_reserve`` (actual minus every reservation,
+	this order's included, which is why only the extra is compared). ``lock``: lock the Bin rows first (the caller
+	commits before and after, never across an external call). Empty when reservation is off or the order has a
+	Product Bundle row (left alone, see the module docstring)."""
+	if not reservation_enabled():
+		return []
+	rows = _stock_rows(order)
+	if not rows:
+		return []
+	from erpnext.stock.doctype.stock_reservation_entry.stock_reservation_entry import (
+		get_available_qty_to_reserve,
+		get_sre_reserved_qty_details_for_voucher,
+	)
+
+	# Added rows (``added``: objects with item_code, qty, warehouse; stock UOM, so the stock quantity is qty)
+	new_stock = [
+		(row.item_code, row.warehouse, flt(row.qty))
+		for row in added
+		if row.warehouse
+		and frappe.get_cached_value("Item", row.item_code, "is_stock_item")
+		and not order.has_product_bundle(row.item_code)
+	]
+	if lock:
+		_lock_bins({(row.item_code, row.warehouse) for row in rows} | {(i, w) for i, w, _q in new_stock})
+	held = get_sre_reserved_qty_details_for_voucher("Sales Order", order.name)
+	extra = {}
+	for item_code, warehouse, stock_qty in new_stock:
+		extra[(item_code, warehouse)] = extra.get((item_code, warehouse), 0) + stock_qty
+	for row in rows:
+		stock_qty = flt(new_qty.get(row.name, row.qty)) * flt(row.conversion_factor or 1)
+		key = (row.item_code, row.warehouse)
+		extra[key] = extra.get(key, 0) + stock_qty - flt(held.get(row.name))
+	short = []
+	for (item_code, warehouse), needed in sorted(extra.items()):
+		available = max(flt(get_available_qty_to_reserve(item_code, warehouse)), 0)
+		if needed > 0.0001 and needed - available > 0.0001:
+			short.append((item_code, needed, available))
+	return short
 
 
 # ---------------------------------------------------------------------------
@@ -243,42 +333,6 @@ def _close_todo(sales_order):
 
 
 # ---------------------------------------------------------------------------
-# Draft Delivery Note
-# ---------------------------------------------------------------------------
-
-
-def _make_note_if_none(order):
-	"""The draft note of a fully reserved order, through the bulk path's own payment plan, invoice and note maker
-	(never a second note). A refusal keeps the reservation, leaves no note and goes to the Error Log: the person
-	creates the note by hand."""
-	from marketplace_integrations.services import bulk_delivery_notes as bulk
-
-	if bulk.live_note(order.name):
-		return RESERVED
-	if not bulk.bosta_shipment.bosta_supplier():
-		frappe.log_error(
-			title="Automatic Delivery Note: no Bosta Supplier", message=f"Sales Order {order.name}"
-		)
-		return RESERVED
-	frappe.db.savepoint(_NOTE_SAVEPOINT)
-	try:
-		plan = bulk.payment_plan(order)
-		if plan["needs_invoice"]:
-			bulk._make_paid_invoice(order)
-		note = bulk._make_note(order, plan["cod"])
-		frappe.clear_messages()
-	except Exception as exc:
-		frappe.db.rollback(save_point=_NOTE_SAVEPOINT)
-		frappe.clear_messages()
-		if not isinstance(exc, bulk.Refused):
-			frappe.log_error(title="Automatic Delivery Note failed", message=f"{order.name}\n{frappe.get_traceback()}")
-		else:
-			frappe.log_error(title="Automatic Delivery Note refused", message=f"{order.name}\n{exc}")
-		return RESERVED
-	return NOTE_CREATED if note else RESERVED
-
-
-# ---------------------------------------------------------------------------
 # Disabled setting notice
 # ---------------------------------------------------------------------------
 
@@ -291,8 +345,8 @@ def _log_disabled_once():
 	frappe.log_error(
 		title="Stock reservation is off",
 		message=(
-			"Stock Settings 'Enable Stock Reservation' is off, so Shopify orders are neither reserved nor given an "
-			"automatic Delivery Note. Turn it on (Auto Reserve Stock stays off)."
+			"Stock Settings 'Enable Stock Reservation' is off, so Shopify orders are not reserved. "
+			"Turn it on (Auto Reserve Stock stays off)."
 		),
 	)
 
@@ -327,7 +381,7 @@ def retry_waiting_orders():
 	more = len(orders) > SWEEP_BATCH_LIMIT
 	for name in orders[:SWEEP_BATCH_LIMIT]:
 		try:
-			if _bins_changed_since(name, since):
+			if _bins_changed_since(name, since) and not _rerun_held_update(name):
 				reserve_or_wait(name)
 			frappe.db.commit()
 		except Exception:
@@ -335,6 +389,25 @@ def retry_waiting_orders():
 			frappe.log_error(title="Order reservation retry failed", message=f"{name}\n{frappe.get_traceback()}")
 	if not more:
 		frappe.cache().set_value(_WATERMARK_KEY, tick)
+
+
+def _rerun_held_update(sales_order):
+	"""True when the order waits because Shopify raised a quantity the stock could not cover (#500): the
+	Marketplace Order's planner is re-run (its debounce is bumped) instead of reserving the OLD quantities, which
+	would show the order as Confirmed while Shopify's increase is still pending. The planner holds it again or
+	applies the change and settles the reservation itself."""
+	from marketplace_integrations.services import sync_reason_codes
+	from marketplace_integrations.services.sales_order_sync_debounce import bump_sync_debounce
+
+	marketplace_order = frappe.db.get_value("Sales Order", sales_order, "custom_marketplace_order")
+	if not marketplace_order:
+		return False
+	if frappe.db.get_value("Marketplace Order", marketplace_order, "sync_reason_code") != (
+		sync_reason_codes.WAITING_FOR_STOCK_EDIT
+	):
+		return False
+	bump_sync_debounce(marketplace_order, "Scheduled Sweep")
+	return True
 
 
 def _bins_changed_since(sales_order, since):

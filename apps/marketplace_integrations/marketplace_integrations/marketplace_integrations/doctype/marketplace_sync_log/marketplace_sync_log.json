@@ -24,7 +24,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Sync Type",
-   "options": "Sales Order Sync\nOrder Import\nFulfillment\nReturn Lookup\nOrder Action\nPayment",
+   "options": "Sales Order Sync\nOrder Import\nFulfillment\nReturn Lookup\nOrder Action\nPayment\nLifecycle Check",
    "reqd": 1
   },
   {
@@ -112,7 +112,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-10-26 12:00:00.000000",
+ "modified": "2026-11-09 09:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Marketplace Sync Log",
