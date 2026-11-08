@@ -149,13 +149,19 @@ class IntegrationTestNoonItemEditGuard(IntegrationTestNoonFulfillmentBase):
 		so.save()  # update after submit; header field only
 		self.assertEqual(frappe.db.get_value("Sales Order", self.fx.name, "contact_mobile"), "01000000000")
 
-	def test_shopify_order_keeps_todays_behaviour(self):
+	def test_talabat_order_keeps_todays_behaviour_and_shopify_is_not_a_noon_guard_case(self):
 		a = self.fx.items["A"].name
-		for platform, qty in (("Shopify", 2), ("Talabat", 1)):
-			with self.subTest(platform=platform):
-				frappe.db.set_value("Marketplace Order", self.fx.marketplace_order.name, "platform", platform)
-				self._update(self._trans_items(**{a: {"qty": qty}}))
-				self.assertEqual(self._qty("A"), qty)
+		frappe.db.set_value("Marketplace Order", self.fx.marketplace_order.name, "platform", "Talabat")
+		self._update(self._trans_items(**{a: {"qty": 1}}))
+		self.assertEqual(self._qty("A"), 1)
+
+		# #500: a direct item edit of a Shopify order is refused by the Shopify guard (``services/order_edit.py``:
+		# items change with Edit Order), not by the Noon guard; ``test_order_edit`` covers that guard.
+		frappe.db.set_value("Marketplace Order", self.fx.marketplace_order.name, "platform", "Shopify")
+		with self.assertRaises(frappe.ValidationError) as raised:
+			self._update(self._trans_items(**{a: {"qty": 2}}))
+		self.assertIn("Edit Order", str(raised.exception))
+		self.assertEqual(self._qty("A"), 1)
 
 	def test_creating_and_submitting_a_noon_sales_order_is_not_blocked(self):
 		# The fixture inserts a draft with rows and submits it, as the import and sync do.

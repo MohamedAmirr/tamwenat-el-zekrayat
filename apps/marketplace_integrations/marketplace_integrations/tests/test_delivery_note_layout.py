@@ -27,6 +27,7 @@ EXPECTED = [
 	"custom_shipping_status",
 	"custom_last_sync_at",
 	"custom_bosta_last_event_at",
+	"custom_shipment_requested_by",  # #500: who the pickup event submits the note as
 	"custom_actual_shipping_cost",
 	"custom_actual_cost_received_on",
 	"custom_last_integration_error",

@@ -144,6 +144,34 @@ def hold_cancel_for_draft_documents(reconciliation_plan, sales_order_name):
 	)
 
 
+def hold_update_for_shipment(reconciliation_plan, sales_order_name):
+	"""Return ``reconciliation_plan``, or a Needs Attention plan when the marketplace changed an order that
+	ERPNext cannot follow without guessing (#500, ``order_edit.update_hold_reason``): the parcel is already with the
+	carrier (a submitted Delivery Note), the order has more than one draft Delivery Note or a draft that does not ship
+	the whole order, or the draft note's carrier shipment is Creating or Unknown (its COD cannot be updated yet).
+
+	The marketplace is right, but the change is held for a person (or a later Retry Sync) instead of failing half
+	way or overwriting a note. A draft note whose carrier shipment is Created is NOT a reason: the change is applied and
+	the COD difference is listed as a COD difference. Queries run only for an ``UPDATE_SUBMITTED_ORDER`` plan;
+	``plan()`` itself stays free of database access.
+	"""
+	if reconciliation_plan["outcome"] != UPDATE_SUBMITTED_ORDER:
+		return reconciliation_plan
+	from marketplace_integrations.services import order_edit
+
+	reason = order_edit.update_hold_reason(sales_order_name)
+	if not reason:
+		return reconciliation_plan
+	return _attention(
+		_(
+			"{0} The marketplace changed the order after that, so ERPNext was not updated. "
+			"Review the order with the carrier."
+		).format(reason),
+		reconciliation_plan["changes"],
+		reasons.ORDER_LOCKED_BY_SHIPMENT,
+	)
+
+
 def _draft_documents(sales_order_name):
 	drafts = {}
 	for doctype, item_doctype, link_field in (
@@ -943,6 +971,10 @@ def _execute_update(sales_order, previous, current):
 	if added:
 		trans_items.extend(_new_row_payload(sales_order, line, current) for _id, line in added)
 	update_child_qty_rate("Sales Order", frappe.as_json(trans_items), sales_order.name)
+	# #500: the order's draft Delivery Note follows the change and the reservation is settled.
+	from marketplace_integrations.services import order_edit
+
+	order_edit.after_marketplace_update(sales_order.name)
 	sales_order = frappe.get_doc("Sales Order", sales_order.name)
 	# The added rows are the ones that did not exist before, paired to the added lines by item.
 	new_rows_by_item = {}

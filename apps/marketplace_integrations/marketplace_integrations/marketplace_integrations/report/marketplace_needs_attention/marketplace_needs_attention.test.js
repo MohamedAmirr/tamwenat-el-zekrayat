@@ -89,12 +89,15 @@ test("onload binds a namespaced click handler after clearing the previous one, s
 	const report = { page: { wrapper } };
 	REPORT().onload(report);
 	REPORT().onload(report);
-	assert.deepEqual(calls, [
+	const one_load = [
 		["off", "click.attention"],
 		["on", "click.attention", "[data-attention-retry]", "function"],
-		["off", "click.attention"],
-		["on", "click.attention", "[data-attention-retry]", "function"],
-	]);
+		["off", "click.attention-submit"],
+		["on", "click.attention-submit", "[data-attention-retry-submit]", "function"],
+		["off", "click.attention-cod"],
+		["on", "click.attention-cod", "[data-attention-retry-cod]", "function"],
+	];
+	assert.deepEqual(calls, [...one_load, ...one_load]);
 });
 
 test("the reference shows the label with the docname in the tooltip, LTR-isolated and escaped", () => {

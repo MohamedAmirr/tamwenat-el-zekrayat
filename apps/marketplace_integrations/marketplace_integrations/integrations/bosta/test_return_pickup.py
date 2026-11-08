@@ -27,8 +27,7 @@ class IntegrationTestBostaReturnPickup(BostaFixtureMixin, IntegrationTestCase):
 			note.name,
 			{"custom_integration_status": "Created", "custom_carrier_delivery_id": "OUT-1", "lr_no": "TRK-OUT"},
 		)
-		note = frappe.get_doc("Delivery Note", note.name)
-		note.submit()
+		note = self.submit_note(note.name)  # the pickup job's flag (#500)
 		frappe.db.commit()
 		return note
 

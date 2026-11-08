@@ -23,6 +23,8 @@
 	const SUMMARY_FIELD = "custom_shipping_status_summary";
 	const PLATFORM_FIELD = "custom_marketplace_platform";
 	const EARLIEST_FIELD = "custom_earliest_delivery_date";
+	const STAGE_FIELD = "custom_order_stage";
+	const WAITING_FOR_STOCK = "Waiting for Stock";
 	const NO_SHIPMENT = "No shipment yet";
 	// Orders ERPNext itself marks Closed / On Hold / unpaid-advance, drafts and cancelled keep their own indicator.
 	const NATIVE_ONLY_STATUSES = ["Closed", "On Hold", "Cancelled", "Draft"];
@@ -72,6 +74,15 @@
 		return [indicator[0], indicator[1], `custom_marketplace_platform,=,${doc.custom_marketplace_platform}`];
 	}
 
+	// #500: an order that waits for stock (not reserved in full, or Shopify raised a quantity the stock cannot
+	// cover) shows a red "Waiting for Stock" indicator in front of every other one, so staff see it in the list
+	// without opening anything. custom_order_stage is written by services/order_reservation.py.
+	function stage_indicator(doc) {
+		if (!doc || doc.docstatus !== 1 || doc[STAGE_FIELD] !== WAITING_FOR_STOCK) return null;
+		if (NATIVE_ONLY_STATUSES.includes(doc.status)) return null;
+		return [__(WAITING_FOR_STOCK), "red", `${STAGE_FIELD},=,${WAITING_FOR_STOCK}`];
+	}
+
 	// The delivery countdown column: custom_earliest_delivery_date is the earliest item delivery date, set by the
 	// sync (ERPNext's own header delivery_date is the LATEST item date). Only an open marketplace order shows a
 	// pill; the whole-day difference comes from frappe.datetime, never from browser timezone math.
@@ -111,7 +122,7 @@
 	// Add to ERPNext's own Sales Order list settings instead of replacing them.
 	if (typeof frappe !== "undefined" && frappe.listview_settings) {
 		const settings = (frappe.listview_settings["Sales Order"] = frappe.listview_settings["Sales Order"] || {});
-		settings.add_fields = [...new Set([...(settings.add_fields || []), PLATFORM_FIELD, SUMMARY_FIELD, EARLIEST_FIELD])];
+		settings.add_fields = [...new Set([...(settings.add_fields || []), PLATFORM_FIELD, SUMMARY_FIELD, EARLIEST_FIELD, STAGE_FIELD])];
 		settings.formatters = {
 			...(settings.formatters || {}),
 			[SUMMARY_FIELD]: format_shipping_status_summary,
@@ -123,7 +134,7 @@
 		if (!settings.__mi_list_extended) {
 			const original_get_indicator = settings.get_indicator;
 			settings.get_indicator = function (doc) {
-				return external_indicator(doc) || (original_get_indicator ? original_get_indicator.call(this, doc) : undefined);
+				return stage_indicator(doc) || external_indicator(doc) || (original_get_indicator ? original_get_indicator.call(this, doc) : undefined);
 			};
 			const original_onload = settings.onload;
 			settings.onload = function (listview) {
@@ -152,6 +163,7 @@
 			format_platform,
 			format_shipping_status_summary,
 			parse_summary,
+			stage_indicator,
 		};
 	}
 })();

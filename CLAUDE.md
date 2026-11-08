@@ -51,7 +51,7 @@ Typical flow per sub-issue: `feature-planner` (plan it) → `frappe-dev` (build 
 - Planning a new feature before building it → `feature-planner` agent (opus — this is a judgment call worth spending on). Breaks it into an Epic + a few dependency-ordered sub-issues per `docs/issue-conventions.md`, then hands off to `git-ops` to actually create them — no need to re-explain the convention each time.
 - Container/bench operations (start/stop, logs, migrate, backup, bench console, site management) → `frappe-ops` agent. Keeps verbose docker/bench output out of the main conversation.
 - Writing or reviewing custom app code (doctypes, controllers, hooks, client scripts) → `frappe-dev` agent. Applies `docs/frappe-conventions.md`.
-- Writing/running tests and linting → `frappe-test` agent (haiku — mechanical: write test files, run `bench run-tests`, run whatever linter is configured, fix trivial lint issues, report real failures rather than papering over them).
+- Writing/running tests and linting → `frappe-test` agent (sonnet — writes test files that must hold up against real behavior and judges failures: write test files, run `bench run-tests`, run whatever linter is configured, fix trivial lint issues, report real failures rather than papering over them).
 - Reviewing a diff/PR before it lands → `frappe-review` agent (opus). Checks convention adherence, duplication/schema drift, inconsistent implementation, security, and framework best practices. Read-only — reports findings, doesn't fix them.
 - Git/GitHub work (commits, branches, pushing, PRs, repo settings, issues) → `git-ops` agent (haiku — mechanical once the rules in its own file are followed). Never commits `.env` or force-pushes without explicit instruction.
 

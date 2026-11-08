@@ -55,7 +55,12 @@ class IntegrationTestManualCouriers(BostaFixtureMixin, IntegrationTestCase):
 			status = frappe.db.get_value("Delivery Note", note.name, "custom_integration_status")
 			self.assertIn(status or "", ("", "Not Created"))
 			self.assertEqual(self.http.sent(), [])
-			self.enqueue.assert_not_called()
+			# Frappe's own deletion of stray test-data Files (Data Import) also goes through frappe.enqueue; only a
+			# carrier job would matter here.
+			carrier_jobs = [
+				c for c in self.enqueue.call_args_list if c.args[:1] != ("frappe.model.delete_doc.delete_dynamic_links",)
+			]
+			self.assertEqual(carrier_jobs, [])
 			self.assertEqual(
 				frappe.db.count(
 					"Integration Request",

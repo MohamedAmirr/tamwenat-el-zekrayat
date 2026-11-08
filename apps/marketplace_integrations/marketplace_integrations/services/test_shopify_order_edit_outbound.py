@@ -484,7 +484,10 @@ class IntegrationTestShopifyOrderEditOutbound(IntegrationTestCase):
 
 		self.assertEqual(seen["marker"].outbound_edit_state, "in_flight")
 		self.assertEqual(seen["marker"].outbound_edit_fingerprint, preview["fingerprint"])
-		self.assertEqual(result, {"ok": True, "refreshed": True, "success_messages": ["done"]})
+		self.assertEqual(
+			result,
+			{"ok": True, "refreshed": True, "applied": True, "apply_error": None, "success_messages": ["done"]},
+		)
 		self.assertEqual(self._marker().outbound_edit_state, "completed")
 		logs = self._logs()
 		self.assertEqual([log.status for log in logs], ["Success"])
@@ -794,39 +797,10 @@ class IntegrationTestShopifyOrderEditOutbound(IntegrationTestCase):
 			frappe.get_doc("User", email).add_roles("Shopify User")
 		return email
 
-	def test_the_api_needs_sales_order_write_and_a_platform_role_for_the_marketplace_order(self):
-		# The platform role (Shopify User: the account's platform) is what grants Marketplace
-		# Order access, and the row hook refuses everyone without it.
-		read_only = self._user("Edit SO read", {"Sales Order": ["read"]})
-		with patch.object(outbound, "send_shopify_order_edit") as send:
-			for method, args in (
-				("get_shopify_order_edit_preview", (self.fixture.name,)),
-				("send_shopify_order_edit", (self.fixture.name, "abc")),
-			):
-				with (
-					self.subTest("Sales Order read only", method=method),
-					self.assertRaises(frappe.PermissionError),
-				):
-					self._call_as(read_only, method, *args)
-			send.assert_not_called()
-
-		no_role = self._user("Edit no role", {"Sales Order": ["read", "write"]}, False)
-		with patch.object(outbound, "send_shopify_order_edit") as send:
-			# Preview: quiet not_applicable (it runs on every form load); send stays strict.
-			preview = self._call_as(no_role, "get_shopify_order_edit_preview", self.fixture.name)
-			self.assertEqual(preview, {"state": outbound.NOT_APPLICABLE, "changes": [], "reasons": []})
-			with self.assertRaises(frappe.PermissionError):
-				self._call_as(no_role, "send_shopify_order_edit", self.fixture.name, "abc")
-			send.assert_not_called()
-
-		writer = self._user("Edit writer", {"Sales Order": ["read", "write"]})
-		with patch.object(outbound, "send_shopify_order_edit", return_value={"ok": True}) as send:
-			preview = self._call_as(writer, "get_shopify_order_edit_preview", self.fixture.name)
-			self.assertEqual(preview["state"], outbound.BLOCKED)  # allowed; no changes made yet
-			self.assertEqual(
-				self._call_as(writer, "send_shopify_order_edit", self.fixture.name, "abc"), {"ok": True}
-			)
-		send.assert_called_once_with(self.fixture.name, "abc")
+	def test_the_old_send_endpoints_are_gone_edit_order_replaced_them(self):
+		# #500: the old "edit rows, then send" flow is closed by the row guard, so its endpoints were removed.
+		self.assertFalse(hasattr(outbound_api, "get_shopify_order_edit_preview"))
+		self.assertFalse(hasattr(outbound_api, "send_shopify_order_edit"))
 
 	def test_clearing_the_edit_marker_is_system_manager_only_and_logged(self):
 		self._set_order(outbound_edit_fingerprint="f" * 64, outbound_edit_state="in_flight")
@@ -854,15 +828,10 @@ class IntegrationTestShopifyOrderEditOutbound(IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			self._call_as(manager, "clear_shopify_edit_marker", self.order.name)  # nothing left to clear
 
-	def test_the_api_delegates_the_fingerprint_for_an_authorized_user(self):
-		with patch.object(outbound, "send_shopify_order_edit", return_value={"ok": True}) as send:
-			self.assertEqual(outbound_api.send_shopify_order_edit(self.fixture.name, "abc"), {"ok": True})
-		send.assert_called_once_with(self.fixture.name, "abc")
-
 	def test_the_api_methods_are_whitelisted_for_post(self):
 		for method in (
-			outbound_api.get_shopify_order_edit_preview,
-			outbound_api.send_shopify_order_edit,
+			outbound_api.get_order_edit_preview,
+			outbound_api.edit_order,
 			outbound_api.clear_shopify_edit_marker,
 		):
 			self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[method], ["POST"])
