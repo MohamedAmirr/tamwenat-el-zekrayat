@@ -176,12 +176,13 @@ def _marketplace_part(sales_order):
 
 
 def _last_sync(marketplace_order):
-	"""Status of the latest Sync Log of the order, only when the caller can read Sync Logs."""
+	"""Status of the latest Sync Log of the order, only when the caller can read Sync Logs. The nightly "Lifecycle
+	Check" rows are not syncs (they only list mismatches), so they are left out."""
 	if not frappe.has_permission("Marketplace Sync Log", "read"):
 		return None
 	rows = frappe.get_list(
 		"Marketplace Sync Log",
-		filters={"marketplace_order": marketplace_order},
+		filters={"marketplace_order": marketplace_order, "sync_type": ["!=", "Lifecycle Check"]},
 		fields=["status"],
 		order_by="attempted_at desc, creation desc",
 		limit_page_length=1,

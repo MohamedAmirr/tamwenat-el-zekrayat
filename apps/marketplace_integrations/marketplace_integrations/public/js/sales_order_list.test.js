@@ -74,6 +74,7 @@ test("the list loads the platform and shipping summary without dropping ERPNext'
 		"custom_marketplace_platform",
 		"custom_shipping_status_summary",
 		"custom_earliest_delivery_date",
+		"custom_order_stage",
 	]);
 });
 
@@ -211,6 +212,19 @@ test("a marketplace order with a summary shows the carrier status instead of the
 	const { settings } = load();
 	assert.deepEqual(
 		settings.get_indicator(marketplace_order('{"Delivered": 2}')).slice(0, 2),
+		["Delivered", "green"]
+	);
+});
+
+test("an order in the stage Waiting for Stock shows a red indicator before the carrier status (#500)", () => {
+	const { settings } = load();
+	assert.ok(settings.add_fields.includes("custom_order_stage"));
+	const waiting = marketplace_order('{"Delivered": 2}', { custom_order_stage: "Waiting for Stock" });
+	assert.deepEqual(settings.get_indicator(waiting).slice(0, 2), ["Waiting for Stock", "red"]);
+	// not for a Closed order (ERPNext's own indicator stays) or another stage
+	assert.equal(settings.get_indicator({ ...waiting, status: "Closed" }), undefined);
+	assert.deepEqual(
+		settings.get_indicator(marketplace_order('{"Delivered": 2}', { custom_order_stage: "Confirmed" })).slice(0, 2),
 		["Delivered", "green"]
 	);
 });

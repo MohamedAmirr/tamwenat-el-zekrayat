@@ -10,7 +10,7 @@ which owns eligibility, the platform call and the echo-guard marker.
 import frappe
 from frappe import _
 
-from marketplace_integrations.services import marketplace_outbound
+from marketplace_integrations.services import marketplace_outbound, order_cancel, order_edit
 
 
 @frappe.whitelist(methods=["POST"])
@@ -41,36 +41,43 @@ def request_platform_cancel(sales_order: str, cancellation_reason: str = ""):
 
 
 @frappe.whitelist(methods=["POST"])
-def get_shopify_order_edit_preview(sales_order: str):
-	"""Return a read-only preview of staff item changes eligible for Shopify.
+def get_order_edit_preview(sales_order: str, items: str | list | None = None):
+	"""Edit Order (#500): the editable rows, or what changing them would do, without any network call.
 
-	A user who may not read the linked Marketplace Order gets ``not_applicable``, not an
-	error: this runs on every Sales Order form load, and a permission error would open
-	Frappe's "Not permitted" popup.  Sending stays strict.
+	Anyone who may edit the Sales Order may ask. ``items`` is ``[{"docname", "qty"}]``.
 	"""
 	sales_order_doc = frappe.get_doc("Sales Order", sales_order)
 	sales_order_doc.check_permission("write")
-	marketplace_order = sales_order_doc.get("custom_marketplace_order")
-	if marketplace_order and not frappe.has_permission(
-		"Marketplace Order", "read", doc=marketplace_order, throw=False
-	):
-		return {"state": marketplace_outbound.NOT_APPLICABLE, "changes": [], "reasons": []}
-	return marketplace_outbound.get_shopify_order_edit_preview(sales_order_doc)
+	return order_edit.get_edit_preview(sales_order_doc, items)
 
 
 @frappe.whitelist(methods=["POST"])
-def send_shopify_order_edit(sales_order: str, fingerprint: str = ""):
-	"""Send the Shopify item changes staff reviewed; ``fingerprint`` comes from the preview.
+def edit_order(sales_order: str, items: str | list, fingerprint: str = ""):
+	"""Edit Order (#500): send the reviewed quantities to Shopify, then change ERPNext in one transaction.
 
-	Needs write permission on the Sales Order and on the Marketplace Order (it is changed).
+	Same permission as ERPNext's own Update Items (write and submit on the Sales Order, which
+	``update_child_qty_rate`` checks on the session user); the Marketplace Order marker is a system write,
+	so no Marketplace Order permission is needed. After the pickup nobody may edit (no override role).
 	"""
 	sales_order_doc = frappe.get_doc("Sales Order", sales_order)
 	sales_order_doc.check_permission("write")
+	sales_order_doc.check_permission("submit")
+	return order_edit.edit_order(sales_order_doc, items, fingerprint)
+
+
+@frappe.whitelist(methods=["POST"])
+def cancel_order(sales_order: str, cancellation_reason: str = ""):
+	"""Cancel a Shopify order before the carrier picked it up (#501): carrier shipment, draft Delivery Note, Sales
+	Order, then Shopify, stopping at the first failure (call again to continue). Needs cancel permission on the
+	Sales Order and write on the Marketplace Order (the platform cancel marks it); each step checks its own
+	document's permission as the session user."""
+	sales_order_doc = frappe.get_doc("Sales Order", sales_order)
+	sales_order_doc.check_permission("cancel")
 	marketplace_order = sales_order_doc.get("custom_marketplace_order")
 	if not marketplace_order:
 		frappe.throw(_("Sales Order {0} is not linked to a marketplace order.").format(sales_order_doc.name))
 	frappe.get_doc("Marketplace Order", marketplace_order).check_permission("write")
-	return marketplace_outbound.send_shopify_order_edit(sales_order_doc.name, fingerprint)
+	return order_cancel.cancel_order(sales_order_doc.name, cancellation_reason)
 
 
 @frappe.whitelist(methods=["POST"])

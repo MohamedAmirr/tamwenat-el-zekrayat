@@ -209,7 +209,13 @@ doc_events = {
 	"Delivery Note": {
 		**_RECHECK_EVENTS,
 		**_PLATFORM_NAMING,
-		"on_submit": [_RECHECK_HANDLER, "marketplace_integrations.services.carrier_shipments.after_submit"],
+		"on_submit": [
+			_RECHECK_HANDLER,
+			# #498: the stage of a note just submitted comes from its stored statuses (the native submit
+			# would put every note in the first submitted state).
+			"marketplace_integrations.services.delivery_note_workflow.fix_state_after_submit",
+			"marketplace_integrations.services.carrier_shipments.after_submit",
+		],
 		# The guard comes first: it refuses a delete while the shipment is live.
 		"on_trash": [_CARRIER_GUARD, _RECHECK_HANDLER],
 		"before_cancel": _CARRIER_GUARD,
@@ -220,16 +226,30 @@ doc_events = {
 	"Payment Entry": _RECHECK_EVENTS,
 	# #368: Noon has no order update, so item rows of a submitted Noon Sales Order are locked. The check
 	# is on the rows because update_child_qty_rate changes them before it saves the parent.
+	# #500: the same rows are locked for Shopify orders from the pickup on (a submitted Delivery Note exists), and
+	# the Sales Order on_update_after_submit hook below refuses an edit that would leave the reservation partial.
 	"Sales Order Item": {
-		"before_update_after_submit": "marketplace_integrations.services.noon_item_edit_guard.block_row_change",
-		"before_insert": "marketplace_integrations.services.noon_item_edit_guard.block_row_add",
-		"on_trash": "marketplace_integrations.services.noon_item_edit_guard.block_row_remove",
+		"before_update_after_submit": [
+			"marketplace_integrations.services.noon_item_edit_guard.block_row_change",
+			"marketplace_integrations.services.order_edit.guard_row_change",
+		],
+		"before_insert": [
+			"marketplace_integrations.services.noon_item_edit_guard.block_row_add",
+			"marketplace_integrations.services.order_edit.guard_row_add",
+		],
+		"on_trash": [
+			"marketplace_integrations.services.noon_item_edit_guard.block_row_remove",
+			"marketplace_integrations.services.order_edit.guard_row_remove",
+		],
 	},
 	"Sales Order": {
 		**_PLATFORM_NAMING,
 		# #393: ERPNext only blocks on submitted links; a draft Delivery Note with a live Noon shipment must block too.
 		"before_cancel": "marketplace_integrations.services.carrier_shipments.refuse_sales_order_cancel",
-		"on_update_after_submit": _RECHECK_HANDLER,
+		"on_update_after_submit": [
+			_RECHECK_HANDLER,
+			"marketplace_integrations.services.order_edit.guard_reservation",
+		],
 		"on_cancel": _RECHECK_HANDLER,
 		# #413: the Bosta count summary is written by the app only; an older form copy must not overwrite it.
 		"validate": [
@@ -243,6 +263,20 @@ doc_events = {
 		],
 	},
 }
+
+# Workflow transition tasks of the "Delivery Note Lifecycle" Workflow (#498, shipped by
+# patches/v0_0/create_delivery_note_lifecycle_workflow.py): the first runs inside the transition and may refuse it,
+# the second is queued after it commits and starts the carrier shipment.
+workflow_methods = [
+	{
+		"name": "Check Carrier Shipment Request",
+		"method": "marketplace_integrations.services.delivery_note_workflow.check_shipment_request",
+	},
+	{
+		"name": "Request Carrier Shipment",
+		"method": "marketplace_integrations.services.delivery_note_workflow.start_shipment",
+	},
+]
 
 # Scheduled Tasks
 # ---------------
@@ -270,7 +304,7 @@ doc_events = {
 # test_no_catalog_document_events_are_registered depends on this app registering
 # no doc_events for the catalog doctypes; do not add one for them here. The
 # only doc_events are the #364 Marketplace Order re-check handlers, the #368 Noon Sales
-# Order Item row check, the #391/#393 Delivery Note and Sales Order carrier handlers and the platform
+# Order Item row check (and the #500 Shopify one), the #391/#393 Delivery Note and Sales Order carrier handlers and the platform
 # naming series before_naming hook above.
 scheduler_events = {
 	# #367: the four hourly jobs run at staggered minutes instead of all at :00, where
@@ -293,6 +327,10 @@ scheduler_events = {
 		"59 23 * * *": [
 			"marketplace_integrations.services.marketplace_order_reconciliation.enqueue_nightly_order_reconciliation",
 			"marketplace_integrations.services.carrier_shipments.reconcile_open_notes",
+		],
+		# #501: read-only lifecycle reconciliation, after the Shopify and carrier jobs above have stored their data.
+		"30 1 * * *": [
+			"marketplace_integrations.services.order_lifecycle_reconciliation.enqueue_nightly",
 		],
 		SHOPIFY_INVENTORY_SWEEP_CRON: [
 			"marketplace_integrations.integrations.shopify.inventory_sync.sweep_changed_bins",
@@ -317,6 +355,10 @@ scheduler_events = {
 # with setdefault, not a dict literal key, so it merges into the Shopify sweep's
 # cron entry if both constants ever share the same expression (as they do today)
 # instead of silently overwriting it.
+# #499: retry of Waiting for Stock Shopify orders on the same 2-minute tick (one deduplicated short job).
+scheduler_events["cron"].setdefault(SHOPIFY_INVENTORY_SWEEP_CRON, []).append(
+	"marketplace_integrations.services.order_reservation.sweep_changed_bins"
+)
 scheduler_events["cron"].setdefault(NOON_INVENTORY_SWEEP_CRON, []).append(
 	"marketplace_integrations.integrations.noon.sweep.sweep_changed_bins"
 )
@@ -417,6 +459,10 @@ fixtures = [
 					"Delivery Note-main-field_order",
 					"Delivery Note-per_installed-depends_on",
 					"Delivery Note-per_returned-depends_on",
+					# #498: employees see the stage (Workflow State), never the native Draft/Submitted status.
+					"Delivery Note-status-in_list_view",
+					"Delivery Note-status-in_standard_filter",
+					"Delivery Note-status-hidden",
 					# A Noon note has no Shipping Rule (integrations/noon/delivery_note_shipment.py clears it).
 					"Delivery Note-shipping_rule-depends_on",
 					# Platform naming series (services/platform_naming.py). The options keep ERPNext's own
@@ -447,11 +493,13 @@ fixtures = [
 					"Sales Order-custom_marketplace_order_html",
 					"Sales Order-custom_shipping_status_summary",
 					"Sales Order-custom_earliest_delivery_date",
+					"Sales Order-custom_order_stage",
 					"Payment Entry-custom_marketplace_order",
 					"Payment Entry-custom_marketplace_transaction_id",
 					# #374: the Item form's Marketplace Listings tab (stores nothing on Item)
 					"Item-custom_marketplace_listings_tab",
 					"Item-custom_marketplace_listings_html",
+					"Delivery Note-workflow_state",
 					"Delivery Note-custom_more_section",
 					"Delivery Note-custom_shipping_section",
 					"Delivery Note-custom_integration_status",
@@ -467,6 +515,7 @@ fixtures = [
 					"Delivery Note-custom_shipping_label",
 					"Delivery Note-custom_last_sync_at",
 					"Delivery Note-custom_bosta_last_event_at",
+					"Delivery Note-custom_shipment_requested_by",
 					"Delivery Note-custom_actual_shipping_cost",
 					"Delivery Note-custom_actual_cost_received_on",
 					"Delivery Note-custom_return_source",

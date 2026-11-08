@@ -9,14 +9,19 @@ import json
 
 import frappe
 from frappe import _
-from frappe.utils import escape_html
+from frappe.utils import escape_html, flt
 from frappe.utils.file_manager import save_file
 
 from marketplace_integrations.integrations.bosta.client import BostaClient, is_success_response
 
 
-def create_a4_arabic_label(delivery_note):
-	"""Fetch the A4/Arabic AWB of a Bosta Delivery Note and attach it privately to the note.
+def create_a4_arabic_label(delivery_note, replace=False, cod=None):
+	"""Fetch the A4/Arabic AWB of a Bosta Delivery Note and attach it privately to the note. ``replace`` (#501,
+	after a COD update) fetches a new label although one is stored; the old file stays attached to the note.
+	``cod`` (with ``replace``): the COD this label was requested for. Two refresh jobs for two COD updates can finish
+	out of order, so the COD in the note's request snapshot is checked again under the note's row lock right before
+	the label is stored; when it moved on the label is NOT stored (the job of the newer COD stores its own) and
+	``None`` is returned.
 
 	Live ``POST /deliveries/mass-awb`` answers ``{"success": true, "data": "<base64 PDF>"}``
 	(verified 2026-10-16); ``_decode_base64_pdf`` accepts that and a bare base64 body, and
@@ -25,7 +30,7 @@ def create_a4_arabic_label(delivery_note):
 	values = frappe.db.get_value(
 		"Delivery Note", delivery_note, ["lr_no", "custom_shipping_label"], as_dict=True
 	)
-	if values and values.custom_shipping_label:
+	if values and values.custom_shipping_label and not replace:
 		return {"file_url": values.custom_shipping_label, "file_name": ""}
 	tracking_number = str((values and values.lr_no) or "").strip()
 	if not tracking_number:
@@ -37,6 +42,15 @@ def create_a4_arabic_label(delivery_note):
 		frappe.throw(escape_html(client.error_message(response)))
 
 	pdf_content = _decode_base64_pdf(response.content)
+	if replace and cod is not None:
+		from marketplace_integrations.integrations.bosta import delivery_note_shipment as shipment
+
+		# Commit, then lock as the next statement (MariaDB snapshot isolation); the caller commits after the write.
+		frappe.db.commit()
+		frappe.db.get_value("Delivery Note", delivery_note, "name", for_update=True)
+		if shipment._snapshot_cod(delivery_note) != flt(cod, 2):
+			frappe.db.commit()
+			return None
 	file_doc = save_file(
 		_label_filename(tracking_number),
 		pdf_content,

@@ -15,10 +15,10 @@
 		"marketplace_integrations.api.marketplace_outbound.get_platform_cancel_option";
 	const REQUEST_METHOD =
 		"marketplace_integrations.api.marketplace_outbound.request_platform_cancel";
-	const SHOPIFY_EDIT_PREVIEW_METHOD =
-		"marketplace_integrations.api.marketplace_outbound.get_shopify_order_edit_preview";
-	const SHOPIFY_EDIT_SEND_METHOD =
-		"marketplace_integrations.api.marketplace_outbound.send_shopify_order_edit";
+	const ORDER_EDIT_PREVIEW_METHOD =
+		"marketplace_integrations.api.marketplace_outbound.get_order_edit_preview";
+	const ORDER_EDIT_METHOD = "marketplace_integrations.api.marketplace_outbound.edit_order";
+	const CANCEL_ORDER_METHOD = "marketplace_integrations.api.marketplace_outbound.cancel_order";
 	const MARKETPLACE_TAB_BREAK_FIELD = "custom_marketplace_order_tab";
 	const MARKETPLACE_TAB_FIELD = "custom_marketplace_order_html";
 	const MARKETPLACE_SUMMARY_METHOD = "marketplace_integrations.api.sales_order_marketplace.get_marketplace_order_summary";
@@ -331,67 +331,6 @@
 		});
 	}
 
-	function show_shopify_edit_dialog(frm, preview) {
-		const rows = (preview.changes || [])
-			.map((change) => {
-				const quantity = change.quantity === 0 ? __("Remove") : change.quantity;
-				return `<li>${frappe.utils.escape_html(change.label || "")} — ${frappe.utils.escape_html(
-					String(change.old_quantity)
-				)} → ${frappe.utils.escape_html(String(quantity))}</li>`;
-			})
-			.join("");
-		const dialog = new frappe.ui.Dialog({
-			title: __("Send item changes to Shopify"),
-			fields: [
-				{
-					fieldtype: "HTML",
-					fieldname: "preview",
-					options: `<p>${frappe.utils.escape_html(
-						__("Shopify will update these item quantities. The customer will not be notified.")
-					)}</p><ul>${rows}</ul><p>${frappe.utils.escape_html(
-						__("Items and shipping total, before tax: {0} → {1}", [
-							format_currency(preview.old_total, frm.doc.currency),
-							format_currency(preview.new_total, frm.doc.currency),
-						])
-					)}</p>`,
-				},
-			],
-			primary_action_label: __("Send to Shopify"),
-			primary_action() {
-				dialog.hide();
-				frappe
-					.call({
-						method: SHOPIFY_EDIT_SEND_METHOD,
-						type: "POST",
-						args: { sales_order: frm.doc.name, fingerprint: preview.fingerprint },
-						freeze: true,
-						freeze_message: __("Sending item changes to Shopify..."),
-					})
-					.then((r) => {
-						frappe.show_alert(shopify_edit_alert(r.message || {}));
-						return frm.reload_doc();
-					})
-					.catch(() => {});
-			},
-			secondary_action_label: __("Not now"),
-			secondary_action() {
-				dialog.hide();
-			},
-		});
-		dialog.show();
-	}
-
-	function show_shopify_edit_blocked(preview) {
-		const reasons = (preview.reasons || [])
-			.map((reason) => `<li>${frappe.utils.escape_html(reason)}</li>`)
-			.join("");
-		frappe.msgprint({
-			title: __("Item changes cannot be sent to Shopify"),
-			indicator: "orange",
-			message: `<ul>${reasons}</ul>`,
-		});
-	}
-
 	// Shopify accepted the edit; only the local refresh can be missing.  That is a warning,
 	// not a success: the Marketplace Order still shows the old lines until the next refresh.
 	function shopify_edit_alert(result) {
@@ -406,43 +345,308 @@
 		return { message: __("Item changes sent to Shopify."), indicator: "green" };
 	}
 
-	// Only a submitted, open Sales Order of a Shopify order the user may change; a call the
-	// user is not permitted to make would open Frappe's "Not permitted" popup.
-	function can_offer_shopify_edit(frm) {
-		const doc = frm.doc;
-		if (!doc || !doc.custom_marketplace_order || doc.docstatus !== 1) return false;
-		if (is_closed_or_cancelled(doc)) return false;
-		if (doc.custom_marketplace_platform && doc.custom_marketplace_platform !== "Shopify") return false;
+	// Edit Order (#500) REPLACES ERPNext's "Update Items" on a submitted Shopify Sales Order: an item edit has
+	// to reach Shopify first. The server is the real gate (stage lock, stock, Shopify checks); this only
+	// offers the action and hides the button that would bypass it.
+	function is_shopify_sales_order(doc) {
 		return Boolean(
-			frappe.model.can_write("Sales Order") &&
+			doc && doc.custom_marketplace_order && doc.docstatus === 1 && doc.custom_marketplace_platform === "Shopify"
+		);
+	}
+
+	// ERPNext adds "Update Items" in two places (its form script and its controller) and the order they run
+	// in against this file is not ours to rely on, so the button is dropped when it is added (an own-property
+	// wrapper on the form instance, like wrap_close_sales_order) and removed again after each refresh.
+	function suppress_update_items(frm) {
+		if (!frm || typeof frm.add_custom_button !== "function") return;
+		if (!frm.__mi_update_items_wrapped) {
+			const original = frm.add_custom_button;
+			frm.add_custom_button = function (label, ...args) {
+				if (label === __("Update Items") && is_shopify_sales_order(frm.doc)) return;
+				return original.call(this, label, ...args);
+			};
+			frm.__mi_update_items_wrapped = true;
+		}
+		if (is_shopify_sales_order(frm.doc) && typeof frm.remove_custom_button === "function") {
+			frm.remove_custom_button(__("Update Items"));
+		}
+	}
+
+	function can_offer_edit_order(frm) {
+		const doc = frm.doc;
+		if (!is_shopify_sales_order(doc) || is_closed_or_cancelled(doc)) return false;
+		return Boolean(frappe.model.can_write("Sales Order") && frappe.model.can_submit("Sales Order"));
+	}
+
+	function show_edit_order_blocked(preview) {
+		const reasons = (preview.reasons || [])
+			.map((reason) => `<li>${frappe.utils.escape_html(reason)}</li>`)
+			.join("");
+		frappe.msgprint({
+			title: __("This order cannot be edited"),
+			indicator: "orange",
+			message: `<ul>${reasons}</ul>`,
+		});
+	}
+
+	function edit_order_alert(result) {
+		if (result.applied === false) {
+			return {
+				message: __(
+					"Shopify accepted the change, but ERPNext could not be updated: {0}. ERPNext follows Shopify automatically; use Retry Sync on the Marketplace tab to do it now.",
+					[frappe.utils.escape_html(result.apply_error || "")]
+				),
+				indicator: "orange",
+			};
+		}
+		return shopify_edit_alert(result);
+	}
+
+	// Plain warnings from the server (for example: the carrier shipment is started and is not updated).
+	function warnings_html(preview) {
+		return (preview.warnings || [])
+			.map((warning) => `<p class="text-warning">${frappe.utils.escape_html(warning)}</p>`)
+			.join("");
+	}
+
+	function show_edit_order_confirm(frm, preview, items) {
+		const rows = (preview.changes || [])
+			.map((change) => {
+				const quantity = change.quantity === 0 ? __("Remove") : change.quantity;
+				return `<li>${frappe.utils.escape_html(change.label || "")} — ${frappe.utils.escape_html(
+					String(change.old_quantity)
+				)} → ${frappe.utils.escape_html(String(quantity))}</li>`;
+			})
+			.join("");
+		const dialog = new frappe.ui.Dialog({
+			title: __("Send the changes to Shopify"),
+			fields: [
+				{
+					fieldtype: "HTML",
+					fieldname: "preview",
+					options: `<p>${frappe.utils.escape_html(
+						__("Shopify is updated first, then this order. The customer will not be notified.")
+					)}</p>${warnings_html(preview)}<ul>${rows}</ul><p>${frappe.utils.escape_html(
+						__("Items and shipping total, before tax: {0} → {1}", [
+							format_currency(preview.old_total, frm.doc.currency),
+							format_currency(preview.new_total, frm.doc.currency),
+						])
+					)}</p>`,
+				},
+			],
+			primary_action_label: __("Send to Shopify"),
+			primary_action() {
+				dialog.hide();
+				frappe
+					.call({
+						method: ORDER_EDIT_METHOD,
+						type: "POST",
+						args: { sales_order: frm.doc.name, items, fingerprint: preview.fingerprint },
+						freeze: true,
+						freeze_message: __("Sending the changes to Shopify..."),
+					})
+					.then((r) => {
+						frappe.show_alert(edit_order_alert(r.message || {}));
+						return frm.reload_doc();
+					})
+					.catch(() => {});
+			},
+			secondary_action_label: __("Not now"),
+			secondary_action() {
+				dialog.hide();
+			},
+		});
+		dialog.show();
+	}
+
+	function review_edit_order(frm, items) {
+		return frappe
+			.call({
+				method: ORDER_EDIT_PREVIEW_METHOD,
+				type: "POST",
+				args: { sales_order: frm.doc.name, items },
+				freeze: true,
+				freeze_message: __("Checking the changes..."),
+			})
+			.then((r) => {
+				const preview = r.message;
+				if (!preview) return;
+				if (preview.state === "eligible" && (preview.changes || []).length) {
+					show_edit_order_confirm(frm, preview, items);
+				} else {
+					show_edit_order_blocked(preview);
+				}
+			})
+			.catch(() => {});
+	}
+
+	function show_edit_order_dialog(frm, preview) {
+		const rows = (preview.rows || []).map((row) => ({ ...row }));
+		const dialog = new frappe.ui.Dialog({
+			title: __("Edit Order"),
+			size: "large",
+			fields: [
+				{
+					fieldtype: "HTML",
+					fieldname: "intro",
+					options: `<p>${frappe.utils.escape_html(
+						__(
+							"Change an item quantity, set it to 0 to remove the item, or add a row for a new item. The change goes to Shopify first."
+						)
+					)}</p>${warnings_html(preview)}`,
+				},
+				{
+					fieldtype: "Table",
+					fieldname: "items",
+					// Existing rows are removed with quantity 0 (the server ignores the item of an existing row).
+					cannot_delete_rows: true,
+					in_place_edit: true,
+					data: rows,
+					get_data: () => rows,
+					fields: [
+						{ fieldtype: "Data", fieldname: "docname", hidden: 1 },
+						{ fieldtype: "Link", fieldname: "item_code", label: __("Item Code"), options: "Item", in_list_view: 1, columns: 3 },
+						{ fieldtype: "Data", fieldname: "item_name", label: __("Item Name"), read_only: 1, in_list_view: 1, columns: 4 },
+						{ fieldtype: "Float", fieldname: "qty", label: __("Quantity"), reqd: 1, in_list_view: 1, columns: 2 },
+					],
+				},
+			],
+			primary_action_label: __("Review"),
+			primary_action(values) {
+				const items = (values.items || [])
+					.filter((row) => row.docname || row.item_code)
+					.map((row) => ({ docname: row.docname || "", item_code: row.item_code, qty: row.qty }));
+				dialog.hide();
+				review_edit_order(frm, items);
+			},
+		});
+		dialog.show();
+	}
+
+	// First call: the rows, or why nothing can be edited (picked up, shipment started, Shopify refuses).
+	function open_edit_order(frm) {
+		const name = frm.doc.name;
+		return frappe
+			.call({
+				method: ORDER_EDIT_PREVIEW_METHOD,
+				type: "POST",
+				args: { sales_order: name },
+				freeze: true,
+				freeze_message: __("Checking the order..."),
+			})
+			.then((r) => {
+				const preview = r.message;
+				if (!preview || frm.doc.name !== name || preview.state === "not_applicable") return;
+				if (preview.state === "blocked") show_edit_order_blocked(preview);
+				else show_edit_order_dialog(frm, preview);
+			})
+			.catch(() => {});
+	}
+
+	function add_edit_order_button(frm) {
+		if (!can_offer_edit_order(frm)) return;
+		frm.add_custom_button(__("Edit Order"), () => open_edit_order(frm));
+	}
+
+	// Cancel Order (#501): the whole chain before pickup - carrier shipment, draft Delivery Note, Sales Order, then
+	// Shopify - stopping at the first failure. The server decides; this offers it and reports the result.
+	function can_offer_cancel_order(frm) {
+		const doc = frm.doc;
+		if (!is_shopify_sales_order(doc) || is_closed_or_cancelled(doc)) return false;
+		return Boolean(
+			frappe.model.can_cancel("Sales Order") &&
 				frappe.model.can_read("Marketplace Order") &&
 				frappe.model.can_write("Marketplace Order")
 		);
 	}
 
-	function add_shopify_edit_button(frm) {
-		if (!can_offer_shopify_edit(frm)) return;
-		const name = frm.doc.name;
+	// The result of the chain: what was done and, when it stopped, where and why (the reason is external text).
+	function cancel_order_result_message(result) {
+		const escape = frappe.utils.escape_html;
+		const stopped = result.stopped || {};
+		const done = (result.completed_labels || []).length
+			? `<p>${escape(__("Done:"))} ${escape((result.completed_labels || []).join(", "))}</p>`
+			: "";
+		return (
+			`<p>${escape(__("The cancellation stopped at: {0}", [stopped.label || ""]))}</p>` +
+			`<p>${escape(stopped.message || "")}</p>` +
+			done +
+			`<p>${escape(__("Everything before this step stays done. Press Cancel Order again to continue from this step."))}</p>`
+		);
+	}
+
+	function run_cancel_order(frm, values) {
 		return frappe
-			.call({ method: SHOPIFY_EDIT_PREVIEW_METHOD, type: "POST", args: { sales_order: name } })
+			.call({
+				method: CANCEL_ORDER_METHOD,
+				type: "POST",
+				args: { sales_order: frm.doc.name, cancellation_reason: (values && values.cancellation_reason) || "" },
+				freeze: true,
+				freeze_message: __("Cancelling the order..."),
+			})
 			.then((r) => {
-				// The form may have moved to another document while the call was in flight.
-				if (frm.doc.name !== name) return;
-				const preview = r.message;
-				if (!preview) return;
-				if (preview.state === "eligible") {
-					frm.add_custom_button(__("Send item changes to Shopify"), () =>
-						show_shopify_edit_dialog(frm, preview)
-					);
-				} else if (preview.state === "blocked" && (preview.changes || []).length) {
-					// Staff changed items, so say why Shopify will not get them.  With no
-					// changes there is nothing to explain and the form stays silent.
-					frm.add_custom_button(__("Item changes blocked"), () =>
-						show_shopify_edit_blocked(preview)
-					);
+				const result = r.message || {};
+				if (result.ok) {
+					frappe.show_alert({ message: __("The order was cancelled."), indicator: "green" });
+				} else {
+					frappe.msgprint({
+						title: __("The order was not fully cancelled"),
+						indicator: "orange",
+						message: cancel_order_result_message(result),
+					});
 				}
+				return frm.reload_doc();
 			})
 			.catch(() => {});
+	}
+
+	function show_cancel_order_dialog(frm, option) {
+		const fields = [
+			{
+				fieldtype: "HTML",
+				fieldname: "warning",
+				options: `<p>${frappe.utils.escape_html(
+					__(
+						"The shipment at the carrier is cancelled, the draft Delivery Note is deleted, the Sales Order is cancelled and the order is cancelled on {0}. This cannot be undone.",
+						[option.platform]
+					)
+				)}</p>`,
+			},
+		];
+		const reason = reason_field(option);
+		if (reason) fields.push(reason);
+		const dialog = new frappe.ui.Dialog({
+			title: __("Cancel Order"),
+			fields,
+			primary_action_label: __("Cancel Order"),
+			primary_action(values) {
+				dialog.hide();
+				run_cancel_order(frm, values);
+			},
+			secondary_action_label: __("Not now"),
+			secondary_action() {
+				dialog.hide();
+			},
+		});
+		dialog.show();
+	}
+
+	function open_cancel_order(frm) {
+		const name = frm.doc.name;
+		return frappe
+			.call({ method: OPTION_METHOD, type: "POST", args: { sales_order: name } })
+			.then((r) => {
+				const option = r.message;
+				if (!option || frm.doc.name !== name || option.state === "not_applicable") return;
+				if (option.state === "blocked" && !needs_no_dialog(option)) show_blocked_dialog(option);
+				else show_cancel_order_dialog(frm, option);
+			})
+			.catch(() => {});
+	}
+
+	function add_cancel_order_button(frm) {
+		if (!can_offer_cancel_order(frm)) return;
+		frm.add_custom_button(__("Cancel Order"), () => open_cancel_order(frm));
 	}
 
 	function add_cancel_button(frm, option) {
@@ -528,7 +732,12 @@
 		);
 	}
 
+	function on_setup(frm) {
+		suppress_update_items(frm);
+	}
+
 	function on_refresh(frm) {
+		suppress_update_items(frm);
 		load_noon_fulfillment(frm);
 		add_marketplace_order_tab(frm);
 		if (!wrap_close_sales_order(frm)) {
@@ -539,7 +748,8 @@
 		const closed_by_click = consume_close_request(frm);
 		if (!is_marketplace_sales_order(frm.doc)) return;
 		add_noon_item_edit_hint(frm);
-		add_shopify_edit_button(frm);
+		add_edit_order_button(frm);
+		add_cancel_order_button(frm);
 		if (closed_by_click || is_closed_or_cancelled(frm.doc)) {
 			load_platform_option(frm, { prompt: closed_by_click, button: true });
 		}
@@ -556,6 +766,7 @@
 		if (frappe.ui && frappe.ui.form && !frappe.ui.form.__mi_sales_order_hooks) {
 			frappe.ui.form.__mi_sales_order_hooks = true;
 			frappe.ui.form.on("Sales Order", {
+				setup: on_setup,
 				refresh: on_refresh,
 				after_cancel: on_after_cancel,
 			});
@@ -567,11 +778,16 @@
 			add_marketplace_order_tab,
 			add_noon_item_edit_hint,
 			load_noon_fulfillment,
-			add_shopify_edit_button,
-			can_offer_shopify_edit,
+			add_edit_order_button,
+			add_cancel_order_button,
+			can_offer_cancel_order,
+			cancel_order_result_message,
+			can_offer_edit_order,
+			edit_order_alert,
+			is_shopify_sales_order,
+			open_edit_order,
+			suppress_update_items,
 			shopify_edit_alert,
-			show_shopify_edit_blocked,
-			show_shopify_edit_dialog,
 			blocked_message,
 			can_offer_cancel,
 			consume_close_request,

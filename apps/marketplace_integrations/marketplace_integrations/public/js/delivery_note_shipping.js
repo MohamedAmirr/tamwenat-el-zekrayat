@@ -24,6 +24,8 @@
 	const CANCEL_STATUSES = ["Cancellation Pending", "Cancellation Unknown", "Cancelled"];
 	const EDITABLE = ["", NOT_CREATED, FAILED];
 	const RETURN_PICKUP = "Customer Return Pickup";
+	// The Workflow action ("Delivery Note Lifecycle", #498) that starts a carrier shipment.
+	const CREATE_SHIPMENT = "Create Shipment";
 	// Not a stored status: the wait ended because the shipment is Created but the job could not submit the note.
 	const SUBMIT_FAILED = "Submit Failed";
 
@@ -81,9 +83,12 @@
 		if (status === CREATING) {
 			frm.set_intro(__("Sending the shipment to {0}...", [name]), "blue");
 		} else if (status === CREATED) {
+			// a draft with a stored error: the pickup submit failed (#500), the reason is shown
+			const submit_error = frm.doc.docstatus === 0 && error;
 			frm.set_intro(
-				__("{0} shipment created. Tracking number: {1}", [name, escape(frm.doc.lr_no || "")]),
-				"green"
+				__("{0} shipment created. Tracking number: {1}", [name, escape(frm.doc.lr_no || "")]) +
+					(submit_error ? `<br>${error}` : ""),
+				submit_error ? "red" : "green"
 			);
 		} else if (status === UNKNOWN) {
 			frm.set_intro(
@@ -96,7 +101,7 @@
 		} else if (status === "Cancelled" && frm.doc.docstatus === 1) {
 			// cancelled at the carrier, not yet in ERPNext: the next Cancel makes no carrier call
 			frm.set_intro(
-				__("Cancelled at {0}. This Delivery Note is still submitted: press Cancel to cancel it here. {0} will not be asked again.", [name]),
+				__("Cancelled at {0}. Press Cancel to cancel this Delivery Note here too. {0} will not be asked again.", [name]),
 				"orange"
 			);
 		} else if (CANCEL_STATUSES.includes(status)) {
@@ -110,7 +115,8 @@
 		// text carries the state, the colour is only extra
 		frm.dashboard.add_indicator(
 			__("Shipping status: {0}", [frappe.utils.escape_html(__(status))]),
-			"blue"
+			// a shipment the carrier reports Lost or Damaged (#500): red
+			!frm.doc.is_return && ["Lost", "Damaged"].includes(status) ? "red" : "blue"
 		);
 	}
 
@@ -213,19 +219,19 @@
 		}
 		if (status === UNKNOWN) {
 			return (
-				`<p>${__("It is not known whether {0} created the shipment. The Delivery Note was not submitted.", [carrier])}</p>` +
+				`<p>${__("It is not known whether {0} created the shipment. The Delivery Note was not changed.", [carrier])}</p>` +
 				`<p class="text-muted">${__("Use Check with {0} on the Delivery Note before trying again.", [carrier])}</p>`
 			);
 		}
 		if (status === FAILED) {
 			// the error is stored raw (it can hold carrier text): escaped here
-			return `<p>${__("{0} did not create the shipment: {1}", [carrier, escape(error || "")])}</p><p class="text-muted">${__("The Delivery Note was not submitted.")}</p>`;
+			return `<p>${__("{0} did not create the shipment: {1}", [carrier, escape(error || "")])}</p><p class="text-muted">${__("The Delivery Note was not changed.")}</p>`;
 		}
 		if (status === SUBMIT_FAILED) {
 			// the shipment exists; the job's own submit failed. The stored text names the reason (raw: escaped here).
-			return `<p>${escape(error || "")}</p><p class="text-muted">${__("The shipment exists at {0}. Fix the problem, then submit the Delivery Note again.", [carrier])}</p>`;
+			return `<p>${escape(error || "")}</p><p class="text-muted">${__("The shipment exists at {0}. Fix the problem, then press Confirm Shipment.", [carrier])}</p>`;
 		}
-		return `<p>${__("{0} is taking longer than expected.", [carrier])}</p><p class="text-muted">${__("The Delivery Note is submitted automatically once the shipment is created. Open the Delivery Note later: if the shipment is Created and it is still a draft, submit it again.")}</p>`;
+		return `<p>${__("{0} is taking longer than expected.", [carrier])}</p><p class="text-muted">${__("The Delivery Note moves on automatically once the shipment is created. Open the Delivery Note later: if its stage is Shipment Created, press Confirm Shipment.")}</p>`;
 	}
 
 	// The server (the background job) submits the note once the carrier confirms Created, so this only waits
@@ -235,10 +241,20 @@
 		const carrier = carrier_name(frm);
 		// A return is submitted without waiting: submitting it is the receipt; its pickup is its own button.
 		if (!carrier || frm.doc.is_return) return;
-		if (status_of(frm) === CREATED) return;
 		const hooks = carriers[carrier];
+		if (status_of(frm) === CREATED) {
+			if (hooks.draft_until_pickup) {
+				// the server refuses a hand submit too (carrier_shipments.require_shipment_created)
+				frappe.msgprint({
+					message: frappe.utils.escape_html(__("The Delivery Note is submitted when {0} picks the shipment up.", [carrier])),
+					indicator: "orange",
+				});
+				frappe.validated = false;
+			}
+			return;
+		}
 		if (frm.is_dirty()) {
-			frappe.msgprint({ message: __("Save the Delivery Note first, then submit it."), indicator: "orange" });
+			frappe.msgprint({ message: __("Save the Delivery Note first, then create the shipment."), indicator: "orange" });
 			frappe.validated = false;
 			return;
 		}
@@ -252,15 +268,20 @@
 	// Starts the carrier request (the create of a delivery, or the pickup of a return) and waits for it in a
 	// dialog. Resolves once the note is Created (form reloaded); otherwise sets frappe.validated = false and
 	// shows why. `submitting` is true when it is the native Submit that waits.
-	function send_and_wait(frm, carrier, submitting) {
+	// `started` is true after the "Create Shipment" Workflow action: its transition already queued the request,
+	// so this only waits for the result (#498).
+	function send_and_wait(frm, carrier, submitting, started = false) {
 		// a request already in flight: this click starts nothing and the submit must not go on
-		return exclusive(frm, () => send_and_wait_locked(frm, carrier, submitting), () => {
+		return exclusive(frm, () => send_and_wait_locked(frm, carrier, submitting, started), () => {
 			frappe.validated = false;
 		});
 	}
 
-	function send_and_wait_locked(frm, carrier, submitting) {
+	function send_and_wait_locked(frm, carrier, submitting, started) {
 		const hooks = carriers[carrier];
+		// the stored status of a failed earlier attempt is not this request's result: only a note written since
+		// the transition counts
+		const baseline = frm.doc.modified;
 		return new Promise((resolve) => {
 			let dialog = null;
 			let timer = null;
@@ -278,6 +299,8 @@
 					Promise.resolve(frm.reload_doc()).then(() => resolve());
 					return;
 				}
+				// a refused request leaves the note in its earlier stage: show it
+				if (started && status !== CREATING) frm.reload_doc();
 				if (status === SUBMIT_FAILED) {
 					frappe.msgprint({
 						message: failure_html(carrier, status, error, submitting),
@@ -291,7 +314,7 @@
 					frappe.show_alert({
 						message: frappe.utils.escape_html(
 							submitting
-								? __("Still sending to {0}. The Delivery Note is submitted automatically once the shipment is created.", [carrier])
+								? __("Still sending to {0}. The Delivery Note moves on automatically once the shipment is created.", [carrier])
 								: __("Still sending to {0}. Open the Delivery Note later and check its Integration Status.", [carrier])
 						),
 						indicator: "blue",
@@ -331,33 +354,45 @@
 			dialog.fields_dict.body.$wrapper.html(
 				`<p>${frappe.utils.escape_html(
 						submitting
-							? __("Please wait. The Delivery Note is submitted automatically once {0} has created the shipment.", [carrier])
+							? __("Please wait. The Delivery Note moves on automatically once {0} has created the shipment.", [carrier])
 							: __("Please wait. Sending the return pickup request to {0}.", [carrier])
 					)}</p>`
 			);
-			const started = Date.now();
+			const started_at = Date.now();
 			const poll = () =>
 				frappe.db
-					.get_value("Delivery Note", frm.doc.name, ["docstatus", "custom_integration_status", "custom_last_integration_error"])
+					.get_value("Delivery Note", frm.doc.name, ["docstatus", "custom_integration_status", "custom_last_integration_error", "modified"])
 					.then(
 						(r) => {
 							if (settled) return;
 							const row = (r && r.message) || {};
 							const status = row.custom_integration_status || NOT_CREATED;
+							if (started && row.modified === baseline) {
+								// nothing written since the transition: the job has not started yet
+								if (Date.now() - started_at >= api.max_wait_ms) return finish(false, CREATING);
+								timer = setTimeout(poll, api.poll_ms);
+								return;
+							}
+							if (started && EDITABLE.includes(row.custom_integration_status || "") && row.custom_last_integration_error) {
+								// the request was refused after the transition (the stock changed meanwhile): the note is back
+								return finish(false, FAILED, row.custom_last_integration_error);
+							}
 							if (status === CREATED) {
 								// a pickup request ends at Created; a delivery ends when the job has submitted the note
-								if (!submitting || row.docstatus === 1) return finish(true);
+								// (#500: a carrier that keeps the note a draft until its pickup ends here too)
+								if (!submitting || row.docstatus === 1 || hooks.draft_until_pickup) return finish(true);
 								// Created but still a draft with an error: the job's submit failed
 								if (row.custom_last_integration_error) {
 									return finish(false, SUBMIT_FAILED, row.custom_last_integration_error);
 								}
 							}
 							if (status === FAILED || status === UNKNOWN) return finish(false, status, row.custom_last_integration_error);
-							if (Date.now() - started >= api.max_wait_ms) return finish(false, CREATING);
+							if (Date.now() - started_at >= api.max_wait_ms) return finish(false, CREATING);
 							timer = setTimeout(poll, api.poll_ms);
 						},
 						() => finish(false, CREATING)
 					);
+			if (started) return poll();
 			frappe
 				.call({
 					method: API + "request_shipment",
@@ -377,7 +412,7 @@
 							frappe.validated = false;
 							frappe.show_alert({
 								message: submitting
-									? __("Choose the {0} city, then submit again.", [carrier])
+									? __("Choose the {0} city, then create the shipment again.", [carrier])
 									: __("Choose the {0} city, save, then request the pickup again.", [carrier]),
 								indicator: "orange",
 							});
@@ -404,6 +439,36 @@
 		});
 	}
 
+	// ---- "Create Shipment" Workflow action (#498) ---------------------------------------------------
+	//
+	// The Workflow transition does the server work (it refuses what cannot be sent, then queues the carrier
+	// request); these two form events only add what Desk's own workflow button lacks: the carrier's own
+	// pre-check before the action, and the "Sending to <carrier>..." wait dialog after it.
+
+	// `frm.selected_workflow_action` is already null when after_workflow_action runs, so remember the action.
+	function before_workflow_action(frm) {
+		frm.__create_shipment_for = null;
+		if (frm.selected_workflow_action !== CREATE_SHIPMENT) return;
+		const carrier = carrier_name(frm);
+		if (!carrier) return;
+		const hooks = carriers[carrier];
+		if (hooks.before_send && hooks.before_send(frm) === false) {
+			// Desk runs the transition only when this promise resolves, and has frozen the screen: stop here
+			frm.selected_workflow_action = null;
+			frappe.dom.unfreeze();
+			return new Promise(() => {});
+		}
+		frm.__create_shipment_for = frm.doc.name;
+	}
+
+	function after_workflow_action(frm) {
+		if (frm.__create_shipment_for !== frm.doc.name) return;
+		frm.__create_shipment_for = null;
+		const carrier = carrier_name(frm);
+		if (!carrier) return;
+		return send_and_wait(frm, carrier, true, true);
+	}
+
 	// Fields the carrier was sent (carrier.locked_fields) lock once the shipment is started; the server
 	// refuses a change too.
 	function set_locked_fields(frm, carrier) {
@@ -426,6 +491,9 @@
 		is_busy,
 		server_message,
 		is_editable,
+		before_workflow_action,
+		after_workflow_action,
+		before_submit,
 	};
 
 	if (typeof frappe !== "undefined") {
@@ -443,6 +511,8 @@
 					add_buttons(frm, carrier);
 				},
 				before_submit,
+				before_workflow_action,
+				after_workflow_action,
 			});
 		}
 	}

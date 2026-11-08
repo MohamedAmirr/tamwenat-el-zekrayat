@@ -67,6 +67,8 @@ LINE_IDENTITY_CHANGED = "LINE_IDENTITY_CHANGED"
 QTY_BELOW_DELIVERED = "QTY_BELOW_DELIVERED"
 ALREADY_BILLED = "ALREADY_BILLED"
 EXECUTION_BLOCKS_UPDATE = "EXECUTION_BLOCKS_UPDATE"
+ORDER_LOCKED_BY_SHIPMENT = "ORDER_LOCKED_BY_SHIPMENT"
+WAITING_FOR_STOCK_EDIT = "WAITING_FOR_STOCK_EDIT"
 ADVANCE_BLOCKS_CANCEL = "ADVANCE_BLOCKS_CANCEL"
 TOTAL_BELOW_ADVANCE = "TOTAL_BELOW_ADVANCE"
 DRAFT_DOCUMENTS_BLOCK_CANCEL = "DRAFT_DOCUMENTS_BLOCK_CANCEL"
@@ -267,6 +269,22 @@ REASONS = {
 		MANUAL,
 		"REVIEW_EXECUTION",
 		"ERPNext delivery or billing execution blocks an automatic submitted-order update.",
+	),
+	# Shopify raised a quantity the stock cannot cover (#500): not a problem for a person to fix in the order
+	# (so Syncing, not Needs Action): the Sales Order shows Waiting for Stock in the list and the Bin sweep re-runs the
+	# planner.
+	WAITING_FOR_STOCK_EDIT: _entry(
+		SYNCING,
+		AUTO_RESOLVE,
+		"WAIT_FOR_STOCK",
+		"Shopify raised an item quantity but there is not enough stock. ERPNext keeps the old quantities "
+		"until the stock is available.",
+	),
+	ORDER_LOCKED_BY_SHIPMENT: _entry(
+		NEEDS_ACTION,
+		MANUAL,
+		"REVIEW_EXECUTION",
+		"The marketplace changed an order that is already with the carrier, so ERPNext was not updated.",
 	),
 	ADVANCE_BLOCKS_CANCEL: _entry(
 		NEEDS_ACTION,
