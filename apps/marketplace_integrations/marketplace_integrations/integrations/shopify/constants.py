@@ -153,6 +153,11 @@ SHOPIFY_ORDER_WEBHOOK_TOPICS = {
 # covered by the next run instead of being silently missed forever.
 SHOPIFY_ORDER_RECONCILE_OVERLAP_MINUTES = 10
 
+# #478: an order import that hits a MariaDB lock wait timeout (1205) is retried in the same run
+# this many times in total (first try included), waiting this long between tries.
+SHOPIFY_ORDER_IMPORT_LOCK_WAIT_ATTEMPTS = 3
+SHOPIFY_ORDER_IMPORT_LOCK_WAIT_RETRY_SECONDS = 2
+
 # Automatic triggers (#107 PR2, decisions 1/2) - see
 # integrations/shopify/inventory_sync.py's sweep_changed_bins() /
 # reconcile_all_accounts().
