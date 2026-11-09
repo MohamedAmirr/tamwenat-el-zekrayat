@@ -26,6 +26,8 @@ function load({
 		oos_rows = [],
 		invoice_state = {},
 	can_create_delivery_note = true,
+	shipment_result = { status: "sent", delivery_note: "DN-1", message: "Creating at Bosta" },
+	note_statuses = ["Created"],
 	marketplace_summary = { name: "MO-1", platform: "Shopify", reference: "#SHOP-1", erpnext_sync_status: "Syncing", erpnext_sales_order: "" },
 } = {}) {
 	const calls = [];
@@ -40,7 +42,11 @@ function load({
 	const msgprints = [];
 	const dialogs = [];
 	const handlers = {};
+	const shipment_calls = [];
+	const routes = [];
+	const polls = [];
 	global.frappe = {
+		set_route: (...args) => routes.push(args),
 		user: { has_role: () => false },
 		utils: { escape_html },
 		datetime: { str_to_user: (value) => `user:${value}` },
@@ -81,6 +87,8 @@ function load({
 				}
 				hide() {
 					this.hidden = true;
+					// Like Frappe, closing the dialog (X or a button) runs onhide.
+					if (this.config.onhide) this.config.onhide();
 				}
 			},
 		},
@@ -111,6 +119,16 @@ function load({
 					return noon_fails ? Promise.reject(new Error("boom")) : Promise.resolve({ message: noon_state });
 				}
 				return Promise.resolve({ message: { queued: true } });
+			}
+			if (opts.method.endsWith("order_shipment.create_shipment")) {
+				shipment_calls.push(opts);
+				return Promise.resolve({ message: shipment_result });
+			}
+			if (opts.method.endsWith("order_shipment.shipment_state")) {
+				polls.push(opts);
+				const status = note_statuses[Math.min(polls.length - 1, note_statuses.length - 1)];
+				const state = { Creating: "creating", Created: "accepted", Failed: "failed", Discarded: "discarded", Missing: "missing" }[status];
+				return Promise.resolve({ message: { state, status, reason: "Bosta said no" } });
 			}
 			if (opts.method.endsWith("get_create_defaults")) {
 				return defaults_fails ? Promise.reject(new Error("ineligible")) : Promise.resolve({ message: {} });
@@ -145,7 +163,7 @@ function load({
 	const path = require.resolve("./sales_order.js");
 	delete require.cache[path];
 	const module_exports = require(path);
-	return { calls, edit_calls, marketplace_calls, noon_calls, oos_calls, invoice_calls, confirms, required, alerts, msgprints, dialogs, handlers, module_exports };
+	return { shipment_calls, routes, polls, calls, edit_calls, marketplace_calls, noon_calls, oos_calls, invoice_calls, confirms, required, alerts, msgprints, dialogs, handlers, module_exports };
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
@@ -760,7 +778,7 @@ test("the Noon Fulfillment group is hidden for Shopify, Talabat, draft, cancelle
 		);
 		// A submitted Shopify order legitimately gets the ungrouped Edit Order / Cancel Order
 		// buttons (#500); what must never appear for any of these is a Noon Fulfillment button.
-		const expected = name === "Shopify" ? ["Edit Order", "Cancel Order"] : [];
+		const expected = name === "Shopify" ? ["Edit Order", "Cancel Order", "Create Shipment"] : [];
 		assert.deepEqual(frm.buttons.map((b) => b.label), expected, name);
 		assert.ok(frm.buttons.every((b) => b.group !== "Noon Fulfillment"), name);
 		assert.equal(noon_calls.length, 0, name);
@@ -883,4 +901,204 @@ test("Retry Order Invoice sends the retry for the Sales Order", async () => {
 	await settle();
 	const call = noon_calls.find((c) => c.method.endsWith("retry_order_invoice"));
 	assert.deepEqual(call.args, { sales_order: "SAL-ORD-1" });
+});
+
+// Create Shipment (one-step): one button, the server decides, the form watches the note.
+const CREATE_SHIPMENT = "Create Shipment";
+const shipment_doc = (extra = {}) => ({ custom_marketplace_platform: "Shopify", ...extra });
+const shipment_button = (frm) => frm.buttons.find((b) => b.label === CREATE_SHIPMENT);
+
+test("Create Shipment is offered on an open submitted Shopify order the user can create notes for", async () => {
+	const { handlers } = load({ shopify_preview: { state: "not_applicable", changes: [], reasons: [] } });
+	const frm = make_frm(shipment_doc());
+	await handlers["Sales Order"].refresh(frm);
+	await settle();
+	assert.ok(shipment_button(frm));
+});
+
+test("Create Shipment is not offered for Noon or Talabat, closed or draft orders, or without Delivery Note create permission", async () => {
+	const cases = [
+		["Noon", shipment_doc({ custom_marketplace_platform: "Noon" }), true],
+		["Talabat", shipment_doc({ custom_marketplace_platform: "Talabat" }), true],
+		["Closed", shipment_doc({ status: "Closed" }), true],
+		["Completed", shipment_doc({ status: "Completed" }), true],
+		["draft", shipment_doc({ docstatus: 0 }), true],
+		["no permission", shipment_doc(), false],
+	];
+	for (const [name, doc, can_create] of cases) {
+		const { handlers } = load({
+			can_create_delivery_note: can_create,
+			shopify_preview: { state: "not_applicable", changes: [], reasons: [] },
+		});
+		const frm = make_frm(doc);
+		await handlers["Sales Order"].refresh(frm);
+		await settle();
+		assert.equal(shipment_button(frm), undefined, name);
+	}
+});
+
+test("the mirror of the excluded platforms equals the server constant", () => {
+	const source = fs.readFileSync(require.resolve("./sales_order.js"), "utf8");
+	const python = fs.readFileSync(require.resolve("../../integrations/bosta/constants.py"), "utf8");
+	const js = source.match(/BOSTA_EXCLUDED_PLATFORMS = \[([^\]]*)\]/)[1].match(/"(\w+)"/g).map((s) => s.replace(/"/g, ""));
+	const py = python.match(/BOSTA_EXCLUDED_PLATFORMS = \(([^)]*)\)/)[1].match(/"(\w+)"/g).map((s) => s.replace(/"/g, ""));
+	assert.deepEqual(js, py);
+});
+
+test("clicking Create Shipment posts only the Sales Order name, then waits for Created and opens the note", async () => {
+	const { handlers, shipment_calls, polls, routes, dialogs, module_exports } = load({
+		note_statuses: ["Creating", "Created"],
+		shopify_preview: { state: "not_applicable", changes: [], reasons: [] },
+	});
+	module_exports.SHIPMENT_TIMING.poll_ms = 1;
+	const frm = make_frm(shipment_doc());
+	await handlers["Sales Order"].refresh(frm);
+	await settle();
+	await shipment_button(frm).action();
+	await settle();
+	assert.equal(shipment_calls.length, 1);
+	assert.deepEqual(shipment_calls[0].args, { sales_order: "SAL-ORD-1" });
+	assert.equal(shipment_calls[0].type, "POST");
+	assert.equal(dialogs.length, 1);
+	assert.equal(polls.length, 2);
+	assert.equal(dialogs[0].hidden, true);
+	assert.deepEqual(routes, [["Form", "Delivery Note", "DN-1"]]);
+});
+
+test("a failed Bosta answer shows its escaped reason and opens the note", async () => {
+	const { handlers, msgprints, routes, module_exports } = load({
+		note_statuses: ["Failed"],
+		shopify_preview: { state: "not_applicable", changes: [], reasons: [] },
+	});
+	module_exports.SHIPMENT_TIMING.poll_ms = 1;
+	const frm = make_frm(shipment_doc());
+	await handlers["Sales Order"].refresh(frm);
+	await settle();
+	await shipment_button(frm).action();
+	await settle();
+	assert.equal(msgprints.length, 1);
+	assert.match(msgprints[0].message, /Bosta said no/);
+	assert.deepEqual(routes, [["Form", "Delivery Note", "DN-1"]]);
+});
+
+test("a shipment Bosta refused for good says the draft note was deleted and opens nothing", async () => {
+	const { handlers, msgprints, routes, polls, dialogs, module_exports } = load({
+		note_statuses: ["Creating", "Discarded"],
+		shopify_preview: { state: "not_applicable", changes: [], reasons: [] },
+	});
+	module_exports.SHIPMENT_TIMING.poll_ms = 1;
+	const frm = make_frm(shipment_doc());
+	await handlers["Sales Order"].refresh(frm);
+	await settle();
+	await shipment_button(frm).action();
+	await settle();
+	assert.equal(polls.length, 2);
+	assert.equal(dialogs[0].hidden, true);
+	assert.equal(msgprints.length, 1);
+	assert.match(msgprints[0].message, /Bosta said no/);
+	assert.match(msgprints[0].message, /DN-1 was deleted/);
+	assert.doesNotMatch(msgprints[0].message, /href/);
+	assert.deepEqual(routes, []);
+});
+
+test("a failed row without a note (the draft was deleted by the pre-check) shows the reason and opens nothing", async () => {
+	const { handlers, msgprints, routes, polls } = load({
+		shipment_result: { status: "failed", message: "The receiver phone is missing.", delivery_note: null },
+		shopify_preview: { state: "not_applicable", changes: [], reasons: [] },
+	});
+	const frm = make_frm(shipment_doc());
+	await handlers["Sales Order"].refresh(frm);
+	await settle();
+	await shipment_button(frm).action();
+	await settle();
+	assert.match(msgprints[0].message, /receiver phone is missing/);
+	assert.equal(polls.length, 0);
+	assert.deepEqual(routes, []);
+});
+
+test("a wait that ends without an answer says Bosta is still creating", async () => {
+	const { handlers, msgprints, module_exports } = load({
+		note_statuses: ["Creating"],
+		shopify_preview: { state: "not_applicable", changes: [], reasons: [] },
+	});
+	module_exports.SHIPMENT_TIMING.poll_ms = 1;
+	module_exports.SHIPMENT_TIMING.limit = 2;
+	const frm = make_frm(shipment_doc());
+	await handlers["Sales Order"].refresh(frm);
+	await settle();
+	await shipment_button(frm).action();
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	assert.match(msgprints[0].title, /Still creating/);
+});
+
+test("closing the wait dialog stops the poll: no later message and no jump to the note", async () => {
+	for (const close of ["x", "button"]) {
+		const { handlers, msgprints, routes, polls, dialogs, module_exports } = load({
+			note_statuses: ["Creating", "Creating", "Failed"],
+			shopify_preview: { state: "not_applicable", changes: [], reasons: [] },
+		});
+		module_exports.SHIPMENT_TIMING.poll_ms = 5;
+		const frm = make_frm(shipment_doc());
+		await handlers["Sales Order"].refresh(frm);
+		await settle();
+		shipment_button(frm).action();
+		await new Promise((resolve) => setTimeout(resolve, 2));
+		assert.equal(dialogs.length, 1, close);
+		const seen = polls.length;
+		if (close === "x") dialogs[0].hide();
+		else dialogs[0].config.secondary_action();
+		await new Promise((resolve) => setTimeout(resolve, 40));
+		assert.ok(polls.length <= seen + 1, close);
+		assert.equal(msgprints.length, 0, close);
+		assert.deepEqual(routes, close === "x" ? [] : [["Form", "Delivery Note", "DN-1"]], close);
+	}
+});
+
+test("a refusal shows the guard reason and the link to the note in the way, and waits for nothing", async () => {
+	const { handlers, msgprints, polls, dialogs, routes } = load({
+		shipment_result: {
+			status: "skipped",
+			message: "Delivery Note DN-9 already exists for this order.",
+			delivery_note: "DN-9",
+		},
+		shopify_preview: { state: "not_applicable", changes: [], reasons: [] },
+	});
+	const frm = make_frm(shipment_doc());
+	await handlers["Sales Order"].refresh(frm);
+	await settle();
+	await shipment_button(frm).action();
+	await settle();
+	assert.equal(msgprints.length, 1);
+	assert.match(msgprints[0].message, /already exists for this order/);
+	assert.match(msgprints[0].message, /href="\/app\/delivery-note\/DN-9"/);
+	assert.equal(polls.length, 0);
+	assert.equal(dialogs.length, 0);
+	assert.deepEqual(routes, []);
+});
+
+test("a data problem keeps the draft: the message names it and the note opens", async () => {
+	const { handlers, msgprints, routes } = load({
+		shipment_result: { status: "failed", message: "The receiver phone is missing.", delivery_note: "DN-2" },
+		shopify_preview: { state: "not_applicable", changes: [], reasons: [] },
+	});
+	const frm = make_frm(shipment_doc());
+	await handlers["Sales Order"].refresh(frm);
+	await settle();
+	await shipment_button(frm).action();
+	await settle();
+	assert.match(msgprints[0].message, /receiver phone is missing/);
+	assert.deepEqual(routes, [["Form", "Delivery Note", "DN-2"]]);
+});
+
+test("the refusal text is escaped", async () => {
+	const { handlers, msgprints } = load({
+		shipment_result: { status: "skipped", message: "<img src=x onerror=alert(1)>", delivery_note: null },
+		shopify_preview: { state: "not_applicable", changes: [], reasons: [] },
+	});
+	const frm = make_frm(shipment_doc());
+	await handlers["Sales Order"].refresh(frm);
+	await settle();
+	await shipment_button(frm).action();
+	await settle();
+	assert.doesNotMatch(msgprints[0].message, /<img/);
 });

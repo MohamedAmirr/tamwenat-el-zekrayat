@@ -649,6 +649,156 @@
 		frm.add_custom_button(__("Cancel Order"), () => open_cancel_order(frm));
 	}
 
+	// Create Shipment (one-step): the whole order's draft Delivery Note AND its Bosta shipment in one click
+	// (api/order_shipment.py, the same service as the list's bulk action). The server decides everything (guards,
+	// stock, permissions); this offers the button, then watches the note's Integration Status until Bosta answers.
+	// The partial or reviewed shipment stays Create > Delivery Note.
+	const CREATE_SHIPMENT_METHOD = "marketplace_integrations.api.order_shipment.create_shipment";
+	const SHIPMENT_STATE_METHOD = "marketplace_integrations.api.order_shipment.shipment_state";
+	// Exposed so a test can shorten the wait.
+	const SHIPMENT_TIMING = { poll_ms: 2000, limit: 30 };
+	// Mirrors BOSTA_EXCLUDED_PLATFORMS in integrations/bosta/constants.py (a test keeps the two equal).
+	const BOSTA_EXCLUDED_PLATFORMS = ["Noon", "Talabat"];
+	const SHIPMENT_OPEN_STATUSES = ["To Deliver", "To Deliver and Bill"];
+
+	function can_offer_create_shipment(frm) {
+		const doc = frm.doc;
+		if (!doc || doc.docstatus !== 1 || !doc.custom_marketplace_order || !doc.custom_marketplace_platform) return false;
+		if (BOSTA_EXCLUDED_PLATFORMS.includes(doc.custom_marketplace_platform)) return false;
+		if (!SHIPMENT_OPEN_STATUSES.includes(doc.status)) return false;
+		return Boolean(frappe.model.can_create("Delivery Note"));
+	}
+
+	function open_delivery_note(name) {
+		if (frappe.set_route) frappe.set_route("Form", "Delivery Note", name);
+	}
+
+	function note_link(name) {
+		const escape = frappe.utils.escape_html;
+		return `<a href="/app/delivery-note/${encodeURIComponent(name)}">${escape(name)}</a>`;
+	}
+
+	// One poll of the note until the Bosta create finished (accepted), failed (the note is kept, Unknown) or was
+	// refused for good (the server deleted the draft note: nothing to open).
+	// `wait.closed` is set when the dialog is closed (its X or "Close, keep sending"): the poll then stops quietly, with
+	// no later alert, message or jump to the note.
+	function watch_shipment(frm, note, dialog, attempt, wait) {
+		wait = wait || { closed: false };
+		return frappe
+			.call({ method: SHIPMENT_STATE_METHOD, args: { delivery_note: note } })
+			.then((r) => {
+				if (wait.closed) return null;
+				const values = (r && r.message) || {};
+				const state = values.state || "";
+				if (state === "accepted") {
+					dialog.hide();
+					frappe.show_alert({ message: __("The Bosta shipment was created."), indicator: "green" });
+					return open_delivery_note(note);
+				}
+				if (state === "discarded" || state === "missing") {
+					dialog.hide();
+					frappe.msgprint({
+						title: __("Bosta did not accept the shipment"),
+						indicator: "red",
+						message:
+							`<p>${frappe.utils.escape_html(
+								state === "discarded"
+									? __("Bosta did not accept the shipment: {0}. The Delivery Note {1} was deleted.", [values.reason || "", note])
+									: __("The Delivery Note {0} no longer exists.", [note])
+							)}</p>`,
+					});
+					return null;
+				}
+				if (state === "failed") {
+					dialog.hide();
+					frappe.msgprint({
+						title: __("Bosta did not accept the shipment"),
+						indicator: "red",
+						message:
+							`<p>${frappe.utils.escape_html(values.reason || __(values.status || ""))}</p>` +
+							`<p>${note_link(note)}</p>`,
+					});
+					return open_delivery_note(note);
+				}
+				if (attempt >= SHIPMENT_TIMING.limit) {
+					dialog.hide();
+					frappe.msgprint({
+						title: __("Still creating at Bosta"),
+						indicator: "orange",
+						message: `<p>${frappe.utils.escape_html(__("Bosta has not answered yet. Open the Delivery Note to see the result."))}</p><p>${note_link(note)}</p>`,
+					});
+					return open_delivery_note(note);
+				}
+				return new Promise((resolve) => setTimeout(resolve, SHIPMENT_TIMING.poll_ms)).then(() =>
+					wait.closed ? null : watch_shipment(frm, note, dialog, attempt + 1, wait)
+				);
+			})
+			.catch(() => dialog.hide());
+	}
+
+	function show_shipment_wait(frm, note) {
+		const wait = { closed: false };
+		const dialog = new frappe.ui.Dialog({
+			title: __("Creating the Bosta shipment"),
+			onhide() {
+				wait.closed = true;
+			},
+			fields: [
+				{
+					fieldtype: "HTML",
+					fieldname: "body",
+					options: `<p>${frappe.utils.escape_html(__("The Delivery Note {0} was created. Waiting for Bosta...", [note]))}</p>`,
+				},
+			],
+			secondary_action_label: __("Close, keep sending"),
+			secondary_action() {
+				dialog.hide();
+				open_delivery_note(note);
+			},
+		});
+		dialog.show();
+		return watch_shipment(frm, note, dialog, 0, wait);
+	}
+
+	function run_create_shipment(frm) {
+		return frappe
+			.call({
+				method: CREATE_SHIPMENT_METHOD,
+				type: "POST",
+				args: { sales_order: frm.doc.name },
+				freeze: true,
+				freeze_message: __("Creating the Delivery Note..."),
+			})
+			.then((r) => {
+				const result = (r && r.message) || {};
+				const message = frappe.utils.escape_html(result.message || "");
+				if (result.status === "sent") return show_shipment_wait(frm, result.delivery_note);
+				if (result.status === "failed" && result.delivery_note) {
+					// Only a REUSED draft (the person's own note) is kept with a failed row; a note this action made is
+					// deleted on a definite failure and the row has no note (the red message below).
+					frappe.msgprint({
+						title: __("The Delivery Note needs your attention"),
+						indicator: "orange",
+						message: `<p>${message}</p><p>${note_link(result.delivery_note)}</p>`,
+					});
+					return open_delivery_note(result.delivery_note);
+				}
+				// Refused (nothing was created, or the note that is in the way is linked) or failed with no note.
+				frappe.msgprint({
+					title: __("The shipment was not created"),
+					indicator: "red",
+					message: `<p>${message}</p>` + (result.delivery_note ? `<p>${note_link(result.delivery_note)}</p>` : ""),
+				});
+				return null;
+			})
+			.catch(() => {});
+	}
+
+	function add_create_shipment_button(frm) {
+		if (!can_offer_create_shipment(frm)) return;
+		frm.add_custom_button(__("Create Shipment"), () => run_create_shipment(frm));
+	}
+
 	function add_cancel_button(frm, option) {
 		frm.add_custom_button(
 			__("Cancel on {0}", [frappe.utils.escape_html(option.platform)]),
@@ -750,6 +900,7 @@
 		add_noon_item_edit_hint(frm);
 		add_edit_order_button(frm);
 		add_cancel_order_button(frm);
+		add_create_shipment_button(frm);
 		if (closed_by_click || is_closed_or_cancelled(frm.doc)) {
 			load_platform_option(frm, { prompt: closed_by_click, button: true });
 		}
@@ -780,6 +931,10 @@
 			load_noon_fulfillment,
 			add_edit_order_button,
 			add_cancel_order_button,
+			add_create_shipment_button,
+			can_offer_create_shipment,
+			run_create_shipment,
+			SHIPMENT_TIMING,
 			can_offer_cancel_order,
 			cancel_order_result_message,
 			can_offer_edit_order,

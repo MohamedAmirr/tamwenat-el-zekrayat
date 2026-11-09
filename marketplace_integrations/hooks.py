@@ -196,12 +196,16 @@ _RECHECK_EVENTS = {
 	"on_trash": _RECHECK_HANDLER,
 }
 # #391/#415: Delivery Note-first carrier shipments (the neutral contract in services/carrier_shipments.py,
-# one adapter per carrier). Nothing is queued on insert: Submit starts the shipment (api/carrier_shipments.py).
+# one adapter per carrier). A NEW Bosta note starts its shipment on insert (after_insert below, a queued job); other
+# carriers are started by the workflow's Create Shipment (api/carrier_shipments.py).
 # validate, before_submit, before_cancel and on_trash (#393) are deliberate refusals, so they do raise:
 # the carrier fields and items are locked once the shipment is started; no submit until it is Created; no
 # cancel or delete while its shipment is live. The Sales Order before_cancel refuses while a draft note has
 # a live shipment. Each only touches the Delivery Notes its carrier adapter claims.
 _CARRIER_GUARD = "marketplace_integrations.services.carrier_shipments.guard_cancel_or_delete"
+# on_trash: a DRAFT note with a live shipment is deleted only after the carrier cancelled it (guard_delete asks the
+# carrier first and refuses the delete when it does not confirm); everything else is guard_cancel_or_delete.
+_CARRIER_DELETE_GUARD = "marketplace_integrations.services.carrier_shipments.guard_delete"
 # Platform naming series (services/platform_naming.py): a marketplace order, its Delivery Note and its Sales
 # Invoice are named per platform (SO-SHP-, DN-NOON-, SI-TLB-...). Runs before the name is built; never raises.
 _PLATFORM_NAMING = {"before_naming": "marketplace_integrations.services.platform_naming.set_naming_series"}
@@ -216,10 +220,13 @@ doc_events = {
 			"marketplace_integrations.services.delivery_note_workflow.fix_state_after_submit",
 			"marketplace_integrations.services.carrier_shipments.after_submit",
 		],
-		# The guard comes first: it refuses a delete while the shipment is live.
-		"on_trash": [_CARRIER_GUARD, _RECHECK_HANDLER],
+		# The guard comes first: it cancels the shipment of a draft before the delete, or refuses when it cannot.
+		"on_trash": [_CARRIER_DELETE_GUARD, _RECHECK_HANDLER],
 		"before_cancel": _CARRIER_GUARD,
 		"validate": "marketplace_integrations.services.carrier_shipments.validate_delivery_note",
+		# One-step shipment: a NEW draft note of a carrier with REQUEST_ON_INSERT (Bosta) starts its shipment
+		# (a job queued after the commit). Other carriers and return notes are untouched.
+		"after_insert": "marketplace_integrations.services.carrier_shipments.request_shipment_on_insert",
 		"before_submit": "marketplace_integrations.services.carrier_shipments.require_shipment_created",
 	},
 	"Sales Invoice": {**_RECHECK_EVENTS, **_PLATFORM_NAMING},

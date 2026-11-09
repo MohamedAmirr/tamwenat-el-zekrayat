@@ -99,7 +99,7 @@
 					fieldname: "help",
 					options: `<p class="text-muted">${esc(
 						__(
-							"The cash on delivery amount is filled from each order. A fully paid order gets a Sales Invoice first and COD 0. Orders that cannot be shipped are skipped and listed with the reason."
+							"The cash on delivery amount is filled from each order. A fully paid order gets COD 0. Orders that cannot be shipped are skipped and listed with the reason."
 						)
 					)}</p><p class="text-muted">${esc(__("Sales Orders selected: {0}", [orders.length]))}</p>`,
 				},

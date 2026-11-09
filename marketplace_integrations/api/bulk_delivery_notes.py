@@ -13,6 +13,6 @@ from marketplace_integrations.services import bulk_delivery_notes
 @frappe.whitelist(methods=["POST"])
 def create_delivery_notes(sales_orders: str | list, shipping_method: str):
 	"""Queue the bulk run for the given Sales Order names (at most ``MAX_ORDERS``). Needs create and submit
-	permission on Delivery Note and Sales Invoice. Progress and the final summary arrive on the
+	permission on Delivery Note. Progress and the final summary arrive on the
 	``bulk_delivery_note_progress`` realtime event (sent at every stage: creating, waiting, done)."""
 	return bulk_delivery_notes.queue_bulk(sales_orders, shipping_method)

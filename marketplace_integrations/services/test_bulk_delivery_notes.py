@@ -18,6 +18,7 @@ from frappe.utils import add_days, nowdate, strip_html_tags
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as shipment
 from marketplace_integrations.services import bulk_delivery_notes as bulk
 from marketplace_integrations.services import carrier_log, carrier_shipments
+from marketplace_integrations.services import order_shipment as shipping
 from marketplace_integrations.tests.bosta_fixtures import BostaFixtureMixin, created
 from marketplace_integrations.tests.utils import make_role_user
 
@@ -100,6 +101,19 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		self._track(entry)
 		frappe.db.commit()
 
+	def _paid_invoice(self, order):
+		"""A submitted invoice of a paid order with its Payment Entry applied, made by someone else (the service
+		itself never makes one): the 'already invoiced' situations."""
+		from erpnext.selling.doctype.sales_order.sales_order import make_sales_invoice
+
+		invoice = make_sales_invoice(order.name)
+		invoice.update_stock = 0
+		invoice.allocate_advances_automatically = 1
+		invoice.only_include_allocated_payments = 1
+		invoice.insert()
+		invoice.submit()
+		return invoice.name
+
 	def _keep_invoices(self, order):
 		"""Register the invoices a run made so ``tearDown`` removes them (after the entries, before the order)."""
 		for name in bulk._invoices(order.name, 1) + bulk._invoices(order.name, 0):
@@ -114,16 +128,19 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 			created(tracking=f"TRK-{self.suffix}", delivery_id=f"D-{self.suffix}")
 		)
 
+	@staticmethod
+	def job_kwargs(call):
+		"""The job's own arguments: ``frappe.enqueue`` consumes its options before calling the method."""
+		options = ("queue", "timeout", "job_id", "deduplicate", "enqueue_after_commit")
+		return {key: value for key, value in call.kwargs.items() if key not in options}
+
 	def _run_job(self, which=-1):
 		"""The create job ``request_create`` queued (the ``which``-th), as the worker would run it."""
 		jobs = [
 			call for call in self.enqueue.call_args_list if call.args and call.args[0].endswith("run_create")
 		]
-		kwargs = jobs[which].kwargs
 		self._queue_bosta_answer()
-		carrier_shipments.run_create(
-			kwargs["delivery_note"], kwargs["log"], kwargs["lookup_first"], kwargs["submit_as"]
-		)
+		carrier_shipments.run_create(**self.job_kwargs(jobs[which]))
 
 	def _events(self, publish):
 		return [call.args[1] for call in publish.call_args_list if call.args[0] == bulk.EVENT]
@@ -138,10 +155,7 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 					continue
 				done.add(id(call))
 				self._queue_bosta_answer()
-				kwargs = call.kwargs
-				carrier_shipments.run_create(
-					kwargs["delivery_note"], kwargs["log"], kwargs["lookup_first"], kwargs["submit_as"]
-				)
+				carrier_shipments.run_create(**self.job_kwargs(call))
 
 		return sleep
 
@@ -177,7 +191,7 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			frappe.get_doc("Delivery Note", note.name).submit()
 
-	def test_a_fully_paid_order_gets_a_submitted_paid_invoice_and_cod_zero(self):
+	def test_a_fully_paid_order_ships_with_cod_zero_and_no_invoice_is_made_at_creation(self):
 		order = self._order(rate=555.5)
 		self._pay(order)
 
@@ -185,12 +199,9 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		self._keep_invoices(order)
 
 		self.assertEqual(result["status"], bulk.SENT, result)
-		invoice = frappe.get_doc("Sales Invoice", result["sales_invoice"])
-		self.assertEqual(invoice.docstatus, 1)
-		self.assertEqual(invoice.update_stock, 0)
-		# Trusted after submit and reload: the advances are allocated and nothing is outstanding.
-		self.assertGreater(invoice.total_advance, 0)
-		self.assertEqual(round(invoice.outstanding_amount, 2), 0)
+		# Decided 2026-11-09: a Bosta order is invoiced when the shipment is Delivered, never at creation.
+		self.assertIsNone(result["sales_invoice"])
+		self.assertEqual(bulk._invoices(order.name, 1) + bulk._invoices(order.name, 0), [])
 		note = frappe.get_doc("Delivery Note", result["delivery_note"])
 		self.assertEqual(note.custom_cod_amount, 0)
 		self.assertEqual(note.custom_cod_confirmed, 1)
@@ -210,7 +221,7 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 			frappe.db.get_value("Delivery Note", result["delivery_note"], "custom_cod_amount"), 355.5
 		)
 
-	def test_the_payment_plan_basis_is_the_grand_total_and_a_paid_order_always_gets_an_invoice(self):
+	def test_the_payment_plan_basis_is_the_grand_total(self):
 		order = self._order(rate=100)
 
 		def plan(**values):
@@ -218,14 +229,13 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 			return bulk.payment_plan(frappe.get_doc("Sales Order", order.name))
 
 		unpaid = plan(advance_paid=0)
-		self.assertEqual(
-			(unpaid["cod"], unpaid["needs_invoice"], unpaid["paid_in_full"]), (100, False, False)
-		)
+		self.assertEqual((unpaid["cod"], unpaid["paid_in_full"]), (100, False))
+		self.assertNotIn("needs_invoice", unpaid)
 		exact = plan(advance_paid=100)
-		self.assertEqual((exact["cod"], exact["needs_invoice"], exact["paid_in_full"]), (0, True, True))
-		# More recorded than the total: still paid in full, still an invoice, never COD 0 without one.
+		self.assertEqual((exact["cod"], exact["paid_in_full"]), (0, True))
+		# More recorded than the total: still paid in full.
 		more = plan(advance_paid=120)
-		self.assertEqual((more["cod"], more["needs_invoice"]), (0, True))
+		self.assertEqual((more["cod"], more["paid_in_full"]), (0, True))
 
 	def test_fully_paid_is_judged_by_erpnexts_rounded_measure(self):
 		order = self._order(rate=100)
@@ -237,21 +247,20 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		# Rounds DOWN: grand 494.21, rounded 494; ERPNext caps the payment at 494, which is fully paid.
 		down = {"grand_total": 494.21, "rounded_total": 494}
 		paid = plan(**down, advance_paid=494)
-		self.assertEqual((paid["cod"], paid["needs_invoice"], paid["paid_in_full"]), (0, True, True))
+		self.assertEqual((paid["cod"], paid["paid_in_full"]), (0, True))
 		partial = plan(**down, advance_paid=200)
-		self.assertEqual((partial["cod"], partial["needs_invoice"]), (294.21, False))
+		self.assertEqual((partial["cod"], partial["paid_in_full"]), (294.21, False))
 		self.assertEqual(plan(**down, advance_paid=0)["cod"], 494.21)
 		# Rounds UP: grand 555.5, rounded 556.
 		up = {"grand_total": 555.5, "rounded_total": 556}
-		self.assertEqual(plan(**up, advance_paid=556)["needs_invoice"], True)
+		self.assertEqual(plan(**up, advance_paid=556)["paid_in_full"], True)
 		self.assertEqual(plan(**up, advance_paid=200)["cod"], 355.5)
 		self.assertEqual(plan(**up, advance_paid=0)["cod"], 555.5)
-		# Paid to the grand total only: just a rounding difference is left, and COD 0 without an invoice is never
-		# shipped.
+		# Paid to the grand total only: just a rounding difference is left, and COD 0 for it is never shipped.
 		with self.assertRaises(bulk.Refused):
 			plan(**up, advance_paid=555.5)
 
-	def test_a_paid_order_that_rounds_down_gets_an_invoice_and_cod_zero(self):
+	def test_a_paid_order_that_rounds_down_ships_with_cod_zero_and_no_invoice(self):
 		order = self._order(rate=494.21)
 		order.reload()
 		if not order.rounded_total or order.rounded_total == order.grand_total:
@@ -262,12 +271,9 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		self._keep_invoices(order)
 
 		self.assertEqual(result["status"], bulk.SENT, result)
-		self.assertTrue(result["sales_invoice"])
+		self.assertIsNone(result["sales_invoice"])
 		self.assertEqual(
 			frappe.db.get_value("Delivery Note", result["delivery_note"], "custom_cod_amount"), 0
-		)
-		self.assertEqual(
-			round(frappe.db.get_value("Sales Invoice", result["sales_invoice"], "outstanding_amount"), 2), 0
 		)
 
 	def test_a_zero_total_order_is_refused(self):
@@ -279,7 +285,7 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 	def test_an_existing_paid_invoice_is_reused_not_duplicated(self):
 		order = self._order(rate=555.5)
 		self._pay(order)
-		first = bulk._make_paid_invoice(frappe.get_doc("Sales Order", order.name))
+		first = self._paid_invoice(order)
 		frappe.db.commit()
 		self._keep_invoices(order)
 
@@ -295,7 +301,7 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 	def test_more_than_one_submitted_invoice_blocks_the_order_with_a_reason(self):
 		order = self._order()
 		with patch.object(
-			bulk,
+			shipping,
 			"_invoices",
 			side_effect=lambda name, docstatus: ["SINV-A", "SINV-B"] if docstatus == 1 else [],
 		):
@@ -325,7 +331,7 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 	def test_an_invoice_with_a_credit_note_blocks_the_order(self):
 		order = self._order(rate=555.5)
 		self._pay(order)
-		bulk._make_paid_invoice(frappe.get_doc("Sales Order", order.name))
+		self._paid_invoice(order)
 		frappe.db.commit()
 		self._keep_invoices(order)
 		real = frappe.db.exists
@@ -410,15 +416,70 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 					self.make_note(self.make_order())
 			self.assertIn(expected, strip_html_tags(str(single.exception)))
 
-	def test_an_order_with_a_live_delivery_note_is_skipped(self):
+	def test_an_order_with_a_shipment_note_is_skipped_with_a_link_to_it(self):
 		order = self._order()
 		note = self.make_note(order)
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Created")
 
 		result = bulk.process_order(order.name)
 
 		self.assertEqual(result["status"], bulk.SKIPPED)
 		self.assertIn(note.name, result["message"])
+		self.assertEqual(result["delivery_note"], note.name)
 		self.assertEqual(self._note_of(order), note.name)
+		self.assertFalse(self.enqueue.called)
+
+	def test_a_submitted_note_also_refuses_with_a_link(self):
+		order = self._order()
+		note = self.make_note(order)
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Created")
+		frappe.db.commit()
+		self.submit_note(note.name)
+
+		result = bulk.process_order(order.name)
+
+		self.assertEqual(result["status"], bulk.SKIPPED)
+		self.assertEqual(result["delivery_note"], note.name)
+
+	def test_a_live_draft_without_a_shipment_is_reused_not_duplicated(self):
+		order = self._order()
+		note = self.make_note(order)
+
+		result = bulk.process_order(order.name)
+
+		self.assertEqual(result["status"], bulk.SENT, result)
+		self.assertEqual(result["delivery_note"], note.name)
+		self.assertEqual(
+			frappe.get_all("Delivery Note Item", filters={"against_sales_order": order.name}, pluck="parent", distinct=True),
+			[note.name],
+		)
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "custom_integration_status"), "Creating")
+		self.assertEqual(len(self._create_jobs()), 1)
+
+	def test_a_second_run_after_the_first_made_the_shipment_makes_nothing_new(self):
+		order = self._order()
+		first = bulk.process_order(order.name)
+		self.assertEqual(first["status"], bulk.SENT, first)
+
+		second = bulk.process_order(order.name)
+
+		self.assertEqual(second["status"], bulk.SKIPPED, second)
+		self.assertEqual(second["delivery_note"], first["delivery_note"])
+		self.assertEqual(len(self._create_jobs()), 1)
+
+	def test_a_draft_that_is_not_a_whole_order_bosta_note_is_not_reused(self):
+		order = self._order(qty=2)
+		note = self.make_note(order)
+		frappe.db.set_value("Delivery Note Item", {"parent": note.name}, "qty", 1)
+
+		result = bulk.process_order(order.name)
+
+		self.assertEqual(result["status"], bulk.SKIPPED, result)
+		self.assertIn("not a Bosta note for the whole order", result["message"])
+		self.assertEqual(result["delivery_note"], note.name)
+
+	def _create_jobs(self):
+		return [call for call in self.enqueue.call_args_list if call.args and call.args[0].endswith("run_create")]
 
 	def test_a_missing_bosta_supplier_skips_the_order(self):
 		order = self._order()
@@ -430,44 +491,17 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 
 	# -- nothing half-done ------------------------------------------------------------------
 
-	def test_an_invoice_failure_ships_nothing_and_leaves_no_note(self):
+	def test_a_note_failure_leaves_no_note_and_no_invoice(self):
 		order = self._order()
 		self._pay(order)
-		with patch.object(
-			bulk, "_make_paid_invoice", side_effect=frappe.ValidationError("No income account")
-		):
+		with patch.object(shipping, "_make_note", side_effect=frappe.ValidationError("No address")):
 			result = bulk.process_order(order.name)
+		self._keep_invoices(order)
 
 		self.assertEqual(result["status"], bulk.FAILED)
-		self.assertIn("No income account", result["message"])
+		self.assertEqual(bulk._invoices(order.name, 1) + bulk._invoices(order.name, 0), [])
 		self.assertIsNone(self._note_of(order))
-		self.assertEqual(bulk._invoices(order.name, 1), [])
 		self.assertFalse(self.enqueue.called)
-
-	def test_a_note_failure_rolls_the_invoice_back(self):
-		order = self._order()
-		self._pay(order)
-		with patch.object(bulk, "_make_note", side_effect=frappe.ValidationError("No address")):
-			result = bulk.process_order(order.name)
-		self._keep_invoices(order)
-
-		self.assertEqual(result["status"], bulk.FAILED)
-		self.assertEqual(bulk._invoices(order.name, 1), [])
-		self.assertIsNone(self._note_of(order))
-
-	def test_a_paid_invoice_that_stays_unpaid_is_rolled_back(self):
-		order = self._order()
-		self._pay(order, amount=200)
-		# Wrongly judged fully paid: the submitted invoice keeps an outstanding amount, so nothing is shipped.
-		plan = {"cod": 0, "paid_in_full": True, "needs_invoice": True, "invoice": None}
-		with patch.object(bulk, "payment_plan", return_value=plan):
-			result = bulk.process_order(order.name)
-		self._keep_invoices(order)
-
-		self.assertEqual(result["status"], bulk.FAILED)
-		self.assertIn("was not fully paid", result["message"])
-		self.assertEqual(bulk._invoices(order.name, 1), [])
-		self.assertIsNone(self._note_of(order))
 
 	def test_a_cod_above_the_bosta_limit_fails_the_order_without_a_note(self):
 		order = self._order(rate=30001)
@@ -491,28 +525,59 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		submit.assert_not_called()
 		self.assertEqual(frappe.db.get_value("Delivery Note", result["delivery_note"], "docstatus"), 0)
 
-	def test_a_refused_shipment_leaves_the_draft_and_the_invoice_and_is_never_submitted(self):
-		for answer in (carrier_log.Failed("Bosta refused the city"), carrier_log.Unknown("no answer")):
+	def test_a_definite_bosta_refusal_deletes_the_draft_and_an_unknown_answer_keeps_it(self):
+		for answer, kept in ((carrier_log.Failed("Bosta refused the city"), False), (carrier_log.Unknown("no answer"), True)):
 			order = self._order(rate=555.5)
 			self._pay(order)
 			result = bulk.process_order(order.name)
 			self._keep_invoices(order)
 			self.assertEqual(result["status"], bulk.SENT, result)
+			# the create job was queued with the discard flag: this action made the note
+			self.assertTrue(self._create_jobs()[-1].kwargs.get("discard_on_failure"))
 
 			with patch.object(shipment, "create_remote", side_effect=answer):
 				self._run_job()
 
-			values = frappe.db.get_value(
-				"Delivery Note",
-				result["delivery_note"],
-				["docstatus", "custom_integration_status"],
-				as_dict=True,
-			)
-			self.assertEqual(values.docstatus, 0)
-			self.assertIn(values.custom_integration_status, ("Creation Failed", "Creation Unknown"))
-			self.assertEqual(frappe.db.get_value("Sales Invoice", result["sales_invoice"], "docstatus"), 1)
+			self.assertEqual(bool(frappe.db.exists("Delivery Note", result["delivery_note"])), kept, answer)
+			if kept:
+				values = frappe.db.get_value(
+					"Delivery Note", result["delivery_note"], ["docstatus", "custom_integration_status"], as_dict=True
+				)
+				self.assertEqual((values.docstatus, values.custom_integration_status), (0, "Creation Unknown"))
+			else:
+				notice = carrier_shipments.discarded_notice(result["delivery_note"])
+				self.assertIn("Bosta refused the city", notice["reason"])
+				self.assertEqual(notice["orders"], [order.name])
+				comments = frappe.get_all(
+					"Comment",
+					filters={"reference_doctype": "Sales Order", "reference_name": order.name, "comment_type": "Comment"},
+					pluck="content",
+				)
+				self.assertTrue(any("was deleted because the Bosta shipment" in text for text in comments))
+			self.assertIsNone(result["sales_invoice"])
 
-	def test_when_bosta_cannot_be_started_the_draft_note_is_kept_with_the_reason(self):
+	def test_a_reused_draft_is_kept_after_a_definite_refusal(self):
+		order = self._order()
+		note = self.make_note(order)
+		result = bulk.process_order(order.name)
+		self.assertEqual((result["status"], result["delivery_note"]), (bulk.SENT, note.name), result)
+		self.assertNotIn("discard_on_failure", self._create_jobs()[-1].kwargs)
+
+		with patch.object(shipment, "create_remote", side_effect=carrier_log.Failed("Bosta refused the city")):
+			self._run_job()
+
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "custom_integration_status"), "Creation Failed")
+
+	def test_a_manual_run_create_without_the_flag_keeps_the_note(self):
+		order = self._order()
+		note = self.make_note(order)
+		carrier_shipments.request_create(note.name)
+		with patch.object(shipment, "create_remote", side_effect=carrier_log.Failed("Bosta refused the city")):
+			self._run_job()
+
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "custom_integration_status"), "Creation Failed")
+
+	def test_when_bosta_cannot_be_started_the_note_this_run_made_is_deleted_with_the_reason(self):
 		order = self._order()
 		with patch.object(
 			carrier_shipments,
@@ -522,11 +587,20 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 			result = bulk.process_order(order.name)
 
 		self.assertEqual(result["status"], bulk.FAILED)
-		self.assertEqual(frappe.db.get_value("Delivery Note", result["delivery_note"], "docstatus"), 0)
-		self.assertIn(result["delivery_note"], result["message"])
+		self.assertIsNone(result["delivery_note"])
+		self.assertIsNone(self._note_of(order))
+		self.assertIn("was deleted", result["message"])
 		self.assertIn("The receiver phone is missing.", result["message"])
 
-	def test_a_missing_phone_is_refused_with_the_single_forms_text_and_the_draft_is_kept(self):
+	def test_an_unexpected_error_while_starting_keeps_the_draft(self):
+		order = self._order()
+		with patch.object(carrier_shipments, "request_create", side_effect=RuntimeError("boom")):
+			result = bulk.process_order(order.name)
+
+		self.assertEqual(result["status"], bulk.FAILED)
+		self.assertEqual(result["delivery_note"], self._note_of(order))
+
+	def test_a_missing_phone_is_refused_with_the_single_forms_text_and_the_note_is_deleted(self):
 		order = self._order(phone="")
 		self._pay(order)
 
@@ -534,24 +608,169 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		self._keep_invoices(order)
 
 		self.assertEqual(result["status"], bulk.FAILED, result)
-		draft = frappe.get_doc("Delivery Note", result["delivery_note"])
-		self.assertEqual(draft.docstatus, 0)
-		with self.assertRaises(frappe.ValidationError) as single:
-			shipment.validate_ready(draft)
-		self.assertIn(strip_html_tags(str(single.exception)), result["message"])
-		# the paid order keeps its invoice
-		self.assertTrue(result["sales_invoice"])
-		self.assertEqual(frappe.db.get_value("Sales Invoice", result["sales_invoice"], "docstatus"), 1)
+		self.assertIsNone(result["delivery_note"])
+		self.assertIsNone(self._note_of(order))
+		self.assertIn("phone", result["message"].lower())
+		self.assertIn("was deleted", result["message"])
+		# no invoice was made
+		self.assertIsNone(result["sales_invoice"])
+		self.assertEqual(bulk._invoices(order.name, 1), [])
 
-	def test_a_missing_city_leaves_a_named_draft_for_the_person(self):
+	def test_a_missing_city_deletes_the_note_and_asks_for_the_address(self):
 		order = self._order()
 		with patch.object(shipment, "autofill_city", return_value=False):
 			result = bulk.process_order(order.name)
 
 		self.assertEqual(result["status"], bulk.FAILED)
-		self.assertIn("pick the city", result["message"])
+		self.assertIn("Correct the address", result["message"])
+		self.assertIsNone(result["delivery_note"])
+		self.assertIsNone(self._note_of(order))
+
+	# -- the insert trigger (native Create > Delivery Note) and the Workflow's Create Shipment ---------
+
+	def test_the_insert_trigger_keeps_its_note_when_the_checks_refuse(self):
+		order = self._order()
+		note = self.make_note(order, auto_request=True)
+		trigger = [c for c in self.enqueue.call_args_list if c.args and c.args[0].endswith("run_request_on_insert")]
+		self.assertEqual(len(trigger), 1)
+
+		with patch.object(shipment, "validate_ready", side_effect=frappe.ValidationError("The receiver phone is missing.")):
+			carrier_shipments.run_request_on_insert(**self.job_kwargs(trigger[0]))
+
+		self.assertTrue(frappe.db.exists("Delivery Note", note.name))
+		self.assertIn(
+			"The receiver phone is missing.", frappe.db.get_value("Delivery Note", note.name, "custom_last_integration_error")
+		)
+
+	def test_the_insert_trigger_job_has_no_discard_flags_and_a_bosta_refusal_keeps_the_note(self):
+		order = self._order()
+		note = self.make_note(order, auto_request=True)
+		trigger = [c for c in self.enqueue.call_args_list if c.args and c.args[0].endswith("run_request_on_insert")]
+		carrier_shipments.run_request_on_insert(**self.job_kwargs(trigger[0]))
+		kwargs =self._create_jobs()[-1].kwargs
+		self.assertNotIn("discard_on_failure", kwargs)
+		self.assertNotIn("notify_discard", kwargs)
+
+		with patch.object(shipment, "create_remote", side_effect=carrier_log.Failed("Bosta refused the address")):
+			self._run_job()
+
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "custom_integration_status"), "Creation Failed")
+
+	def test_a_one_step_note_gets_exactly_one_shipment_request(self):
+		order = self._order()
+
+		result = bulk.process_order(order.name)
+
+		self.assertEqual(result["status"], bulk.SENT, result)
+		self.assertEqual(len(self._create_jobs()), 1)
+		self.assertEqual(
+			[c for c in self.enqueue.call_args_list if c.args and c.args[0].endswith("run_request_on_insert")], []
+		)
+
+	def test_a_timestamp_mismatch_while_starting_keeps_the_note(self):
+		order = self._order()
+		with patch.object(carrier_shipments, "request_create", side_effect=frappe.TimestampMismatchError("changed")):
+			result = bulk.process_order(order.name)
+
+		self.assertEqual(result["status"], bulk.FAILED)
+		self.assertTrue(frappe.db.exists("Delivery Note", result["delivery_note"]))
+		self.assertNotIn("was deleted", result["message"])
+
+	def test_a_user_without_delete_permission_keeps_the_note_after_a_refusal(self):
+		email, _role = make_role_user(self, "Bulk No Delete", STAFF_PERMISSIONS)
+		order = self._order()
+		with patch.object(
+			carrier_shipments, "request_create", side_effect=frappe.ValidationError("The receiver phone is missing.")
+		):
+			result = self._as(email, bulk.process_order, order.name)
+
+		self.assertEqual(result["status"], bulk.FAILED)
 		self.assertEqual(result["delivery_note"], self._note_of(order))
-		self.assertEqual(frappe.db.get_value("Delivery Note", result["delivery_note"], "docstatus"), 0)
+		self.assertIsNotNone(result["delivery_note"])
+		self.assertIn("The receiver phone is missing.", result["message"])
+
+	def test_a_bosta_refusal_keeps_the_note_when_the_requester_cannot_delete_it(self):
+		email, _role = make_role_user(self, "Bulk No Delete Job", STAFF_PERMISSIONS)
+		order = self._order()
+		result = self._as(email, bulk.process_order, order.name)
+		self.assertEqual(result["status"], bulk.SENT, result)
+
+		with patch.object(shipment, "create_remote", side_effect=carrier_log.Failed("Bosta refused the city")):
+			self._run_job()
+
+		values = frappe.db.get_value(
+			"Delivery Note", result["delivery_note"], ["custom_integration_status", "custom_last_integration_error"], as_dict=True
+		)
+		self.assertEqual(values.custom_integration_status, "Creation Failed")
+		self.assertIn("Bosta refused the city", values.custom_last_integration_error)
+		self.assertIn("could not be removed", values.custom_last_integration_error)
+
+	def test_the_insert_trigger_keeps_the_note_on_an_unknown_answer(self):
+		order = self._order()
+		note = self.make_note(order, auto_request=True)
+		trigger = [c for c in self.enqueue.call_args_list if c.args and c.args[0].endswith("run_request_on_insert")]
+		carrier_shipments.run_request_on_insert(**self.job_kwargs(trigger[0]))
+
+		with patch.object(shipment, "create_remote", side_effect=carrier_log.Unknown("no answer")):
+			self._run_job()
+
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "custom_integration_status"), "Creation Unknown")
+
+	def test_the_workflows_create_shipment_never_deletes_a_note_a_person_made(self):
+		from marketplace_integrations.services import delivery_note_workflow as workflow
+
+		order = self._order()
+		note = self.make_note(order)
+		with patch.object(shipment, "validate_ready", side_effect=frappe.ValidationError("The receiver phone is missing.")):
+			workflow.start_shipment(frappe._dict(name=note.name))
+
+		self.assertTrue(frappe.db.exists("Delivery Note", note.name))
+		self.assertIn(
+			"The receiver phone is missing.", frappe.db.get_value("Delivery Note", note.name, "custom_last_integration_error")
+		)
+
+	def test_a_submitted_or_started_note_is_never_discarded(self):
+		order = self._order()
+		note = self.make_note(order)
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Creation Unknown")
+		frappe.db.commit()
+
+		self.assertFalse(carrier_shipments.discard_draft(note.name, "x"))
+		self.assertTrue(frappe.db.exists("Delivery Note", note.name))
+
+	def test_the_outcome_of_a_deleted_note_is_answered_only_to_the_user_who_asked(self):
+		from marketplace_integrations.api import order_shipment as api
+
+		order = self._order()
+		note = self.make_note(order)
+		name = note.name
+		self.assertTrue(carrier_shipments.discard_draft(name, "Bosta refused", requested_by="Administrator"))
+
+		answer = api.shipment_state(name)
+		self.assertEqual((answer["state"], answer["reason"]), ("discarded", "Bosta refused"))
+		email = self.make_user("Stock User")
+		frappe.set_user(email)
+		try:
+			other = api.shipment_state(name)
+			self.assertEqual((other["state"], other["reason"]), ("missing", ""))
+			self.assertEqual(other, api.shipment_state("MI-NEVER-EXISTED"))
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_the_wait_reports_a_deleted_note_as_failed_with_its_reason_and_no_link(self):
+		order = self._order()
+		result = bulk.process_order(order.name)
+		with patch.object(shipment, "create_remote", side_effect=carrier_log.Failed("Bosta refused the address")):
+			self._run_job()
+		rows = [result]
+
+		with patch.object(bulk, "WAIT_SECONDS", 0):
+			bulk.wait_for_bosta(rows, lambda: None)
+
+		self.assertEqual(rows[0]["status"], bulk.FAILED)
+		self.assertIsNone(rows[0]["delivery_note"])
+		self.assertIn("Bosta refused the address", rows[0]["message"])
+		self.assertIn("was deleted", rows[0]["message"])
 
 	# -- the job: progress, wait, summary -----------------------------------------------------
 
@@ -626,7 +845,7 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		self.assertIn("is not a marketplace order", doc["email_content"])
 		self.assertEqual(doc["document_type"], "Delivery Note")
 
-	def test_a_shipment_bosta_refuses_is_a_failure_with_its_reason_and_the_draft_kept(self):
+	def test_a_shipment_bosta_refuses_is_a_failure_with_its_reason_and_the_draft_deleted(self):
 		order = self._order(rate=555.5)
 		self._pay(order)
 
@@ -643,14 +862,14 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 
 		self.assertEqual(results[0]["status"], bulk.FAILED)
 		self.assertIn("Bosta did not accept the shipment: Bosta refused the address", results[0]["message"])
-		self.assertEqual(frappe.db.get_value("Delivery Note", results[0]["delivery_note"], "docstatus"), 0)
-		self.assertEqual(frappe.db.get_value("Sales Invoice", results[0]["sales_invoice"], "docstatus"), 1)
+		self.assertIn("was deleted", results[0]["message"])
+		self.assertIsNone(results[0]["delivery_note"])
+		self.assertIsNone(self._note_of(order))
+		self.assertIsNone(results[0]["sales_invoice"])
 		summary = self._events(publish)[-1]["summary"]
 		self.assertEqual((summary["accepted"], summary["failed"]), (0, 1))
 		content = notify.call_args.args[1]["email_content"]
 		self.assertIn("Bosta refused the address", content)
-		self.assertIn(results[0]["delivery_note"], content)
-		self.assertIn(results[0]["sales_invoice"], content)
 
 	def test_an_order_bosta_has_not_answered_yet_is_reported_still_creating(self):
 		order = self._order()
@@ -804,6 +1023,22 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		frappe.db.commit()
 		return frappe.get_doc("Sales Order", order.name), warehouse
 
+	def _short_note(self, order):
+		"""A saved draft note of an order that is short of stock. A NEW Bosta note is refused at insert by the stock
+		check (``validate_delivery_note``), so the check is switched off for the insert only: the tests then judge the
+		stock of a draft that already exists (the form's Submit, a retry, an edit made after the draft was saved)."""
+		with patch.object(carrier_shipments, "check_deliverable"):
+			return self.make_note(order)
+
+	def test_a_new_bosta_note_short_of_stock_is_refused_at_insert(self):
+		order, _warehouse = self._stock_order(qty=3, in_stock=2)
+
+		with self.assertRaises(carrier_shipments.NotDeliverable):
+			self.make_note(order)
+		frappe.clear_messages()
+
+		self.assertIsNone(bulk.live_note(order.name))
+
 	def tearDown(self):
 		super().tearDown()
 		# Posted stock rows cannot be removed through the ORM (the Material Receipt and the ledger rows of the
@@ -873,7 +1108,7 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 
 	def test_the_form_submit_of_a_note_short_of_stock_is_refused_with_the_same_text_and_no_request_row(self):
 		order, _warehouse = self._stock_order(qty=3, in_stock=2)
-		note = self.make_note(order)
+		note = self._short_note(order)
 		email = self._staff()
 
 		with self.assertRaises(frappe.ValidationError):
@@ -903,7 +1138,7 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 
 		self.assertTrue(carrier_shipments.request_create(note.name)["queued"])
 
-	def test_a_bundle_short_of_a_component_is_skipped_by_bulk_and_refused_by_the_form_with_the_same_text(self):
+	def test_the_one_step_action_refuses_a_product_bundle_order_and_the_form_judges_the_components(self):
 		part, other = self._stock_item(), self._stock_item()
 		# 3 bundles need 6 of `part` (2 each) and 3 of `other`; only 5 of `part` are in stock.
 		order, warehouse = self._bundle_order(3, {part: 2, other: 1}, in_stock={part: 5, other: 10})
@@ -913,22 +1148,26 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		result = self._as(email, bulk.process_order, order.name)
 		self._keep_invoices(order)
 
+		# The one-step action skips any order with a Product Bundle item, whatever the stock.
 		self.assertEqual(result["status"], bulk.SKIPPED, result)
-		self.assertIn(f"Item {part}: 6 to deliver but only 5 in stock in warehouse {warehouse}", result["message"])
-		self.assertNotIn(other, result["message"])
+		self.assertIn("Product Bundle", result["message"])
 		self.assertIsNone(result["delivery_note"])
 		self.assertIsNone(bulk.live_note(order.name))
 		self.assertEqual(bulk._invoices(order.name, 0) + bulk._invoices(order.name, 1), [])
 		self.assertEqual(self.http.sent(), [])
 		self.assertEqual([c for c in self.enqueue.call_args_list if c.args[0].endswith("run_create")], [])
 
-		# The form: the saved draft carries the packed items; the same text, no request row, no Bosta call.
-		note = self.make_note(order)
+		# The form: a draft saved earlier carries the packed items; the components are judged, no request row, no Bosta call.
+		note = self._short_note(order)
 		self.assertEqual(len(note.packed_items), 2)
 		with self.assertRaises(frappe.ValidationError) as caught:
 			self._as(self._staff(), carrier_shipments.request_create, note.name)
 		frappe.clear_messages()
-		self.assertEqual(strip_html_tags(str(caught.exception)).strip(), result["message"])
+		self.assertIn(
+			f"Item {part}: 6 to deliver but only 5 in stock in warehouse {warehouse}",
+			strip_html_tags(str(caught.exception)),
+		)
+		self.assertNotIn(other, strip_html_tags(str(caught.exception)))
 		self.assertFalse(
 			frappe.db.exists(
 				"Integration Request", {"reference_doctype": "Delivery Note", "reference_docname": note.name}
@@ -936,7 +1175,7 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		)
 		self.assertEqual(self.http.sent(), [])
 
-	def test_a_bundle_with_enough_component_stock_is_sent_by_bulk_and_queued_by_the_form(self):
+	def test_a_bundle_with_enough_component_stock_is_queued_by_the_form_and_still_skipped_by_the_one_step_action(self):
 		part, other = self._stock_item(), self._stock_item()
 		order, _warehouse = self._bundle_order(3, {part: 2, other: 1}, in_stock={part: 6, other: 3})
 		note = self.make_note(order)
@@ -947,13 +1186,14 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		result = self._as(email, bulk.process_order, second.name)
 		self._keep_invoices(second)
 
-		self.assertEqual(result["status"], bulk.SENT, result)
+		self.assertEqual(result["status"], bulk.SKIPPED, result)
+		self.assertIn("Product Bundle", result["message"])
 
 	def test_a_component_used_by_a_bundle_and_a_plain_row_is_checked_together(self):
 		part = self._stock_item()
 		# 2 bundles use 2 `part`, the plain row asks for 2 more: 4 in all, 3 in stock (each alone would pass).
 		order, warehouse = self._bundle_order(2, {part: 1}, extra_rows=[(part, 2)], in_stock={part: 3})
-		note = self.make_note(order)
+		note = self._short_note(order)
 
 		with self.assertRaises(frappe.ValidationError) as caught:
 			carrier_shipments.check_deliverable(frappe.get_doc("Delivery Note", note.name))
@@ -963,7 +1203,7 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 
 	def test_a_negative_bin_reads_as_zero_in_the_message(self):
 		order, warehouse = self._stock_order(qty=3, in_stock=0)
-		note = self.make_note(order)
+		note = self._short_note(order)
 		from erpnext.stock.utils import get_bin
 
 		frappe.db.set_value("Bin", get_bin(self._stock_items[-1], warehouse).name, "actual_qty", -2)
@@ -977,7 +1217,7 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 	def test_a_retry_with_a_stored_carrier_reference_skips_the_stock_check(self):
 		# Creation Unknown: the shipment may exist at the carrier, so the lookup-first retry must reach it.
 		order, _warehouse = self._stock_order(qty=3, in_stock=0)
-		note = self.make_note(order)
+		note = self._short_note(order)
 		frappe.db.set_value(
 			"Delivery Note",
 			note.name,
@@ -992,11 +1232,11 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 
 	def test_an_item_that_allows_negative_stock_is_not_refused(self):
 		order, _warehouse = self._stock_order(qty=3, in_stock=0)
-		note = self.make_note(order)
 		item = self._stock_items[-1]
 		frappe.db.set_value("Item", item, "allow_negative_stock", 1)
 		frappe.clear_document_cache("Item", item)
 		self.addCleanup(frappe.clear_document_cache, "Item", item)
+		note = self.make_note(order)  # accepted at insert: the item allows negative stock
 
 		carrier_shipments.check_deliverable(frappe.get_doc("Delivery Note", note.name))
 
@@ -1073,7 +1313,7 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 	def test_an_unexpected_error_in_one_order_is_a_failed_row_not_a_crash(self):
 		first = self._order(platform=None)
 		second = self._order(platform=None)
-		real = bulk.ship_order
+		real = shipping.ship_order
 
 		def flaky(name, method):
 			if name == first.name:
@@ -1081,7 +1321,7 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 			return real(name, method)
 
 		with (
-			patch.object(bulk, "ship_order", side_effect=flaky),
+			patch.object(shipping, "ship_order", side_effect=flaky),
 			patch("frappe.publish_realtime"),
 			patch("frappe.log_error") as log_error,
 			patch.object(bulk, "enqueue_create_notification"),
@@ -1138,14 +1378,14 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 			frappe.set_user("Administrator")
 		self.assertFalse(self.enqueue.called)
 
-	def test_a_user_with_only_note_rights_is_refused_for_the_invoice(self):
+	def test_a_user_with_only_note_rights_is_accepted_because_no_invoice_is_made(self):
+		# 2026-11-09: the one-step flow makes no Sales Invoice, so only the Delivery Note rights are asked for.
 		email, _role = make_role_user(
 			self, "Bulk Notes", {"Delivery Note": ["create", "submit"], "Sales Order": ["read"]}
 		)
 		frappe.set_user(email)
 		try:
-			with self.assertRaises(frappe.PermissionError):
-				bulk.check_permissions()
+			bulk.check_permissions()
 		finally:
 			frappe.set_user("Administrator")
 
@@ -1174,8 +1414,8 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual(result["status"], bulk.SENT, result)
 		self.assertEqual(self.enqueue.call_args.kwargs["submit_as"], email)
 
-	def test_the_users_own_invoice_rights_apply_even_though_the_mapper_ignores_permissions(self):
-		perms = {**STAFF_PERMISSIONS, "Sales Invoice": ["read"]}
+	def test_a_paid_order_ships_for_a_user_without_invoice_rights_and_makes_no_invoice(self):
+		perms = {k: v for k, v in STAFF_PERMISSIONS.items() if k != "Sales Invoice"}
 		email, _role = make_role_user(self, "Bulk No Invoice", perms)
 		order = self._order(rate=555.5)
 		self._pay(order)
@@ -1183,10 +1423,11 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		result = self._as(email, bulk.process_order, order.name)
 		self._keep_invoices(order)
 
-		self.assertEqual(result["status"], bulk.FAILED, result)
-		self.assertIn("permission", result["message"])
-		self.assertEqual(bulk._invoices(order.name, 1), [])
-		self.assertIsNone(self._note_of(order))
+		self.assertEqual(result["status"], bulk.SENT, result)
+		self.assertEqual(result["cod"], 0)
+		self.assertIsNone(result["sales_invoice"])
+		self.assertEqual(bulk._invoices(order.name, 1) + bulk._invoices(order.name, 0), [])
+		self.assertEqual(self._note_of(order), result["delivery_note"])
 
 	def test_a_document_level_user_permission_hides_the_order(self):
 		email, _role = make_role_user(self, "Bulk Restricted", STAFF_PERMISSIONS)
