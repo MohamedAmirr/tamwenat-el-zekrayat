@@ -40,6 +40,10 @@ An adapter is a module exposing (the contract; a contract test checks every adap
   wrote the Integration Status Cancelled it calls ``cancel_after_carrier_cancelled`` (every path that reads
   the carrier does: webhook, nightly job, Refresh).
 - ``after_submit(doc)``: optional; work queued after the note is submitted (``on_submit``). Must not raise.
+- ``REQUEST_ON_INSERT``: optional, True for an adapter whose NEW draft note starts its shipment by itself
+  (``request_shipment_on_insert``, ``after_insert``). ``validate`` of such a new note runs the optional
+  ``guard_new_note(doc)`` (a deliberate refusal raises) and ``check_deliverable`` (no note is made when the stock
+  cannot cover it).
 - ``SUBMIT_AT_PICKUP``: optional, True for an adapter whose note stays a draft until the carrier's pickup event
   (#500): the create job then does not submit, ``request_create`` records who asked
   (``custom_shipment_requested_by``) and the carrier's status code of the pickup queues ``run_submit_at_pickup``
@@ -55,11 +59,12 @@ An adapter is a module exposing (the contract; a contract test checks every adap
 """
 
 import json
+import sys
 import time
 
 import frappe
 from frappe import _
-from frappe.utils import add_to_date, cstr, flt, get_datetime, now_datetime, strip_html_tags
+from frappe.utils import add_to_date, cstr, escape_html, flt, get_datetime, now_datetime, strip_html_tags
 from frappe.utils.background_jobs import is_job_enqueued
 
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as bosta_shipment
@@ -95,6 +100,15 @@ STALE_CREATING_MINUTES = 5
 STALE_CANCEL_MINUTES = 2
 
 _CREATE_JOB = "{}-create|{}"
+_REQUEST_JOB = "{}-request|{}"
+#: Set on a new note by the code that requests its shipment itself (``order_shipment``): the ``after_insert`` trigger
+#: ``request_shipment_on_insert`` then leaves it alone, so exactly one of them asks for the shipment. The trigger's
+#: own requests never delete a note on failure (only ``order_shipment`` does, for the notes it made).
+SKIP_AUTO_REQUEST_FLAG = "skip_auto_shipment_request"
+
+
+class NotDeliverable(frappe.ValidationError):
+	"""The stock rows of a note cannot be delivered (``check_deliverable``): short of stock or over the order."""
 
 #: The linked doctypes ``DeliveryNote.on_cancel`` ignores (ERPNext sets ``ignore_linked_doctypes`` to the first
 #: four) plus the Packing Slips it cancels first.
@@ -165,6 +179,61 @@ def validate_delivery_note(doc, method=None):
 			for adapter in CARRIERS.values():
 				if adapter.applies_to(source):
 					adapter.clear_inherited(doc)
+	if doc.is_new() and not doc.get("is_return"):
+		# A NEW note of a carrier that starts its shipment on insert: the order guards and the stock check run now,
+		# so a note that cannot be shipped is never made (no draft left behind). Only a new note: Edit Order's refresh
+		# and the pickup submit save existing ones.
+		adapter = adapter_for(doc)
+		if adapter and getattr(adapter, "REQUEST_ON_INSERT", False):
+			guard_new = getattr(adapter, "guard_new_note", None)
+			if guard_new:
+				guard_new(doc)
+			check_deliverable(doc)
+
+
+def request_shipment_on_insert(doc, method=None):
+	"""``after_insert``: a NEW draft note of a carrier with ``REQUEST_ON_INSERT`` starts its shipment, so nobody has to
+	press anything after Save. Only the first insert triggers: later saves (Edit Order, the pickup submit) and
+	return notes never do, and a note made by ``order_shipment`` (``SKIP_AUTO_REQUEST_FLAG``) is requested by that
+	service. The work is a deduplicated job queued after the commit (``request_create`` commits and must not run inside the
+	save); the job looks the shipment up first on every retry, so a repeat never makes a second one."""
+	adapter = adapter_for(doc)
+	if (
+		not adapter
+		or not getattr(adapter, "REQUEST_ON_INSERT", False)
+		or doc.get("is_return")
+		or doc.docstatus != 0
+		or doc.flags.get(SKIP_AUTO_REQUEST_FLAG)
+	):
+		return
+	frappe.enqueue(
+		"marketplace_integrations.services.carrier_shipments.run_request_on_insert",
+		queue="short",
+		timeout=300,
+		job_id=_REQUEST_JOB.format(adapter.SHIPPING_CARRIER.lower(), doc.name),
+		deduplicate=True,
+		enqueue_after_commit=True,
+		delivery_note=doc.name,
+		requested_by=frappe.session.user,
+	)
+
+
+def run_request_on_insert(delivery_note, requested_by):
+	"""The job of ``request_shipment_on_insert``: as the user who saved the note, start the shipment exactly like the
+	workflow's Create Shipment (``delivery_note_workflow.start_shipment``). A failure never deletes the note (it was not
+	made by the one-step flow): it stays a draft with the error. Never raises."""
+	frappe.set_user(requested_by)
+	try:
+		if status_of(delivery_note) not in EDITABLE_STATUSES or frappe.db.get_value("Delivery Note", delivery_note, "docstatus") != 0:
+			return
+		if not frappe.has_permission("Delivery Note", "submit", doc=delivery_note):
+			lifecycle.record_request_failure(delivery_note, _("You need permission to submit Delivery Notes to start the shipment."))
+			return
+		# A note made any way but the one-step flow is never deleted by a failure: it stays a draft with the error.
+		lifecycle.start_shipment(frappe._dict(name=delivery_note))
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(title="Starting the shipment of a new Delivery Note failed", message=f"{delivery_note}\n{frappe.get_traceback()}")
 
 
 def require_shipment_created(doc, method=None):
@@ -215,6 +284,55 @@ def guard_cancel_or_delete(doc, method=None):
 			).format(adapter.SERVICE_NAME, _(status_of(doc))),
 			title=_("{0} shipment").format(adapter.SERVICE_NAME),
 		)
+
+
+#: A DRAFT note in one of these statuses has a shipment at the carrier that a delete cancels first.
+CANCEL_BEFORE_DELETE_STATUSES = (CREATED, CANCELLATION_PENDING, CANCELLATION_UNKNOWN)
+
+
+def guard_delete(doc, method=None):
+	"""``on_trash``: a DRAFT note with a live shipment (Created, Cancellation Pending, Cancellation Unknown) is deleted
+	only after the carrier cancelled the shipment: ``cancel`` runs here, before the native delete goes on.
+
+	- Cancelled: the delete continues. Everything else (the carrier refused, the answer is unknown) throws, so the
+	  native delete stops and nothing is removed; the status the cancel wrote stays (``cancel`` committed it) and a
+	  second delete asks again.
+	- ``cancel`` commits before it locks and again after the carrier answered (lock-after-commit, no lock held across the
+	  carrier call). That is safe here: the delete has changed nothing yet when ``on_trash`` runs (it refuses on the
+	  throw), so the commit only publishes the cancel. If the native delete fails AFTER this (a linked document), the note
+	  stays with Integration Status Cancelled, which a later delete passes without asking the carrier again. A linked
+	  document that would block the native delete is checked FIRST (``_check_native_delete_not_blocked``), before any
+	  carrier call, so the shipment is not cancelled for a delete that then fails.
+	- Creating and Creation Unknown still block (``guard_cancel_or_delete``); a submitted note cannot be deleted at all.
+	- It needs write permission on the note (the same as ``api/carrier_shipments.cancel_shipment`` for a draft), on top
+	  of the delete permission Frappe already checked; a system delete (``ignore_permissions``) skips only that check."""
+	adapter = adapter_for(doc)
+	if not (adapter and doc.docstatus == 0 and status_of(doc) in CANCEL_BEFORE_DELETE_STATUSES):
+		return guard_cancel_or_delete(doc, method)
+	if not doc.flags.get("ignore_permissions"):
+		frappe.has_permission("Delivery Note", "write", doc=doc, throw=True)
+	service = adapter.SERVICE_NAME
+	# The carrier cancel cannot be undone: refuse a delete a linked document would block BEFORE asking the carrier.
+	_check_native_delete_not_blocked(doc)
+	result = cancel(doc.name)
+	if result["outcome"] == "cancelled":
+		# Keep the in-memory note in step with what cancel() stored, so the Deleted Document snapshot and the
+		# later on_trash handlers see the Cancelled status.
+		doc.custom_integration_status = result["status"]
+		doc.modified = frappe.db.get_value("Delivery Note", doc.name, "modified") or doc.modified
+		return
+	reason = escape_html(strip_html_tags(cstr(result.get("message"))).strip()) or _("The carrier gave no reason.")
+	if result["outcome"] == "refused":
+		frappe.throw(
+			_("{0} did not cancel the shipment, so the Delivery Note was not deleted: {1}").format(service, reason),
+			title=_("{0} shipment").format(service),
+		)
+	frappe.throw(
+		_(
+			"It is not known whether {0} cancelled the shipment, so the Delivery Note was not deleted. Try again in a few minutes. {1}"
+		).format(service, reason),
+		title=_("{0} shipment").format(service),
+	)
 
 
 def refuse_sales_order_cancel(doc, method=None):
@@ -318,7 +436,7 @@ def check_deliverable(doc):
 					)
 				)
 	if problems:
-		frappe.throw(" ".join(problems), title=_("The Delivery Note cannot be confirmed"))
+		frappe.throw(" ".join(problems), exc=NotDeliverable, title=_("The Delivery Note cannot be confirmed"))
 
 
 def check_ready(doc):
@@ -343,14 +461,18 @@ def check_ready(doc):
 		frappe.throw(_("{0} needs more information before the shipment can be created.").format(adapter.SERVICE_NAME))
 
 
-def request_create(delivery_note, modified=None, submit_as=None):
+def request_create(delivery_note, modified=None, submit_as=None, discard_on_failure=False):
 	"""Start the create of a draft note (the API has checked the submit permission). Idempotent: a note that
 	is already Creating or Created only returns its status. When the adapter answers that it needs the
 	person's input first, nothing is sent and that answer is returned.
 
 	``submit_as`` is the user who pressed Submit: only ``request_shipment`` for a delivery sets it. The job
 	then submits the note as that user once the carrier confirms Created (delivery-note-first.md). Retries,
-	checks, the nightly job and return pickups never pass it, so they never submit."""
+	checks, the nightly job and return pickups never pass it, so they never submit.
+
+	``discard_on_failure`` is set only by ``order_shipment.ship_order`` for a draft note it just MADE: the create job
+	then deletes the draft when the carrier definitively refuses it (``discard_draft``, as ``submit_as``). No other
+	path passes it, so a note made any other way is never deleted by a failure."""
 	doc = frappe.get_doc("Delivery Note", delivery_note)
 	adapter = adapter_for(doc)
 	if not adapter:
@@ -411,6 +533,9 @@ def request_create(delivery_note, modified=None, submit_as=None):
 		attempt=attempt_number(adapter.SERVICE_NAME, delivery_note, operation),
 		reference=reference,
 	)
+	extra = {}
+	if discard_on_failure and not doc.get("is_return"):
+		extra = {"discard_on_failure": True}
 	frappe.enqueue(
 		"marketplace_integrations.services.carrier_shipments.run_create",
 		queue="short",
@@ -422,6 +547,7 @@ def request_create(delivery_note, modified=None, submit_as=None):
 		log=log,
 		lookup_first=bool(previous) or bool(getattr(adapter, "LOOKUP_FIRST", False)),
 		submit_as=None if doc.get("is_return") else submit_as,
+		**extra,
 	)
 	frappe.db.commit()
 	return {"status": CREATING, "queued": True}
@@ -432,10 +558,12 @@ def request_create(delivery_note, modified=None, submit_as=None):
 # ---------------------------------------------------------------------------
 
 
-def run_create(delivery_note, log=None, lookup_first=True, submit_as=None):
+def run_create(delivery_note, log=None, lookup_first=True, submit_as=None, discard_on_failure=False):
 	"""Create (or find) the shipment of one Creating note and write the result back. ``lookup_first`` is
 	False only for the very first attempt of a note (``request_create`` decides it). ``submit_as`` (the user
-	who pressed Submit) makes the job submit the note, as that user, once the carrier confirmed Created."""
+	who pressed Submit) makes the job submit the note, as that user, once the carrier confirmed Created.
+	``discard_on_failure``: a DEFINITE refusal (``Failed``) deletes the draft note after it was marked Creation
+	Failed (``discard_draft``); Unknown outcomes and unexpected errors always keep it."""
 	frappe.set_user("Administrator")
 	if status_of(delivery_note) != CREATING:
 		frappe.db.commit()
@@ -463,7 +591,11 @@ def run_create(delivery_note, log=None, lookup_first=True, submit_as=None):
 				# Submitted as soon as Created, unless the carrier's note stays a draft until its pickup event (#500).
 				_submit_created(delivery_note, submit_as, adapter.SERVICE_NAME)
 	except Failed as failure:
-		_finish(delivery_note, FAILED, {"custom_last_integration_error": cstr(failure)}, log, "Failed", error=cstr(failure))
+		written = _finish(
+			delivery_note, FAILED, {"custom_last_integration_error": cstr(failure)}, log, "Failed", error=cstr(failure)
+		)
+		if written and discard_on_failure:
+			discard_draft(delivery_note, cstr(failure), requested_by=submit_as)
 	except Unknown as unknown:
 		_finish(delivery_note, UNKNOWN, {"custom_last_integration_error": cstr(unknown)}, log, "Unknown", error=cstr(unknown))
 	except Exception:
@@ -621,6 +753,88 @@ def _finish(delivery_note, status, values, log, result, expected=CREATING, **log
 		commit=True,
 	)
 	return True
+
+
+DISCARDED_KEY = "shipment-discarded|{}"
+DISCARDED_TTL_SECONDS = 3600
+
+
+def discard_draft(delivery_note, reason, requested_by=None):
+	"""Delete a DRAFT note whose shipment DEFINITELY failed (our pre-check refused it, or the carrier refused the
+	create: Integration Status Not Created / Creation Failed), because the one-step flow that made it must not leave it
+	behind. The caller decides it is the flow's own note and that the failure is definite. Never raises; returns whether
+	the note was deleted (False: it is kept, nothing changed).
+
+	``requested_by`` is the user who triggered the flow: the note is deleted only when THAT user may delete Delivery
+	Notes (no user, no delete). Without the permission the note is kept; a Creation Failed note then gets a line saying
+	it could not be removed, next to the carrier's reason.
+
+	The delete itself runs as the system. It keeps the audit trail in two places
+	(the note itself is gone): a comment on each Sales Order, and a short-lived cache entry
+	(``discarded_notice``) so a waiting form or bulk run can still show the reason. The Sales Invoice of a paid order
+	is never touched. Lock order as ``_submit_created``: the Sales Orders, then the note."""
+	try:
+		frappe.db.commit()
+		orders = sorted(
+			{
+				name
+				for name in frappe.get_all(
+					"Delivery Note Item",
+					filters={"parent": delivery_note, "parenttype": "Delivery Note"},
+					pluck="against_sales_order",
+					parent_doctype="Delivery Note",
+					limit_page_length=0,
+				)
+				if name
+			}
+		)
+		frappe.db.commit()
+		for name in orders:
+			frappe.db.get_value("Sales Order", name, "name", for_update=True)
+		locked = frappe.db.get_value(
+			"Delivery Note", delivery_note, ["docstatus", "custom_integration_status"], as_dict=True, for_update=True
+		)
+		if not locked or locked.docstatus != 0 or (cstr(locked.custom_integration_status) or NOT_CREATED) not in EDITABLE_STATUSES:
+			frappe.db.commit()
+			return False
+		if not (requested_by and frappe.has_permission("Delivery Note", "delete", doc=delivery_note, user=requested_by)):
+			if (cstr(locked.custom_integration_status) or NOT_CREATED) == FAILED:
+				kept = _("The Delivery Note could not be removed because you do not have permission to delete it.")
+				stored = cstr(frappe.db.get_value("Delivery Note", delivery_note, "custom_last_integration_error"))
+				frappe.db.set_value(
+					"Delivery Note",
+					delivery_note,
+					"custom_last_integration_error",
+					f"{stored} {kept}".strip(),
+					update_modified=False,
+				)
+			frappe.db.commit()
+			return False
+		adapter = adapter_for(frappe.get_doc("Delivery Note", delivery_note))
+		service = adapter.SERVICE_NAME if adapter else _("carrier")
+		frappe.delete_doc("Delivery Note", delivery_note, ignore_permissions=True)
+		reason = strip_html_tags(cstr(reason)).strip()[:300]
+		text = _("Delivery Note {0} was deleted because the {1} shipment could not be created: {2}").format(
+			delivery_note, service, reason
+		)
+		for name in orders:
+			frappe.get_doc("Sales Order", name).add_comment("Comment", text)
+		frappe.cache().set_value(
+			DISCARDED_KEY.format(delivery_note),
+			{"reason": reason, "user": requested_by, "service": service, "orders": orders},
+			expires_in_sec=DISCARDED_TTL_SECONDS,
+		)
+		frappe.db.commit()
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(title="Deleting the draft of a failed shipment failed", message=f"{delivery_note}\n{frappe.get_traceback()}")
+		return False
+	return True
+
+
+def discarded_notice(delivery_note):
+	"""``{"reason", "user", "service", "orders"}`` of a note ``discard_draft`` deleted in the last hour, else ``None``."""
+	return frappe.cache().get_value(DISCARDED_KEY.format(delivery_note))
 
 
 # ---------------------------------------------------------------------------
@@ -1075,6 +1289,43 @@ def _check_native_cancel_not_blocked(doc):
 	# ERPNext's own cancel refuses a note whose Sales Order is Closed or On Hold (not checked for a return)
 	if not doc.get("is_return") and hasattr(doc, "check_sales_order_on_hold_or_close"):
 		doc.check_sales_order_on_hold_or_close("against_sales_order")
+
+
+#: Documents the native delete removes itself in its own ``on_trash`` (Frappe's wildcard ``doc_events`` runs
+#: ``workflow_action.process_workflow_actions``, which deletes the note's Workflow Action rows) BEFORE its link
+#: check. This early check runs before that cleanup, so it must not count them as links.
+NATIVE_DELETE_CLEARED_LINKS = ("Workflow Action",)
+
+
+def _native_delete_is_forced(doc):
+	"""True when this delete runs under ``frappe.delete_doc(..., force=True)``. ``delete_doc`` keeps ``force`` in a
+	local variable (it sets no flag), so the only way to see it from ``on_trash`` is the calling ``delete_doc`` frame."""
+	if doc.flags.get("force") or frappe.flags.get("force"):
+		return True
+	from frappe.model.delete_doc import delete_doc as native_delete_doc
+
+	frame = sys._getframe(1)
+	while frame:
+		if frame.f_code is native_delete_doc.__code__:
+			return bool(frame.f_locals.get("force"))
+		frame = frame.f_back
+	return False
+
+
+def _check_native_delete_not_blocked(doc):
+	"""Raise the link error the native delete of a draft note raises (``frappe.model.delete_doc``), before the
+	carrier is contacted. Skipped for a forced delete, which the native delete does not check either. It uses
+	Frappe's own link lookups (so ``ignore_links_on_delete`` applies) and, like the native delete, does not count
+	the rows its ``on_trash`` clears (``NATIVE_DELETE_CLEARED_LINKS``)."""
+	if _native_delete_is_forced(doc):
+		return
+	from frappe.model.delete_doc import get_dynamic_linked_docs, get_linked_docs, raise_link_exists_exception
+
+	for link in (*get_linked_docs(doc, "Delete"), *get_dynamic_linked_docs(doc, "Delete")):
+		if link["reference_doctype"] not in NATIVE_DELETE_CLEARED_LINKS:
+			raise_link_exists_exception(
+				doc, link["reference_doctype"], link["reference_docname"], link.get("at_position", "")
+			)
 
 
 def reconcile_open_notes():
