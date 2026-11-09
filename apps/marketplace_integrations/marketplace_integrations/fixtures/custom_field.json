@@ -662,7 +662,7 @@
   "permlevel": 0,
   "translatable": 0,
   "no_copy": 1,
-  "description": "Cash to collect on delivery. 0 means prepaid. Until confirmed, the default (the note's total minus the order's advance) is recalculated on every save.",
+  "description": "Cash to collect on delivery. 0 means prepaid. A new note gets the amount calculated from the order unless you type one; after that the saved amount is kept. Unticked COD confirmed recalculates it on every save.",
   "depends_on": "eval:!doc.is_return && doc.transporter_name==\"Bosta\""
  },
  {
@@ -679,9 +679,26 @@
   "permlevel": 0,
   "translatable": 0,
   "description": "Tick to keep the COD amount as it is, including 0. Required before the shipment is sent.",
-  "default": "0",
+  "default": "1",
   "no_copy": 1,
   "depends_on": "eval:!doc.is_return && doc.transporter_name==\"Bosta\""
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Delivery Note",
+  "fieldname": "custom_cod_typed",
+  "fieldtype": "Check",
+  "label": "COD typed",
+  "insert_after": "custom_cod_confirmed",
+  "name": "Delivery Note-custom_cod_typed",
+  "hidden": 1,
+  "modified": "2026-11-09 12:00:00.000000",
+  "module": null,
+  "permlevel": 0,
+  "translatable": 0,
+  "description": "Set by the form when the COD of a new Delivery Note was typed by hand, so the server keeps it. The server clears it.",
+  "default": "0",
+  "no_copy": 1
  },
  {
   "doctype": "Custom Field",
@@ -689,7 +706,7 @@
   "fieldname": "custom_bosta_city",
   "fieldtype": "Data",
   "label": "Bosta City Code",
-  "insert_after": "custom_cod_confirmed",
+  "insert_after": "custom_cod_typed",
   "name": "Delivery Note-custom_bosta_city",
   "hidden": 0,
   "modified": "2026-10-31 12:00:00.000000",
