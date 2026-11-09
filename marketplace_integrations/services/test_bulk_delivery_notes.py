@@ -163,16 +163,19 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual(note.custom_cod_confirmed, 1)
 		self.assertEqual(note.custom_integration_status, "Creating")
 		self.assertIsNone(result["sales_invoice"])
-		# Still a draft: only the Bosta job submits it, after Bosta confirmed.
+		# Still a draft: Bosta's pickup event submits it (#500), never the create job.
 		self.assertEqual(note.docstatus, 0)
 		self.assertEqual(self.enqueue.call_args.kwargs["submit_as"], frappe.session.user)
 		self._run_job()
-		submitted = frappe.db.get_value(
+		created_note = frappe.db.get_value(
 			"Delivery Note", note.name, ["docstatus", "custom_integration_status"], as_dict=True
 		)
-		self.assertEqual(submitted.docstatus, 1)
-		self.assertEqual(submitted.custom_integration_status, "Created")
+		self.assertEqual(created_note.docstatus, 0)
+		self.assertEqual(created_note.custom_integration_status, "Created")
 		self.assertEqual(len(self.http.calls_of("create")), 1)
+		# and nobody can submit it by hand before the pickup
+		with self.assertRaises(frappe.ValidationError):
+			frappe.get_doc("Delivery Note", note.name).submit()
 
 	def test_a_fully_paid_order_gets_a_submitted_paid_invoice_and_cod_zero(self):
 		order = self._order(rate=555.5)
@@ -612,10 +615,10 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual(
 			events[-1]["summary"], {"total": 3, "accepted": 2, "failed": 0, "skipped": 1, "still_creating": 0}
 		)
-		# Bosta confirmed: the existing flow submitted both notes
+		# Bosta confirmed: the notes stay drafts until the pickup event (#500)
 		for row in results:
 			if row["delivery_note"]:
-				self.assertEqual(frappe.db.get_value("Delivery Note", row["delivery_note"], "docstatus"), 1)
+				self.assertEqual(frappe.db.get_value("Delivery Note", row["delivery_note"], "docstatus"), 0)
 		# The summary is kept as a native notification
 		users, doc = notify.call_args.args
 		self.assertEqual(users, ["Administrator"])
@@ -666,7 +669,7 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		self.assertIn("1 still creating", notify.call_args.args[1]["subject"])
 		sleep.assert_not_called()
 
-	def test_created_at_bosta_but_still_a_draft_with_no_error_is_still_submitting_not_failed(self):
+	def test_created_at_bosta_and_still_a_draft_is_accepted_not_failed(self):
 		order = self._order()
 		result = bulk.process_order(order.name)
 		frappe.db.set_value("Delivery Note", result["delivery_note"], "custom_integration_status", "Created")
@@ -676,9 +679,9 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		with patch.object(bulk, "WAIT_SECONDS", 0):
 			bulk.wait_for_bosta(rows, lambda: None)
 
-		self.assertEqual(rows[0]["status"], bulk.STILL_CREATING)
-		self.assertIn(result["delivery_note"], rows[0]["message"])
-		self.assertIn("still being submitted", rows[0]["message"])
+		# #500: the draft is the end state until Bosta's pickup event
+		self.assertEqual(rows[0]["status"], bulk.ACCEPTED)
+		self.assertEqual(rows[0]["message"], "Accepted by Bosta")
 
 	# -- pre-flight stock check (#476) ---------------------------------------------------------
 
@@ -838,7 +841,7 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 			[results[1]["delivery_note"]],
 		)
 
-	def test_a_bulk_order_with_enough_stock_creates_at_bosta_and_is_submitted_as_the_requester(self):
+	def test_a_bulk_order_with_enough_stock_creates_at_bosta_and_the_pickup_submits_it_as_the_requester(self):
 		order, warehouse = self._stock_order(qty=3, in_stock=5)
 		email = self._staff(with_item_read=True)  # the bulk mapper needs Item read
 
@@ -847,6 +850,19 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual(result["status"], bulk.SENT, result)
 		self.assertEqual(self.enqueue.call_args.kwargs["submit_as"], email)
 		self._run_job()
+		created_note = frappe.db.get_value(
+			"Delivery Note", result["delivery_note"], ["docstatus", "custom_integration_status"], as_dict=True
+		)
+		# #500: the create job leaves a Created draft; the stock has not moved yet
+		self.assertEqual((created_note.docstatus, created_note.custom_integration_status), (0, "Created"))
+		self.assertEqual(
+			frappe.db.get_value("Delivery Note", result["delivery_note"], "custom_shipment_requested_by"), email
+		)
+		# Bosta's pickup event queues this job, which submits the note as the requester
+		frappe.db.set_value(
+			"Delivery Note", result["delivery_note"], "custom_shipping_status", "Picked up from business"
+		)
+		carrier_shipments.run_submit_at_pickup(result["delivery_note"])
 		submitted = frappe.db.get_value(
 			"Delivery Note", result["delivery_note"], ["docstatus", "custom_integration_status", "modified_by"], as_dict=True
 		)
@@ -996,7 +1012,8 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 
 		self.assertIn("5 to deliver but only 3 left on Sales Order", str(caught.exception))
 
-	def test_a_draft_whose_automatic_submit_failed_is_a_failure_with_the_error(self):
+	def test_a_created_draft_is_accepted_even_when_an_earlier_submit_error_is_stored(self):
+		# #500: nothing submits a Bosta note after Created, so a stored submit error does not turn the run into a failure
 		order = self._order()
 		result = bulk.process_order(order.name)
 		frappe.db.set_value(
@@ -1004,7 +1021,7 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 			result["delivery_note"],
 			{
 				"custom_integration_status": "Created",
-				"custom_last_integration_error": "Shipment created at Bosta; the Delivery Note could not be submitted: credit limit",
+				"custom_last_integration_error": "Bosta picked the shipment up; the Delivery Note could not be confirmed: credit limit",
 			},
 		)
 		frappe.db.commit()
@@ -1013,10 +1030,15 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 
 		bulk.wait_for_bosta(rows, lambda: changes.append(True))
 
-		self.assertEqual(rows[0]["status"], bulk.FAILED)
-		self.assertIn("credit limit", rows[0]["message"])
-		self.assertIn(result["delivery_note"], rows[0]["message"])
+		self.assertEqual(rows[0]["status"], bulk.ACCEPTED)
 		self.assertEqual(len(changes), 1)
+
+	def test_the_bulk_note_is_one_whole_order_draft_so_edit_order_accepts_it(self):
+		from marketplace_integrations.services import order_edit
+
+		order = self._order(rate=100)
+		result = bulk.process_order(order.name)
+		self.assertIsNone(order_edit.draft_note_problem(order.name), result)
 
 	def test_a_crash_outside_an_order_still_ends_with_a_done_event_and_a_notification(self):
 		order = self._order()

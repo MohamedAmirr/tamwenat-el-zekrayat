@@ -1,0 +1,68 @@
+{
+ "workflow_name": "Delivery Note Lifecycle",
+ "document_type": "Delivery Note",
+ "workflow_state_field": "workflow_state",
+ "is_active": 1,
+ "override_status": 0,
+ "send_email_alert": 0,
+ "enable_action_confirmation": 1,
+ "states": [
+  {"state": "Order Received", "doc_status": "0", "allow_edit": "All", "style": "Info"},
+  {"state": "Waiting for Goods", "doc_status": "0", "allow_edit": "All", "style": "Warning"},
+  {"state": "Shipment Requested", "doc_status": "0", "allow_edit": "All", "style": "Primary"},
+  {"state": "Shipment Created", "doc_status": "0", "allow_edit": "All", "style": "Info"},
+  {"state": "Picked Up", "doc_status": "1", "allow_edit": "All", "style": "Primary"},
+  {"state": "In Transit", "doc_status": "1", "allow_edit": "All", "style": "Primary"},
+  {"state": "Delivered", "doc_status": "1", "allow_edit": "All", "style": "Success"},
+  {"state": "Returned / Failed", "doc_status": "1", "allow_edit": "All", "style": "Danger"},
+  {"state": "Cancelled", "doc_status": "2", "allow_edit": "All", "style": "Inverse"}
+ ],
+ "transitions": [
+  {
+   "state": "Order Received",
+   "action": "Create Shipment",
+   "next_state": "Shipment Requested",
+   "allowed": "Stock User",
+   "condition": "doc.transporter_name in (\"Bosta\", \"Noon\") and not doc.is_return",
+   "transition_tasks": "Create Carrier Shipment"
+  },
+  {
+   "state": "Order Received",
+   "action": "Confirm Delivery",
+   "next_state": "Delivered",
+   "allowed": "Stock User",
+   "condition": "doc.transporter_name not in (\"Bosta\", \"Noon\") and not doc.is_return"
+  },
+  {
+   "state": "Order Received",
+   "action": "Confirm Delivery",
+   "next_state": "Returned / Failed",
+   "allowed": "Stock User",
+   "condition": "doc.is_return"
+  },
+  {
+   "state": "Shipment Created",
+   "action": "Confirm Delivery",
+   "next_state": "Returned / Failed",
+   "allowed": "Stock User",
+   "condition": "doc.is_return"
+  },
+  {
+   "state": "Shipment Created",
+   "action": "Confirm Shipment",
+   "next_state": "Picked Up",
+   "allowed": "Stock User",
+   "condition": "not doc.is_return and doc.transporter_name != \"Bosta\""
+  },
+  {"state": "Picked Up", "action": "Cancel", "next_state": "Cancelled", "allowed": "Stock Manager"},
+  {"state": "In Transit", "action": "Cancel", "next_state": "Cancelled", "allowed": "Stock Manager"},
+  {"state": "Delivered", "action": "Cancel", "next_state": "Cancelled", "allowed": "Stock Manager"},
+  {"state": "Returned / Failed", "action": "Cancel", "next_state": "Cancelled", "allowed": "Stock Manager"}
+ ],
+ "transition_tasks": {
+  "Create Carrier Shipment": [
+   {"task": "Check Carrier Shipment Request", "asynchronous": 0},
+   {"task": "Request Carrier Shipment", "asynchronous": 1}
+  ]
+ }
+}

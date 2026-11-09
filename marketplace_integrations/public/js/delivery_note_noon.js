@@ -62,7 +62,7 @@
 	function before_send(frm) {
 		if ((frm.doc.lr_no || "").trim() || frm.doc.custom_noon_generate_awb) return true;
 		frappe.msgprint({
-			message: __("Type the AWB, or tick Generate AWB through Noon, before submitting."),
+			message: __("Type the AWB, or tick Generate AWB through Noon, before creating the shipment."),
 			indicator: "orange",
 		});
 		return false;

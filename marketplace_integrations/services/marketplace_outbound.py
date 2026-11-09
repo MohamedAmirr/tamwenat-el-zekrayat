@@ -36,7 +36,7 @@ import json
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, escape_html, flt, now_datetime
+from frappe.utils import cstr, escape_html, flt, now_datetime, strip_html_tags
 
 from marketplace_integrations.integrations.talabat.orders import CANCELLATION_REASONS
 from marketplace_integrations.services.marketplace_orders import rollback_to_savepoint
@@ -68,8 +68,16 @@ def get_shopify_order_edit_preview(sales_order):
 	return _shopify_edit_preview(sales_order, order)
 
 
-def send_shopify_order_edit(sales_order, fingerprint):
+def send_shopify_order_edit(sales_order, fingerprint, preview_fn=None, apply_fn=None):
 	"""Recheck and send an explicit Shopify order edit, then re-baseline it.
+
+	``preview_fn`` and ``apply_fn`` are given only by the Edit Order action
+	(``services/order_edit.py``, #500): the Sales Order has not been changed yet, so the preview is
+	built from the proposed rows (``preview_fn(sales_order_doc, marketplace_order_doc)``, run under
+	the Marketplace Order lock) and ``apply_fn()`` changes ERPNext in ONE transaction after Shopify
+	accepted. When ``apply_fn`` raises, Shopify still holds the edit: it is rolled back and logged,
+	the marker stays ``completed``, the order is re-imported WITHOUT re-baselining (the old baseline
+	stays, so the planner brings ERPNext to Shopify's state) and the result says ``applied: False``.
 
 	``fingerprint`` is the one the preview returned: staff confirmed exactly that change
 	list, so a different one is rejected.  The same fingerprint is stored on the
@@ -100,7 +108,10 @@ def send_shopify_order_edit(sales_order, fingerprint):
 	order = _lock_and_load_order(marketplace_order)
 	if order.platform != "Shopify":
 		frappe.throw(_("Marketplace order {0} is not a Shopify order.").format(order.name))
-	preview = _shopify_edit_preview(frappe.get_doc("Sales Order", sales_order.name), order)
+	sales_order_doc = frappe.get_doc("Sales Order", sales_order.name)
+	preview = (
+		preview_fn(sales_order_doc, order) if preview_fn else _shopify_edit_preview(sales_order_doc, order)
+	)
 	if preview["state"] != ELIGIBLE:
 		frappe.throw(" ".join(preview["reasons"]) or _("No Shopify item changes are ready to send."))
 	if cstr(fingerprint).strip() != preview["fingerprint"]:
@@ -142,16 +153,44 @@ def send_shopify_order_edit(sales_order, fingerprint):
 		action=_ORDER_ACTION_EDIT,
 	)
 	frappe.db.commit()
-	refreshed = _refresh_after_shopify_edit(order, sales_order.name)
-	return {"ok": True, "refreshed": refreshed, "success_messages": success_messages}
+	applied, apply_error = True, None
+	if apply_fn:
+		try:
+			apply_fn()
+		except Exception as exc:
+			# Everything before ``apply_fn`` is committed (it starts with a commit), so a full rollback loses
+			# nothing but its own partial work. Shopify holds the edit and the marker stays ``completed``.
+			frappe.db.rollback()
+			applied = False
+			# Plain text: the form escapes it before showing it.
+			apply_error = strip_html_tags(cstr(exc)).strip()[:300] or exc.__class__.__name__
+			frappe.clear_messages()
+			frappe.log_error(
+				title="Marketplace outbound Shopify edit: updating ERPNext failed",
+				message=f"{sales_order.name}\n{frappe.get_traceback()}",
+			)
+			_record_order_action_error(order, sales_order.name, details, exc, action=_ORDER_ACTION_EDIT)
+			frappe.db.commit()
+	refreshed = _refresh_after_shopify_edit(
+		order, sales_order.name, rebaseline=applied, correct_rates=bool(apply_fn)
+	)
+	return {
+		"ok": True,
+		"refreshed": refreshed,
+		"applied": applied,
+		"apply_error": apply_error,
+		"success_messages": success_messages,
+	}
 
 
-def _refresh_after_shopify_edit(order, sales_order_name):
+def _refresh_after_shopify_edit(order, sales_order_name, rebaseline=True, correct_rates=False):
 	"""Re-import the order and re-baseline it; a failure here must not hide the edit.
 
 	The edit and the ``completed`` marker are already committed, so a failure is logged
 	and reported as ``False`` (the marker stays: "completed, refresh pending"; the echo
-	webhook or a manual refresh reconciles).
+	webhook or a manual refresh reconciles). ``rebaseline=False`` (ERPNext could not be updated
+	after Shopify accepted, #500) only imports: the old baseline stays, the planner sees Shopify's
+	new quantities against it, and brings ERPNext to Shopify's state (a queued sync, or Retry Sync).
 	"""
 	from marketplace_integrations.integrations.shopify.orders import import_order
 	from marketplace_integrations.services.sales_order_sync import rebaseline_after_outbound_edit
@@ -162,7 +201,10 @@ def _refresh_after_shopify_edit(order, sales_order_name):
 		refreshed = import_order(order.marketplace_account, order.external_order_id)
 		if not refreshed:
 			frappe.throw(_("Shopify returned no order after committing the item changes."))
-		rebaseline_after_outbound_edit(refreshed, frappe.get_doc("Sales Order", sales_order_name))
+		if rebaseline:
+			rebaseline_after_outbound_edit(
+				refreshed, frappe.get_doc("Sales Order", sales_order_name), correct_rates=correct_rates
+			)
 	except Exception:
 		# MariaDB error 1020 rolls back the whole transaction, savepoint included; the edit
 		# and the marker are already committed, so a full rollback loses nothing.
@@ -177,7 +219,9 @@ def _refresh_after_shopify_edit(order, sales_order_name):
 _CLOSED_SALES_ORDER_STATUSES = {"Closed", "Cancelled", "On Hold"}
 
 
-def _shopify_edit_preview(sales_order, order):
+def _shopify_edit_preview(sales_order, order, draft_note_allowed=False):
+	"""``draft_note_allowed``: the Edit Order action (#500) updates the draft Delivery Note itself, so a
+	changed row on a draft note is not a reason there; the old send-after-edit flow still refuses it."""
 	reasons = []
 	if sales_order.docstatus != 1 or sales_order.status in _CLOSED_SALES_ORDER_STATUSES:
 		reasons.append(
@@ -243,7 +287,7 @@ def _shopify_edit_preview(sales_order, order):
 					),
 				)
 			if flt(row.qty) != flt(baseline.get("qty")):
-				_reason_for_changed_row(row, reasons)
+				_reason_for_changed_row(row, reasons, draft_note_allowed)
 				_reason_for_shopify_line(marketplace_items.get(baseline.get("external_item_id")), reasons)
 				changes.append(
 					{
@@ -255,8 +299,8 @@ def _shopify_edit_preview(sales_order, order):
 					}
 				)
 		else:
-			_reason_for_changed_row(row, reasons)
-			mapping = _single_shopify_mapping(order.marketplace_account, row.item_code)
+			_reason_for_changed_row(row, reasons, draft_note_allowed)
+			mapping =_single_shopify_mapping(order.marketplace_account, row.item_code)
 			if not mapping:
 				reasons.append(
 					_("Item {0} needs exactly one enabled Shopify variant mapping.").format(row.item_code)
@@ -353,11 +397,15 @@ def _has_discount_allocations(order):
 	return False
 
 
-def _reason_for_changed_row(sales_order_item, reasons):
+def _reason_for_changed_row(sales_order_item, reasons, draft_note_allowed=False):
 	"""Delivery and billing on a changed or added Sales Order row stop an edit."""
 	if flt(sales_order_item.delivered_qty) or flt(sales_order_item.billed_amt):
 		_add_reason(reasons, _("A changed line already has delivered quantity or a billed amount."))
-	if frappe.db.exists("Delivery Note Item", {"so_detail": sales_order_item.name, "docstatus": 0}):
+	if (
+		not draft_note_allowed
+		and sales_order_item.name
+		and frappe.db.exists("Delivery Note Item", {"so_detail": sales_order_item.name, "docstatus": 0})
+	):
 		_add_reason(reasons, _("A changed line is on a draft Delivery Note; submit or delete it first."))
 
 

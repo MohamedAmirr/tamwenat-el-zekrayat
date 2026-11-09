@@ -196,8 +196,7 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Cancelled")
 
 	def _submit(self, note):
-		doc = frappe.get_doc("Delivery Note", note.name)
-		doc.submit()
+		doc = self.submit_note(note.name)  # the pickup job's flag: nobody submits a Created Bosta draft by hand (#500)
 		frappe.db.commit()
 		return doc
 
@@ -611,17 +610,19 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 			statuses._write_state(note.name, 49)
 		auto.assert_called_once_with(note.name)
 
-	def test_the_label_is_queued_by_the_submit_not_by_the_create(self):
+	def test_the_label_is_queued_by_the_create_not_by_the_submit(self):
+		"""#500: the note stays a draft after Created, so nothing submits it right after and the label job no longer
+		races a submit: ``after_created`` queues the label, the (pickup) submit does not queue it again."""
 		from unittest.mock import patch
 
 		note = self._live()
 		with patch.object(frappe, "enqueue") as enqueue, patch.object(statuses, "replay_pending_events"):
 			shipment.after_created(note.name, {"_id": "DELIVERY-1"})
-		self.assertFalse([c for c in enqueue.call_args_list if "run_fetch_label" in str(c)])
+		self.assertEqual(len([c for c in enqueue.call_args_list if "run_fetch_label" in str(c)]), 1)
 
 		with patch.object(frappe, "enqueue") as enqueue:
 			self._submit(note)
-		self.assertEqual(len([c for c in enqueue.call_args_list if "run_fetch_label" in str(c)]), 1)
+		self.assertFalse([c for c in enqueue.call_args_list if "run_fetch_label" in str(c)])
 
 	def test_a_terminated_delivery_reading_not_found_resolves_the_note_to_cancelled(self):
 		"""Real Bosta: a terminated delivery reads back HTTP 400, errorCode 1066 "Delivery not found."."""
@@ -886,6 +887,12 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 			editing.edit_shipment(note.name, "01111111111", "city-cairo", "12 Example Street")
 		self.assertEqual(self.http.sent(), [])
 
+	def test_the_cod_blocker_is_plain_text_because_the_client_escapes_it(self):
+		with patch.object(
+			editing, "_refuse_edit_locally", side_effect=frappe.ValidationError("State <b>A &amp; B</b> &lt;x&gt;")
+		):
+			self.assertEqual(editing.cod_edit_blocker({}), "State A & B <x>")
+
 	def test_a_bosta_refusal_changes_nothing_in_erpnext(self):
 		note = self._editable()
 		self.http.queue["update"].append(FakeResponse(400, {"success": False, "message": "nope"}))
@@ -924,8 +931,7 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 
 	def _submitted(self):
 		note = self._live()
-		note = frappe.get_doc("Delivery Note", note.name)
-		note.submit()
+		note = self.submit_note(note.name)
 		frappe.db.commit()
 		return note
 

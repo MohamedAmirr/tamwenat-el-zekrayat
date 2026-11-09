@@ -9,6 +9,7 @@ from marketplace_integrations.marketplace_integrations.doctype.marketplace_accou
 )
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_order.marketplace_order import (
     compute_order_identity_key,
+    compute_order_number,
 )
 from marketplace_integrations.services.marketplace_orders import upsert_marketplace_order
 
@@ -42,6 +43,10 @@ class IntegrationTestMarketplaceOrder(IntegrationTestCase):
                 "connection": connection.name,
             }
         ).insert()
+
+    def _delete_orders_of(self, account_name):
+        for name in frappe.get_all("Marketplace Order", filters={"marketplace_account": account_name}, pluck="name"):
+            frappe.delete_doc("Marketplace Order", name, force=True)
 
     def sample_order(self, external_order_id="order-001"):
         payload = {
@@ -587,6 +592,53 @@ class IntegrationTestMarketplaceOrder(IntegrationTestCase):
 
         self.assertFalse(meta.get_field("order_code").in_list_view)
         self.assertIn("order_code", meta.get_search_fields())
+
+    def test_order_code_is_a_standard_filter_and_order_number_is_a_sort_option(self):
+        """Staff search by number in the Order Code filter box (a Data standard filter is a
+        'like' match, so 25233 finds '#25233'); order_number is hidden, never a column, and
+        bold so Frappe's sort selector offers it."""
+        meta = frappe.get_meta("Marketplace Order")
+        order_number = meta.get_field("order_number")
+
+        self.assertTrue(meta.get_field("order_code").in_standard_filter)
+        self.assertEqual(order_number.fieldtype, "Int")
+        self.assertTrue(order_number.hidden)
+        self.assertTrue(order_number.bold)
+        self.assertFalse(order_number.in_list_view)
+        self.assertEqual(meta.sort_field, "creation")
+
+    def test_compute_order_number_only_for_pure_hash_digits(self):
+        self.assertEqual(compute_order_number("#25233"), 25233)
+        self.assertEqual(compute_order_number(" #9 "), 9)
+        for code in ("PICKUP-001", "25233", "#12a", "#", "", None, "#1234567890123"):
+            self.assertIsNone(compute_order_number(code))
+
+    def test_order_number_is_filled_from_order_code_and_sorts_numerically(self):
+        account = self.make_account()
+        connection_name = account.connection
+        self.addCleanup(frappe.delete_doc, "Talabat Connection", connection_name, force=True)
+        self.addCleanup(frappe.delete_doc, "Marketplace Account", account.name, force=True)
+        # Registered last so it runs first: orders reference the account.
+        self.addCleanup(self._delete_orders_of, account.name)
+        for external_id, code in (("num-a", "#9"), ("num-b", "#10000"), ("num-c", "PICKUP-001")):
+            payload = self.sample_order(external_id)
+            payload["order_code"] = code
+            upsert_marketplace_order(account.name, payload)
+
+        rows = frappe.get_all(
+            "Marketplace Order",
+            filters={"marketplace_account": account.name, "order_number": [">", 0]},
+            fields=["order_code", "order_number"],
+            order_by="order_number desc",
+        )
+        self.assertEqual([r.order_code for r in rows], ["#10000", "#9"])
+        self.assertEqual([r.order_number for r in rows], [10000, 9])
+        # A bare number matches the '#' code through the standard filter's like match.
+        found = frappe.get_all(
+            "Marketplace Order",
+            filters={"marketplace_account": account.name, "order_code": ["like", "%10000%"]},
+        )
+        self.assertEqual(len(found), 1)
 
     def test_empty_platform_order_reference_falls_back_to_external_order_id(self):
         """#324: Frappe falls back to the docname for an empty title, so the controller

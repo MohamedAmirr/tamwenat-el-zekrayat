@@ -291,6 +291,7 @@
 				`<button type="button" class="btn btn-default btn-sm" data-action="add">${escape(__("Add Listing"))}</button>`
 			);
 		}
+		if (ctx.can_create_shopify) left.push(create_shopify_button());
 		left.push(
 			`<button type="button" class="btn btn-default btn-sm" data-action="view_all">${escape(__("View all"))}</button>`
 		);
@@ -317,25 +318,39 @@
 			);
 		}
 		if (!state.rows.length) {
-			const add = ctx.can_create
-				? `<p><button type="button" class="btn btn-default btn-sm" data-action="add">${escape(__("Add Listing"))}</button></p>`
-				: "";
+			const buttons = [];
+			if (ctx.can_create) {
+				buttons.push(
+					`<button type="button" class="btn btn-default btn-sm" data-action="add">${escape(__("Add Listing"))}</button>`
+				);
+			}
+			if (ctx.can_create_shopify) buttons.push(create_shopify_button());
+			const add = buttons.length ? `<p class="d-flex" style="gap: var(--margin-sm)">${buttons.join("")}</p>` : "";
 			return `<p class="text-muted">${escape(__("No marketplace listings for this Item"))}</p>${add}`;
 		}
 		return `${toolbar_html(state, ctx)}${table_html(state, ctx)}`;
 	}
 
-	function get_ctx() {
+	function create_shopify_button() {
+		return `<button type="button" class="btn btn-default btn-sm" data-action="create_shopify">${escape(__("Create on Shopify"))}</button>`;
+	}
+
+	function get_ctx(frm) {
+		const can_create = frappe.model.can_create(MAPPING);
 		return {
-			can_create: frappe.model.can_create(MAPPING),
+			can_create,
 			can_write: frappe.model.can_write(MAPPING),
+			// A saved, enabled, non-template Item the user may map. The server checks again.
+			can_create_shopify: !!(
+				frm && !frm.is_new() && !frm.doc.disabled && !frm.doc.has_variants && can_create
+			),
 		};
 	}
 
 	function paint(frm) {
 		const field = listings_field(frm);
 		if (!field) return;
-		field.$wrapper.html(render_html(get_state(frm), get_ctx()));
+		field.$wrapper.html(render_html(get_state(frm), get_ctx(frm)));
 		bind_events(frm, field);
 	}
 
@@ -374,6 +389,7 @@
 	function on_action(frm, action, data) {
 		const state = get_state(frm);
 		if (action === "add") return frappe.new_doc(MAPPING, { item: frm.doc.name });
+		if (action === "create_shopify") return open_create_on_shopify(frm);
 		if (action === "view_all") return frappe.set_route("List", MAPPING, { item: frm.doc.name });
 		if (action === "retry") return load_listings(frm);
 		if (action === "expand") {
@@ -425,6 +441,126 @@
 			return Promise.resolve();
 		}
 		return load_listings(frm);
+	}
+
+	// ---- create on Shopify (#495) ------------------------------------------------------------
+
+	const CREATE_METHOD = "marketplace_integrations.api.shopify_products.queue_product_create";
+	const CREATE_STATUS_METHOD = "marketplace_integrations.api.shopify_products.get_product_create_status";
+	const ACCOUNTS_METHOD = "marketplace_integrations.api.shopify_products.list_product_create_accounts";
+	const POLL_MS = 2000;
+	const MAX_POLLS = 150;
+
+	function error_message(error) {
+		const sync = get_sync();
+		return (sync && sync.error_text(error)) || (error && error.message) || __("The request failed.");
+	}
+
+	function preview_html(frm) {
+		const row = (label, value) =>
+			`<div><span class="text-muted">${escape(label)}:</span> <bdi>${escape(value)}</bdi></div>`;
+		return (
+			row(__("Title"), frm.doc.item_name || frm.doc.name) +
+			row(__("SKU"), frm.doc.name) +
+			row(__("Status"), __("Draft"))
+		);
+	}
+
+	// Resolves to the finished job state; rejects with an Error carrying the server text.
+	function wait_for_create(job_id, attempt = 0) {
+		return frappe
+			.call({ method: CREATE_STATUS_METHOD, type: "GET", args: { job_id }, silent: true })
+			.then((response) => {
+				const state = response.message || {};
+				if (state.status === "completed") return state;
+				if (state.status === "failed") {
+					const failure = new Error(state.error || __("The request failed."));
+					// The product exists and is already mapped: no Retry (it would duplicate), fix it in Shopify.
+					failure.mapped = !!state.mapped;
+					throw failure;
+				}
+				if (attempt >= MAX_POLLS) {
+					throw new Error(__("Still waiting for Shopify. Check Shopify before retrying."));
+				}
+				return new Promise((resolve) => setTimeout(resolve, POLL_MS)).then(() =>
+					wait_for_create(job_id, attempt + 1)
+				);
+			});
+	}
+
+	function run_create(frm, dialog, account) {
+		const status = dialog.get_field("status_html").$wrapper;
+		status.html(`<p class="text-muted">${escape(__("Creating on Shopify..."))}</p>`);
+		dialog.disable_primary_action();
+		return frappe
+			.call({ method: CREATE_METHOD, args: { account, item: frm.doc.name }, freeze: false, silent: true })
+			.then((response) => wait_for_create(response.message.job_id))
+			.then(
+				() => {
+					dialog.hide();
+					frappe.show_alert({ message: __("Created on Shopify as a draft product."), indicator: "green" });
+					return load_listings(frm, { quiet: true });
+				},
+				(error) => {
+					status.html(`<p class="text-danger" style="white-space: pre-wrap">${escape(error_message(error))}</p>`);
+					if (error && error.mapped) {
+						dialog.set_primary_action(__("Close"), () => dialog.hide());
+						dialog.enable_primary_action();
+						return load_listings(frm, { quiet: true });
+					}
+					dialog.set_primary_action(__("Retry"), () => run_create(frm, dialog, dialog.get_value("account")));
+					dialog.enable_primary_action();
+				}
+			);
+	}
+
+	function open_create_on_shopify(frm) {
+		return ensure_sync_module().then(() =>
+			frappe
+				.call({
+					// Server-side so only accounts the user may write (not merely read) are listed.
+					method: ACCOUNTS_METHOD,
+					type: "GET",
+					silent: true,
+				})
+				.then((response) => {
+					const accounts = response.message || [];
+					if (!accounts.length) {
+						frappe.msgprint({ title: __("Error"), message: __("No enabled Shopify account is available."), indicator: "red" });
+						return null;
+					}
+					const dialog = new frappe.ui.Dialog({
+						title: __("Create on Shopify"),
+						fields: [
+							{
+								fieldname: "account",
+								fieldtype: "Select",
+								label: __("Marketplace Account"),
+								reqd: 1,
+								// A blank first option when there are several accounts: the user must choose.
+								options: [
+									...(accounts.length > 1 ? [{ value: "", label: "" }] : []),
+									...accounts.map((account) => ({
+										value: account.name,
+										label: account.account_name || account.name,
+									})),
+								],
+								default: accounts.length === 1 ? accounts[0].name : "",
+							},
+							{ fieldname: "preview_html", fieldtype: "HTML", options: preview_html(frm) },
+							{ fieldname: "status_html", fieldtype: "HTML" },
+						],
+						primary_action_label: __("Create on Shopify"),
+						primary_action: (values) => run_create(frm, dialog, values.account),
+					});
+					dialog.show();
+					return dialog;
+				})
+				.catch((error) => {
+					frappe.msgprint({ title: __("Error"), message: escape(error_message(error)), indicator: "red" });
+					return null;
+				})
+		);
 	}
 
 	// ---- manual sync -------------------------------------------------------------------------
@@ -654,6 +790,7 @@
 			confirm_message,
 			build_legs,
 			get_state,
+			open_create_on_shopify,
 		};
 	}
 })();
