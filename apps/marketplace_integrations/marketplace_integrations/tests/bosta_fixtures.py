@@ -309,10 +309,14 @@ class BostaFixtureMixin:
 		frappe.db.commit()
 		return order
 
-	def make_note(self, order=None, city="EG-01", cod=None, confirm_cod=True, **overrides):
+	def make_note(self, order=None, city="EG-01", cod=None, confirm_cod=True, auto_request=False, **overrides):
 		"""A saved draft Bosta Delivery Note. ``cod=None`` lets the adapter default it. The COD is marked
-		confirmed (Submit refuses an unconfirmed one) unless ``confirm_cod=False``."""
+		confirmed (Submit refuses an unconfirmed one) unless ``confirm_cod=False``. A new Bosta note starts its
+		shipment on insert (``carrier_shipments.request_shipment_on_insert``); the fixture turns that off unless
+		``auto_request=True``, so a test sends the note itself."""
 		from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
+
+		from marketplace_integrations.services.carrier_shipments import SKIP_AUTO_REQUEST_FLAG
 
 		order = order or self.make_order()
 		note = make_delivery_note(order.name)
@@ -325,6 +329,8 @@ class BostaFixtureMixin:
 			note.custom_cod_amount = cod
 		note.custom_cod_confirmed = 1 if confirm_cod else 0
 		note.update(overrides)
+		if not auto_request:
+			note.flags[SKIP_AUTO_REQUEST_FLAG] = True
 		note.insert()
 		frappe.db.commit()
 		return note

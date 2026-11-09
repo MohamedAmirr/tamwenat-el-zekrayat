@@ -1167,13 +1167,21 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 			self.assertFalse(amended.get(fieldname), fieldname)
 
 	def test_cancel_and_delete_are_refused_while_the_shipment_is_live(self):
-		for status in ("Creating", "Creation Unknown", "Created"):
+		# Creating and Creation Unknown block a delete; a Created draft is deleted only after Bosta cancels it
+		# (test_cancel_edit_returns).
+		for status in ("Creating", "Creation Unknown"):
 			with self.subTest(status):
 				note = self.make_note()
 				frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", status)
 				with self.assertRaises(frappe.ValidationError):
 					frappe.delete_doc("Delivery Note", note.name)
 				frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Not Created")
+		# the before_cancel guard is unchanged: a live shipment still refuses a native cancel
+		note = self.make_note()
+		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Created")
+		doc = frappe.get_doc("Delivery Note", note.name)
+		with self.assertRaises(frappe.ValidationError):
+			carrier_shipments.guard_cancel_or_delete(doc)
 
 	def test_a_sales_order_with_a_live_draft_note_cannot_be_cancelled(self):
 		order = self.make_order()

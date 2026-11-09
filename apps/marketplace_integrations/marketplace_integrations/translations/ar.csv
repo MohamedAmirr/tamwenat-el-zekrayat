@@ -1913,8 +1913,27 @@ Choose a shipping method.,اختر طريقة الشحن.
 Your previous bulk Delivery Note run is still in progress. Wait for its result.,تشغيلك السابق لإنشاء مذكرات التسليم بالجملة ما زال قيد التنفيذ. انتظر نتيجته.
 Sales Order {0} was not found.,لم يتم العثور على أمر البيع {0}.
 You do not have permission to read Sales Order {0}.,ليست لديك صلاحية قراءة أمر البيع {0}.
-Delivery Note {0} was created as a draft but Bosta was not started. Open it and press Submit. Reason: {1},تم إنشاء مذكرة التسليم {0} كمسودة لكن لم يبدأ الشحن عبر Bosta. افتحها واضغط تسجيل. السبب: {1}
-"Delivery Note {0} was created as a draft. The Bosta city could not be found from the address: open it, pick the city and press Submit.",تم إنشاء مذكرة التسليم {0} كمسودة. تعذّر تحديد مدينة Bosta من العنوان: افتحها واختر المدينة ثم اضغط تسجيل.
+"Delivery Note {0} was created as a draft but Bosta was not started. Open it, fix the problem and press Create Shipment. Reason: {1}",تم إنشاء مذكرة التسليم {0} كمسودة لكن لم يبدأ الشحن عبر Bosta. افتحها وأصلح المشكلة ثم اضغط إنشاء شحنة. السبب: {1}
+"Delivery Note {0} was created as a draft. The Bosta city could not be found from the address: open it, pick the city and press Create Shipment.",تم إنشاء مذكرة التسليم {0} كمسودة. تعذّر تحديد مدينة Bosta من العنوان: افتحها واختر المدينة ثم اضغط إنشاء شحنة.
+"Sales Order {0} is Waiting for Stock, so it cannot be shipped yet.",أمر البيع {0} في انتظار المخزون لذلك لا يمكن شحنه بعد.
+A change of Sales Order {0} is being sent to the marketplace. Wait for it to finish.,يجري إرسال تعديل على أمر البيع {0} إلى السوق. انتظر حتى ينتهي.
+Sales Order {0} is held: the marketplace changed it and ERPNext was not updated. Review it first.,أمر البيع {0} معلّق: غيّره السوق ولم يتم تحديث ERPNext. راجعه أولًا.
+"The marketplace cancelled or refunded Sales Order {0}, but ERPNext was not updated yet. Sync it first.",ألغى السوق أمر البيع {0} أو استرد قيمته لكن لم يتم تحديث ERPNext بعد. زامنه أولًا.
+"Sales Order {0} has items in warehouse {1}, but the Marketplace Account's warehouse is {2}.",أمر البيع {0} يحتوي على أصناف في المستودع {1} لكن مستودع حساب السوق هو {2}.
+Sales Order {0} has a Product Bundle item. Product Bundles cannot be shipped by this action: packs must be normal items (the -P<N> items).,أمر البيع {0} يحتوي على صنف حزمة منتجات. لا يمكن شحن حزم المنتجات بهذا الإجراء: يجب أن تكون العبوات أصنافًا عادية (أصناف -P<N>).
+Sales Order {0} has more than one draft Delivery Note ({1}); keep one first.,لأمر البيع {0} أكثر من مذكرة تسليم مسودة ({1}). أبقِ واحدة أولًا.
+"Delivery Note {0} is not a Bosta note for the whole order, so its shipment is not created here. Open it and use its own buttons.",مذكرة التسليم {0} ليست مذكرة Bosta للطلب كاملًا لذلك لا تُنشأ شحنتها هنا. افتحها واستخدم أزرارها.
+The city of the delivery address could not be found. Pick the city and create the shipment again.,تعذّر تحديد مدينة عنوان التسليم. اختر المدينة ثم أنشئ الشحنة مرة أخرى.
+You need permission to submit Delivery Notes to start the shipment.,تحتاج إلى صلاحية تسجيل مذكرات التسليم لبدء الشحنة.
+The Bosta shipment was created.,تم إنشاء شحنة Bosta.
+Bosta did not accept the shipment,لم تقبل Bosta الشحنة
+Bosta has not answered yet. Open the Delivery Note to see the result.,لم ترد Bosta بعد. افتح مذكرة التسليم لرؤية النتيجة.
+Creating the Bosta shipment,جارٍ إنشاء شحنة Bosta
+The Delivery Note {0} was created. Waiting for Bosta...,تم إنشاء مذكرة التسليم {0}. في انتظار Bosta...
+Creating the Delivery Note...,جارٍ إنشاء مذكرة التسليم...
+The Delivery Note needs your attention,مذكرة التسليم تحتاج إلى انتباهك
+The shipment was not created,لم يتم إنشاء الشحنة
+Still creating at Bosta,ما زال قيد الإنشاء لدى Bosta
 Creating at Bosta,جارٍ الإنشاء لدى Bosta
 Sales Order {0} is not a marketplace order.,أمر البيع {0} ليس طلب سوق.
 Sales Order {0} is {1}; only To Deliver and To Deliver and Bill orders can be shipped.,أمر البيع {0} حالته {1}؛ يمكن شحن الطلبات بحالة للتسليم أو للتسليم والفوترة فقط.
@@ -1922,19 +1941,16 @@ Delivery Note {0} already exists for this order.,مذكرة التسليم {0} �
 The Bosta carrier is not set up: there is no Supplier named Bosta.,شركة الشحن Bosta غير مُعدّة: لا يوجد مورد باسم Bosta.
 Sales Order {0} has more than one submitted Sales Invoice ({1}); check them first.,لأمر البيع {0} أكثر من فاتورة مبيعات مسجلة ({1})؛ راجعها أولًا.
 Sales Invoice {0} still has an outstanding amount while Sales Order {1} also has a recorded payment. Apply the payment to the invoice first.,فاتورة المبيعات {0} عليها مبلغ مستحق بينما أمر البيع {1} عليه أيضًا دفعة مسجلة. طبّق الدفعة على الفاتورة أولًا.
-Sales Order {0} has a draft Sales Invoice. Submit or delete it first.,لأمر البيع {0} فاتورة مبيعات مسودة. سجّلها أو احذفها أولًا.
 The recorded payment of Sales Order {0} covers its total except a rounding difference; settle the difference first.,الدفعة المسجلة لأمر البيع {0} تغطي إجماليه عدا فرق التقريب؛ سوِّ الفرق أولًا.
 The bulk run stopped unexpectedly: {0},توقف التشغيل الجماعي بشكل غير متوقع: {0}
 The Delivery Note cannot be confirmed,لا يمكن تأكيد مذكرة التسليم
 Item {0}: {1} to deliver but only {2} in stock in warehouse {3}.,الصنف {0}: المطلوب تسليمه {1} لكن المتوفر في المخزون {2} فقط في المستودع {3}.
 Item {0}: {1} to deliver but only {2} left on Sales Order {3}.,الصنف {0}: المطلوب تسليمه {1} لكن المتبقي على أمر البيع {3} هو {2} فقط.
-The recorded payment could not be applied to the Sales Invoice.,تعذّر تطبيق الدفعة المسجلة على فاتورة المبيعات.
-Sales Invoice {0} was not fully paid by the recorded payment (outstanding {1}).,لم تُسدَّد فاتورة المبيعات {0} بالكامل بالدفعة المسجلة (المستحق {1}).
 You do not have permission to do this.,ليست لديك صلاحية للقيام بذلك.
 Create Delivery Notes,إنشاء مذكرات التسليم
 Delivery Notes,مذكرات التسليم
 Shipping Method,طريقة الشحن
-The cash on delivery amount is filled from each order. A fully paid order gets a Sales Invoice first and COD 0. Orders that cannot be shipped are skipped and listed with the reason.,يُملأ مبلغ الدفع عند الاستلام من كل طلب. الطلب المدفوع بالكامل تُنشأ له فاتورة مبيعات أولًا ويكون الدفع عند الاستلام 0. الطلبات التي لا يمكن شحنها تُتجاوز وتُعرض مع السبب.
+The cash on delivery amount is filled from each order. A fully paid order gets COD 0. Orders that cannot be shipped are skipped and listed with the reason.,يُملأ مبلغ الدفع عند الاستلام من كل طلب. الطلب المدفوع بالكامل يكون الدفع عند الاستلام فيه 0. الطلبات التي لا يمكن شحنها تُتجاوز وتُعرض مع السبب.
 Sales Orders selected: {0},عدد أوامر البيع المحددة: {0}
 Documents,المستندات
 No orders were processed.,لم تتم معالجة أي طلبات.
@@ -2092,3 +2108,12 @@ Payment Entry {0} is linked to this order. Cancel or unlink it first. Nothing wa
 "Delivery Note {0} is linked with {1} {2}, so it cannot be deleted. Nothing was cancelled.","مذكرة التسليم {0} مرتبطة بـ {1} {2}، لذلك لا يمكن حذفها. لم يُلغَ شيء."
 "Delivery Note {0} ships one item of the order in more than one row (for example by batch), so the items of the order cannot be changed here. Merge those rows into one first.","تشحن مذكرة التسليم {0} صنفًا واحدًا من الطلب في أكثر من صف (مثلًا بحسب الدفعة)، لذلك لا يمكن تغيير أصناف الطلب من هنا. ادمج هذه الصفوف في صف واحد أولًا."
 "An item edit of order {0} is not settled with Shopify yet, so the COD is not sent again. Check the order in Shopify, clear the edit marker on the Marketplace Order, then retry.","تعديل أصناف الطلب {0} لم يُحسم مع Shopify بعد، لذلك لن يُرسل مبلغ التحصيل مرة أخرى. تحقق من الطلب في Shopify وامسح علامة التعديل في طلب السوق ثم أعد المحاولة."
+"Delivery Note {0} was deleted because the {1} shipment could not be created: {2}","تم حذف مذكرة التسليم {0} لأن تعذّر إنشاء شحنة {1}: {2}"
+The Delivery Note could not be removed because you do not have permission to delete it.,تعذّر حذف مذكرة التسليم لأنك لا تملك صلاحية حذفها.
+The Bosta city could not be found from the delivery address. Correct the address and try again.,تعذّر تحديد مدينة Bosta من عنوان التسليم. صحّح العنوان ثم حاول مرة أخرى.
+"The Bosta shipment could not be created, so the Delivery Note {0} was deleted. Reason: {1}","تعذّر إنشاء شحنة Bosta، لذلك تم حذف مذكرة التسليم {0}. السبب: {1}"
+"Bosta did not accept the shipment: {0}. The Delivery Note {1} was deleted.","لم تقبل Bosta الشحنة: {0}. تم حذف مذكرة التسليم {1}."
+The Delivery Note {0} no longer exists.,مذكرة التسليم {0} لم تعد موجودة.
+A Delivery Note that you cannot open already exists for this order.,توجد بالفعل مذكرة تسليم لهذا الطلب لا يمكنك فتحها.
+"{0} did not cancel the shipment, so the Delivery Note was not deleted: {1}","لم تلغِ {0} الشحنة، لذلك لم تُحذف مذكرة التسليم: {1}"
+"It is not known whether {0} cancelled the shipment, so the Delivery Note was not deleted. Try again in a few minutes. {1}","من غير المعروف ما إذا كانت {0} قد ألغت الشحنة، لذلك لم تُحذف مذكرة التسليم. حاول مرة أخرى بعد بضع دقائق. {1}"
