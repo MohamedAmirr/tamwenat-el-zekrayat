@@ -324,6 +324,7 @@
 	const on_change = (frm) => schedule_sync(frm);
 	const form_events = {
 		before_cancel,
+		before_workflow_action,
 		custom_cod_amount,
 		onload,
 		after_save,
@@ -485,6 +486,45 @@
 					resolve();
 				},
 			});
+		});
+	}
+
+	// Form hook for the Delivery Note Lifecycle workflow's Cancel action (Status menu), which does not go through
+	// before_cancel: without this the server guard refuses the cancel of a note with a live shipment and the form
+	// offers no other way out. Frappe applies the workflow action after this hook whatever frappe.validated says
+	// (form/workflow.js), so the only way to stop it is a promise that never settles; the screen it froze is released
+	// here. The server guard (guard_cancel_or_delete) stays the safety net.
+	function before_workflow_action(frm) {
+		if (frm.selected_workflow_action !== "Cancel") return;
+		if (frm.doc.transporter_name !== "Bosta" || !CANCELLABLE.includes(frm.doc.custom_integration_status || "")) return;
+		const unfreeze = () => {
+			if (frappe.dom && frappe.dom.unfreeze) frappe.dom.unfreeze();
+		};
+		const halt = () => {
+			frm.selected_workflow_action = null;
+			unfreeze();
+			return new Promise(() => {});
+		};
+		unfreeze();
+		return new Promise((resolve) => {
+			frappe.confirm(
+				__("Cancel the Bosta shipment of this Delivery Note? This cannot be undone."),
+				() =>
+					cancel_at_bosta(frm, {
+						done: () =>
+							Promise.resolve(frm.reload_doc()).then(() => {
+								// Already cancelled (a Check read found Bosta's cancel): the workflow must not go on.
+								if (frm.doc.docstatus === 2) {
+									frappe.show_alert({ message: __("The Delivery Note was already cancelled."), indicator: "green" });
+									return halt();
+								}
+								if (frappe.dom && frappe.dom.freeze) frappe.dom.freeze();
+								resolve();
+							}),
+						stop: halt,
+					}),
+				halt
+			);
 		});
 	}
 
@@ -673,6 +713,7 @@
 			request_pickup,
 			city_label,
 			before_cancel,
+			before_workflow_action,
 			custom_cod_amount,
 			prefill_cod,
 			sync_cod,
