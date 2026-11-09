@@ -20,7 +20,10 @@ from frappe.tests import IntegrationTestCase
 
 from marketplace_integrations.api.shopify_products import (
 	get_catalog_sweep_status,
+	get_product_create_status,
+	list_product_create_accounts,
 	queue_catalog_sweep,
+	queue_product_create,
 	upsert_mapping,
 )
 from marketplace_integrations.integrations.shopify.test_products import make_shopify_account
@@ -38,9 +41,7 @@ class IntegrationTestShopifyProductsApi(IntegrationTestCase):
 		self.assertEqual(result, {"job_id": "abc", "status": "queued"})
 
 	def test_queue_catalog_sweep_post_only(self):
-		self.assertEqual(
-			frappe.allowed_http_methods_for_whitelisted_func[queue_catalog_sweep], ["POST"]
-		)
+		self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[queue_catalog_sweep], ["POST"])
 
 	def test_upsert_mapping_post_only(self):
 		self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[upsert_mapping], ["POST"])
@@ -78,6 +79,39 @@ class IntegrationTestShopifyProductsApi(IntegrationTestCase):
 			external_barcode="BAR-1",
 		)
 		self.assertEqual(result, {"name": "MPM-00001"})
+
+	def test_queue_product_create_delegates(self):
+		with patch(
+			"marketplace_integrations.integrations.shopify.product_create.queue_product_create",
+			return_value={"job_id": "abc", "status": "queued"},
+		) as mocked:
+			result = queue_product_create("Some Account", "Some Item")
+
+		mocked.assert_called_once_with("Some Account", "Some Item")
+		self.assertEqual(result, {"job_id": "abc", "status": "queued"})
+
+	def test_queue_product_create_post_only(self):
+		self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[queue_product_create], ["POST"])
+
+	def test_list_product_create_accounts_delegates(self):
+		with patch(
+			"marketplace_integrations.integrations.shopify.product_create.list_product_create_accounts",
+			return_value=[{"name": "A"}],
+		) as mocked:
+			result = list_product_create_accounts()
+
+		mocked.assert_called_once_with()
+		self.assertEqual(result, [{"name": "A"}])
+
+	def test_get_product_create_status_delegates(self):
+		with patch(
+			"marketplace_integrations.integrations.shopify.product_create.get_product_create_status",
+			return_value={"status": "running"},
+		) as mocked:
+			result = get_product_create_status("job-1")
+
+		mocked.assert_called_once_with("job-1")
+		self.assertEqual(result, {"status": "running"})
 
 
 def _make_role_only_user(email_prefix):

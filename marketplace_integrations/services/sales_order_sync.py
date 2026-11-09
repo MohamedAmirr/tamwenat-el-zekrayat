@@ -76,6 +76,7 @@ from marketplace_integrations.services.sales_order_reconciliation import (
 	SalesOrderLinesMismatch,
 	execute,
 	hold_cancel_for_draft_documents,
+	hold_update_for_shipment,
 	plan,
 	read_erp_state,
 	snapshot_advanced_from,
@@ -309,6 +310,7 @@ def _sync_sales_order(marketplace_order, trigger_source):
 		result = _save_success(order, current_hash, sales_order, updated=False, snapshot=snapshot)
 		result = _flag_compensating_evidence_on_new_order(order, sales_order, snapshot) or result
 		_create_sync_log(order, trigger_source, "Success", snapshot, result)
+		_reserve_new_shopify_order(order, sales_order)
 		return result
 	except (SyncBlocker, SalesOrderLinesMismatch) as exc:
 		# SalesOrderLinesMismatch carries a specific, user-actionable message.
@@ -346,6 +348,24 @@ def _sync_sales_order(marketplace_order, trigger_source):
 		# transaction. It must never change the outcome of the Sales Order sync.
 		if allow_payment_mirroring:
 			_mirror_shopify_payments_independently(order.name, trigger_source)
+
+
+def _reserve_new_shopify_order(order, sales_order):
+	"""#499: reserve the whole new Shopify order or put it in Waiting for Stock (no Delivery Note is made: a person
+	creates it). Never changes the outcome of the sync: a failure here is logged and rolled back to its own
+	savepoint, and the sweep retries the order only if it reached Waiting for Stock."""
+	if order.platform != "Shopify":
+		return
+	from marketplace_integrations.services import order_reservation
+
+	frappe.db.savepoint("marketplace_order_reservation_call")
+	try:
+		order_reservation.reserve_or_wait(sales_order.name)
+	except Exception:
+		frappe.db.rollback(save_point="marketplace_order_reservation_call")
+		frappe.log_error(
+			title="Shopify order reservation failed", message=f"{sales_order.name}\n{frappe.get_traceback()}"
+		)
 
 
 def is_transient_failure(exc):
@@ -1092,9 +1112,12 @@ def set_sync_status_from_current_snapshot(order, preserve_sync_error=False):
 		reasons.apply_sync_state(order, exc.reason_code, cstr(exc))
 		return
 	if docstatus != 0:
-		reconciliation_plan = hold_cancel_for_draft_documents(
-			plan(
-				_parse_last_synced_snapshot(order), current_snapshot, evidence, read_erp_state(sales_order)
+		reconciliation_plan = hold_update_for_shipment(
+			hold_cancel_for_draft_documents(
+				plan(
+					_parse_last_synced_snapshot(order), current_snapshot, evidence, read_erp_state(sales_order)
+				),
+				sales_order.name,
 			),
 			sales_order.name,
 		)
@@ -1186,7 +1209,8 @@ def _apply_reconciliation_status(order, reconciliation_plan, queue_executable=Fa
 	if outcome == NO_ACTION:
 		reasons.apply_synced(order)
 	elif outcome in _EXECUTABLE_OUTCOMES and queue_executable:
-		if order.get("sync_reason_code") not in reasons.EXECUTION_FAILED_REASONS:
+		# A held update (#500) is re-run by the Bin sweep, not by every form load.
+		if order.get("sync_reason_code") not in (*reasons.EXECUTION_FAILED_REASONS, reasons.WAITING_FOR_STOCK_EDIT):
 			queue_resync_in_memory(order)
 	else:
 		reasons.apply_sync_state(
@@ -2082,7 +2106,7 @@ def release_outbound_edit_marker(order):
 		order.flags.clear_outbound_edit_marker = True
 
 
-def rebaseline_after_outbound_edit(order, sales_order):
+def rebaseline_after_outbound_edit(order, sales_order, correct_rates=False):
 	"""Make the refreshed Shopify order the baseline after ERPNext's item edit (#356).
 
 	``order`` is the freshly imported Marketplace Order, ``sales_order`` the current
@@ -2108,10 +2132,30 @@ def rebaseline_after_outbound_edit(order, sales_order):
 		)
 	except SyncBlocker as exc:
 		return _flag_after_outbound_edit(order, exc.reason_code, cstr(exc))
-	reconciliation_plan = plan(paired, snapshot, evidence, read_erp_state(sales_order))
+	erp_state = read_erp_state(sales_order)
+	reconciliation_plan = plan(paired, snapshot, evidence, erp_state)
 	if reconciliation_plan["outcome"] == NO_ACTION:
 		release_outbound_edit_marker(order)
 		return _save_success(order, snapshot_hash(snapshot), sales_order, True, snapshot)
+	if correct_rates:
+		# Edit Order (#500) priced an added row from the Item Price; Shopify's price differs. Store a baseline
+		# that holds ERPNext's own rate and amount per line, so the planner sees only the price difference and
+		# queues the update from Shopify's snapshot (a baseline equal to the snapshot would be a plain divergence).
+		erp_lines = {line["sales_order_item"]: line for line in erp_state["lines"]}
+		adjusted = deepcopy(paired)
+		for line in adjusted.get("items") or []:
+			erp_line = erp_lines.get(line.get("sales_order_item"))
+			if erp_line:
+				line["effective_rate"] = erp_line["rate"]
+				line["fulfilled_total_price"] = erp_line["amount"]
+		corrected = plan(adjusted, snapshot, evidence, erp_state)
+		if corrected["outcome"] == UPDATE_SUBMITTED_ORDER:
+			order.last_synced_snapshot = frappe.as_json(adjusted)
+			order.last_synced_hash = snapshot_hash(adjusted)
+			release_outbound_edit_marker(order)
+			_apply_reconciliation_status(order, corrected, queue_executable=True)
+			order.save()
+			return {"ok": False}
 	release_outbound_edit_marker(order)
 	_apply_reconciliation_status(order, reconciliation_plan, queue_executable=True)
 	order.save()
@@ -2133,9 +2177,17 @@ def _reconcile_submitted_order(order, sales_order, snapshot, evidence, trigger_s
 		# Case 4 (#364): a missing baseline is adopted only when the marketplace and ERPNext
 		# states are proven to match.
 		previous = _adopt_baseline_if_equivalent(order, sales_order, snapshot, evidence, erp_state)
-	reconciliation_plan = hold_cancel_for_draft_documents(
-		plan(previous, snapshot or {}, evidence, erp_state), sales_order.name
+	reconciliation_plan = hold_update_for_shipment(
+		hold_cancel_for_draft_documents(plan(previous, snapshot or {}, evidence, erp_state), sales_order.name),
+		sales_order.name,
 	)
+	if reconciliation_plan["outcome"] == UPDATE_SUBMITTED_ORDER:
+		# #500: Shopify raised a quantity the stock cannot cover: apply nothing, keep the baseline, show it in the list.
+		from marketplace_integrations.services import order_edit
+
+		waiting = order_edit.hold_for_stock(sales_order.name, previous, snapshot or {})
+		if waiting:
+			return _save_waiting_for_stock(order, waiting, trigger_source, snapshot, reconciliation_plan, erp_state)
 	# Single dispatch point between "act on ERPNext" and "advise only".
 	if reconciliation_plan["outcome"] in _EXECUTABLE_OUTCOMES:
 		return _execute_reconciliation_plan(
@@ -2482,6 +2534,32 @@ def _save_reconciliation_advisory(order, reconciliation_plan):
 		"error": None if reconciliation_plan["outcome"] == NO_ACTION else message,
 		"reconciliation": reconciliation_plan,
 	}
+
+
+def _save_waiting_for_stock(order, message, trigger_source, snapshot, reconciliation_plan, erp_state):
+	"""The update is held for stock (#500): Syncing with the reason ``WAITING_FOR_STOCK_EDIT`` and NO debounce
+	window (the Bin sweep bumps it when stock changes, the hourly stuck sweep re-checks it daily). The baseline
+	(``last_synced_*``) is untouched, so Shopify's change stays pending. One Sync Log row per hold, not per retry."""
+	already_held = order.get("sync_reason_code") == reasons.WAITING_FOR_STOCK_EDIT
+	reasons.apply_sync_state(order, reasons.WAITING_FOR_STOCK_EDIT, message)
+	order.sync_debounce_until = None
+	order.pending_sync_trigger_source = None
+	order.flags.skip_sync_status_update = True
+	order.save()
+	result = {
+		"ok": False,
+		"status": order.erpnext_sync_status,
+		"sales_order": order.erpnext_sales_order,
+		"updated": False,
+		"error": None,
+		"waiting_for_stock": True,
+		"reconciliation": reconciliation_plan,
+	}
+	if not already_held:
+		_create_sync_log(
+			order, trigger_source, "Invalid", snapshot, result, reconciliation_plan=reconciliation_plan, erp_state=erp_state
+		)
+	return result
 
 
 def _save_failure(order, message, reason_code=reasons.SYNC_FAILED):

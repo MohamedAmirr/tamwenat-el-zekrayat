@@ -26,7 +26,8 @@ def _carrier_note(delivery_note, ptype):
 def request_shipment(delivery_note: str, modified: str | None = None):
 	"""Start the carrier create of a draft Delivery Note (needs submit permission on it)."""
 	_carrier_note(delivery_note, "submit")
-	# The job submits the note as this user once the carrier confirms Created (a return pickup is not submitted).
+	# The job submits the note as this user once the carrier confirms Created, except a carrier whose note waits for
+	# its pickup event (#500) and a return pickup.
 	return carrier_shipments.request_create(delivery_note, modified, submit_as=frappe.session.user)
 
 
@@ -52,6 +53,27 @@ def refresh_shipment(delivery_note: str):
 		return {"shipping_status": adapter.refresh(delivery_note)}
 	except carrier_log.RateLimited:
 		frappe.throw(_("{0} is busy. Try again in a few minutes.").format(adapter.SERVICE_NAME))
+
+
+@frappe.whitelist(methods=["POST"])
+def retry_pickup_submit(delivery_note: str):
+	"""Needs Attention "Picked up but not submitted" Retry (#500): queue the submit of a Created draft again (needs
+	submit permission). The job submits as the stored requester (the note's owner when none is stored; this call
+	never changes the note) and stores the reason again if it fails."""
+	from marketplace_integrations.services import marketplace_attention as attention
+
+	doc, adapter = _carrier_note(delivery_note, "submit")
+	pickup_statuses = adapter.problem_states().get(attention.PICKED_UP_NOT_SUBMITTED, [])
+	if (
+		not getattr(adapter, "SUBMIT_AT_PICKUP", False)
+		or doc.docstatus != 0
+		or doc.get("is_return")
+		or carrier_shipments.status_of(doc) != carrier_log.CREATED
+		or doc.get("custom_shipping_status") not in pickup_statuses
+	):
+		frappe.throw(_("This Delivery Note is not waiting to be submitted after a pickup."))
+	carrier_shipments.queue_submit_at_pickup(delivery_note)
+	return {"queued": True}
 
 
 @frappe.whitelist(methods=["POST"])

@@ -58,6 +58,7 @@ from marketplace_integrations.integrations.noon.constants import (
 	SHIPMENT_INVOICE_UPLOAD_PATH,
 )
 from marketplace_integrations.services import carrier_log
+from marketplace_integrations.services import delivery_note_workflow as lifecycle
 from marketplace_integrations.services.carrier_log import (
 	CANCELLATION_PENDING,
 	CANCELLATION_UNKNOWN,
@@ -1103,7 +1104,7 @@ def refresh(delivery_note):
 			values.update(
 				custom_integration_status=CANCELLED, custom_shipping_status=SHIPPING_CANCELLED, custom_last_integration_error=None
 			)
-		note.db_set(values, update_modified=False, notify=True, commit=True)
+		note.db_set(lifecycle.with_state(delivery_note, values), update_modified=False, notify=True, commit=True)
 		_update_summary(delivery_note)
 		if values.get("custom_integration_status") == CANCELLED:
 			_cancel_note_natively(delivery_note)
@@ -1139,7 +1140,7 @@ def refresh(delivery_note):
 		for row in note.get("items") or []:
 			if derived.rows.get(row.name):
 				row.db_set("custom_noon_item_status", derived.rows[row.name], update_modified=False)
-	note.db_set(values, update_modified=False, notify=True, commit=True)
+	note.db_set(lifecycle.with_state(delivery_note, values), update_modified=False, notify=True, commit=True)
 	_update_summary(delivery_note)
 	if values.get("custom_integration_status") == CANCELLED:
 		_cancel_note_natively(delivery_note)

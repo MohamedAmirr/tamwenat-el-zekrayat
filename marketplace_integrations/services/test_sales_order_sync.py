@@ -6542,6 +6542,9 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		from marketplace_integrations.api.marketplace_orders import confirm_goods_received
 		from marketplace_integrations.tests.utils import make_role_user
 
+		# make_role_user's cleanup commits; registered first so it exits last, this keeps that commit from
+		# persisting this test's orders (the class rolls back instead).
+		self.enterContext(patch("frappe.db.commit"))
 		order, _sales_order, delivery_note = self._delivered_and_cancelled_order()
 		sync_sales_order(order.name)
 		email, _role = make_role_user(
@@ -6680,6 +6683,9 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		from marketplace_integrations.services.sales_order_recheck import bump_linked_orders
 		from marketplace_integrations.tests.utils import make_role_user
 
+		# make_role_user's cleanup commits; registered first so it exits last, this keeps that commit from
+		# persisting this test's orders (the class rolls back instead).
+		self.enterContext(patch("frappe.db.commit"))
 		order = self._synced_talabat_order()
 		frappe.db.set_value("Marketplace Order", order.name, "erpnext_sync_status", "Needs Action")
 		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)
@@ -6785,7 +6791,9 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertTrue(queued[0]["enqueue_after_commit"])
 		self.assertEqual(queued[0]["job_id"], f"marketplace-echo-sync-{order.name}")
 
-		run_echo_sync(order.name, "Talabat Webhook")
+		# The job ends with a real commit, which would persist this class's rows; the class rolls back instead.
+		with patch("frappe.db.commit"):
+			run_echo_sync(order.name, "Talabat Webhook")
 
 		order.reload()
 		sales_order = frappe.get_doc("Sales Order", order.erpnext_sales_order)

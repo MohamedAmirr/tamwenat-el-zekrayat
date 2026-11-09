@@ -329,6 +329,16 @@ class BostaFixtureMixin:
 		frappe.db.commit()
 		return note
 
+	def submit_note(self, note):
+		"""Submit a Created Bosta draft the way the pickup job does (#500: nobody submits it by hand before the
+		pickup, ``require_shipment_created`` refuses without the job's flag). ``note``: a document or a name."""
+		from marketplace_integrations.services.carrier_shipments import PICKUP_SUBMIT_FLAG
+
+		doc = frappe.get_doc("Delivery Note", note) if isinstance(note, str) else note
+		doc.flags[PICKUP_SUBMIT_FLAG] = True
+		doc.submit()
+		return doc
+
 	def make_user(self, role, *extra_roles):
 		email = f"bosta-{frappe.scrub(role)}-{len(extra_roles)}-{self.suffix}@example.com"
 		user = frappe.get_doc(

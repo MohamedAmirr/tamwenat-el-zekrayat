@@ -5,8 +5,9 @@
 
 Delivery Note-first (``docs/marketplace-integrations/delivery-note-first.md``): the Delivery Note
 with transporter "Bosta" is the shipment. Submit starts a background job (``carrier_shipments.request_create``
-then ``run_create``); once the shipment is Created the job submits the note as the requester
-(``require_shipment_created`` still refuses any submit before).
+then ``run_create``); once the shipment is Created the note STAYS A DRAFT (stage Shipment Created, #500) and
+Bosta's pickup event submits it as the requester (``statuses._write_state``; ``require_shipment_created`` still
+refuses any submit before Created).
 This module holds only the Bosta parts: the contract methods and the Bosta-only helpers (city, COD, label).
 
 Native fields used: ``transporter`` (Supplier "Bosta", created by a patch), ``lr_no`` (the Bosta
@@ -84,6 +85,9 @@ RETURNED_SOURCE = RETURNED_BY_BOSTA
 #: Set on the draft the app makes itself (``returns.create_returned_draft``); a person's save never has it.
 AUTOMATIC_RETURN_FLAG = "bosta_automatic_return"
 BOSTA_COD_LIMIT = 30000
+#: #500: a Bosta note stays a draft (stage Shipment Created) until Bosta reports the pickup; the pickup event submits
+#: it (``statuses._write_state`` -> ``carrier_shipments.run_submit_at_pickup``).
+SUBMIT_AT_PICKUP = True
 # The Integration Status values, LIVE_STATUSES and EDITABLE_STATUSES come from ``services/carrier_log.py``
 # (shared with the neutral service).
 
@@ -101,6 +105,7 @@ SYSTEM_FIELDS = (
 	"custom_actual_shipping_cost",
 	"custom_actual_cost_received_on",
 	"custom_bosta_last_event_at",
+	"custom_shipment_requested_by",
 )
 #: Cleared on a new or amended note: Amend copies even ``no_copy`` fields (conventions).
 CLEARED_ON_NEW = (*SYSTEM_FIELDS, "custom_bosta_city", "custom_bosta_city_name")
@@ -205,9 +210,7 @@ def default_cod(doc):
 	by ERPNext's own measure (nothing outstanding on ``rounded_total`` else ``grand_total`` minus
 	``advance_paid``; ERPNext caps a recorded payment at the rounded total, so 494 paid on 494.21 is fully
 	paid) has COD 0, not the 0.21 the grand total alone would leave."""
-	total = flt(doc.get("grand_total"))
 	order = sales_order_of(doc)
-	advance = 0
 	values = (
 		frappe.db.get_value(
 			"Sales Order", order, ["advance_paid", "rounded_total", "grand_total"], as_dict=True
@@ -215,15 +218,24 @@ def default_cod(doc):
 		if order
 		else None
 	)
-	if values:
-		order_total = flt(values.grand_total)
+	return cod_from_totals(flt(doc.get("grand_total")), values)
+
+
+def cod_from_totals(total, order_values=None):
+	"""``default_cod`` from numbers: ``total`` is the note's grand total, ``order_values`` the Sales Order's
+	``advance_paid``, ``rounded_total`` and ``grand_total`` (``None`` for a note with no Sales Order). The edit of
+	a Shopify order (#501) calls it with the totals the order WILL have, before ERPNext is changed."""
+	advance = 0
+	if order_values:
+		order_total = flt(order_values.get("grand_total"))
 		if (
-			flt(values.advance_paid) > 0
-			and flt((flt(values.rounded_total) or order_total) - flt(values.advance_paid), 2) <= 0
+			flt(order_values.get("advance_paid")) > 0
+			and flt((flt(order_values.get("rounded_total")) or order_total) - flt(order_values.get("advance_paid")), 2)
+			<= 0
 		):
 			return 0
 		if order_total:
-			advance = flt(values.advance_paid) * min(total / order_total, 1)
+			advance = flt(order_values.get("advance_paid")) * min(total / order_total, 1)
 	return max(flt(total - advance, 2), 0)
 
 
@@ -799,11 +811,9 @@ def log_data(values):
 
 
 def after_created(delivery_note, data):
-	"""Once a note is Created: the Sales Order summary and the webhook events that arrived before the note
-	could take them. The label job is NOT queued here: the note is still a draft that is about to be submitted
-	(by the create job itself), and a label job writing to it at that moment raced the submit (MySQL 1020
-	"Record has changed since last read", a stale ``modified``), leaving the note Draft. ``after_submit``
-	queues it."""
+	"""Once a note is Created: the Sales Order summary, the label job (#500: the note stays a draft and nothing
+	submits it right after Created, so the old race of the label job with the create job's submit is gone) and the
+	webhook events that arrived before the note could take them."""
 	from marketplace_integrations.integrations.bosta import statuses
 
 	if frappe.db.get_value("Delivery Note", delivery_note, "is_return"):
@@ -811,6 +821,8 @@ def after_created(delivery_note, data):
 		return
 	delivery_id = _delivery_id(data)
 	_update_summary(delivery_note)
+	if not frappe.db.get_value("Delivery Note", delivery_note, "custom_shipping_label"):
+		_queue_label(delivery_note)
 	frappe.db.commit()
 	try:
 		statuses.replay_pending_events(delivery_id)
@@ -821,21 +833,30 @@ def after_created(delivery_note, data):
 		frappe.log_error(title="Bosta: pending events could not be replayed", message=frappe.get_traceback())
 
 
-def after_submit(doc):
-	"""Optional contract hook (``carrier_shipments.after_submit``, the Delivery Note ``on_submit``): queue the
-	label job once the note is submitted, so it never writes to a draft that is being submitted. Runs after
-	the submit commits (``enqueue_after_commit``)."""
-	if doc.get("is_return") or status_of(doc) != CREATED or doc.get("custom_shipping_label"):
-		return
+def _queue_label(delivery_note):
+	"""The label job, queued once the shipment is Created (#500: nothing is submitted after Created any more, so
+	the old race of the label job with the create job's submit is gone). Runs after the caller's commit."""
 	frappe.enqueue(
 		"marketplace_integrations.integrations.bosta.delivery_note_shipment.run_fetch_label",
 		queue="short",
 		timeout=120,
-		job_id=_LABEL_JOB.format(doc.name),
+		job_id=_LABEL_JOB.format(delivery_note),
 		deduplicate=True,
 		enqueue_after_commit=True,
-		delivery_note=doc.name,
+		delivery_note=delivery_note,
 	)
+
+
+def after_pickup_submit(delivery_note):
+	"""A draft the pickup event just submitted: when Bosta already reported the goods returned (46/60), queue the
+	draft return as a note that was submitted before would (idempotent)."""
+	from marketplace_integrations.integrations.bosta import returns, statuses
+
+	values = frappe.db.get_value("Delivery Note", delivery_note, ["custom_shipping_status", "is_return"], as_dict=True)
+	if values and not values.is_return and values.custom_shipping_status in [
+		statuses.BOSTA_STATE_NAMES[code] for code in statuses.RETURNED_STATE_CODES
+	]:
+		returns.queue_returned_draft(delivery_note)
 
 
 def refresh(delivery_note):
@@ -865,6 +886,8 @@ def problem_states():
 	return {
 		attention.CARRIER_EXCEPTION: [statuses.BOSTA_STATE_NAMES[c] for c in statuses.PROBLEM_STATE_CODES],
 		attention.CARRIER_RETURN: [statuses.BOSTA_STATE_NAMES[c] for c in statuses.RETURNED_STATE_CODES],
+		# #500: the statuses that submit the draft; a draft still in one of them was not submitted.
+		attention.PICKED_UP_NOT_SUBMITTED: [statuses.BOSTA_STATE_NAMES[c] for c in statuses.PICKUP_CODES],
 	}
 
 
@@ -1007,27 +1030,67 @@ def _update_summary(delivery_note):
 # ---------------------------------------------------------------------------
 
 
-def run_fetch_label(delivery_note):
+def run_fetch_label(delivery_note, replace=False, cod=None):
 	"""Background job after Created: fetch the label as the system. A failure is logged and leaves the
-	Integration Status alone; Fetch Label retries."""
+	Integration Status alone; Fetch Label retries. ``replace``: the COD changed (#501), request a new label.
+	``cod``: the COD that update sent; when the note's COD has moved on since, a newer update queued its own refresh
+	and this one does nothing (the label would show a COD Bosta no longer has)."""
 	frappe.set_user("Administrator")
-	return fetch_label(delivery_note)
+	if replace and cod is not None and _snapshot_cod(delivery_note) != flt(cod, 2):
+		return None
+	return fetch_label(delivery_note, replace=replace, cod=cod)
 
 
-def fetch_label(delivery_note, raise_on_error=False):
+def _snapshot_cod(delivery_note):
+	"""The COD in the note's request snapshot (what Bosta was last sent), else ``None``."""
+	raw = frappe.db.get_value("Delivery Note", delivery_note, "custom_carrier_request_snapshot")
+	try:
+		data = frappe.parse_json(raw) if raw else {}
+	except Exception:
+		return None
+	if not isinstance(data, dict) or data.get("cod") is None:
+		return None
+	return flt(data["cod"], 2)
+
+
+def queue_label_refresh(delivery_note):
+	"""After a COD update (#501): queue a new label when one is stored (the stored one shows the old COD). Runs
+	after the caller's commit. One job per note AND COD: a second update while a refresh runs queues its own, and the
+	older one skips itself (``run_fetch_label``), so the last COD always gets its label."""
+	if not frappe.db.get_value("Delivery Note", delivery_note, "custom_shipping_label"):
+		return
+	cod = _snapshot_cod(delivery_note)
+	frappe.enqueue(
+		"marketplace_integrations.integrations.bosta.delivery_note_shipment.run_fetch_label",
+		queue="short",
+		timeout=120,
+		job_id=f"{_LABEL_JOB.format(delivery_note)}|refresh|{cod}",
+		deduplicate=True,
+		enqueue_after_commit=True,
+		delivery_note=delivery_note,
+		replace=True,
+		cod=cod,
+	)
+
+
+def fetch_label(delivery_note, raise_on_error=False, replace=False, cod=None):
 	"""Fetch the A4 Arabic label and attach it privately to the note (the one implementation behind the job
 	and the Fetch Label button). Commits before the log row and before the HTTP call, so no transaction is
 	open across it. A failure is logged Failed, never changes the Integration Status, and is raised again
-	only when ``raise_on_error``."""
+	only when ``raise_on_error``. ``replace`` (#501): fetch even when a label is stored; when that fails the stored
+	label is dropped, because it shows a COD Bosta no longer has (Fetch Bosta Label gets it again)."""
 	from marketplace_integrations.integrations.bosta import labels
 
 	frappe.db.commit()
 	log = carrier_log.open_log(SERVICE_NAME, delivery_note, "Label Fetch")
 	frappe.db.commit()
 	try:
-		result = labels.create_a4_arabic_label(delivery_note)
+		result = labels.create_a4_arabic_label(delivery_note, replace=replace, cod=cod)
 	except Exception as exc:
 		frappe.db.rollback()
+		# A job of an older COD must not drop the label a newer COD's job stored.
+		if replace and (cod is None or _snapshot_cod(delivery_note) == flt(cod, 2)):
+			frappe.db.set_value("Delivery Note", delivery_note, "custom_shipping_label", None, update_modified=False)
 		# labels.py escapes Bosta's text for the screen; the log keeps it raw (escaped where it is rendered).
 		carrier_log.close_log(log, "Failed", error=html.unescape(cstr(exc))[:500] or _("The label could not be fetched."))
 		frappe.db.commit()
