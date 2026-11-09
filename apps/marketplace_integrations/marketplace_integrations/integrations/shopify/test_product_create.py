@@ -9,6 +9,7 @@ calling create_product() directly with the arguments the queue captured.
 """
 
 import random
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import frappe
@@ -70,11 +71,25 @@ def _dispatcher(product_gid, variant_gid, create=None, sku=None):
 	return _side_effect
 
 
+_SEEDED_STATUS_IDS = []
+
+
+def _track(result):
+	"""Remember a queued status id so tearDown can delete the cache entry it seeded."""
+	_SEEDED_STATUS_IDS.append(result["job_id"])
+	return result
+
+
+def _clear_status_cache():
+	while _SEEDED_STATUS_IDS:
+		frappe.cache().delete_value(product_create._cache_key(_SEEDED_STATUS_IDS.pop()))
+
+
 def _queue(account, item):
 	"""Queue through the real queue_product_create() with frappe.enqueue mocked.
 	Returns (result, enqueue kwargs) so a test can run the worker itself."""
 	with patch(ENQUEUE_TARGET, return_value=object()) as mocked_enqueue:
-		result = product_create.queue_product_create(account, item)
+		result = _track(product_create.queue_product_create(account, item))
 	return result, mocked_enqueue.call_args.kwargs
 
 
@@ -97,6 +112,7 @@ class _ProductCreateFixtures(IntegrationTestCase):
 		self.item = self._new_item("Product Create Item")
 
 	def tearDown(self):
+		_clear_status_cache()
 		for parent in self.bundle_codes:
 			frappe.delete_doc("Product Bundle", parent, ignore_permissions=True, force=True)
 		frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": self.account.name})
@@ -258,7 +274,7 @@ class IntegrationTestProductCreatePermissions(_ProductCreateFixtures):
 		with self.set_user(staff):
 			with patch(ENQUEUE_TARGET, return_value=object()) as mocked_enqueue:
 				with patch(EXECUTE_TARGET) as mocked_execute:
-					result = product_create.queue_product_create(self.account.name, self.item)
+					result = _track(product_create.queue_product_create(self.account.name, self.item))
 
 		mocked_enqueue.assert_called_once()
 		mocked_execute.assert_not_called()
@@ -285,6 +301,43 @@ class IntegrationTestProductCreatePermissions(_ProductCreateFixtures):
 		mocked_enqueue.assert_not_called()
 
 
+class IntegrationTestListProductCreateAccounts(_ProductCreateFixtures):
+	def _names(self):
+		return [row.name for row in product_create.list_product_create_accounts()]
+
+	def test_shopify_user_sees_the_writable_account(self):
+		staff = _make_staff(self, "Product Create List Shopify Staff", ["Shopify User"])
+
+		with self.set_user(staff):
+			self.assertIn(self.account.name, self._names())
+
+	def test_account_the_user_can_only_read_is_not_listed(self):
+		staff = _make_staff(self, "Product Create List Read Only Staff", ["Shopify User"])
+		real_has_permission = frappe.has_permission
+
+		def _read_only(doctype=None, ptype="read", *args, **kw):
+			if doctype == "Marketplace Account" and ptype == "write":
+				return False
+			return real_has_permission(doctype, ptype, *args, **kw)
+
+		with self.set_user(staff):
+			with patch("frappe.has_permission", side_effect=_read_only):
+				self.assertEqual(self._names(), [])
+
+	def test_user_without_platform_role_gets_no_accounts(self):
+		staff = _make_staff(self, "Product Create List Item Manager Staff", ["Item Manager"])
+
+		with self.set_user(staff):
+			self.assertEqual(self._names(), [])
+
+	def test_disabled_and_non_shopify_accounts_are_not_listed(self):
+		frappe.db.set_value("Marketplace Account", self.account.name, "enabled", 0)
+		self.assertNotIn(self.account.name, self._names())
+		frappe.db.set_value("Marketplace Account", self.account.name, "enabled", 1)
+		self.account.db_set("platform", "Talabat", update_modified=False)
+		self.assertNotIn(self.account.name, self._names())
+
+
 class IntegrationTestCreateProductWorker(IntegrationTestCase):
 	"""create_product() run directly. It commits (the mapping, then the status
 	write), so the fixtures are committed here too and torn down by hand."""
@@ -301,6 +354,7 @@ class IntegrationTestCreateProductWorker(IntegrationTestCase):
 		frappe.db.commit()
 
 	def tearDown(self):
+		_clear_status_cache()
 		for name in frappe.get_all(
 			"Error Log",
 			filters={"method": ERROR_LOG_METHOD, "error": ["like", f"%{self.item}%"]},
@@ -423,7 +477,32 @@ class IntegrationTestCreateProductWorker(IntegrationTestCase):
 		self.assertEqual(self._mapping_rows(), [])
 		self.assertEqual(mocked_execute.call_count, 1)
 
-	def test_sku_user_errors_report_both_gids_and_log(self):
+	def _assert_sku_failure_is_mapped(self, state, expected_text):
+		"""Decision (c): a SKU-step failure still writes the mapping (both GIDs are
+		known) so a second create is refused, and tells the user to fix the SKU in Shopify."""
+		self.assertEqual(state["status"], "failed")
+		self.assertTrue(state["mapped"])
+		self.assertIn(self.product_gid, state["error"])
+		self.assertIn(self.variant_gid, state["error"])
+		self.assertIn(expected_text, state["error"])
+		self.assertIn("Fix the SKU in Shopify", state["error"])
+		rows = self._mapping_rows()
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0].external_reference, self.variant_gid)
+		self.assertEqual(rows[0].external_product_id, self.product_gid)
+		self.assertFalse(rows[0].external_sku)
+		self.assertEqual(state["result"]["mapping"], rows[0].name)
+		logs = self._error_log_texts()
+		self.assertEqual(len(logs), 1)
+		self.assertIn(self.product_gid, logs[0])
+		self.assertIn(self.variant_gid, logs[0])
+		# The duplicate guard now refuses a second queue.
+		with patch(ENQUEUE_TARGET) as mocked_enqueue:
+			with self.assertRaisesRegex(frappe.ValidationError, "already mapped"):
+				product_create.queue_product_create(self.account.name, self.item)
+		mocked_enqueue.assert_not_called()
+
+	def test_sku_user_errors_still_map_and_tell_user_to_fix_sku(self):
 		sku = {
 			"productVariantsBulkUpdate": {
 				"productVariants": [],
@@ -433,36 +512,32 @@ class IntegrationTestCreateProductWorker(IntegrationTestCase):
 
 		state, _mocked_execute = self._queue_and_run_with(self._responses(sku=sku))
 
-		self.assertEqual(state["status"], "failed")
-		self.assertIn(self.product_gid, state["error"])
-		self.assertIn(self.variant_gid, state["error"])
-		self.assertIn("SKU already taken", state["error"])
-		self.assertEqual(self._mapping_rows(), [])
-		logs = self._error_log_texts()
-		self.assertEqual(len(logs), 1)
-		self.assertIn(self.product_gid, logs[0])
-		self.assertIn(self.variant_gid, logs[0])
+		self._assert_sku_failure_is_mapped(state, "SKU already taken")
 
-	def test_sku_exception_reports_both_gids_and_logs(self):
+	def test_sku_exception_still_maps_and_tells_user_to_fix_sku(self):
 		state, _mocked_execute = self._queue_and_run_with(self._responses(sku=Exception("sku boom")))
 
-		self.assertEqual(state["status"], "failed")
-		self.assertIn(self.product_gid, state["error"])
-		self.assertIn(self.variant_gid, state["error"])
-		self.assertIn("sku boom", state["error"])
-		self.assertEqual(self._mapping_rows(), [])
-		logs = self._error_log_texts()
-		self.assertEqual(len(logs), 1)
-		self.assertIn(self.variant_gid, logs[0])
+		self._assert_sku_failure_is_mapped(state, "sku boom")
 
 	def test_sku_not_confirmed_when_variant_missing_from_response(self):
 		sku = {"productVariantsBulkUpdate": {"productVariants": [], "userErrors": []}}
 
 		state, _mocked_execute = self._queue_and_run_with(self._responses(sku=sku))
 
+		self._assert_sku_failure_is_mapped(state, "did not confirm the SKU update")
+
+	def test_sku_failure_then_mapping_write_failure_says_check_shopify(self):
+		result, kwargs = _queue(self.account.name, self.item)
+
+		with patch(EXECUTE_TARGET, side_effect=self._responses(sku=Exception("sku boom"))):
+			with patch(UPSERT_MAPPING_TARGET, side_effect=frappe.ValidationError("Duplicate entry")):
+				self._run(kwargs)
+
+		state = product_create.get_product_create_status(result["job_id"])
 		self.assertEqual(state["status"], "failed")
-		self.assertIn("did not confirm the SKU update", state["error"])
-		self.assertIn(self.product_gid, state["error"])
+		self.assertNotIn("mapped", state)
+		self.assertIn("Check Shopify before retrying", state["error"])
+		self.assertIn("sku boom", state["error"])
 		self.assertEqual(self._mapping_rows(), [])
 
 	def test_mapping_write_failure_reports_both_gids_and_logs(self):
@@ -494,6 +569,7 @@ class IntegrationTestCreateProductWorker(IntegrationTestCase):
 		self.assertEqual(state["status"], "failed")
 		self.assertIn("already mapped", state["error"])
 		mocked_execute.assert_not_called()
+		self.assertEqual(self._error_log_texts(), [])
 
 	def test_worker_refuses_when_account_disabled_after_queue(self):
 		result, kwargs = _queue(self.account.name, self.item)
@@ -506,3 +582,98 @@ class IntegrationTestCreateProductWorker(IntegrationTestCase):
 		self.assertEqual(state["status"], "failed")
 		self.assertIn("is disabled", state["error"])
 		mocked_execute.assert_not_called()
+		self.assertEqual(self._error_log_texts(), [])
+
+	def test_worker_refuses_when_connection_disabled_after_queue(self):
+		result, kwargs = _queue(self.account.name, self.item)
+		frappe.db.set_value("Shopify Connection", self.account.connection, "enabled", 0)
+
+		with patch(EXECUTE_TARGET) as mocked_execute:
+			self._run(kwargs)
+
+		state = product_create.get_product_create_status(result["job_id"])
+		self.assertEqual(state["status"], "failed")
+		self.assertIn("Shopify Connection", state["error"])
+		mocked_execute.assert_not_called()
+
+	def test_worker_rechecks_account_write_permission(self):
+		result, kwargs = _queue(self.account.name, self.item)
+		# Same worker call, but the queueing user has since lost the platform role.
+		staff = _make_staff(self, "Product Create Worker Talabat Staff", ["Talabat User"])
+
+		with self.set_user(staff):
+			with patch(EXECUTE_TARGET) as mocked_execute:
+				self._run(kwargs)
+
+		state = product_create.get_product_create_status(result["job_id"])
+		self.assertEqual(state["status"], "failed")
+		mocked_execute.assert_not_called()
+		self.assertEqual(self._mapping_rows(), [])
+		self.assertEqual(self._error_log_texts(), [])
+
+	def test_worker_rechecks_mapping_create_permission(self):
+		result, kwargs = _queue(self.account.name, self.item)
+		real_has_permission = frappe.has_permission
+
+		def _deny_mapping_create(doctype=None, ptype="read", *args, **kw):
+			if doctype == product_create.MAPPING_DOCTYPE and ptype == "create":
+				return False
+			return real_has_permission(doctype, ptype, *args, **kw)
+
+		with patch("frappe.has_permission", side_effect=_deny_mapping_create):
+			with patch(EXECUTE_TARGET) as mocked_execute:
+				self._run(kwargs)
+
+		state = product_create.get_product_create_status(result["job_id"])
+		self.assertEqual(state["status"], "failed")
+		self.assertIn("Not permitted", state["error"])
+		mocked_execute.assert_not_called()
+		self.assertEqual(self._error_log_texts(), [])
+
+	def test_worker_holds_a_per_account_item_lock_around_the_create(self):
+		result, kwargs = _queue(self.account.name, self.item)
+		events = []
+
+		@contextmanager
+		def _fake_lock(name, **lock_kwargs):
+			events.append(("acquire", name, lock_kwargs))
+			try:
+				yield
+			finally:
+				events.append(("release", name, None))
+
+		def _execute(query, variables=None):
+			events.append(("shopify", None, None))
+			return self._responses()(query, variables)
+
+		with patch.object(product_create, "filelock", _fake_lock):
+			with patch(EXECUTE_TARGET, side_effect=_execute):
+				self._run(kwargs)
+
+		name = product_create._lock_name(self.account.name, self.item)
+		self.assertEqual(events[0][:2], ("acquire", name))
+		self.assertEqual(events[0][2], {"timeout": product_create.LOCK_TIMEOUT})
+		self.assertEqual(events[-1][:2], ("release", name))
+		self.assertEqual([e[0] for e in events].count("shopify"), 2)
+		self.assertEqual(
+			product_create.get_product_create_status(result["job_id"])["status"], "completed"
+		)
+		other = product_create._lock_name(self.account.name, f"{self.item} other")
+		self.assertNotEqual(name, other)
+
+	def test_second_job_after_the_first_sees_the_mapping_and_does_not_call_shopify(self):
+		_first, first_kwargs = _queue(self.account.name, self.item)
+		# A second request queued before the first finished (the queue check passes for both).
+		second, second_kwargs = _queue(self.account.name, self.item)
+
+		with patch(EXECUTE_TARGET, side_effect=self._responses()) as mocked_execute:
+			self._run(first_kwargs)
+			first_calls = mocked_execute.call_count
+			self._run(second_kwargs)
+
+		self.assertEqual(mocked_execute.call_count, first_calls)
+		self.assertEqual(len(self._mapping_rows()), 1)
+		state = product_create.get_product_create_status(second["job_id"])
+		self.assertEqual(state["status"], "failed")
+		self.assertIn("already mapped", state["error"])
+		self.assertEqual(self._error_log_texts(), [])

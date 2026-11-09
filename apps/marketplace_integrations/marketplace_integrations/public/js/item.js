@@ -447,6 +447,7 @@
 
 	const CREATE_METHOD = "marketplace_integrations.api.shopify_products.queue_product_create";
 	const CREATE_STATUS_METHOD = "marketplace_integrations.api.shopify_products.get_product_create_status";
+	const ACCOUNTS_METHOD = "marketplace_integrations.api.shopify_products.list_product_create_accounts";
 	const POLL_MS = 2000;
 	const MAX_POLLS = 150;
 
@@ -472,7 +473,12 @@
 			.then((response) => {
 				const state = response.message || {};
 				if (state.status === "completed") return state;
-				if (state.status === "failed") throw new Error(state.error || __("The request failed."));
+				if (state.status === "failed") {
+					const failure = new Error(state.error || __("The request failed."));
+					// The product exists and is already mapped: no Retry (it would duplicate), fix it in Shopify.
+					failure.mapped = !!state.mapped;
+					throw failure;
+				}
 				if (attempt >= MAX_POLLS) {
 					throw new Error(__("Still waiting for Shopify. Check Shopify before retrying."));
 				}
@@ -497,6 +503,11 @@
 				},
 				(error) => {
 					status.html(`<p class="text-danger" style="white-space: pre-wrap">${escape(error_message(error))}</p>`);
+					if (error && error.mapped) {
+						dialog.set_primary_action(__("Close"), () => dialog.hide());
+						dialog.enable_primary_action();
+						return load_listings(frm, { quiet: true });
+					}
 					dialog.set_primary_action(__("Retry"), () => run_create(frm, dialog, dialog.get_value("account")));
 					dialog.enable_primary_action();
 				}
@@ -507,14 +518,9 @@
 		return ensure_sync_module().then(() =>
 			frappe
 				.call({
-					method: "frappe.client.get_list",
+					// Server-side so only accounts the user may write (not merely read) are listed.
+					method: ACCOUNTS_METHOD,
 					type: "GET",
-					args: {
-						doctype: "Marketplace Account",
-						filters: { platform: "Shopify", enabled: 1 },
-						fields: ["name", "account_name"],
-						limit_page_length: 0,
-					},
 					silent: true,
 				})
 				.then((response) => {
@@ -531,10 +537,14 @@
 								fieldtype: "Select",
 								label: __("Marketplace Account"),
 								reqd: 1,
-								options: accounts.map((account) => ({
-									value: account.name,
-									label: account.account_name || account.name,
-								})),
+								// A blank first option when there are several accounts: the user must choose.
+								options: [
+									...(accounts.length > 1 ? [{ value: "", label: "" }] : []),
+									...accounts.map((account) => ({
+										value: account.name,
+										label: account.account_name || account.name,
+									})),
+								],
 								default: accounts.length === 1 ? accounts[0].name : "",
 							},
 							{ fieldname: "preview_html", fieldtype: "HTML", options: preview_html(frm) },

@@ -1982,7 +1982,8 @@ Shopify did not accept the product.,لم يقبل Shopify المنتج.
 Shopify did not confirm the SKU update.,لم يؤكد Shopify تحديث رمز المنتج (SKU).
 "Shopify did not confirm the product create ({0}). It may have been created: check Shopify for a product titled {1} before retrying.","لم يؤكد Shopify إنشاء المنتج ({0}). قد يكون قد أُنشئ: تحقق من Shopify بحثًا عن منتج بعنوان {1} قبل إعادة المحاولة."
 "Shopify's response did not include the product and variant ids. It may have been created: check Shopify for a product titled {0} before retrying.","لم تتضمن استجابة Shopify معرّفي المنتج والمتغيّر. قد يكون قد أُنشئ: تحقق من Shopify بحثًا عن منتج بعنوان {0} قبل إعادة المحاولة."
-"Shopify created product {0} (variant {1}) but setting its SKU failed: {2}. Check Shopify before retrying.","أنشأ Shopify المنتج {0} (المتغيّر {1}) لكن تعيين رمز المنتج (SKU) فشل: {2}. تحقق من Shopify قبل إعادة المحاولة."
+"Shopify created product {0} (variant {1}) and it is mapped, but setting its SKU failed: {2}. Fix the SKU in Shopify; do not create it again.","أنشأ Shopify المنتج {0} (المتغيّر {1}) وتم ربطه، لكن تعيين رمز المنتج (SKU) فشل: {2}. صحّح رمز المنتج في Shopify ولا تنشئه مرة أخرى."
+Setting its SKU also failed: {0}.,كما فشل تعيين رمز المنتج (SKU): {0}.
 "Shopify created product {0} (variant {1}) but saving the mapping failed: {2}. Check Shopify before retrying.","أنشأ Shopify المنتج {0} (المتغيّر {1}) لكن حفظ الربط فشل: {2}. تحقق من Shopify قبل إعادة المحاولة."
 Order Received,تم استلام الطلب
 Waiting for Goods,بانتظار البضاعة

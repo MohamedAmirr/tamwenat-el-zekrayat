@@ -21,6 +21,7 @@ from frappe.tests import IntegrationTestCase
 from marketplace_integrations.api.shopify_products import (
 	get_catalog_sweep_status,
 	get_product_create_status,
+	list_product_create_accounts,
 	queue_catalog_sweep,
 	queue_product_create,
 	upsert_mapping,
@@ -91,6 +92,16 @@ class IntegrationTestShopifyProductsApi(IntegrationTestCase):
 
 	def test_queue_product_create_post_only(self):
 		self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[queue_product_create], ["POST"])
+
+	def test_list_product_create_accounts_delegates(self):
+		with patch(
+			"marketplace_integrations.integrations.shopify.product_create.list_product_create_accounts",
+			return_value=[{"name": "A"}],
+		) as mocked:
+			result = list_product_create_accounts()
+
+		mocked.assert_called_once_with()
+		self.assertEqual(result, [{"name": "A"}])
 
 	def test_get_product_create_status_delegates(self):
 		with patch(

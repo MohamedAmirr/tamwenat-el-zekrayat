@@ -15,15 +15,21 @@ on its own: any failure after Shopify may have created the product tells staff
 to check Shopify first (and names the GIDs when they are known).
 """
 
+import hashlib
+
 import frappe
 from frappe import _
 from frappe.utils import cstr
+from frappe.utils.synchronization import filelock
 
 from marketplace_integrations.integrations.shopify import products
 from marketplace_integrations.integrations.shopify.client import ShopifyClient
 
 MAPPING_DOCTYPE = "Marketplace Product Mapping"
 
+ERROR_LOG_TITLE = "Shopify product create failed"
+# Long enough for a concurrent job's Shopify calls; the waiter then sees the mapping and refuses.
+LOCK_TIMEOUT = 120
 RESULT_TTL = 60 * 60
 ERROR_MESSAGE_MAX_LENGTH = 500
 
@@ -125,94 +131,138 @@ def get_product_create_status(job_id):
 	return {key: value for key, value in state.items() if key != "owner"}
 
 
+def list_product_create_accounts():
+	"""Enabled Shopify accounts the current user may create products on
+	(Marketplace Account ``write``), for the Item form dialog. Empty when the
+	user cannot create mappings."""
+	if not frappe.has_permission(MAPPING_DOCTYPE, ptype="create") or not frappe.has_permission(
+		"Marketplace Account", ptype="read"
+	):
+		return []
+	accounts = frappe.get_list(
+		"Marketplace Account",
+		filters={"platform": "Shopify", "enabled": 1},
+		fields=["name", "account_name"],
+		order_by="account_name asc",
+		limit_page_length=0,
+	)
+	return [row for row in accounts if frappe.has_permission("Marketplace Account", "write", doc=row.name)]
+
+
 def create_product(job_id_for_result, owner, account, item):
-	"""Background worker. Runs as the user who queued it."""
-	product_gid = None
-	variant_gid = None
+	"""Background worker. Runs as the user who queued it. A per-(account, item)
+	file lock serialises the already-mapped check, the Shopify create and the
+	mapping write, so two near-simultaneous jobs cannot both create a product:
+	the second waits, then sees the mapping and refuses."""
+	# `progress` records what is known when something fails: only a failure after Shopify
+	# was called is logged (a routine refusal is not an error worth an Error Log row).
+	progress = {"shopify_called": False, "product_gid": None, "variant_gid": None}
 	try:
 		_update_status(job_id_for_result, owner, status="running")
-		account_doc, connection = products.get_account(account)
-		item_doc = frappe.get_doc("Item", item)
-		# Re-check: the account, Item or mapping may have changed since queueing.
-		if not account_doc.enabled:
-			frappe.throw(_("Marketplace Account {0} is disabled.").format(account_doc.name))
-		_check_item_eligible(item_doc)
-		if frappe.db.exists(MAPPING_DOCTYPE, {"marketplace_account": account_doc.name, "item": item_doc.name}):
-			frappe.throw(
-				_("Item {0} is already mapped on Marketplace Account {1}.").format(
-					item_doc.name, account_doc.name
-				)
-			)
-		client = ShopifyClient(connection.name)
+		with filelock(_lock_name(account, item), timeout=LOCK_TIMEOUT):
+			changes = _create_locked(account, item, progress)
+		_update_status(job_id_for_result, owner, **changes)
+	except Exception as exc:
+		if progress["shopify_called"]:
+			_log_failure(account, item, progress, frappe.get_traceback())
+		_update_status(job_id_for_result, owner, status="failed", error=cstr(exc)[:ERROR_MESSAGE_MAX_LENGTH * 2])
 
-		try:
-			created = client.execute(
-				_PRODUCT_CREATE_MUTATION,
-				{"product": {"title": item_doc.item_name, "status": "DRAFT"}},
-			)
-		except Exception as exc:
-			raise ProductCreateError(
-				_(
-					"Shopify did not confirm the product create ({0}). It may have been created: check Shopify for a product titled {1} before retrying."
-				).format(cstr(exc)[:ERROR_MESSAGE_MAX_LENGTH], item_doc.item_name)
-			) from exc
 
-		payload = (created or {}).get("productCreate") or {}
-		_raise_user_errors(payload.get("userErrors"))
-		product = payload.get("product") or {}
-		product_gid = cstr(product.get("id")).strip()
-		nodes = ((product.get("variants") or {}).get("nodes")) or []
-		variant_gid = cstr((nodes[0] or {}).get("id")).strip() if nodes else ""
-		if not product_gid or not variant_gid:
-			raise ProductCreateError(
-				_(
-					"Shopify's response did not include the product and variant ids. It may have been created: check Shopify for a product titled {0} before retrying."
-				).format(item_doc.item_name)
-			)
+def _log_failure(account, item, progress, details):
+	frappe.log_error(
+		title=ERROR_LOG_TITLE,
+		message=f"account={account} item={item} product={progress['product_gid']} variant={progress['variant_gid']}\n\n{details}",
+	)
 
-		sku_payload = _set_sku(client, product_gid, variant_gid, item_doc.name)
-		if sku_payload is not None:
-			raise ProductCreateError(
-				_(
-					"Shopify created product {0} (variant {1}) but setting its SKU failed: {2}. Check Shopify before retrying."
-				).format(product_gid, variant_gid, sku_payload)
-			)
 
-		try:
-			mapping = products.upsert_mapping(
-				account_doc.name,
-				variant_gid,
-				item_doc.name,
-				external_product_id=product_gid,
-				external_sku=item_doc.name,
-			)
-			# Commit the mapping before the status write so the rollback in the except
-			# branch below only ever discards a failed mapping write.
-			frappe.db.commit()
-		except Exception as exc:
-			frappe.db.rollback()
-			raise ProductCreateError(
-				_(
-					"Shopify created product {0} (variant {1}) but saving the mapping failed: {2}. Check Shopify before retrying."
-				).format(product_gid, variant_gid, cstr(exc)[:ERROR_MESSAGE_MAX_LENGTH])
-			) from exc
+def _lock_name(account, item):
+	return f"shopify_product_create_{hashlib.sha1(f'{account}::{item}'.encode()).hexdigest()}"
 
-		_update_status(
-			job_id_for_result,
-			owner,
-			status="completed",
-			result={
-				"mapping": mapping["name"],
-				"product_id": product_gid,
-				"variant_id": variant_gid,
-			},
+
+def _create_locked(account, item, progress):
+	"""Runs under the lock. Returns the status changes for a finished job, or raises."""
+	account_doc, connection = products.get_account(account)
+	item_doc = frappe.get_doc("Item", item)
+	# Re-check: permissions, the account, Item or mapping may have changed since queueing.
+	account_doc.check_permission("write")
+	if not frappe.has_permission(MAPPING_DOCTYPE, ptype="create"):
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
+	item_doc.check_permission("read")
+	if not account_doc.enabled:
+		frappe.throw(_("Marketplace Account {0} is disabled.").format(account_doc.name))
+	if not connection.enabled:
+		frappe.throw(_("Shopify Connection {0} is disabled.").format(connection.name))
+	_check_item_eligible(item_doc)
+	if frappe.db.exists(MAPPING_DOCTYPE, {"marketplace_account": account_doc.name, "item": item_doc.name}):
+		frappe.throw(
+			_("Item {0} is already mapped on Marketplace Account {1}.").format(item_doc.name, account_doc.name)
+		)
+	client = ShopifyClient(connection.name)
+
+	progress["shopify_called"] = True
+	try:
+		created = client.execute(
+			_PRODUCT_CREATE_MUTATION,
+			{"product": {"title": item_doc.item_name, "status": "DRAFT"}},
 		)
 	except Exception as exc:
-		frappe.log_error(
-			title="Shopify product create failed",
-			message=f"account={account} item={item} product={product_gid} variant={variant_gid}\n\n{frappe.get_traceback()}",
+		raise ProductCreateError(
+			_(
+				"Shopify did not confirm the product create ({0}). It may have been created: check Shopify for a product titled {1} before retrying."
+			).format(cstr(exc)[:ERROR_MESSAGE_MAX_LENGTH], item_doc.item_name)
+		) from exc
+
+	payload = (created or {}).get("productCreate") or {}
+	_raise_user_errors(payload.get("userErrors"))
+	product = payload.get("product") or {}
+	product_gid = cstr(product.get("id")).strip()
+	nodes = ((product.get("variants") or {}).get("nodes")) or []
+	variant_gid = cstr((nodes[0] or {}).get("id")).strip() if nodes else ""
+	if not product_gid or not variant_gid:
+		raise ProductCreateError(
+			_(
+				"Shopify's response did not include the product and variant ids. It may have been created: check Shopify for a product titled {0} before retrying."
+			).format(item_doc.item_name)
 		)
-		_update_status(job_id_for_result, owner, status="failed", error=cstr(exc)[:ERROR_MESSAGE_MAX_LENGTH * 2])
+	progress["product_gid"] = product_gid
+	progress["variant_gid"] = variant_gid
+
+	# A SKU failure still maps the product: both GIDs are known, and the mapping makes the
+	# duplicate guard refuse a second create. The user fixes the SKU in Shopify.
+	sku_error = _set_sku(client, product_gid, variant_gid, item_doc.name)
+
+	try:
+		mapping = products.upsert_mapping(
+			account_doc.name,
+			variant_gid,
+			item_doc.name,
+			external_product_id=product_gid,
+			external_sku=None if sku_error else item_doc.name,
+		)
+		# Commit the mapping before the status write so the rollback below only ever
+		# discards a failed mapping write.
+		frappe.db.commit()
+	except Exception as exc:
+		frappe.db.rollback()
+		message = _(
+			"Shopify created product {0} (variant {1}) but saving the mapping failed: {2}. Check Shopify before retrying."
+		).format(product_gid, variant_gid, cstr(exc)[:ERROR_MESSAGE_MAX_LENGTH])
+		if sku_error:
+			message = f"{message} {_('Setting its SKU also failed: {0}.').format(sku_error)}"
+		raise ProductCreateError(message) from exc
+
+	result = {"mapping": mapping["name"], "product_id": product_gid, "variant_id": variant_gid}
+	if sku_error:
+		_log_failure(account, item, progress, f"SKU step failed: {sku_error}")
+		return {
+			"status": "failed",
+			"mapped": True,
+			"result": result,
+			"error": _(
+				"Shopify created product {0} (variant {1}) and it is mapped, but setting its SKU failed: {2}. Fix the SKU in Shopify; do not create it again."
+			).format(product_gid, variant_gid, sku_error),
+		}
+	return {"status": "completed", "result": result}
 
 
 class ProductCreateError(Exception):

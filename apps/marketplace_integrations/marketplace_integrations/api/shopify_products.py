@@ -48,6 +48,12 @@ def queue_product_create(account: str, item: str):
 
 
 @frappe.whitelist()
+def list_product_create_accounts():
+	"""Enabled Shopify accounts the user may create products on (account write)."""
+	return product_create.list_product_create_accounts()
+
+
+@frappe.whitelist()
 def get_product_create_status(job_id: str):
 	"""Poll a queued product create job. Owner-scoped."""
 	return product_create.get_product_create_status(job_id)

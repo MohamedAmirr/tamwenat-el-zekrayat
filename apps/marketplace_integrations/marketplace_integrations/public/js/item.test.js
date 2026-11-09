@@ -647,7 +647,7 @@ test("a failed leg is reported as Failed with the escaped server message and the
 
 const QUEUE_CREATE = "marketplace_integrations.api.shopify_products.queue_product_create";
 const CREATE_STATUS = "marketplace_integrations.api.shopify_products.get_product_create_status";
-const GET_LIST = "frappe.client.get_list";
+const GET_LIST = "marketplace_integrations.api.shopify_products.list_product_create_accounts";
 
 function install_dialog() {
 	const made = [];
@@ -728,10 +728,49 @@ test("a single enabled Shopify account is preselected and the preview is escaped
 	assert.match(preview, /Draft/);
 });
 
-test("several accounts are not preselected", async () => {
-	const { frm, dialogs } = await create_frm([{ name: "A" }, { name: "B" }]);
+test("the account list comes from the write-filtered server method, not a read list", async () => {
+	const { frm, calls } = await create_frm([{ name: "MKT-1" }]);
 	await item.open_create_on_shopify(frm);
-	assert.equal(dialogs[0].args.fields[0].default, "");
+	assert.ok(calls.some((c) => c.method === GET_LIST));
+	assert.ok(!calls.some((c) => c.method === "frappe.client.get_list"));
+});
+
+test("a single account has no blank option", async () => {
+	const { frm, dialogs } = await create_frm([{ name: "MKT-1", account_name: "Shop A" }]);
+	await item.open_create_on_shopify(frm);
+	assert.deepEqual(dialogs[0].args.fields[0].options, [{ value: "MKT-1", label: "Shop A" }]);
+});
+
+test("several accounts start with a blank option and nothing preselected", async () => {
+	const { frm, dialogs } = await create_frm([{ name: "A", account_name: "Shop A" }, { name: "B" }]);
+	await item.open_create_on_shopify(frm);
+	const field = dialogs[0].args.fields[0];
+	assert.deepEqual(field.options, [
+		{ value: "", label: "" },
+		{ value: "A", label: "Shop A" },
+		{ value: "B", label: "B" },
+	]);
+	assert.equal(field.default, "");
+	assert.equal(field.reqd, 1);
+});
+
+test("a failed job whose product is already mapped offers Close, not Retry, and reloads the listings", async () => {
+	const { frm, calls, dialogs } = await create_frm([{ name: "MKT-1" }], {
+		[QUEUE_CREATE]: () => Promise.resolve({ message: { job_id: "j1" } }),
+		[CREATE_STATUS]: () =>
+			Promise.resolve({ message: { status: "failed", mapped: true, error: "Mapped, fix the SKU in Shopify" } }),
+	});
+	await item.open_create_on_shopify(frm);
+	const before = calls.filter((c) => c.method === LISTINGS).length;
+
+	dialogs[0].args.primary_action({ account: "MKT-1" });
+	await settle();
+
+	assert.match(dialogs[0].fields.status_html.last, /fix the SKU in Shopify/);
+	assert.equal(dialogs[0].retry.label, "Close");
+	assert.equal(calls.filter((c) => c.method === LISTINGS).length, before + 1);
+	dialogs[0].retry.fn();
+	assert.equal(dialogs[0].hidden, true);
 });
 
 test("success hides the dialog and reloads the listings", async () => {
