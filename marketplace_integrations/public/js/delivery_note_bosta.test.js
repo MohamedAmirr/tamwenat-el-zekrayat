@@ -187,6 +187,68 @@ test("a confirmed cancel reloads the note and lets the native cancel go on", asy
 	assert.equal(global.frappe.validated, true);
 });
 
+// The workflow's Cancel action (Status menu) does not run before_cancel; Frappe applies it after this hook
+// whatever frappe.validated says, so "stop" is a promise that never settles.
+async function settled(promise) {
+	const pending = Symbol("pending");
+	const outcome = await Promise.race([promise.then(() => "resolved"), new Promise((r) => setTimeout(() => r(pending), 20))]);
+	return outcome === pending ? "pending" : outcome;
+}
+
+test("a workflow action other than Cancel, or a note without a live Bosta shipment, is left alone", () => {
+	const { mod, calls, confirms } = load();
+	const form = (action, doc) => Object.assign(bosta_form(doc), { selected_workflow_action: action });
+	assert.equal(mod.before_workflow_action(form("Confirm Shipment")), undefined);
+	for (const doc of [
+		{ custom_integration_status: "Cancelled" },
+		{ custom_integration_status: "Creation Failed" },
+		{ transporter_name: "Noon" },
+	]) {
+		assert.equal(mod.before_workflow_action(form("Cancel", doc)), undefined);
+	}
+	assert.equal(calls.length, 0);
+	assert.equal(confirms.length, 0);
+	assert.equal(typeof mod.form_events.before_workflow_action, "function");
+});
+
+test("the workflow Cancel on a Created note cancels at Bosta first and then lets the workflow go on", async () => {
+	const { mod, calls, confirms } = load({ responses: { cancel_shipment: CANCELLED } });
+	const frm = Object.assign(bosta_form({ docstatus: 1 }), { selected_workflow_action: "Cancel" });
+
+	assert.equal(await settled(mod.before_workflow_action(frm)), "resolved");
+
+	assert.equal(confirms.length, 1);
+	assert.equal(calls[0].method, "marketplace_integrations.api.carrier_shipments.cancel_shipment");
+	assert.deepEqual(calls[0].args, { delivery_note: "MAT-DN-1" });
+	assert.equal(frm.reloads, 1);
+});
+
+test("the workflow Cancel stops for good when Bosta refuses, and releases the frozen screen", async () => {
+	const { mod, calls, msgprints } = load({ responses: { cancel_shipment: { outcome: "refused", message: "Too <b>late</b>" } } });
+	let unfrozen = 0;
+	global.frappe.dom = { unfreeze: () => unfrozen++, freeze() {} };
+	const frm = Object.assign(bosta_form({ docstatus: 1 }), { selected_workflow_action: "Cancel" });
+
+	assert.equal(await settled(mod.before_workflow_action(frm)), "pending");
+
+	assert.equal(calls.length, 1);
+	assert.match(msgprints[0].message, /Too &lt;b&gt;late/);
+	assert.equal(frm.selected_workflow_action, null);
+	assert.ok(unfrozen >= 2);
+	delete global.frappe.dom;
+});
+
+test("answering No to the confirm sends nothing and stops the workflow Cancel", async () => {
+	const { mod, calls } = load();
+	global.frappe.confirm = (message, yes, no) => no();
+	const frm = Object.assign(bosta_form({ docstatus: 1 }), { selected_workflow_action: "Cancel" });
+
+	assert.equal(await settled(mod.before_workflow_action(frm)), "pending");
+
+	assert.equal(calls.length, 0);
+	assert.equal(frm.selected_workflow_action, null);
+});
+
 test("a Bosta refusal stops the cancel and shows Bosta's text escaped", async () => {
 	const { mod, msgprints } = load({
 		responses: { cancel_shipment: { outcome: "refused", status: "Created", message: "<img src=x onerror=1> not cancellable" } },
