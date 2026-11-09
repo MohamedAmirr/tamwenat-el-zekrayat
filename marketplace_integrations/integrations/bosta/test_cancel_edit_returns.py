@@ -806,13 +806,154 @@ class IntegrationTestBostaCancelEditReturns(BostaFixtureMixin, IntegrationTestCa
 			carrier_shipments.cancel(note.name)
 		self.assertEqual(self.http.sent(), [])
 
-	def test_cancel_and_delete_are_allowed_only_once_cancelled(self):
+	def test_deleting_a_draft_with_a_created_shipment_cancels_it_at_bosta_first(self):
 		note = self._live()
-		with self.assertRaises(frappe.ValidationError):
+		self.http.queue["terminate"].append(OK)
+
+		frappe.delete_doc("Delivery Note", note.name, force=False)
+
+		self.assertEqual(self._sent_kinds(), ["terminate"])
+		self.assertFalse(frappe.db.exists("Delivery Note", note.name))
+
+	def test_a_delete_is_blocked_when_bosta_refuses_the_cancel_and_the_note_stays_created(self):
+		note = self._live()
+		self.http.queue["terminate"].append(FakeResponse(400, {"success": False, "message": "picked up <b>x</b>"}))
+		self.http.queue["get"].append(delivery(24))
+
+		with self.assertRaises(frappe.ValidationError) as blocked:
 			frappe.delete_doc("Delivery Note", note.name)
-		frappe.db.set_value("Delivery Note", note.name, "custom_integration_status", "Cancelled")
+
+		self.assertIn("did not cancel the shipment", str(blocked.exception))
+		self.assertNotIn("<b>x</b>", str(blocked.exception))  # the carrier text is escaped
+		self.assertTrue(frappe.db.exists("Delivery Note", note.name))
+		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Created")
+
+	def test_a_delete_is_blocked_when_the_cancel_outcome_is_unknown_and_a_second_delete_asks_again(self):
+		note = self._live()
+		self.http.queue["terminate"].append(TimeoutError("slow"))
+
+		with self.assertRaises(frappe.ValidationError) as blocked:
+			frappe.delete_doc("Delivery Note", note.name)
+
+		self.assertIn("not known whether Bosta cancelled", str(blocked.exception))
+		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Cancellation Unknown")
+		self.http.queue["terminate"].append(OK)
+		frappe.delete_doc("Delivery Note", note.name)
+		self.assertFalse(frappe.db.exists("Delivery Note", note.name))
+
+	def test_a_linked_document_blocks_the_delete_before_any_carrier_call(self):
+		note = self._live()
+		invoice = self._draft_invoice_of(note)
+		try:
+			with self.assertRaises(frappe.LinkExistsError):
+				frappe.delete_doc("Delivery Note", note.name)
+
+			self.assertEqual(self._sent_kinds(), [])  # the shipment was not terminated
+			self.assertTrue(frappe.db.exists("Delivery Note", note.name))
+			self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Created")
+		finally:
+			self._drop_invoice(invoice)
+
+	def _draft_invoice_of(self, note):
+		from erpnext.stock.doctype.delivery_note.delivery_note import make_sales_invoice
+
+		invoice = make_sales_invoice(note.name)
+		invoice.insert()
+		frappe.db.commit()
+		return invoice
+
+	def _workflow_actions_of(self, note):
+		return frappe.get_all(
+			"Workflow Action", filters={"reference_doctype": "Delivery Note", "reference_name": note.name}, pluck="name"
+		)
+
+	def test_workflow_action_rows_do_not_block_the_delete_after_the_cancel(self):
+		note = self._live()
+		action = frappe.get_doc(
+			{
+				"doctype": "Workflow Action",
+				"reference_doctype": "Delivery Note",
+				"reference_name": note.name,
+				"status": "Open",
+				"user": "Administrator",
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+		self.assertEqual(self._workflow_actions_of(note), [action.name])
+		self.http.queue["terminate"].append(OK)
+
+		frappe.delete_doc("Delivery Note", note.name)
+
+		self.assertEqual(self._sent_kinds(), ["terminate"])
+		self.assertFalse(frappe.db.exists("Delivery Note", note.name))
+		self.assertEqual(self._workflow_actions_of(note), [])  # the native on_trash cleared them
+
+	def test_a_forced_delete_skips_the_early_link_check(self):
+		note = self._live()
+		invoice = self._draft_invoice_of(note)
+		self.http.queue["terminate"].append(OK)
+		try:
+			frappe.delete_doc("Delivery Note", note.name, force=True)
+
+			self.assertEqual(self._sent_kinds(), ["terminate"])  # not blocked before the carrier call
+			self.assertFalse(frappe.db.exists("Delivery Note", note.name))
+		finally:
+			self._drop_invoice(invoice)
+
+	def test_the_deleted_document_snapshot_holds_the_cancelled_status(self):
+		import json
+
+		note = self._live()
+		self.http.queue["terminate"].append(OK)
+
+		frappe.delete_doc("Delivery Note", note.name)
+
+		snapshot = frappe.get_all(
+			"Deleted Document",
+			filters={"deleted_doctype": "Delivery Note", "deleted_name": note.name},
+			pluck="data",
+		)
+		self.assertEqual(len(snapshot), 1)
+		self.assertEqual(json.loads(snapshot[0])["custom_integration_status"], "Cancelled")
+
+	def test_a_stale_cancellation_pending_draft_refused_by_bosta_is_not_deleted(self):
+		note = self._live(custom_integration_status="Cancellation Pending")
+		frappe.db.set_value(
+			"Delivery Note", note.name, "modified", add_to_date(now_datetime(), minutes=-5), update_modified=False
+		)
+		frappe.db.commit()
+		self.http.queue["terminate"].append(FakeResponse(400, {"success": False, "message": "picked up"}))
+		self.http.queue["get"].append(delivery(24))
+
+		with self.assertRaises(frappe.ValidationError) as blocked:
+			frappe.delete_doc("Delivery Note", note.name)
+
+		self.assertIn("did not cancel the shipment", str(blocked.exception))
+		self.assertTrue(frappe.db.exists("Delivery Note", note.name))
+		self.assertEqual(stored(note, "custom_integration_status").custom_integration_status, "Created")
+
+	def test_a_delete_needs_write_permission_for_the_carrier_cancel(self):
+		note = self._live()
+		email, _role = make_role_user(self, "Bosta Delete Only", {"Delivery Note": ["read", "delete"]})
+		frappe.set_user(email)
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				frappe.delete_doc("Delivery Note", note.name)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(self._sent_kinds(), [])
+
+	def test_creating_and_unknown_still_block_a_delete_and_cancelled_passes_without_a_call(self):
+		for status in ("Creating", "Creation Unknown"):
+			with self.subTest(status):
+				note = self._live(custom_integration_status=status)
+				with self.assertRaises(frappe.ValidationError):
+					frappe.delete_doc("Delivery Note", note.name)
+				self.assertTrue(frappe.db.exists("Delivery Note", note.name))
+		note = self._live(custom_integration_status="Cancelled")
 		frappe.delete_doc("Delivery Note", note.name, force=False)
 		self.assertFalse(frappe.db.exists("Delivery Note", note.name))
+		self.assertEqual(self._sent_kinds(), [])
 
 	def test_the_cancel_api_needs_permission_on_the_note(self):
 		note = self._live()

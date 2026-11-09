@@ -88,6 +88,9 @@ BOSTA_COD_LIMIT = 30000
 #: #500: a Bosta note stays a draft (stage Shipment Created) until Bosta reports the pickup; the pickup event submits
 #: it (``statuses._write_state`` -> ``carrier_shipments.run_submit_at_pickup``).
 SUBMIT_AT_PICKUP = True
+#: A NEW draft Bosta note starts its shipment by itself (``carrier_shipments.request_shipment_on_insert``); its
+#: ``validate`` runs ``guard_new_note`` and the stock check first.
+REQUEST_ON_INSERT = True
 # The Integration Status values, LIVE_STATUSES and EDITABLE_STATUSES come from ``services/carrier_log.py``
 # (shared with the neutral service).
 
@@ -426,6 +429,17 @@ def guard_changes(doc):
 			title=_("Bosta shipment"),
 		)
 
+
+
+def guard_new_note(doc):
+	"""``validate`` of a NEW Bosta note (``REQUEST_ON_INSERT``): refuse when the order's state forbids a shipment now
+	(Waiting for Stock, a change in flight or held, cancelled or refunded at the marketplace, a warehouse that is not
+	the account's). The same rules as the one-step "Create Shipment" (``order_shipment.order_state_problem``)."""
+	from marketplace_integrations.services import order_shipment
+
+	problem = order_shipment.order_state_problem(sales_order_of(doc))
+	if problem:
+		frappe.throw(problem, title=_("Bosta shipment"))
 
 
 def refuse_sales_order_cancel(order):

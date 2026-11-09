@@ -212,24 +212,41 @@ def start_shipment(doc):
 	button): start the carrier create through the same path as before. A Noon note is submitted by the job as that
 	user once the carrier confirms Created; a Bosta note stays a draft until Bosta picks the parcel up (#500), then
 	the pickup job submits it as the user recorded as requester. A refusal that only the locked check can see
-	(the stock changed meanwhile) puts the note back to the stage its statuses lead to, with the reason."""
+	(the stock changed meanwhile) puts the note back to the stage its statuses lead to, with the reason.
+
+	This never deletes the note, whoever made it (the Workflow's Create Shipment, the insert trigger of
+	``carrier_shipments.run_request_on_insert``): a failure keeps the draft with the reason. Only the one-step flow
+	(``order_shipment.ship_order``) deletes the notes it made."""
 	from marketplace_integrations.services import carrier_shipments
 
 	name = doc.name
+	user = frappe.session.user
+
 	try:
-		carrier_shipments.request_create(name, submit_as=frappe.session.user)
+		answer = carrier_shipments.request_create(name, submit_as=user)
+		if answer.get("needs_city"):
+			# Only a note saved without a transition (the trigger on insert) can get here: the transition's own check
+			# refuses an empty city first.
+			record_request_failure(
+				name, _("The city of the delivery address could not be found. Pick the city and create the shipment again.")
+			)
 	except Exception as exc:
 		frappe.db.rollback()
 		if not isinstance(exc, frappe.ValidationError):
 			frappe.log_error(title="Starting the carrier shipment of a Delivery Note failed", message=f"{name}\n{frappe.get_traceback()}")
 		frappe.clear_messages()
-		reason = strip_html_tags(cstr(exc)).strip()[:300] or exc.__class__.__name__
-		frappe.db.set_value(
-			"Delivery Note",
-			name,
-			"custom_last_integration_error",
-			_("The shipment request was not sent: {0}").format(reason),
-			update_modified=True,
-		)
-		sync_state(name)
-		frappe.db.commit()
+		record_request_failure(name, strip_html_tags(cstr(exc)).strip()[:300] or exc.__class__.__name__)
+
+
+def record_request_failure(name, reason):
+	"""Keep the note where its statuses lead (Order Received for a draft) with the reason on it, so the person fixes it
+	and creates the shipment again."""
+	frappe.db.set_value(
+		"Delivery Note",
+		name,
+		"custom_last_integration_error",
+		_("The shipment request was not sent: {0}").format(reason),
+		update_modified=True,
+	)
+	sync_state(name)
+	frappe.db.commit()
