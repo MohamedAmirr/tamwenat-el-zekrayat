@@ -37,6 +37,7 @@ EXPECTED = [
 	"custom_shipping_column",
 	"custom_cod_amount",
 	"custom_cod_confirmed",
+	"custom_cod_typed",  # hidden marker: the COD was typed by a person
 	"custom_bosta_city",
 	"custom_bosta_city_name",
 	"custom_shipping_label",

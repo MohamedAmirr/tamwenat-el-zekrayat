@@ -138,7 +138,7 @@ test("without read on the mapping the tab is hidden and no request is made", asy
 	assert.equal(frm.toggled.custom_marketplace_listings_tab, false);
 });
 
-test("the table lists the columns in the specified order, with references in a ltr bdi", async () => {
+test("each listing is a card with labelled fields, references in a ltr bdi", async () => {
 	const { frm, calls } = await loaded_frm([
 		make_row(),
 		make_row({ name: "MPM-2", platform: "Talabat", account_name: "Talabat A", external_reference: "T-9" }),
@@ -148,79 +148,66 @@ test("the table lists the columns in the specified order, with references in a l
 	assert.equal(calls[0].type, "GET");
 	assert.deepEqual(calls[0].args, { item: "ITEM-1" });
 	const html = frm.wrapper.last;
-	const order = [
-		"Marketplace Account",
-		"External Reference",
-		"Enabled",
-		"Sales UOM",
-		"Sync Status",
-		"Inventory Sync Status",
-	].map((label) => html.indexOf(`>${label}<`));
-	assert.ok(order.every((position) => position >= 0), "every column heading renders");
-	assert.deepEqual(order, [...order].sort((a, b) => a - b));
+	for (const label of ["External Reference", "Sales UOM", "Price", "Stock"]) {
+		assert.ok(html.includes(`>${label}<`), `${label} label renders`);
+	}
 	assert.match(html, /<bdi dir="ltr">REF-1<\/bdi>/);
 	assert.match(html, /badge[^>]*>Shopify</);
-	assert.match(html, /grid-heading-row/);
+	assert.match(html, /mi-listing-card/);
+	assert.doesNotMatch(html, /grid-heading-row|grid-row/);
 	assert.match(html, /indicator-pill green/);
 });
 
-function row_cells(html, name) {
+function card_from(html, name) {
 	const start = html.indexOf(`data-name="${name}"`);
 	return html.slice(start);
 }
 
-test("account and platform share one cell; the platform has no column of its own", async () => {
+test("the account name, platform badge and enabled status share the card header", async () => {
 	const { frm } = await loaded_frm([make_row()]);
 	const html = frm.wrapper.last;
 
 	assert.doesNotMatch(html, />Platform</);
 	assert.match(
 		html,
-		/<span class="ellipsis"[^>]*title="Shop A">Shop A<\/span><span class="badge badge-light"[^>]*>Shopify<\/span>/
+		/<strong class="ellipsis"[^>]*title="Shop A">Shop A<\/strong><span class="badge badge-light"[^>]*>Shopify<\/span><span class="indicator-pill green[^>]*><span>Enabled</
 	);
 });
 
-test("sync status and inventory sync status are two labelled lines of one cell", async () => {
+test("price and stock status are two labelled groups, each with its own pill", async () => {
 	const { frm } = await loaded_frm([make_row({ sync_status: "Error", inventory_sync_status: "Queued" })]);
-	const body = row_cells(frm.wrapper.last, "MPM-1");
+	const body = card_from(frm.wrapper.last, "MPM-1");
 
-	const cell = body.match(
-		/<div role="group" aria-label="Sync Status"[^>]*>(.*?)<\/div><div role="group" aria-label="Inventory Sync Status"[^>]*>(.*?)<\/div>/
-	);
-	assert.ok(cell, "both lines sit side by side in one cell");
-	assert.match(cell[1], /indicator-pill red[^>]*><span>Error</);
-	assert.match(cell[2], /indicator-pill blue[^>]*><span>Queued</);
-	// The heading stacks the same two labels in one column.
-	assert.match(frm.wrapper.last, />Sync Status<\/div><div class="ellipsis"[^>]*>Inventory Sync Status</);
+	const price = body.match(/<div role="group" aria-label="Price"[^>]*>(.*?)<\/div>/);
+	const stock = body.match(/<div role="group" aria-label="Stock"[^>]*>(.*?)<\/div>/);
+	assert.ok(price && stock, "both groups render");
+	assert.match(price[1], /indicator-pill red[^>]*><span>Error</);
+	assert.match(stock[1], /indicator-pill blue[^>]*><span>Queued</);
 });
 
-test("a Talabat row keeps the labelled inventory line with a dash", async () => {
+test("a Talabat card has one Price and stock status and no Stock group", async () => {
 	const { frm } = await loaded_frm([make_row({ platform: "Talabat", inventory_sync_status: "Error" })]);
+	const body = card_from(frm.wrapper.last, "MPM-1");
 
-	assert.match(row_cells(frm.wrapper.last, "MPM-1"), /aria-label="Inventory Sync Status"[^>]*>-<\/div>/);
+	assert.match(body, /aria-label="Price and stock"/);
+	assert.doesNotMatch(body, /aria-label="Stock"/);
+	assert.doesNotMatch(body, /indicator-pill red/);
 });
 
-test("a long external reference keeps its ltr bdi and carries the full value as tooltip", async () => {
-	const long_ref = "X".repeat(120);
-	const { frm } = await loaded_frm([make_row({ external_reference: long_ref })]);
+test("an unset Sales UOM is left out of the card", async () => {
+	const { frm } = await loaded_frm([make_row({ sales_uom: "" })]);
 
-	assert.match(frm.wrapper.last, new RegExp(`class="static-area ellipsis" title="${long_ref}"><bdi dir="ltr">${long_ref}</bdi>`));
+	assert.doesNotMatch(frm.wrapper.last, />Sales UOM</);
 });
 
-test("the sync button stays on one line in an overflow-visible cell so the menu is not clipped", async () => {
+test("the sync control sits inside the card and stays on one line", async () => {
 	const { frm } = await loaded_frm([make_row()]);
 	const html = frm.wrapper.last;
 
 	assert.match(html, /<div class="btn-group mi-sync" role="group" style="white-space: nowrap">/);
 	assert.match(html, /<button type="button" class="btn btn-default btn-xs" style="white-space: nowrap"[^>]*>Sync price and stock</);
-	const cell = html.match(/<div class="col grid-static-col mi-sync-cell" style="([^"]*)">/);
-	assert.ok(cell, "the sync control has its own cell");
-	assert.match(cell[1], /overflow: visible/);
-	assert.doesNotMatch(cell[1], /ellipsis/);
-	// It is not wrapped in the clipping static-area.
-	assert.doesNotMatch(html, /static-area ellipsis"[^>]*><div class="btn-group/);
-	// Ancestors of the menu do not clip either.
-	assert.match(html, /<div class="grid-row mi-listing-row"[^>]*style="overflow: visible"/);
+	const card = html.slice(html.indexOf('class="mi-listing-card"'));
+	assert.ok(card.indexOf("mi-sync-cell") > 0, "the per-listing control is inside the card");
 });
 
 test("only logical CSS properties are used for layout", async () => {
@@ -229,7 +216,15 @@ test("only logical CSS properties are used for layout", async () => {
 	assert.doesNotMatch(frm.wrapper.last, /(?:margin|padding)-(?:left|right)|(?:^|[\s;"])(?:left|right):|text-align: *(?:left|right)/);
 });
 
-test("Talabat shows a dash for the inventory sync status", async () => {
+test("a long external reference wraps inside the card and keeps its tooltip and ltr bdi", async () => {
+	const long_ref = "gid://shopify/ProductVariant/" + "9".repeat(80);
+	const { frm } = await loaded_frm([make_row({ external_reference: long_ref })]);
+	const html = frm.wrapper.last;
+
+	assert.match(html, /overflow-wrap: anywhere" title="gid:\/\/shopify\/ProductVariant\/9+"><bdi dir="ltr">gid:/);
+});
+
+test("a Talabat card ignores the stored inventory status", async () => {
 	const { frm } = await loaded_frm([make_row({ platform: "Talabat", inventory_sync_status: "Error" })]);
 
 	assert.doesNotMatch(frm.wrapper.last, /indicator-pill red/);
@@ -792,6 +787,58 @@ test("success hides the dialog and reloads the listings", async () => {
 	assert.deepEqual(calls.find((c) => c.method === QUEUE_CREATE).args, { account: "MKT-1", item: "ITEM-1" });
 	assert.equal(dialogs[0].hidden, true);
 	assert.equal(alerts[0].indicator, "green");
+	assert.equal(calls.filter((c) => c.method === LISTINGS).length, before + 1);
+});
+
+async function create_with_result(result) {
+	const alerts = [];
+	const { frm, calls, dialogs } = await create_frm(
+		[{ name: "MKT-1" }],
+		{
+			[QUEUE_CREATE]: () => Promise.resolve({ message: { job_id: "j1" } }),
+			[CREATE_STATUS]: () => Promise.resolve({ message: { status: "completed", result } }),
+		},
+		{ show_alert: (args, seconds, actions) => alerts.push({ ...args, actions }) }
+	);
+	await item.open_create_on_shopify(frm);
+	dialogs[0].args.primary_action({ account: "MKT-1" });
+	await settle();
+	return { alerts, calls };
+}
+
+test("when the price was sent the success alert is the plain green one", async () => {
+	const { alerts } = await create_with_result({ mapping: "MPM-9", price_sent: true });
+
+	assert.equal(alerts[0].indicator, "green");
+	assert.equal(alerts[0].message, "Created on Shopify as a draft product.");
+});
+
+test("a skipped price is named in the alert, escaped, without Retry for an expected reason", async () => {
+	const { alerts } = await create_with_result({
+		mapping: "MPM-9",
+		price_sent: false,
+		price_skipped_reason: "No <b>Item Price</b>",
+		price_retry: false,
+	});
+
+	assert.equal(alerts[0].indicator, "orange");
+	assert.match(alerts[0].message, /The price was not sent: No &lt;b&gt;Item Price&lt;\/b&gt;/);
+	assert.deepEqual(Object.keys(alerts[0].actions), []);
+});
+
+test("an unexpected price error offers Retry, which reloads the listings for the price-only sync", async () => {
+	const { alerts, calls } = await create_with_result({
+		mapping: "MPM-9",
+		price_sent: false,
+		price_skipped_reason: "An unexpected error occurred while looking up the price.",
+		price_retry: true,
+	});
+	assert.deepEqual(Object.keys(alerts[0].actions), ["Retry"]);
+	const before = calls.filter((c) => c.method === LISTINGS).length;
+
+	alerts[0].actions.Retry();
+	await settle();
+
 	assert.equal(calls.filter((c) => c.method === LISTINGS).length, before + 1);
 });
 

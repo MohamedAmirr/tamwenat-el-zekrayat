@@ -4,7 +4,7 @@
 // Item form extension (#374): the "Marketplace Listings" tab. It lists the Marketplace Product
 // Mappings of the Item (read-only, rendered into the HTML Custom Field `custom_marketplace_listings_html`,
 // nothing is stored on the Item) and offers a manual price and stock sync for them. The mapping
-// stays the source of truth; a row opens its mapping form. The sync reuses the platform endpoints the
+// stays the source of truth; each listing is a card, and a click on it opens its mapping form. The sync reuses the platform endpoints the
 // mapping list already calls (public/js/mapping_sync_actions.js); this file adds no sync logic.
 //
 // Wrapped in a function: every doctype_js file shares one scope with ERPNext's own Item script, so
@@ -108,41 +108,9 @@
 		return pill(__(value), STATUS_COLORS[value] || "gray");
 	}
 
-	// A cell. `title` (the full value) is shown as a tooltip when the text is ellipsized. `style` is a
-	// column width from COLS; the cell grows with its content (no fixed height).
-	function static_col(inner, style = "", title = "") {
-		const tip = title ? ` title="${escape(title)}"` : "";
-		return `<div class="col grid-static-col"${style ? ` style="${style}"` : ""}><div class="static-area ellipsis"${tip}>${inner}</div></div>`;
-	}
-
-	// Column widths (flex shorthand, logical only). The expand column is narrow, the account and
-	// reference columns get the most room, and the sync column keeps its button on one line with
-	// overflow visible so the dropdown menu is never clipped.
-	const COLS = {
-		expand: "flex: 0 0 2.5rem",
-		account: "flex: 2.4 1 0; min-width: 0",
-		reference: "flex: 2 1 0; min-width: 0",
-		enabled: "flex: 1 1 0; min-width: 0",
-		uom: "flex: 1 1 0; min-width: 0",
-		status: "flex: 1.8 1 0; min-width: 0",
-		sync: "flex: 0 0 15rem; overflow: visible; white-space: nowrap",
-	};
 	const NOWRAP = "white-space: nowrap";
-	// Ancestors of the sync dropdown must not clip it.
-	const VISIBLE = 'style="overflow: visible"';
-
-	// `columns`: [{labels: [text, ...], style}]. Several labels stack as lines (the two status columns).
-	function heading_row(columns) {
-		const cells = columns
-			.map(({ labels, style }) => {
-				const inner = labels
-					.map((label) => `<div class="ellipsis" title="${escape(label)}">${escape(label)}</div>`)
-					.join("");
-				return `<div class="col grid-static-col" style="${style}"><div class="static-area">${inner}</div></div>`;
-			})
-			.join("");
-		return `<div class="grid-heading-row"><div class="grid-row" ${VISIBLE}><div class="data-row row m-0" ${VISIBLE}>${cells}</div></div></div>`;
-	}
+	// Layout helpers (logical CSS only, Frappe theme variables, so RTL and the dark theme follow).
+	const ROW = "display: flex; flex-wrap: wrap; align-items: center; gap: var(--margin-sm) var(--margin-md)";
 
 	function when(value) {
 		if (!value) return "-";
@@ -171,7 +139,7 @@
 				detail_line(__("Inventory Last Error"), error_html(row.inventory_last_error))
 			);
 		}
-		return `<div class="mi-listing-detail text-muted small" style="padding-inline: var(--padding-md); padding-block: var(--padding-sm)">${lines.join("")}</div>`;
+		return `<div class="mi-listing-detail text-muted small" style="border-block-start: 1px solid var(--border-color); margin-block-start: var(--margin-sm); padding-block-start: var(--padding-sm)">${lines.join("")}</div>`;
 	}
 
 	function kind_label(kind) {
@@ -239,49 +207,47 @@
 	function listing_row_html(state, row, ctx) {
 		const open = !!state.expanded[row.name];
 		const account = row.account_name || row.marketplace_account;
-		// A status line carries its own label for assistive tech and as a tooltip, since the two lines
-		// are stacked in one cell and look alike.
-		const status_line = (label, inner) =>
-			`<div role="group" aria-label="${escape(label)}" title="${escape(label)}">${inner}</div>`;
-		const status_cell =
-			status_line(__("Sync Status"), status_pill(row.sync_status)) +
-			status_line(__("Inventory Sync Status"), row.platform === "Talabat" ? "-" : status_pill(row.inventory_sync_status));
-		const cells = [
-			// Expand control. Its own click toggles the detail; a click anywhere else on the row opens the mapping.
-			`<div class="col grid-static-col" style="${COLS.expand}"><button type="button" class="btn btn-link btn-xs" data-action="expand" data-name="${escape(row.name)}" aria-expanded="${open}" aria-label="${escape(open ? __("Hide details") : __("Show details"))}">${open ? "&#9652;" : "&#9662;"}</button></div>`,
-			// Account name (ellipsized, full name as tooltip) with the platform badge beside it.
-			`<div class="col grid-static-col" style="${COLS.account}"><div class="static-area d-flex align-items-center" style="gap: var(--margin-xs)"><span class="ellipsis" style="min-width: 0" title="${escape(account)}">${escape(account)}</span><span class="badge badge-light" style="flex: none">${escape(row.platform)}</span></div></div>`,
-			static_col(`<bdi dir="ltr">${escape(row.external_reference)}</bdi>`, COLS.reference, row.external_reference),
-			static_col(row.enabled ? pill(__("Enabled"), "green") : pill(__("Disabled"), "gray"), COLS.enabled),
-			static_col(escape(row.sales_uom), COLS.uom),
-			`<div class="col grid-static-col" style="${COLS.status}"><div class="static-area">${status_cell}</div></div>`,
+		// A labelled value: muted caption, then the value. The caption is its own text node so the
+		// order follows the reading direction (RTL safe).
+		// Values wrap anywhere (a Shopify GID has no break points) and carry the full value as tooltip.
+		const field = (label, inner, title = "") =>
+			`<div class="mi-listing-field" style="min-width: 0; max-width: 100%"><div class="text-muted small">${escape(label)}</div><div style="overflow-wrap: anywhere"${
+				title ? ` title="${escape(title)}"` : ""
+			}>${inner}</div></div>`;
+		// The status of one kind of sync. Sync Status is the price (catalog) status; Talabat writes price
+		// and stock together into it and has no separate stock status.
+		const status_line = (label, status) =>
+			`<div role="group" aria-label="${escape(label)}" style="display: flex; align-items: center; gap: var(--margin-xs)"><span class="text-muted small">${escape(label)}</span>${status_pill(status)}</div>`;
+		const statuses = [
+			status_line(row.platform === "Talabat" ? __("Price and stock") : __("Price"), row.sync_status),
+		];
+		if (row.platform !== "Talabat") statuses.push(status_line(__("Stock"), row.inventory_sync_status));
+
+		const head = [
+			`<div style="${ROW}; flex: 1 1 auto; min-width: 0"><strong class="ellipsis" style="min-width: 0" title="${escape(account)}">${escape(account)}</strong><span class="badge badge-light" style="flex: none">${escape(row.platform)}</span>${
+				row.enabled ? pill(__("Enabled"), "green") : pill(__("Disabled"), "gray")
+			}</div>`,
 		];
 		if (ctx.can_write) {
-			cells.push(
-				`<div class="col grid-static-col mi-sync-cell" style="${COLS.sync}">${sync_control(state, "row", row.name, row_states(row, ctx.can_write))}</div>`
-			);
+			head.push(`<div class="mi-sync-cell" style="flex: none">${sync_control(state, "row", row.name, row_states(row, ctx.can_write))}</div>`);
 		}
+		const facts = [field(__("External Reference"), `<bdi dir="ltr">${escape(row.external_reference)}</bdi>`, row.external_reference)];
+		if (row.sales_uom) facts.push(field(__("Sales UOM"), escape(row.sales_uom)));
+
 		return (
-			`<div class="grid-row mi-listing-row" tabindex="0" data-name="${escape(row.name)}" ${VISIBLE}>` +
-			`<div class="data-row row m-0" style="overflow: visible; align-items: center">${cells.join("")}</div>` +
+			`<div class="mi-listing-card" tabindex="0" data-name="${escape(row.name)}" style="border: 1px solid var(--border-color); border-radius: var(--border-radius-md); background-color: var(--card-bg); padding: var(--padding-md); margin-block-end: var(--margin-sm); cursor: pointer">` +
+			`<div style="${ROW}; justify-content: space-between">${head.join("")}</div>` +
+			`<div style="${ROW}; margin-block-start: var(--margin-sm)">${facts.join("")}</div>` +
+			`<div style="${ROW}; margin-block-start: var(--margin-sm)">${statuses.join("")}</div>` +
+			// Its own click toggles the detail; a click anywhere else on the card opens the mapping.
+			`<div style="margin-block-start: var(--margin-xs)"><button type="button" class="btn btn-link btn-xs" style="padding: 0" data-action="expand" data-name="${escape(row.name)}" aria-expanded="${open}">${escape(open ? __("Hide details") : __("Show details"))}</button></div>` +
 			(open ? detail_html(row) : "") +
 			`</div>`
 		);
 	}
 
-	function table_html(state, ctx) {
-		const columns = [
-			{ labels: [], style: COLS.expand },
-			{ labels: [__("Marketplace Account")], style: COLS.account },
-			{ labels: [__("External Reference")], style: COLS.reference },
-			{ labels: [__("Enabled")], style: COLS.enabled },
-			{ labels: [__("Sales UOM")], style: COLS.uom },
-			{ labels: [__("Sync Status"), __("Inventory Sync Status")], style: COLS.status },
-		];
-		if (ctx.can_write) columns.push({ labels: [], style: COLS.sync });
-		const heading = heading_row(columns);
-		const rows = state.rows.map((row) => listing_row_html(state, row, ctx)).join("");
-		return `<div class="form-grid-container" ${VISIBLE}><div class="form-grid" ${VISIBLE}>${heading}<div class="grid-body" ${VISIBLE}><div class="rows" ${VISIBLE}>${rows}</div></div></div></div>`;
+	function cards_html(state, ctx) {
+		return `<div class="mi-listing-cards">${state.rows.map((row) => listing_row_html(state, row, ctx)).join("")}</div>`;
 	}
 
 	function toolbar_html(state, ctx) {
@@ -328,7 +294,7 @@
 			const add = buttons.length ? `<p class="d-flex" style="gap: var(--margin-sm)">${buttons.join("")}</p>` : "";
 			return `<p class="text-muted">${escape(__("No marketplace listings for this Item"))}</p>${add}`;
 		}
-		return `${toolbar_html(state, ctx)}${table_html(state, ctx)}`;
+		return `${toolbar_html(state, ctx)}${cards_html(state, ctx)}`;
 	}
 
 	function create_shopify_button() {
@@ -369,13 +335,13 @@
 					kind: target.getAttribute("data-kind"),
 				});
 			})
-			.on("click.mi_listings", ".mi-listing-row", (event) => {
-				// The dropdown toggle and menu sit inside the row; they must not open the mapping.
+			.on("click.mi_listings", ".mi-listing-card", (event) => {
+				// The dropdown toggle and menu sit inside the card; they must not open the mapping.
 				if (event.target.closest && event.target.closest("button, a, .dropdown-menu")) return;
 				open_row(event.currentTarget.getAttribute("data-name"));
 			})
-			.on("keydown.mi_listings", ".mi-listing-row", (event) => {
-				// Only when the row itself has focus, so Enter on a button inside it keeps its own meaning.
+			.on("keydown.mi_listings", ".mi-listing-card", (event) => {
+				// Only when the card itself has focus, so Enter on a button inside it keeps its own meaning.
 				if (event.key === "Enter" && event.target === event.currentTarget) {
 					open_row(event.currentTarget.getAttribute("data-name"));
 				}
@@ -488,6 +454,24 @@
 			});
 	}
 
+	// The success alert. When the price was not sent it says why; after an unexpected price error it
+	// also offers Retry, which is the existing price-only sync of that listing (same confirm).
+	function show_created_alert(frm, result) {
+		if (result.price_sent !== false) {
+			frappe.show_alert({ message: __("Created on Shopify as a draft product."), indicator: "green" });
+			return;
+		}
+		const message = __("Created on Shopify as a draft product. The price was not sent: {0}", [
+			escape(result.price_skipped_reason || ""),
+		]);
+		const actions = {};
+		if (result.price_retry && result.mapping) {
+			actions[__("Retry")] = () =>
+				load_listings(frm, { quiet: true }).then(() => start_sync(frm, "row", result.mapping, "price"));
+		}
+		frappe.show_alert({ message, indicator: "orange" }, 15, actions);
+	}
+
 	function run_create(frm, dialog, account) {
 		const status = dialog.get_field("status_html").$wrapper;
 		status.html(`<p class="text-muted">${escape(__("Creating on Shopify..."))}</p>`);
@@ -496,9 +480,9 @@
 			.call({ method: CREATE_METHOD, args: { account, item: frm.doc.name }, freeze: false, silent: true })
 			.then((response) => wait_for_create(response.message.job_id))
 			.then(
-				() => {
+				(state) => {
 					dialog.hide();
-					frappe.show_alert({ message: __("Created on Shopify as a draft product."), indicator: "green" });
+					show_created_alert(frm, (state && state.result) || {});
 					return load_listings(frm, { quiet: true });
 				},
 				(error) => {

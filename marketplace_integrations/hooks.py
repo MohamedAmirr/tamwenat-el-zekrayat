@@ -345,6 +345,10 @@ scheduler_events = {
 		"* * * * *": [
 			"marketplace_integrations.services.sales_order_sync_debounce.sweep_due_sales_order_syncs",
 		],
+		# #506: invoice (and submit) delivered Bosta notes; moved from a prod Server Script.
+		"*/10 * * * *": [
+			"marketplace_integrations.integrations.bosta.auto_invoice.invoice_delivered_notes",
+		],
 	},
 	"daily": [
 		"marketplace_integrations.integrations.shopify.inventory_sync.reconcile_all_accounts",
@@ -517,6 +521,7 @@ fixtures = [
 					"Delivery Note-custom_shipping_column",
 					"Delivery Note-custom_cod_amount",
 					"Delivery Note-custom_cod_confirmed",
+					"Delivery Note-custom_cod_typed",
 					"Delivery Note-custom_bosta_city",
 					"Delivery Note-custom_bosta_city_name",
 					"Delivery Note-custom_shipping_label",
