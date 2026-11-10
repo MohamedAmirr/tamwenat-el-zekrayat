@@ -2001,6 +2001,10 @@ Shopify did not confirm the SKU update.,لم يؤكد Shopify تحديث رمز 
 "Shopify created product {0} (variant {1}) and it is mapped, but setting its SKU failed: {2}. Fix the SKU in Shopify; do not create it again.","أنشأ Shopify المنتج {0} (المتغيّر {1}) وتم ربطه، لكن تعيين رمز المنتج (SKU) فشل: {2}. صحّح رمز المنتج في Shopify ولا تنشئه مرة أخرى."
 Setting its SKU also failed: {0}.,كما فشل تعيين رمز المنتج (SKU): {0}.
 "Shopify created product {0} (variant {1}) but saving the mapping failed: {2}. Check Shopify before retrying.","أنشأ Shopify المنتج {0} (المتغيّر {1}) لكن حفظ الربط فشل: {2}. تحقق من Shopify قبل إعادة المحاولة."
+Created on Shopify as a draft product. The price was not sent: {0},تم الإنشاء على Shopify كمنتج مسودة. لم يتم إرسال السعر: {0}
+An unexpected error occurred while looking up the price.,حدث خطأ غير متوقع أثناء البحث عن السعر.
+Stock,المخزون
+Price and stock,السعر والمخزون
 Order Received,تم استلام الطلب
 Waiting for Goods,بانتظار البضاعة
 Shipment Requested,تم طلب الشحنة
