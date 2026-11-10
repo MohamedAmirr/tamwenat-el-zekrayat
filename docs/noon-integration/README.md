@@ -52,7 +52,7 @@ The Delivery Note of a Noon Sales Order is the shipment. The Noon adapter
 - **Cancel.** Noon is asked first (`GetFbpiOrder`): every unit of the shipment already cancelled is success
   with no cancel call. Otherwise `CancelShipment`: 200 cancels, a definite 4xx leaves the note submitted with
   Noon's reason, anything else is Cancellation Unknown (Retry asks Noon first again). The ERPNext cancel
-  follows only after Noon confirms. Changing the AWB or items of a created shipment is cancel and amend.
+  follows only after Noon confirms. Changing the AWB or items of a created shipment is cancel and amend. A person cancelling a note or shipment never cancels the Sales Order from here; only a cancel Noon started (the automatic cancel after a read shows every unit cancelled, plus a stored Noon order with no eligible unit) does (`services/order_cancel_cascade.py`).
   Noon documents (CancelShipment in `noon_api_full.md`): "Cancels an existing shipment. All items included in
   that shipment will also be canceled". So the order sync may then cancel or shrink the Sales Order by itself
   and the units may not be shippable again; the Cancel confirmation says so. UNVERIFIED against real Noon (see

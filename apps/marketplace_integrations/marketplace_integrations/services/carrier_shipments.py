@@ -36,6 +36,8 @@ An adapter is a module exposing (the contract; a contract test checks every adap
 - ``cancel_remote(doc)``: ``_dict(outcome="cancelled"|"refused", message, values, http_status)`` or raises
   ``carrier_log.Unknown``. ``values`` are extra fields written with the result.
 - ``after_cancelled(delivery_note)``: work after the Cancelled write.
+- ``picked_up(doc)``: optional; True when the carrier already has the parcel / the shipment is past the point where a
+  cancel is possible (the Sales Order cancel cascade refuses such a note up front instead of asking the carrier).
 - ``refresh(delivery_note)``: read the carrier's state and apply it; returns the shipping status. Once it
   wrote the Integration Status Cancelled it calls ``cancel_after_carrier_cancelled`` (every path that reads
   the carrier does: webhook, nightly job, Refresh).
@@ -1097,6 +1099,8 @@ def _auto_cancel(delivery_note):
 			doc.reload()  # the invoice cancel rewrote the note's billing status
 		_check_native_cancel_not_blocked(doc)
 		doc.flags.ignore_permissions = True
+		# The carrier cancelled the shipment (not a person): the order cancel hook (order_cancel_cascade) reads it.
+		doc.flags.cancelled_by_carrier = True
 		doc.cancel()
 	except Exception as exc:
 		frappe.db.rollback()
@@ -1127,6 +1131,46 @@ def _auto_cancel(delivery_note):
 		subject = _("Delivery Note {0} was cancelled automatically because {1} cancelled the shipment.").format(delivery_note, service)
 	_notify(doc, subject)
 	frappe.db.commit()
+
+
+#: ``invoice_blocker`` kinds: the linked document that holds a payment or return, or an invoice that is not fully unpaid / POS.
+PAYMENT_ENTRY, JOURNAL_ENTRY, RETURN, UNPAID = "Payment Entry", "Journal Entry", "Sales Invoice", "unpaid"
+
+
+def invoice_blocker(name, values=None):
+	"""Why a submitted Sales Invoice must not be cancelled automatically, else ``None``: ``(kind, linked document)``
+	where kind is ``PAYMENT_ENTRY``, ``JOURNAL_ENTRY`` (a submitted one references the invoice), ``RETURN`` (a credit
+	note against it) or ``UNPAID`` (POS, or ``outstanding_amount`` differs from the total, so it is paid or partly
+	paid; the linked document is ``""``). The one payment rule shared by the carrier auto-cancel and the Sales Order
+	cancel cascade (``order_cancel_cascade``). ``values`` (``outstanding_amount``, ``is_pos``, ``rounded_total``,
+	``grand_total``) may be passed when the caller already read them under a lock."""
+	linked = frappe.get_all(
+		"Payment Entry Reference",
+		filters={"reference_doctype": "Sales Invoice", "reference_name": name, "docstatus": 1},
+		pluck="parent",
+		limit=1,
+	)
+	if linked:
+		return PAYMENT_ENTRY, linked[0]
+	linked = frappe.get_all(
+		"Journal Entry Account",
+		filters={"reference_type": "Sales Invoice", "reference_name": name, "docstatus": 1},
+		pluck="parent",
+		limit=1,
+	)
+	if linked:
+		return JOURNAL_ENTRY, linked[0]
+	linked = frappe.get_all("Sales Invoice", filters={"return_against": name, "docstatus": 1}, pluck="name", limit=1)
+	if linked:
+		return RETURN, linked[0]
+	values = values or frappe.db.get_value(
+		"Sales Invoice", name, ["outstanding_amount", "is_pos", "rounded_total", "grand_total"], as_dict=True
+	)
+	precision = frappe.get_precision("Sales Invoice", "outstanding_amount")
+	total = values.rounded_total or values.grand_total
+	if values.is_pos or flt(values.outstanding_amount, precision) != flt(total, precision):
+		return UNPAID, ""
+	return None
 
 
 def _cancel_linked_sales_invoices(doc):
@@ -1169,28 +1213,12 @@ def _cancel_linked_sales_invoices(doc):
 			frappe.throw(
 				_("Sales Invoice {0} also bills other Delivery Notes or items without one, so it is not cancelled automatically.").format(name)
 			)
-		linked = (
-			frappe.get_all(
-				"Payment Entry Reference",
-				filters={"reference_doctype": "Sales Invoice", "reference_name": name, "docstatus": 1},
-				pluck="parent",
-				limit=1,
-			)
-			or frappe.get_all(
-				"Journal Entry Account",
-				filters={"reference_type": "Sales Invoice", "reference_name": name, "docstatus": 1},
-				pluck="parent",
-				limit=1,
-			)
-			or frappe.get_all("Sales Invoice", filters={"return_against": name, "docstatus": 1}, pluck="name", limit=1)
-		)
-		if linked:
+		blocker = invoice_blocker(name, values)
+		if blocker and blocker[0] != UNPAID:
 			frappe.throw(
-				_("Sales Invoice {0} is linked with {1}, so it is not cancelled automatically.").format(name, linked[0])
+				_("Sales Invoice {0} is linked with {1}, so it is not cancelled automatically.").format(name, blocker[1])
 			)
-		precision = frappe.get_precision("Sales Invoice", "outstanding_amount")
-		total = values.rounded_total or values.grand_total
-		if values.is_pos or flt(values.outstanding_amount, precision) != flt(total, precision):
+		if blocker:
 			frappe.throw(
 				_("Sales Invoice {0} is a POS invoice or is not fully unpaid, so it is not cancelled automatically.").format(name)
 			)

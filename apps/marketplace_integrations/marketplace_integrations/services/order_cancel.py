@@ -35,6 +35,7 @@ from frappe.utils import cstr, strip_html_tags
 
 from marketplace_integrations.services import carrier_log, order_edit
 from marketplace_integrations.services import marketplace_outbound as outbound
+from marketplace_integrations.services.order_cancel_cascade import SKIP_PUSH_FLAG
 
 CARRIER = "carrier"
 DELIVERY_NOTE = "delivery_note"
@@ -240,7 +241,12 @@ def _cancel_sales_order(sales_order):
 		return
 	if doc.docstatus != 1:
 		raise Stopped(_("Sales Order {0} is not submitted.").format(sales_order))
-	doc.cancel()
+	# Step 4 pushes the cancel to Shopify itself: the Sales Order on_cancel hook (order_cancel_cascade) must not.
+	frappe.flags[SKIP_PUSH_FLAG] = True
+	try:
+		doc.cancel()
+	finally:
+		frappe.flags[SKIP_PUSH_FLAG] = False
 
 
 def _cancel_on_platform(sales_order, cancellation_reason):
