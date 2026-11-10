@@ -140,17 +140,21 @@ class UnitTestPaymentKind(UnitTestCase):
 		)
 		self.assertEqual(service.payment_kind(unpaid, []), service.PAY_ON_DELIVERY)
 
-	def test_a_settled_full_invoice_is_paid(self):
+	def test_a_full_invoice_is_paid_even_with_an_outstanding_amount(self):
+		# INTERIM (2026-11-10, until the Bosta COD receivable "Option A" exists): the carrier still holds the cash
+		# of an invoiced Bosta order, so the outstanding amount must not turn it back into "pay on delivery".
+		# When Option A is built, this test goes back to expecting PAY_ON_DELIVERY for an unsettled invoice.
 		order = {"grand_total": 100, "advance_paid": 0, "per_billed": 100}
 		self.assertEqual(service.payment_kind(order, [0]), service.PAID_BY_INVOICE)
 		self.assertEqual(service.payment_kind(order, [0, 0.0]), service.PAID_BY_INVOICE)
+		self.assertEqual(service.payment_kind(order, [100]), service.PAID_BY_INVOICE)
+		self.assertEqual(service.payment_kind(order, [0, 40]), service.PAID_BY_INVOICE)
 
-	def test_an_unsettled_partial_or_missing_invoice_is_not_paid(self):
+	def test_a_partly_billed_or_not_invoiced_order_is_not_paid(self):
 		order = {"grand_total": 100, "advance_paid": 0, "per_billed": 100}
-		self.assertEqual(service.payment_kind(order, [40]), service.PAY_ON_DELIVERY)
-		self.assertEqual(service.payment_kind(order, [0, 40]), service.PAY_ON_DELIVERY)
 		self.assertEqual(service.payment_kind(order, []), service.PAY_ON_DELIVERY)
 		self.assertEqual(service.payment_kind({**order, "per_billed": 50}, [0]), service.PAY_ON_DELIVERY)
+		self.assertEqual(service.payment_kind({**order, "per_billed": 50}, [100]), service.PAY_ON_DELIVERY)
 
 
 class UnitTestGetStatesMocked(UnitTestCase):
@@ -267,7 +271,7 @@ class IntegrationTestGetStatesQueries(BostaFixtureMixin, IntegrationTestCase):
 		frappe.db.set_value("Delivery Note Item", {"parent": made.name}, "qty", 3)
 		self.assertEqual(self._stage(order), service.READY)
 
-	def test_invoice_paid_unpaid_and_return_invoices(self):
+	def test_a_submitted_invoice_counts_as_paid_whatever_is_outstanding_and_a_return_invoice_does_not(self):
 		from erpnext.selling.doctype.sales_order.sales_order import make_sales_invoice
 
 		order = self.make_order()
@@ -277,8 +281,9 @@ class IntegrationTestGetStatesQueries(BostaFixtureMixin, IntegrationTestCase):
 		frappe.db.set_value("Sales Order", order.name, "per_billed", 100)
 		# a draft invoice is not an invoice
 		self.assertEqual(self._payment(order), service.PAY_ON_DELIVERY)
+		# INTERIM (until Bosta COD "Option A"): still outstanding, still paid
 		frappe.db.set_value("Sales Invoice", invoice.name, {"docstatus": 1, "outstanding_amount": 50})
-		self.assertEqual(self._payment(order), service.PAY_ON_DELIVERY)
+		self.assertEqual(self._payment(order), service.PAID_BY_INVOICE)
 		frappe.db.set_value("Sales Invoice", invoice.name, "outstanding_amount", 0)
 		self.assertEqual(self._payment(order), service.PAID_BY_INVOICE)
 		frappe.db.set_value("Sales Invoice", invoice.name, "is_return", 1)

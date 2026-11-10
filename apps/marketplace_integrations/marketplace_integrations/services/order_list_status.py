@@ -98,17 +98,21 @@ def payment_kind(order, invoice_outstanding):
 	``invoice_outstanding``: the outstanding amounts of the order's submitted, non-return Sales Invoices. Paid by
 	the marketplace for a platform that collects the money (``MARKETPLACE_COLLECTS``); else paid in advance when
 	the advance covers the total (the rounded total when there is one: ERPNext asks for that amount); paid by
-	invoice when the order is fully billed and every invoice is settled; otherwise pay on delivery."""
+	invoice when the order is fully billed by a submitted invoice; otherwise pay on delivery.
+
+	INTERIM (decided 2026-11-10): an invoice counts as paid EVEN WHEN IT STILL HAS OUTSTANDING. Until the accounting
+	"Option A" exists (the Bosta COD receivable is recorded with a Payment Entry at delivery), a Bosta order is
+	invoiced when delivered while the carrier still holds the cash, so the outstanding amount cannot mean "unpaid".
+	When Option A is built, bring the check back: ``all(flt(amount) <= _TOLERANCE for amount in
+	invoice_outstanding)`` (the outstanding amounts are still fetched and passed in for that)."""
 	if order.get("custom_marketplace_platform") in MARKETPLACE_COLLECTS:
 		return PAID_BY_MARKETPLACE
 	total = flt(order.get("rounded_total")) or flt(order.get("grand_total"))
 	if total > 0 and flt(order.get("advance_paid")) >= total - _TOLERANCE:
 		return PAID_IN_ADVANCE
-	if (
-		invoice_outstanding
-		and flt(order.get("per_billed")) >= 100 - _TOLERANCE
-		and all(flt(amount) <= _TOLERANCE for amount in invoice_outstanding)
-	):
+	# INTERIM: no "nothing outstanding" condition here (see the docstring); the list is non-empty = a submitted,
+	# non-return invoice exists.
+	if invoice_outstanding and flt(order.get("per_billed")) >= 100 - _TOLERANCE:
 		return PAID_BY_INVOICE
 	return PAY_ON_DELIVERY
 
