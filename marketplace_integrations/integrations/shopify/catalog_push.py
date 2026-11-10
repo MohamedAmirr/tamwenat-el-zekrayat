@@ -523,12 +523,12 @@ def _push_product_group(client, price_list, product_id, group_mappings, item_by_
 			)
 			continue
 		try:
-			price = resolve_listing_price(price_list, item, item.stock_uom)
+			price = variant_price(price_list, item)
 		except CatalogBuildError as error:
 			local_results.append((mapping, False, _build_error_message(error)))
 			continue
 		variant_id = mapping.external_reference
-		valid_variants.append({"id": variant_id, "price": _format_money(price)})
+		valid_variants.append({"id": variant_id, "price": price})
 		mapping_by_variant_id[variant_id] = mapping
 
 	remote_results = []
@@ -568,7 +568,7 @@ def _push_product_group(client, price_list, product_id, group_mappings, item_by_
 	try:
 		for mapping, ok, error in all_results:
 			if ok:
-				_mark_synced(mapping.name)
+				mark_synced(mapping.name)
 			else:
 				_mark_error(mapping.name, error)
 	except Exception:
@@ -674,6 +674,13 @@ def _config_error_message(error, account_name):
 	)
 
 
+def variant_price(price_list, item):
+	"""The Shopify variant price (plain fixed-point string) for ``item``: its current
+	generic Item Price in its stock UOM. Raises ``CatalogBuildError`` without one.
+	The one rule shared by the price push and Create on Shopify."""
+	return _format_money(resolve_listing_price(price_list, item, item.stock_uom))
+
+
 def _format_money(price):
 	"""Format a Decimal price as a plain fixed-point decimal string, as the
 	GraphQL Admin API's Money scalar expects - never scientific notation. See
@@ -695,7 +702,8 @@ def _format_user_errors(user_errors):
 	return combined[:ERROR_MESSAGE_MAX_LENGTH]
 
 
-def _mark_synced(mapping_name):
+def mark_synced(mapping_name):
+	# Also used by Create on Shopify when it sends the price with the new variant.
 	# Deliberately does not touch last_sync_reference: unlike Talabat's
 	# _mark_queued() (which stores a genuinely new remote job id there), this
 	# synchronous per-group mutation has no equivalent "job id" concept - the

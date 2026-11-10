@@ -32,8 +32,7 @@ ERPNext. If Shopify rejects the edit the old COD is sent back (``_restore_bosta_
 answer was unknown, the note is listed in Needs Attention as "Bosta COD Differs" with Retry. A stored label is
 requested again after each COD update. Only the shipment status Created is edited this way; a shipment that is
 Creating, Unknown or being cancelled refuses the edit, one Bosta cancelled changes the note's rows only. Whenever
-the rows of an editable draft note change, its ``custom_cod_confirmed`` is reset so the person confirms the COD
-again.
+the rows of an editable draft note change, its COD is recomputed and stays confirmed.
 
 Draft Delivery Notes (the form's and the bulk path's are the same document). Edit Order, and a change that comes
 from Shopify, are REFUSED (before anything is sent; the planner holds the change as Needs Attention, reason
@@ -67,6 +66,7 @@ from marketplace_integrations.services.carrier_log import EDITABLE_STATUSES
 from marketplace_integrations.services.noon_item_edit_guard import row_changed
 
 PLATFORM = "Shopify"
+RECOMPUTE_COD_FLAG = "recompute_cod"  # integrations/bosta/delivery_note_shipment.RECOMPUTE_FLAG (same string)
 SKIP_FLAG = "skip_carrier_shipment"  # services/carrier_shipments.SKIP_FLAG (not imported: it pulls the adapters)
 _ROWS_CHANGED_FLAG = "marketplace_order_rows_changed"
 #: Set (to the Sales Order name) by ``apply_edit`` around ``update_child_qty_rate``: the row hooks refuse every other
@@ -694,8 +694,8 @@ def refresh_draft_note(sales_order, cod=None):
 	``update_hold_reason`` before it applies anything). Only then is it right to set a row to the full pending
 	quantity and to add the rows the note lacks; a partial or second draft is never touched (the change is refused
 	or held before it gets here). The COD of an
-	editable draft Bosta note is not recomputed once confirmed: its confirmation is reset instead, so the person
-	confirms the COD again. The COD of a draft Bosta note whose shipment is started (#501) is set to ``cod`` (what
+	editable draft Bosta note is recomputed when its rows change (its confirmation is unticked for the save and ticked
+	again, so the amount is the computed one). The COD of a draft Bosta note whose shipment is started (#501) is set to ``cod`` (what
 	the edit already sent to Bosta) or, when the change comes from Shopify, to the COD rule on the new totals; Bosta
 	is not called here, so for the second case the difference is listed in Needs Attention (Bosta COD Differs) with
 	Retry. Returns the note name or ``None``."""
@@ -744,10 +744,10 @@ def refresh_draft_note(sales_order, cod=None):
 		# The carrier shipment is started: the carrier adapter would refuse a row change. The rows follow the
 		# order anyway (decision, #500); only that guard is skipped. Bosta gets the COD only (#501, see above).
 		note.flags[SKIP_FLAG] = True
-	elif cint(note.get("custom_cod_confirmed")):
-		# The items changed, so the COD must be confirmed again (single form and bulk path both require it
-		# before a shipment is created; a draft whose rows an edit changed is never re-sent by the bulk path).
-		note.custom_cod_confirmed = 0
+	else:
+		# The items changed, so the COD is recomputed by this one validated save and the box is ticked
+		# (``_apply_cod_rule`` reads the flag; nothing to confirm again, and no untick-save-tick toggle).
+		note.flags[RECOMPUTE_COD_FLAG] = True
 	note.save()
 	if started and cstr(note.custom_integration_status) == carrier_log.CREATED:
 		from marketplace_integrations.integrations.bosta import delivery_note_shipment as bosta

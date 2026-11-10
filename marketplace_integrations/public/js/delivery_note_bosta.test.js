@@ -322,9 +322,17 @@ test("Check with Bosta reads the state and continues when the note is Cancelled"
 	assert.equal(global.frappe.validated, true);
 });
 
-test("the draft note offers Cancel Bosta Shipment and asks before cancelling", async () => {
-	const { mod, confirms, calls } = load({ responses: { cancel_shipment: CANCELLED } });
-	const frm = bosta_form({ docstatus: 0 });
+function delete_env({ can_delete = true } = {}) {
+	const routes = [];
+	global.frappe.model = { can_delete: () => can_delete };
+	global.frappe.set_route = (route) => routes.push(route);
+	return routes;
+}
+
+test("Cancel Bosta Shipment asks, deletes the draft through the native delete and opens its Sales Order", async () => {
+	const { mod, confirms, calls, alerts } = load({ responses: { "frappe.client.delete": {} } });
+	const routes = delete_env();
+	const frm = bosta_form({ docstatus: 0, items: [{ against_sales_order: "SO-1" }, { against_sales_order: "SO-1" }] });
 	mod.add_buttons(frm);
 	const button = frm.buttons.find((b) => b.label === "Cancel Bosta Shipment");
 	assert.ok(button);
@@ -332,8 +340,50 @@ test("the draft note offers Cancel Bosta Shipment and asks before cancelling", a
 	await button.action();
 
 	assert.match(confirms[0], /This cannot be undone/);
-	assert.equal(calls[0].method.endsWith("cancel_shipment"), true);
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].method, "frappe.client.delete");
+	assert.deepEqual(calls[0].args, { doctype: "Delivery Note", name: "MAT-DN-1" });
+	assert.deepEqual(routes, [["Form", "Sales Order", "SO-1"]]);
+	assert.equal(alerts.length, 1);
+});
+
+test("a note of several orders (or none) lands on the Delivery Note list after the delete", async () => {
+	const { mod } = load({ responses: { "frappe.client.delete": {} } });
+	const routes = delete_env();
+	await mod.delete_note(bosta_form({ items: [{ against_sales_order: "SO-1" }, { against_sales_order: "SO-2" }] }));
+	assert.deepEqual(routes, [["List", "Delivery Note"]]);
+});
+
+test("a blocked delete (Bosta refused or unknown) shows the reason, stays on the note and reloads it", async () => {
+	const { mod, msgprints, alerts } = load({ responses: { "frappe.client.delete": new Error("no") } });
+	const routes = delete_env();
+	const frm = bosta_form({ docstatus: 0 });
+	await mod.delete_note(frm);
+
+	assert.deepEqual(routes, []);
+	assert.equal(alerts.length, 0);
+	assert.equal(msgprints.length, 1);
+	assert.equal(msgprints[0].indicator, "red");
 	assert.equal(frm.reloads, 1);
+});
+
+test("without the delete permission nothing is promised, confirmed or sent", async () => {
+	const { mod, confirms, calls, msgprints } = load();
+	delete_env({ can_delete: false });
+	await mod.cancel_shipment(bosta_form({ docstatus: 0 }));
+
+	assert.equal(confirms.length, 0);
+	assert.equal(calls.length, 0);
+	assert.equal(msgprints.length, 1);
+	assert.equal(msgprints[0].indicator, "orange");
+});
+
+test("answering No to the delete confirm sends nothing", async () => {
+	const { mod, calls } = load();
+	delete_env();
+	global.frappe.confirm = (message, yes, no) => no();
+	await mod.cancel_shipment(bosta_form({ docstatus: 0 }));
+	assert.equal(calls.length, 0);
 });
 
 test("a submitted note has no Cancel Bosta Shipment button (Cancel does it)", () => {
@@ -542,25 +592,36 @@ test("a new Bosta note with an empty COD is prefilled on refresh", async () => {
 	assert.equal(frm.doc.custom_cod_amount, 100);
 });
 
-test("a programmatic prefill does not confirm the COD, a typed amount does", async () => {
+test("a programmatic prefill sends no typed marker, a typed amount does and confirms the COD", async () => {
 	const { mod } = load({ responses: { get_default_cod: 80 } });
 	const frm = prefill_form(mod, { custom_integration_status: "Not Created" });
 	await mod.sync_cod(frm);
 	assert.equal(frm.doc.custom_cod_confirmed, 0);
-	// the person types: confirmed, and the "filled from the order" text goes away
+	assert.equal(frm.doc.custom_cod_typed, undefined);
+	// the person types: the form says so (the server then keeps the amount), and the "filled from the order" text goes away
 	frm.doc.custom_cod_amount = 90;
 	mod.custom_cod_amount(frm);
+	assert.equal(frm.doc.custom_cod_typed, 1);
 	assert.equal(frm.doc.custom_cod_confirmed, 1);
 	assert.equal(frm.df["custom_cod_amount.description"], "");
 });
 
-test("a confirmed or typed amount is never overwritten", async () => {
+test("an amount the person typed on a new note is never overwritten, a ticked COD confirmed does not stop the prefill", async () => {
 	const { mod, calls } = load({ responses: { get_default_cod: 80 } });
-	const frm = prefill_form(mod, { custom_integration_status: "Not Created", custom_cod_confirmed: 1, custom_cod_amount: 42 });
-	await mod.sync_cod(frm);
+	const typed = prefill_form(mod, { custom_integration_status: "Not Created", custom_cod_confirmed: 1, custom_cod_amount: 42 });
+	typed.doc.custom_cod_amount = 42;
+	mod.custom_cod_amount(typed);
+	typed.writes.length = 0;
+	await mod.sync_cod(typed);
 	assert.equal(calls.length, 0);
-	assert.equal(frm.doc.custom_cod_amount, 42);
-	assert.deepEqual(frm.writes, []);
+	assert.equal(typed.doc.custom_cod_amount, 42);
+	assert.deepEqual(typed.writes, []);
+
+	// COD confirmed is ticked by default now: the new note is still prefilled until the person types
+	const fresh = prefill_form(mod, { custom_integration_status: "Not Created", custom_cod_confirmed: 1 });
+	await mod.sync_cod(fresh);
+	assert.equal(fresh.doc.custom_cod_amount, 80);
+	assert.equal(fresh.doc.custom_cod_typed, undefined);
 });
 
 test("a response is ignored when the person confirmed or the items changed meanwhile", async () => {
@@ -572,7 +633,8 @@ test("a response is ignored when the person confirmed or the items changed meanw
 
 	const typed = prefill_form(mod);
 	const pending_typed = mod.sync_cod(typed);
-	typed.doc.custom_cod_confirmed = 1;
+	mod.custom_cod_amount(typed); // the person typed meanwhile
+	typed.writes.length = 0;
 	const changed = prefill_form(mod);
 	const pending_changed = mod.sync_cod(changed);
 	changed.doc.grand_total = 999;

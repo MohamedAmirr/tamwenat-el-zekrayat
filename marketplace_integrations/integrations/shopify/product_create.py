@@ -6,8 +6,11 @@
 Sends title (``item_name``) and status DRAFT through ``productCreate``, then
 sets the default variant's SKU to ``item_code`` through
 ``productVariantsBulkUpdate``, then writes the Marketplace Product Mapping
-through ``products.upsert_mapping()``. Price and stock reach Shopify later
-through the existing #106 price push and #107 inventory sync.
+through ``products.upsert_mapping()``. The same call also sets the variant price
+when the account's Selling Price List has a current Item Price (same source and
+checks as the #106 price push); without one the product is created without a
+price. Stock reaches Shopify later through the #107 inventory sync, and a missing
+price through the #106 price push.
 
 Shopify has no idempotency key for ``productCreate``. A retry after an unknown
 outcome can therefore create a duplicate product, so this module never retries
@@ -18,11 +21,12 @@ to check Shopify first (and names the GIDs when they are known).
 import hashlib
 
 import frappe
+import requests
 from frappe import _
 from frappe.utils import cstr
 from frappe.utils.synchronization import filelock
 
-from marketplace_integrations.integrations.shopify import products
+from marketplace_integrations.integrations.shopify import catalog_push, products
 from marketplace_integrations.integrations.shopify.client import ShopifyClient
 
 MAPPING_DOCTYPE = "Marketplace Product Mapping"
@@ -198,6 +202,7 @@ def _create_locked(account, item, progress):
 			_("Item {0} is already mapped on Marketplace Account {1}.").format(item_doc.name, account_doc.name)
 		)
 	client = ShopifyClient(connection.name)
+	price, price_skipped = _resolve_price(account_doc.name, item_doc)
 
 	progress["shopify_called"] = True
 	try:
@@ -229,7 +234,7 @@ def _create_locked(account, item, progress):
 
 	# A SKU failure still maps the product: both GIDs are known, and the mapping makes the
 	# duplicate guard refuse a second create. The user fixes the SKU in Shopify.
-	sku_error = _set_sku(client, product_gid, variant_gid, item_doc.name)
+	sku_error = _set_sku(client, product_gid, variant_gid, item_doc.name, price)
 
 	try:
 		mapping = products.upsert_mapping(
@@ -262,6 +267,15 @@ def _create_locked(account, item, progress):
 				"Shopify created product {0} (variant {1}) and it is mapped, but setting its SKU failed: {2}. Fix the SKU in Shopify; do not create it again."
 			).format(product_gid, variant_gid, sku_error),
 		}
+	if price is not None:
+		# Shopify confirmed the variant update that carried the price.
+		catalog_push.mark_synced(mapping["name"])
+		frappe.db.commit()
+		result["price_sent"] = True
+	elif price_skipped:
+		result["price_sent"] = False
+		result["price_skipped_reason"] = price_skipped["reason"]
+		result["price_retry"] = price_skipped["retry"]
 	return {"status": "completed", "result": result}
 
 
@@ -282,12 +296,45 @@ def _check_item_eligible(item_doc):
 		frappe.throw(_("Item {0} is not a stock Item.").format(item_doc.name))
 
 
-def _set_sku(client, product_gid, variant_gid, sku):
-	"""Return None on success, else an error text."""
+def _resolve_price(account, item_doc):
+	"""Returns ``(price, skipped)``: the price to create the variant with, or None plus
+	``{"reason", "retry"}`` to create it without one (``retry`` only for an unexpected error).
+
+	Same source as the #106 price push: the account's Selling Price List, validated
+	the same way (enabled, selling, currency equal to the shop's), and the Item's
+	current generic Item Price in its stock UOM. Any problem (no price list, no
+	Item Price, currency mismatch, a failed shop query) means no price: the product
+	is still created and the price can be pushed later with Sync price and stock,
+	which reports the reason."""
+	try:
+		_account_doc, _connection, price_list = catalog_push.validate_push_account(account)
+		return catalog_push.variant_price(price_list, item_doc), None
+	except (frappe.ValidationError, requests.RequestException) as exc:
+		# Expected: a push-account rule failed, no current Item Price (CatalogBuildError is a
+		# ValidationError), or the shop query failed. The throws queue msgprints that must not
+		# reach whichever request reads the message log next (#85).
+		frappe.clear_messages()
+		return None, {"reason": cstr(exc)[:ERROR_MESSAGE_MAX_LENGTH], "retry": False}
+	except Exception:
+		frappe.clear_messages()
+		frappe.log_error(
+			title=ERROR_LOG_TITLE,
+			message=f"price lookup failed: account={account} item={item_doc.name}\n\n{frappe.get_traceback()}",
+		)
+		# Unexpected, so the UI offers a price-only retry.
+		return None, {"reason": _("An unexpected error occurred while looking up the price."), "retry": True}
+
+
+def _set_sku(client, product_gid, variant_gid, sku, price=None):
+	"""Set the SKU, and the price when there is one, on the default variant in
+	one call. Return None on success, else an error text."""
+	variant = {"id": variant_gid, "inventoryItem": {"sku": sku}}
+	if price is not None:
+		variant["price"] = price
 	try:
 		response = client.execute(
 			_SET_SKU_MUTATION,
-			{"productId": product_gid, "variants": [{"id": variant_gid, "inventoryItem": {"sku": sku}}]},
+			{"productId": product_gid, "variants": [variant]},
 		)
 	except Exception as exc:
 		return cstr(exc)[:ERROR_MESSAGE_MAX_LENGTH]

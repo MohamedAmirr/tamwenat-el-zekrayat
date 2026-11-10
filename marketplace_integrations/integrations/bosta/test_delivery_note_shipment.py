@@ -267,17 +267,119 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 		frappe.db.set_value("Sales Order", order.name, "advance_paid", 0)
 		self.assertEqual(shipment.default_cod(doc), 555.5)
 
-	def test_an_amended_note_must_confirm_its_cod_again(self):
-		note = self.make_note(cod=77)
+	def test_an_amended_note_takes_the_computed_cod_and_is_not_asked_to_confirm_again(self):
+		note = self.make_note(self.make_order(rate=100, qty=2), cod=77)
 		amended = frappe.copy_doc(frappe.get_doc("Delivery Note", note.name))
 		amended.amended_from = note.name
 		amended.custom_cod_amount = 77
-		amended.custom_cod_confirmed = 1
+		amended.custom_cod_typed = 1
+		amended.custom_cod_confirmed = 0
 
 		shipment.guard_changes(amended)
 
-		self.assertEqual(amended.custom_cod_confirmed, 0)
-		self.assertNotEqual(amended.custom_cod_amount, 77)
+		self.assertEqual(amended.custom_cod_confirmed, 1)
+		self.assertEqual(amended.custom_cod_amount, 200)
+		self.assertEqual(amended.custom_cod_typed, 0)
+
+	# -- COD on a new note: typed marker, computed amount ---------------------------------------
+
+	def test_a_new_note_from_an_order_without_the_typed_marker_gets_the_computed_cod(self):
+		# A form sends 0 for a Currency the person never touched: that is not a choice.
+		note = self.make_note(self.make_order(rate=100, qty=2), custom_cod_amount=0)
+
+		values = stored(note, "custom_cod_amount", "custom_cod_confirmed", "custom_cod_typed")
+		self.assertEqual((values.custom_cod_amount, values.custom_cod_confirmed, values.custom_cod_typed), (200, 1, 0))
+
+	def test_a_typed_amount_is_kept_and_the_marker_is_cleared(self):
+		note = self.make_note(self.make_order(rate=100, qty=2), cod=33)
+
+		values = stored(note, "custom_cod_amount", "custom_cod_confirmed", "custom_cod_typed")
+		self.assertEqual((values.custom_cod_amount, values.custom_cod_confirmed, values.custom_cod_typed), (33, 1, 0))
+
+	def test_the_marker_is_ignored_when_there_is_no_amount(self):
+		order = self.make_order(rate=100, qty=2)
+		note = self.make_note(order, custom_cod_typed=1, custom_cod_amount=None)
+
+		self.assertEqual(stored(note, "custom_cod_amount").custom_cod_amount, 200)
+
+	def test_the_recompute_flag_recalculates_once_and_ticks_the_box(self):
+		note = self.make_note(self.make_order(rate=100, qty=4), cod=5)
+		doc = frappe.get_doc("Delivery Note", note.name)
+		doc.items[0].qty = 2
+		doc.flags[shipment.RECOMPUTE_FLAG] = True
+		doc.save()
+
+		values = stored(note, "custom_cod_amount", "custom_cod_confirmed")
+		self.assertEqual((values.custom_cod_amount, values.custom_cod_confirmed), (200, 1))
+
+		# without the flag a ticked box keeps the amount
+		doc = frappe.get_doc("Delivery Note", note.name)
+		doc.items[0].qty = 1
+		doc.save()
+		self.assertEqual(stored(note, "custom_cod_amount").custom_cod_amount, 200)
+
+	# -- shipping charge ---------------------------------------------------------------------------
+
+	def test_a_whole_order_note_gets_the_shipping_amount_back_and_the_cod_matches_the_order(self):
+		order = self.make_order_with_shipping(105)
+		note = self.make_note(order)
+
+		doc = frappe.get_doc("Delivery Note", note.name)
+		self.assertEqual([row.tax_amount for row in doc.taxes], [105])  # reset to 0 by the fixture, restored
+		self.assertEqual(doc.total_taxes_and_charges, 105)
+		self.assertEqual(doc.grand_total, order.grand_total)
+		self.assertIn("Three Hundred", doc.in_words)
+		self.assertEqual(doc.custom_cod_amount, order.grand_total)
+
+	def test_a_partial_note_does_not_get_the_shipping_amount(self):
+		from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
+
+		order = self.make_order_with_shipping(105)
+		doc = make_delivery_note(order.name)
+		self.reset_actual_charges(doc)
+		doc.items[0].qty = 1
+
+		shipment.carry_order_charges(doc)
+
+		self.assertEqual([row.tax_amount for row in doc.taxes], [0])
+
+	def test_no_charge_row_is_ever_added(self):
+		from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
+
+		order = self.make_order_with_shipping(105)
+		doc = make_delivery_note(order.name)
+		doc.set("taxes", [])
+
+		shipment.carry_order_charges(doc)
+
+		self.assertEqual(len(doc.taxes), 0)
+
+	def test_a_reused_draft_gets_the_shipping_amount_and_the_computed_cod(self):
+		from marketplace_integrations.services import order_shipment
+
+		order = self.make_order_with_shipping(105)
+		note = self.make_note(order, cod=10)
+		# an older draft: the amount was reset to 0 when it was made, the COD is somebody's guess, the box unticked
+		frappe.db.set_value("Sales Taxes and Charges", {"parent": note.name}, "tax_amount", 0)
+		frappe.db.set_value("Delivery Note", note.name, {"custom_cod_amount": 10, "custom_cod_confirmed": 0})
+
+		order_shipment._set_draft_cod(note.name, order_shipment.payment_plan(order)["cod"])
+
+		doc = frappe.get_doc("Delivery Note", note.name)
+		self.assertEqual(doc.taxes[0].tax_amount, 105)
+		self.assertEqual(doc.grand_total, order.grand_total)
+		self.assertEqual((doc.custom_cod_amount, doc.custom_cod_confirmed), (order.grand_total, 1))
+
+	def test_computed_cod_of_a_whole_order_note_is_the_payment_plan(self):
+		from marketplace_integrations.services import order_shipment
+
+		order = self.make_order_with_shipping(105)
+		note = self.make_note(order)
+		doc = frappe.get_doc("Delivery Note", note.name)
+
+		self.assertEqual(shipment.computed_cod(doc), order_shipment.payment_plan(order)["cod"])
+		doc.items[0].qty = 1  # a partial note falls back to the note's own total
+		self.assertEqual(shipment.computed_cod(doc), shipment.default_cod(doc))
 
 	# -- request -----------------------------------------------------------------------------
 

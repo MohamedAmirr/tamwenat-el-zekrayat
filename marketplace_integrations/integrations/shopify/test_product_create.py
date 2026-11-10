@@ -51,13 +51,20 @@ def _sku_response(variant_gid, user_errors=None):
 	}
 
 
-def _dispatcher(product_gid, variant_gid, create=None, sku=None):
+def _dispatcher(product_gid, variant_gid, create=None, sku=None, shop_currency="USD"):
 	"""side_effect for ShopifyClient.execute(): answers the productCreate and
-	productVariantsBulkUpdate mutations by query text. ``create``/``sku`` may
-	be a response dict or an Exception instance to raise; None means the
-	successful response for these GIDs."""
+	productVariantsBulkUpdate mutations and the shop currency query by query
+	text. ``create``/``sku``/``shop_currency`` may be a response (dict, or the
+	currency code) or an Exception instance to raise; None means the successful
+	response for these GIDs. A query it does not know is recorded in
+	``_side_effect.unexpected`` (not only raised, since a caller's except could
+	swallow the raise) so a test can assert it is empty."""
 
 	def _side_effect(query, variables=None):
+		if "currencyCode" in query:
+			if isinstance(shop_currency, Exception):
+				raise shop_currency
+			return {"shop": {"currencyCode": shop_currency}}
 		if "productVariantsBulkUpdate" in query:
 			if isinstance(sku, Exception):
 				raise sku
@@ -66,8 +73,10 @@ def _dispatcher(product_gid, variant_gid, create=None, sku=None):
 			if isinstance(create, Exception):
 				raise create
 			return create if create is not None else _create_response(product_gid, variant_gid)
+		_side_effect.unexpected.append(query)
 		raise AssertionError(f"Unexpected query in test: {query}")
 
+	_side_effect.unexpected = []
 	return _side_effect
 
 
@@ -364,8 +373,120 @@ class IntegrationTestCreateProductWorker(IntegrationTestCase):
 		frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": self.account.name})
 		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
 		frappe.delete_doc("Shopify Connection", self.account.connection, ignore_permissions=True, force=True)
+		frappe.db.delete("Item Price", {"item_code": self.item})
+		for price_list in getattr(self, "price_lists", []):
+			frappe.delete_doc("Price List", price_list, ignore_permissions=True, force=True)
 		frappe.delete_doc("Item", self.item, ignore_permissions=True, force=True)
 		frappe.db.commit()
+
+	def _setup_price(self, rate=12.5, currency="USD"):
+		"""A selling Price List on the account, with a current Item Price for the Item
+		(committed: the worker commits too)."""
+		price_list = (
+			frappe.get_doc(
+				{
+					"doctype": "Price List",
+					"price_list_name": f"Product Create Price List {self.suffix}",
+					"currency": currency,
+					"selling": 1,
+					"enabled": 1,
+				}
+			)
+			.insert()
+			.name
+		)
+		self.price_lists = [price_list]
+		frappe.get_doc(
+			{
+				"doctype": "Item Price",
+				"price_list": price_list,
+				"item_code": self.item,
+				"uom": frappe.db.get_value("Item", self.item, "stock_uom"),
+				"price_list_rate": rate,
+				"selling": 1,
+			}
+		).insert()
+		self.account.db_set("erpnext_selling_price_list", price_list, update_modified=False)
+		frappe.db.commit()
+
+	def _sku_call(self, mocked_execute):
+		calls = [
+			call for call in mocked_execute.call_args_list if "productVariantsBulkUpdate" in call.args[0]
+		]
+		self.assertEqual(len(calls), 1)
+		return calls[0]
+
+	def _run_price_case(self, **dispatcher_kwargs):
+		responses = _dispatcher(self.product_gid, self.variant_gid, **dispatcher_kwargs)
+		state, mocked_execute = self._queue_and_run_with(responses)
+		self.assertEqual(responses.unexpected, [])
+		self.assertEqual(state["status"], "completed")
+		self.state = state
+		return self._sku_call(mocked_execute)
+
+	def _mapping_status(self):
+		return frappe.db.get_value(
+			"Marketplace Product Mapping",
+			self.state["result"]["mapping"],
+			["sync_status", "last_synced_on"],
+			as_dict=True,
+		)
+
+	def test_price_list_with_item_price_sends_a_plain_decimal_price(self):
+		self._setup_price(rate=12.5)
+
+		sku_call = self._run_price_case()
+
+		self.assertEqual(
+			sku_call.args[1]["variants"],
+			[{"id": self.variant_gid, "inventoryItem": {"sku": self.item}, "price": "12.5"}],
+		)
+		# Shopify confirmed the variant, so the price status is Synced.
+		status = self._mapping_status()
+		self.assertEqual(status.sync_status, "Synced")
+		self.assertIsNotNone(status.last_synced_on)
+		self.assertTrue(self.state["result"]["price_sent"])
+
+	def test_currency_mismatch_creates_without_price(self):
+		self._setup_price(currency="USD")
+
+		sku_call = self._run_price_case(shop_currency="EGP")
+
+		self.assertNotIn("price", sku_call.args[1]["variants"][0])
+		# Skipped: the status stays Not Synced and the reason is reported (no Retry for it).
+		self.assertEqual(self._mapping_status().sync_status, "Not Synced")
+		result = self.state["result"]
+		self.assertFalse(result["price_sent"])
+		self.assertIn("currency", result["price_skipped_reason"])
+		self.assertFalse(result["price_retry"])
+
+	def test_unexpected_price_error_is_logged_and_offers_retry(self):
+		self._setup_price()
+
+		with patch.object(product_create.catalog_push, "variant_price", side_effect=RuntimeError("boom")):
+			sku_call = self._run_price_case()
+
+		self.assertNotIn("price", sku_call.args[1]["variants"][0])
+		result = self.state["result"]
+		self.assertFalse(result["price_sent"])
+		self.assertTrue(result["price_retry"])
+		self.assertTrue(any("price lookup failed" in text for text in self._error_log_texts()))
+
+	def test_failing_shop_currency_query_creates_without_price(self):
+		self._setup_price()
+
+		sku_call = self._run_price_case(shop_currency=frappe.ValidationError("Shopify unavailable"))
+
+		self.assertNotIn("price", sku_call.args[1]["variants"][0])
+
+	def test_no_current_item_price_creates_without_price(self):
+		self._setup_price()
+		frappe.db.delete("Item Price", {"item_code": self.item})
+		frappe.db.commit()
+
+		sku_call = self._run_price_case()
+
+		self.assertNotIn("price", sku_call.args[1]["variants"][0])
 
 	def _run(self, kwargs):
 		product_create.create_product(
