@@ -2123,3 +2123,5 @@ The Delivery Note {0} no longer exists.,مذكرة التسليم {0} لم تع�
 A Delivery Note that you cannot open already exists for this order.,توجد بالفعل مذكرة تسليم لهذا الطلب لا يمكنك فتحها.
 "{0} did not cancel the shipment, so the Delivery Note was not deleted: {1}","لم تلغِ {0} الشحنة، لذلك لم تُحذف مذكرة التسليم: {1}"
 "It is not known whether {0} cancelled the shipment, so the Delivery Note was not deleted. Try again in a few minutes. {1}","من غير المعروف ما إذا كانت {0} قد ألغت الشحنة، لذلك لم تُحذف مذكرة التسليم. حاول مرة أخرى بعد بضع دقائق. {1}"
+Auto invoice failed: {0},فشلت الفوترة التلقائية: {0}
+"Auto-invoice (Bosta delivered) failed for Delivery Note {0}. See the Error Log. Please create the invoice manually.","فشلت الفوترة التلقائية (تم التسليم عبر بوسطة) لمذكرة التسليم {0}. راجع سجل الأخطاء. يرجى إنشاء الفاتورة يدويًا."
