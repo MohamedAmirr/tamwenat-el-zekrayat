@@ -128,6 +128,14 @@ def stage_for_name(shipping_status):
 	return None
 
 
+def before_pickup(shipping_status):
+	"""True only for a Bosta Shipping Status that is KNOWN to be before the courier collects the parcel (the
+	Shipment Created stage: Pickup requested, Waiting for route, Route Assigned, Picking up from consignee, Picking
+	up). An empty, unknown or unstaged status (e.g. 104 Archived) is not: the caller must treat it as past the
+	point where a cancel is safe."""
+	return stage_for_name(cstr(shipping_status).strip()) == lifecycle.SHIPMENT_CREATED
+
+
 DOCUMENTED_DELIVERY_TYPES = {
 	"SEND",
 	"EXCHANGE",

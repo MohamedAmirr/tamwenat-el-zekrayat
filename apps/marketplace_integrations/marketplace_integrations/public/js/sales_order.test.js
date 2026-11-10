@@ -23,6 +23,8 @@ function load({
 	defaults_fails = false,
 	noon_state = { actions: [], cancelled_on_noon: false, shipments: [] },
 	noon_fails = false,
+	cancel_choice = { ask: true },
+	choice_fails = false,
 		oos_rows = [],
 		invoice_state = {},
 	can_create_delivery_note = true,
@@ -31,6 +33,7 @@ function load({
 	marketplace_summary = { name: "MO-1", platform: "Shopify", reference: "#SHOP-1", erpnext_sync_status: "Syncing", erpnext_sales_order: "" },
 } = {}) {
 	const calls = [];
+	const choice_calls = [];
 	const edit_calls = [];
 	const marketplace_calls = [];
 	const noon_calls = [];
@@ -82,6 +85,9 @@ function load({
 					);
 					dialogs.push(this);
 				}
+				add_custom_action(label, action) {
+					(this.custom_actions = this.custom_actions || []).push({ label, action });
+				}
 				show() {
 					this.shown = true;
 				}
@@ -93,6 +99,11 @@ function load({
 			},
 		},
 		call(opts) {
+			if (opts.method.endsWith("get_shopify_cancel_choice") || opts.method.endsWith("skip_shopify_cancel_push")) {
+				choice_calls.push(opts);
+				if (choice_fails) return Promise.reject(new Error("boom"));
+				return Promise.resolve({ message: opts.method.endsWith("skip_shopify_cancel_push") ? { ok: true } : cancel_choice });
+			}
 			if (opts.method.endsWith("get_shopify_order_edit_preview")) {
 				edit_calls.push(opts);
 				return Promise.resolve({ message: shopify_preview });
@@ -163,7 +174,7 @@ function load({
 	const path = require.resolve("./sales_order.js");
 	delete require.cache[path];
 	const module_exports = require(path);
-	return { shipment_calls, routes, polls, calls, edit_calls, marketplace_calls, noon_calls, oos_calls, invoice_calls, confirms, required, alerts, msgprints, dialogs, handlers, module_exports };
+	return { choice_calls, shipment_calls, routes, polls, calls, edit_calls, marketplace_calls, noon_calls, oos_calls, invoice_calls, confirms, required, alerts, msgprints, dialogs, handlers, module_exports };
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
@@ -390,6 +401,107 @@ test("after_cancel prompts for a cancelled order and adds no button itself", asy
 	await settle();
 	assert.equal(dialogs.length, 1);
 	assert.equal(frm.buttons.length, 0);
+});
+
+const shopify_submitted = (extra = {}) =>
+	make_frm({ docstatus: 1, name: "SO-1", custom_marketplace_platform: "Shopify", custom_marketplace_order: "MO-1", ...extra });
+
+async function ask_before_cancel(options, frm = shopify_submitted()) {
+	const loaded = load(options);
+	global.frappe.validated = true;
+	const settled = loaded.handlers["Sales Order"].before_cancel(frm);
+	await new Promise((resolve) => setTimeout(resolve, 5));
+	return { ...loaded, settled, frm };
+}
+
+test("Cancel All Documents leaves the Delivery Note, Sales Invoice and Payment Entry to the server cascade, even after ERPNext reassigns the list", () => {
+	const { handlers } = load({});
+	const frm = make_frm({ docstatus: 1, name: "SO-1" });
+	handlers["Sales Order"].setup(frm);
+	// ERPNext's onload reassigns the list
+	frm.ignore_doctypes_on_cancel_all = ["Purchase Order", "Unreconcile Payment"];
+	for (const doctype of ["Delivery Note", "Sales Invoice", "Payment Entry", "Purchase Order", "Unreconcile Payment"]) {
+		assert.ok(frm.ignore_doctypes_on_cancel_all.includes(doctype), doctype);
+	}
+	// a refresh does not define it twice or lose the list
+	handlers["Sales Order"].refresh(frm);
+	frm.ignore_doctypes_on_cancel_all = (frm.ignore_doctypes_on_cancel_all || []).concat(["Other"]);
+	assert.ok(frm.ignore_doctypes_on_cancel_all.includes("Payment Entry"));
+	assert.ok(frm.ignore_doctypes_on_cancel_all.includes("Other"));
+});
+
+test("before_cancel asks a submitted Shopify order how to cancel and 'Cancel and push' goes on", async () => {
+	const { dialogs, choice_calls, settled } = await ask_before_cancel({});
+	assert.equal(dialogs.length, 1);
+	assert.equal(dialogs[0].config.primary_action_label, "Cancel and push to Shopify");
+	assert.equal(dialogs[0].config.secondary_action_label, "Cancel in ERPNext only");
+	assert.equal(dialogs[0].custom_actions[0].label, "Don't cancel");
+	dialogs[0].config.primary_action();
+	await settled;
+	assert.equal(global.frappe.validated, true);
+	assert.equal(choice_calls.length, 1, "no skip call");
+});
+
+test("before_cancel 'Cancel in ERPNext only' tells the server first, then goes on", async () => {
+	const { dialogs, choice_calls, settled } = await ask_before_cancel({});
+	dialogs[0].config.secondary_action();
+	await settled;
+	assert.equal(global.frappe.validated, true);
+	assert.ok(choice_calls[1].method.endsWith("skip_shopify_cancel_push"));
+	assert.deepEqual(choice_calls[1].args, { sales_order: "SO-1" });
+});
+
+test("before_cancel 'Don't cancel' and closing the dialog both stop the cancel", async () => {
+	for (const stop of [(d) => d.custom_actions[0].action(), (d) => d.hide()]) {
+		const { dialogs, settled } = await ask_before_cancel({});
+		stop(dialogs[0]);
+		await settled;
+		assert.equal(global.frappe.validated, false);
+	}
+});
+
+test("before_cancel stops the cancel when the server refuses to remember 'ERPNext only'", async () => {
+	const { dialogs, settled, choice_calls } = await ask_before_cancel({});
+	// the first call (the question) already succeeded; make the next one fail
+	const loaded_call = global.frappe.call;
+	global.frappe.call = (opts) => (opts.method.endsWith("skip_shopify_cancel_push") ? Promise.reject(new Error("no")) : loaded_call(opts));
+	dialogs[0].config.secondary_action();
+	await settled;
+	assert.equal(global.frappe.validated, false);
+	assert.equal(choice_calls.length, 1);
+});
+
+test("before_cancel asks nothing when the server says Shopify would not cancel it, or for other orders", async () => {
+	let result = await ask_before_cancel({ cancel_choice: { ask: false } });
+	await result.settled;
+	assert.equal(result.dialogs.length, 0);
+	assert.equal(global.frappe.validated, true);
+	for (const extra of [{ docstatus: 0 }, { custom_marketplace_order: "" }]) {
+		result = await ask_before_cancel({}, shopify_submitted(extra));
+		await result.settled;
+		assert.equal(result.dialogs.length, 0);
+		assert.equal(result.choice_calls.length, 0);
+	}
+	// Another platform: the SERVER decides (the JS names no platform), here it answers no.
+	result = await ask_before_cancel({ cancel_choice: { ask: false } }, shopify_submitted({ custom_marketplace_platform: "Noon" }));
+	await result.settled;
+	assert.equal(result.dialogs.length, 0);
+	assert.equal(result.choice_calls.length, 1);
+});
+
+test("before_cancel cancels as before when the question cannot be asked", async () => {
+	const { dialogs, settled } = await ask_before_cancel({ choice_fails: true });
+	await settled;
+	assert.equal(dialogs.length, 0);
+	assert.equal(global.frappe.validated, true);
+});
+
+test("after_cancel of a Shopify order does not prompt: the server cancels it on Shopify", async () => {
+	const { handlers, dialogs, msgprints } = load({ option: eligible() });
+	const frm = make_frm({ status: "Cancelled", docstatus: 2, custom_marketplace_platform: "Shopify" });
+	handlers["Sales Order"].after_cancel(frm);
+	await settle();
+	assert.equal(dialogs.length + msgprints.length + frm.buttons.length, 0);
 });
 
 test("not_applicable does nothing", async () => {

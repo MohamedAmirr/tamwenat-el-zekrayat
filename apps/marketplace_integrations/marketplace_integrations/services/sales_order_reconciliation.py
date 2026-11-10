@@ -415,7 +415,8 @@ def plan(previous, current, evidence, erp_state):
 				_(
 					"The shipping charge differs from the submitted Sales Order "
 					"(Sales Order {0}, marketplace {1}). "
-					"A submitted Sales Order's charges are not edited automatically; cancel and amend it."
+					"A submitted Sales Order's charges are not edited automatically; cancel and amend it "
+					"(choose Cancel in ERPNext only when asked, so the marketplace order stays open)."
 				).format(shipping_change["previous"] or 0, shipping_change["current"] or 0),
 				header_changes + changes,
 				reasons.SHIPPING_CHANGED,
@@ -909,7 +910,20 @@ def execute(reconciliation_plan, sales_order_name, previous=None, current=None, 
 		executed["reopened"] = reopened
 		return executed
 	if outcome == CANCEL_ORDER:
-		sales_order.cancel()
+		# The planner returns CANCEL_ORDER only for an order with NO delivered quantity and NO billed amount (the
+		# ALREADY_BILLED / delivered gates in ``plan`` come first), so the order has no submitted Delivery Note or Sales
+		# Invoice and the cancel cascade (``order_cancel_cascade.cascade_cancel``) finds nothing to cancel: it neither
+		# commits nor calls a carrier here, so the reconcile savepoint survives.
+		# The marketplace cancelled the order: an inbound sync never pushes a cancel back to the marketplace. (Imported here:
+		# order_cancel_cascade imports marketplace_outbound, which imports this module.)
+		from marketplace_integrations.services.order_cancel_cascade import SKIP_PUSH_FLAG
+
+		previous_flag = frappe.flags.get(SKIP_PUSH_FLAG)
+		frappe.flags[SKIP_PUSH_FLAG] = True
+		try:
+			sales_order.cancel()
+		finally:
+			frappe.flags[SKIP_PUSH_FLAG] = previous_flag
 	else:
 		# SalesOrder.update_status() itself performs no permission check (ERPNext's
 		# whitelisted wrapper does); closing needs submit permission like cancel does.

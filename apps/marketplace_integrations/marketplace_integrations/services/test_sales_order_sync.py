@@ -1574,21 +1574,22 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 			)
 		)
 
-	def test_cancel_with_a_linked_delivery_note_is_rejected_and_rolled_back(self):
+	def test_cancel_with_a_linked_delivery_note_cancels_the_note_with_the_order(self):
 		from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
 
 		order, sales_order = self._cancelled_talabat_order()
 		delivery_note = make_delivery_note(sales_order.name)
 		delivery_note.insert()
 		delivery_note.submit()
-		# Hide the delivery from the planner so it still plans CANCEL_ORDER, while the
-		# Delivery Note link makes ERPNext refuse the cancel.
+		# Hide the delivery from the planner so it still plans CANCEL_ORDER. The Sales Order cancel cascade
+		# (order_cancel_cascade, decided 2026-11-09) then cancels the linked note itself instead of ERPNext refusing.
 		frappe.db.set_value("Sales Order Item", sales_order.items[0].name, "delivered_qty", 0)
-		baseline = (order.last_synced_hash, order.last_synced_snapshot)
 
 		result = sync_sales_order(order.name)
 
-		self._assert_rejected_and_untouched(order, sales_order, baseline, result)
+		self.assertTrue(result["ok"], result)
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order.name, "docstatus"), 2)
+		self.assertEqual(frappe.db.get_value("Delivery Note", delivery_note.name, "docstatus"), 2)
 
 	def test_cancel_is_blocked_by_an_advance_payment_without_calling_erpnext(self):
 		order, sales_order = self._cancelled_talabat_order()

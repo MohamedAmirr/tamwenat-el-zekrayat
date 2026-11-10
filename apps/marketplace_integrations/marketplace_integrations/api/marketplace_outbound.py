@@ -10,7 +10,12 @@ which owns eligibility, the platform call and the echo-guard marker.
 import frappe
 from frappe import _
 
-from marketplace_integrations.services import marketplace_outbound, order_cancel, order_edit
+from marketplace_integrations.services import (
+	marketplace_outbound,
+	order_cancel,
+	order_cancel_cascade,
+	order_edit,
+)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -22,6 +27,24 @@ def get_platform_cancel_option(sales_order: str):
 	if marketplace_order:
 		frappe.get_doc("Marketplace Order", marketplace_order).check_permission("read")
 	return marketplace_outbound.get_platform_cancel_option(sales_order_doc)
+
+
+@frappe.whitelist(methods=["POST"])
+def get_shopify_cancel_choice(sales_order: str):
+	"""Whether the Sales Order form asks before cancelling if Shopify is cancelled too. Needs cancel permission on the
+	Sales Order only (no Marketplace Order permission: the answer is a yes or no)."""
+	sales_order_doc = frappe.get_doc("Sales Order", sales_order)
+	sales_order_doc.check_permission("cancel")
+	return order_cancel_cascade.shopify_push_choice(sales_order_doc.name)
+
+
+@frappe.whitelist(methods=["POST"])
+def skip_shopify_cancel_push(sales_order: str):
+	"""The user chose "Cancel in ERPNext only": their next cancel of this order does not cancel it on Shopify."""
+	sales_order_doc = frappe.get_doc("Sales Order", sales_order)
+	sales_order_doc.check_permission("cancel")
+	order_cancel_cascade.skip_push_on_next_cancel(sales_order_doc.name)
+	return {"ok": True}
 
 
 @frappe.whitelist(methods=["POST"])

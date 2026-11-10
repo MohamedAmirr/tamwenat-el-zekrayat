@@ -847,6 +847,13 @@ def cancel_remote(doc):
 	raise Unknown(message, response.status_code)
 
 
+def picked_up(doc):
+	"""The contract's optional ``picked_up``: Noon shows (some of) the units Shipped. The states in which Noon
+	still allows a cancel are not documented (business-spec, "Which states allow cancellation"), so only a
+	shipment Noon itself shows as Shipped or Mixed counts as past the point."""
+	return cstr(doc.get("custom_shipping_status")) in (SHIPPING_SHIPPED, SHIPPING_MIXED)
+
+
 def after_cancelled(delivery_note):
 	"""Once the note is Cancelled: the Sales Order summary."""
 	_update_summary(delivery_note)

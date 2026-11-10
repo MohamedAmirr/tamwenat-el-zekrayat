@@ -1024,6 +1024,16 @@ def cancel_remote(doc):
 	return frappe._dict(outcome=outcome, message=message, values=values, http_status=http_status)
 
 
+def picked_up(doc):
+	"""The contract's optional ``picked_up``, from Bosta's own state (``custom_shipping_status``), not from the
+	docstatus: a submitted note can still show "Pickup requested" (prod has such notes). Only a state known to be
+	before the courier collects the parcel (``statuses.before_pickup``) lets the Sales Order cancel ask Bosta to
+	cancel; an empty or unknown state counts as picked up (conservative: the cancel is refused up front)."""
+	from marketplace_integrations.integrations.bosta import statuses
+
+	return not statuses.before_pickup(doc.get("custom_shipping_status"))
+
+
 def after_cancelled(delivery_note):
 	"""Once the note is Cancelled: the Sales Order summary."""
 	from marketplace_integrations.integrations.bosta import statuses
