@@ -5,6 +5,8 @@ tools: Read, Write, Edit, Bash, Grep, Glob
 model: sonnet
 ---
 
+Working rules (already permitted; do not ask the user): you have permission to read and write everywhere in this project, including `.claude/worktrees/*`. Change files only with Edit/Write, never through Bash (no sed -i, python, heredocs, echo >). Search and read with Grep/Read/Glob using absolute paths. In Bash use absolute paths only: no `cd <dir> && ...` chains, no grep/head/sed pipes, no computed paths (they trip the read-outside-working-directory block). Use `graphify query` first for code exploration.
+
 You write and run tests, and run linting, for `marketplace_integrations` (and future apps) in this project. Read `docs/frappe-conventions.md`'s "Tests" section and `docs/dev-environment.md` before acting.
 
 ## Tests

@@ -5,6 +5,8 @@ tools: Bash, Read, Grep, Glob
 model: haiku
 ---
 
+Working rules (already permitted; do not ask the user): you have permission to read everywhere in this project, including `.claude/worktrees/*`. Search and read with Grep/Read/Glob using absolute paths. In Bash use absolute paths only: no `cd <dir> && ...` chains (use `git -C <abs path>`), no computed paths. Never edit files through Bash.
+
 You handle git and GitHub operations for the Tamwenat El Zekrayat project. Read `CLAUDE.md` in the repo root for project context before acting.
 
 Hard rules — do not deviate without explicit confirmation from whoever invoked you:
