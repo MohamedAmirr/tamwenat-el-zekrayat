@@ -1651,7 +1651,9 @@ Carrier Creation Problem,مشكلة في إنشاء شحنة شركة الشحن
 Carrier Cancelled,تسليم ألغته شركة الشحن
 Bosta Delivery Notes,مذكرات تسليم Bosta
 COD confirmed,تم تأكيد مبلغ الدفع عند الاستلام
-"Cash to collect on delivery. 0 means prepaid. Until confirmed, the default (the note's total minus the order's advance) is recalculated on every save.",النقد المطلوب تحصيله عند التسليم. 0 يعني مدفوع مسبقًا. حتى يتم التأكيد، يُعاد حساب القيمة الافتراضية (إجمالي المذكرة ناقص دفعة أمر البيع المقدمة) عند كل حفظ.
+"Cash to collect on delivery. 0 means prepaid. A new note gets the amount calculated from the order unless you type one; after that the saved amount is kept. Unticked COD confirmed recalculates it on every save.",النقد المطلوب تحصيله عند التسليم. 0 يعني مدفوع مسبقًا. تحصل المذكرة الجديدة على المبلغ المحسوب من الطلب ما لم تكتب مبلغًا؛ وبعد ذلك يُحفظ المبلغ كما هو. إلغاء تفعيل «تم تأكيد مبلغ الدفع عند الاستلام» يعيد حسابه عند كل حفظ.
+COD typed,كُتب مبلغ الدفع عند الاستلام يدويًا
+"Set by the form when the COD of a new Delivery Note was typed by hand, so the server keeps it. The server clears it.",يضبطه النموذج عند كتابة مبلغ الدفع عند الاستلام لمذكرة تسليم جديدة يدويًا ليحتفظ به الخادم. ويمسحه الخادم.
 "Close, keep sending",إغلاق مع متابعة الإرسال
 "Confirm the COD amount before sending the shipment: tick COD confirmed, or change the COD. 0 is allowed.",أكّد مبلغ الدفع عند الاستلام قبل إرسال الشحنة: فعّل «تم تأكيد مبلغ الدفع عند الاستلام» أو غيّر المبلغ. القيمة 0 مسموحة.
 "Confirm the COD amount before creating the shipment: tick COD confirmed, or change the COD. 0 is allowed.",أكّد مبلغ الدفع عند الاستلام قبل إنشاء الشحنة: فعّل «تم تأكيد مبلغ الدفع عند الاستلام» أو غيّر المبلغ. القيمة 0 مسموحة.
@@ -1682,7 +1684,11 @@ Checking with Bosta...,جارٍ التحقق من Bosta...
 Bosta still shows the shipment as not cancelled.,ما زالت Bosta تعرض الشحنة غير ملغاة.
 The shipment could not be cancelled at Bosta.,تعذر إلغاء الشحنة في Bosta.
 Cancel the Bosta shipment of this Delivery Note? This cannot be undone.,إلغاء شحنة Bosta لمذكرة التسليم هذه؟ لا يمكن التراجع عن ذلك.
-The Bosta shipment was cancelled. The Delivery Note can now be deleted.,أُلغيت شحنة Bosta. يمكن الآن حذف مذكرة التسليم.
+Cancel the Bosta shipment and delete this Delivery Note? This cannot be undone.,إلغاء شحنة Bosta وحذف مذكرة التسليم هذه؟ لا يمكن التراجع عن ذلك.
+The Bosta shipment was cancelled and the Delivery Note was deleted.,أُلغيت شحنة Bosta وحُذفت مذكرة التسليم.
+The Delivery Note could not be deleted.,تعذّر حذف مذكرة التسليم.
+You do not have permission to delete this Delivery Note.,لا تملك صلاحية حذف مذكرة التسليم هذه.
+Cancelling at Bosta and deleting the Delivery Note...,جارٍ إلغاء الشحنة لدى Bosta وحذف مذكرة التسليم...
 Cancel Bosta Shipment,إلغاء شحنة Bosta
 Edit Bosta Shipment,تعديل شحنة Bosta
 Choose the Bosta city.,اختر مدينة Bosta.

@@ -521,6 +521,7 @@ fixtures = [
 					"Delivery Note-custom_shipping_column",
 					"Delivery Note-custom_cod_amount",
 					"Delivery Note-custom_cod_confirmed",
+					"Delivery Note-custom_cod_typed",
 					"Delivery Note-custom_bosta_city",
 					"Delivery Note-custom_bosta_city_name",
 					"Delivery Note-custom_shipping_label",

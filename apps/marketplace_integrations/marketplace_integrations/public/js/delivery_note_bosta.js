@@ -109,7 +109,7 @@
 		return false;
 	}
 
-	// A confirmed COD is never recomputed (it may be a deliberate choice), so when the items or the
+	// A saved, confirmed COD is never recomputed (it may be a deliberate choice), so when the items or the
 	// advance changed since, say what the computed amount is. The merchant decides; nothing is written.
 	// The saved note is judged by the server, so an unsaved form shows no hint.
 	function show_cod_hint(frm) {
@@ -145,9 +145,10 @@
 
 	// ---- Live COD prefill ------------------------------------------------------------------------
 	// The server rule (default_cod) stays the single source of truth: while a note is being CREATED (new,
-	// unsaved) the browser asks it for the amount of the form and shows it, still editable and NOT confirmed.
-	// A saved note is never prefilled by the browser: the server fills or recomputes the COD on save (until the
-	// person confirms it). A typed or confirmed amount is never overwritten.
+	// unsaved) the browser asks it for the amount of the form and shows it, still editable. A saved note is never
+	// prefilled by the browser: the server computes the COD on the first save. An amount the person TYPES is sent with
+	// the hidden marker `custom_cod_typed` = 1, which makes the server keep it; a prefilled amount carries no marker
+	// (the server computes the same amount). A typed amount is never overwritten by the prefill.
 	// Frappe reuses one `frm` for many documents, so the state (`__cod_*`) is reset when the document changes.
 
 	const COD_FIELD = "custom_cod_amount";
@@ -173,7 +174,7 @@
 			doc.transporter_name === "Bosta" &&
 			!doc.is_return &&
 			is_editable(frm) &&
-			!doc.custom_cod_confirmed
+			!frm.__cod_typed
 		);
 	}
 
@@ -203,6 +204,7 @@
 		forget_prefill(frm);
 		frm.__cod_description = undefined;
 		frm.__cod_programmatic = false;
+		frm.__cod_typed = false;
 		frm.__cod_doc = frm.doc && frm.doc.name;
 	}
 
@@ -255,7 +257,7 @@
 		const filled = frm.__cod_prefilled;
 		if (filled === undefined) return Promise.resolve();
 		forget_prefill(frm);
-		if (!is_editable(frm) || frm.doc.custom_cod_confirmed || Number(frm.doc[COD_FIELD]) !== filled) return Promise.resolve();
+		if (!is_editable(frm) || frm.__cod_typed || Number(frm.doc[COD_FIELD]) !== filled) return Promise.resolve();
 		return set_cod(frm, null);
 	}
 
@@ -314,8 +316,14 @@
 
 	// Editing the COD is the person's choice: it confirms the amount.
 	function custom_cod_amount(frm) {
+		ensure_state(frm);
 		if (frm.__cod_programmatic) return;
 		forget_prefill(frm);
+		if (is_creating(frm)) {
+			frm.__cod_typed = true;
+			// the server keeps an amount only when the form says it was typed (see the section comment above)
+			frm.set_value("custom_cod_typed", 1);
+		}
 		if (frm.doc.transporter_name === "Bosta" && is_editable(frm) && !frm.doc.custom_cod_confirmed) {
 			frm.set_value("custom_cod_confirmed", 1);
 		}
@@ -528,20 +536,56 @@
 		});
 	}
 
-	// A draft note with a live shipment cannot be deleted until the shipment is cancelled at Bosta.
+	// The Sales Order the draft note was made from, when it has exactly one.
+	function source_sales_order(frm) {
+		const orders = [...new Set((frm.doc.items || []).map((row) => row.against_sales_order).filter(Boolean))];
+		return orders.length === 1 ? orders[0] : null;
+	}
+
+	// Deletes the draft through the native delete. The server's `on_trash` (guard_delete) cancels the shipment at Bosta
+	// first, after checking that no linked document blocks the delete, and lets the delete go on only when Bosta
+	// confirmed; a refusal or an unknown answer blocks it with the reason, which is shown here (press the button again
+	// to ask Bosta again). On success the Sales Order opens.
+	function delete_note(frm) {
+		const name = frm.doc.name;
+		const order = source_sales_order(frm);
+		return frappe
+			.call({
+				method: "frappe.client.delete",
+				type: "POST",
+				args: { doctype: "Delivery Note", name },
+				freeze: true,
+				freeze_message: __("Cancelling at Bosta and deleting the Delivery Note..."),
+				silent: true,
+			})
+			.then(
+				() => {
+					frappe.show_alert({ message: __("The Bosta shipment was cancelled and the Delivery Note was deleted."), indicator: "green" });
+					frappe.set_route(order ? ["Form", "Sales Order", order] : ["List", "Delivery Note"]);
+				},
+				(error) => {
+					frappe.msgprint({
+						message: escape(message_of(error) || __("The Delivery Note could not be deleted.")),
+						indicator: "red",
+						title: __("Bosta shipment"),
+					});
+					// the server may have written the note (cancel pending / unknown): load it
+					return frm.reload_doc();
+				}
+			);
+	}
+
+	// "Cancel Bosta Shipment" on a draft note: deletes the draft (which cancels the shipment at Bosta first) and opens its
+	// Sales Order. Nothing is promised to a user who may not delete the note.
 	function cancel_shipment(frm) {
+		if (!(frappe.model && frappe.model.can_delete && frappe.model.can_delete("Delivery Note"))) {
+			frappe.msgprint({ message: __("You do not have permission to delete this Delivery Note."), indicator: "orange", title: __("Bosta shipment") });
+			return Promise.resolve();
+		}
 		return new Promise((resolve) => {
 			frappe.confirm(
-				__("Cancel the Bosta shipment of this Delivery Note? This cannot be undone."),
-				() =>
-					cancel_at_bosta(frm, {
-						done: () =>
-							Promise.resolve(frm.reload_doc()).then(() => {
-								frappe.show_alert({ message: __("The Bosta shipment was cancelled. The Delivery Note can now be deleted."), indicator: "green" });
-								resolve();
-							}),
-						stop: () => resolve(),
-					}),
+				__("Cancel the Bosta shipment and delete this Delivery Note? This cannot be undone."),
+				() => exclusive(frm, () => delete_note(frm), resolve).then(resolve, resolve),
 				() => resolve()
 			);
 		});
@@ -728,6 +772,7 @@
 			show_cod_hint,
 			set_cod_state,
 			cancel_shipment,
+			delete_note,
 			edit_shipment,
 			edit_error,
 		};
