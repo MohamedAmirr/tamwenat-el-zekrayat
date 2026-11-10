@@ -19,6 +19,8 @@
 		"marketplace_integrations.api.marketplace_outbound.get_order_edit_preview";
 	const ORDER_EDIT_METHOD = "marketplace_integrations.api.marketplace_outbound.edit_order";
 	const CANCEL_ORDER_METHOD = "marketplace_integrations.api.marketplace_outbound.cancel_order";
+	const CANCEL_CHOICE_METHOD = "marketplace_integrations.api.marketplace_outbound.get_shopify_cancel_choice";
+	const SKIP_PUSH_METHOD = "marketplace_integrations.api.marketplace_outbound.skip_shopify_cancel_push";
 	const MARKETPLACE_TAB_BREAK_FIELD = "custom_marketplace_order_tab";
 	const MARKETPLACE_TAB_FIELD = "custom_marketplace_order_html";
 	const MARKETPLACE_SUMMARY_METHOD = "marketplace_integrations.api.sales_order_marketplace.get_marketplace_order_summary";
@@ -882,12 +884,35 @@
 		);
 	}
 
+	// Frappe's "Cancel All Documents" (form.js savecancel) cancels the submitted linked documents natively BEFORE
+	// before_cancel runs and skips every doctype in frm.ignore_doctypes_on_cancel_all. ERPNext's sales_order.js
+	// REASSIGNS that list in onload, so a one-time push would be lost: the property is redefined so every assignment
+	// keeps these doctypes in it. The server cascade (order_cancel_cascade) then owns them: it cancels the invoices
+	// and notes in order and blocks on payments and returns, which the native dialog would not.
+	const CASCADE_OWNED_DOCTYPES = ["Delivery Note", "Sales Invoice", "Payment Entry"];
+
+	function own_cancel_all_documents(frm) {
+		if (!frm || frm.__mi_cancel_all_owned) return;
+		let stored = frm.ignore_doctypes_on_cancel_all || [];
+		Object.defineProperty(frm, "ignore_doctypes_on_cancel_all", {
+			configurable: true,
+			enumerable: true,
+			get: () => Array.from(new Set([...stored, ...CASCADE_OWNED_DOCTYPES])),
+			set: (value) => {
+				stored = value || [];
+			},
+		});
+		frm.__mi_cancel_all_owned = true;
+	}
+
 	function on_setup(frm) {
 		suppress_update_items(frm);
+		own_cancel_all_documents(frm);
 	}
 
 	function on_refresh(frm) {
 		suppress_update_items(frm);
+		own_cancel_all_documents(frm);
 		load_noon_fulfillment(frm);
 		add_marketplace_order_tab(frm);
 		if (!wrap_close_sales_order(frm)) {
@@ -906,8 +931,81 @@
 		}
 	}
 
+	// Native Cancel, after Frappe's own confirmation (form.js runs before_cancel, waits for its promise and cancels
+	// only while frappe.validated is true). A submitted Shopify order that Shopify would still cancel asks whether
+	// to cancel it on Shopify too: a cancel-and-amend must not cancel the real order. The choice "ERPNext only" is
+	// remembered by the server for this user's next cancel of this order. The cascade (invoices, notes, shipments)
+	// is the same either way. List-view bulk cancel does not run this form hook and keeps the default (push).
+	function before_cancel(frm) {
+		// Whether to ask is the server's call (get_shopify_cancel_choice checks the platform and eligibility).
+		if (frm.doc.docstatus !== 1 || !frm.doc.custom_marketplace_order) {
+			return;
+		}
+		const order = frm.doc.name;
+		return new Promise((resolve) => {
+			const proceed = () => resolve();
+			const stop = () => {
+				frappe.validated = false;
+				resolve();
+			};
+			frappe
+				.call({ method: CANCEL_CHOICE_METHOD, type: "POST", args: { sales_order: order } })
+				.then((r) => {
+					if (!(r.message && r.message.ask)) return proceed();
+					let settled = false;
+					const settle = (action) => {
+						if (settled) return;
+						settled = true;
+						dialog.hide();
+						action();
+					};
+					const dialog = new frappe.ui.Dialog({
+						title: __("Cancel on {0}", ["Shopify"]),
+						fields: [
+							{
+								fieldtype: "HTML",
+								fieldname: "choice",
+								options: `<p>${frappe.utils.escape_html(
+									__(
+										"Also cancel this order on Shopify? Choose Cancel in ERPNext only when you will amend the Sales Order: the Shopify order stays open."
+									)
+								)}</p>`,
+							},
+						],
+						primary_action_label: __("Cancel and push to Shopify"),
+						primary_action() {
+							settle(proceed);
+						},
+						secondary_action_label: __("Cancel in ERPNext only"),
+						secondary_action() {
+							settle(() =>
+								frappe
+									.call({ method: SKIP_PUSH_METHOD, type: "POST", args: { sales_order: order } })
+									.then(proceed)
+									.catch(stop)
+							);
+						},
+						// Closing the dialog is the same as Don't cancel.
+						onhide() {
+							if (!settled) {
+								settled = true;
+								stop();
+							}
+						},
+					});
+					dialog.add_custom_action(__("Don't cancel"), () => settle(stop));
+					dialog.show();
+				})
+				// The question could not be asked: cancel as before (push), Frappe has shown its own error.
+				.catch(proceed);
+		});
+	}
+
 	function on_after_cancel(frm) {
 		if (!is_marketplace_sales_order(frm.doc)) return;
+		// A Shopify order is cancelled on Shopify by the server after the cancel (and warned about there): no prompt.
+		// The "Cancel on Shopify" button still shows on the cancelled order, to retry a failed push.
+		if (frm.doc.custom_marketplace_platform === "Shopify") return;
 		load_platform_option(frm, { prompt: true, button: false });
 	}
 
@@ -919,6 +1017,7 @@
 			frappe.ui.form.on("Sales Order", {
 				setup: on_setup,
 				refresh: on_refresh,
+				before_cancel,
 				after_cancel: on_after_cancel,
 			});
 		}
@@ -953,6 +1052,8 @@
 			marketplace_summary_html,
 			should_offer_erpnext_sync,
 			on_after_cancel,
+			before_cancel,
+			own_cancel_all_documents,
 			on_refresh,
 			reason_field,
 			result_alert,

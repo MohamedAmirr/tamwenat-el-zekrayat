@@ -206,7 +206,7 @@ REASONS = {
 		NEEDS_ACTION,
 		MANUAL,
 		"AMEND_SALES_ORDER",
-		"The shipping charge differs from the submitted Sales Order; cancel and amend it.",
+		"The shipping charge differs from the submitted Sales Order; cancel and amend it (choose Cancel in ERPNext only when asked, so the Shopify order stays open).",
 	),
 	HEADER_CHANGED: _entry(
 		NEEDS_ACTION,

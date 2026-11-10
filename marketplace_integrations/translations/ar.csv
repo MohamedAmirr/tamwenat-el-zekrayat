@@ -121,7 +121,7 @@ The marketplace refunded this order,استرد السوق هذا الطلب
 The marketplace reported a return for this order,أفاد السوق بوجود مرتجع لهذا الطلب
 The marketplace snapshot has duplicate or missing line identities.,تحتوي لقطة السوق على هويات بنود مكرّرة أو مفقودة.
 The reconciled Sales Order line is missing from ERPNext.,بند أمر البيع المتوافق مفقود من ERPNext.
-"The shipping charge differs from the submitted Sales Order (Sales Order {0}, marketplace {1}). A submitted Sales Order's charges are not edited automatically; cancel and amend it.",تختلف رسوم الشحن عن أمر البيع المقدَّم (أمر البيع {0}، السوق {1}). لا تُعدَّل رسوم أمر البيع المقدَّم تلقائيًا؛ ألغِه وعدّله.
+"The shipping charge differs from the submitted Sales Order (Sales Order {0}, marketplace {1}). A submitted Sales Order's charges are not edited automatically; cancel and amend it (choose Cancel in ERPNext only when asked, so the marketplace order stays open).",تختلف رسوم الشحن عن أمر البيع المقدَّم (أمر البيع {0}، السوق {1}). لا تُعدَّل رسوم أمر البيع المقدَّم تلقائيًا؛ ألغِه وعدّله (اختر «الإلغاء في ERPNext فقط» عند السؤال ليبقى طلب السوق مفتوحًا).
 The submitted Sales Order changes are eligible for ERPNext validation.,تغييرات أمر البيع المقدَّم مؤهّلة للتحقق في ERPNext.
 {0} The Sales Order is Closed; it will be reopened first.,{0} أمر البيع مغلق؛ سيُعاد فتحه أولًا.
 "{0}, but ERPNext already delivered ({1}) and invoiced ({2}) it. The Sales Order was not changed. Create a Sales Return and a Credit Note (compensating transactions) as needed, or review the order manually.",{0}، لكن ERPNext سلّمه ({1}) وفوّتره ({2}) مسبقًا. لم يُغيَّر أمر البيع. أنشئ مرتجع بيع وإشعار دائن (معاملتين تعويضيتين) حسب الحاجة، أو راجع الطلب يدويًا.
@@ -1499,7 +1499,7 @@ The marketplace cancelled the order after fulfillment and ERPNext has delivery. 
 The order was cancelled after fulfillment and ERPNext has billing without delivery. Review what happened to the goods.,أُلغي الطلب بعد التنفيذ، ولدى ERPNext فوترة بلا تسليم. راجع ما حدث للبضاعة.
 No reconciled snapshot baseline is available for this Sales Order. Review the order against ERPNext.,لا توجد لقطة أساس مطابَقة لأمر البيع هذا. راجع الطلب مقابل ERPNext.
 The marketplace snapshot has duplicate or missing line identities. Review the order data.,لقطة السوق فيها هويات سطور مكررة أو مفقودة. راجع بيانات الطلب.
-The shipping charge differs from the submitted Sales Order; cancel and amend it.,رسوم الشحن تختلف عن أمر البيع المعتمد؛ ألغه وعدّله.
+"The shipping charge differs from the submitted Sales Order; cancel and amend it (choose Cancel in ERPNext only when asked, so the Shopify order stays open).",رسوم الشحن تختلف عن أمر البيع المعتمد؛ ألغه وعدّله (اختر «الإلغاء في ERPNext فقط» عند السؤال ليبقى طلب Shopify مفتوحًا).
 "ERPNext refused to add or remove a Sales Order row (it is delivered, ordered, in a work order or billed). Amend the Sales Order manually.",رفض ERPNext إضافة صف إلى أمر البيع أو حذفه (مسلَّم أو مطلوب أو في أمر عمل أو مفوتر). عدّل أمر البيع يدويًا.
 A submitted Sales Order line is already billed in ERPNext. Cancel the invoice or issue a Credit Note.,أحد سطور أمر البيع المعتمد مفوتر مسبقًا في ERPNext. ألغِ الفاتورة أو أصدر إشعارًا دائنًا.
 ERPNext delivery or billing execution blocks an automatic submitted-order update.,تنفيذ التسليم أو الفوترة في ERPNext يمنع تعديل أمر البيع المعتمد تلقائيًا.
@@ -1900,7 +1900,6 @@ External Variant ID is required for a new Shopify listing.,معرّف المتغ
 Saving this listing can re-sync this account's failed orders and push stock automatically.,قد يؤدي حفظ هذا الإدراج إلى إعادة مزامنة الطلبات الفاشلة لهذا الحساب ودفع المخزون تلقائيًا.
 "A submitted Payment Entry already covers {0} of Sales Order {1}, which is at least the amount of Shopify transaction {2} ({3}). No second Payment Entry was created; review it in ERPNext.","يغطي قيد دفع مُرسَل بالفعل {0} من أمر البيع {1}، وهو لا يقل عن مبلغ معاملة Shopify {2} ({3}). لم يتم إنشاء قيد دفع ثانٍ؛ راجعه في ERPNext."
 "Permission was denied while creating the Payment Entry. Check the user's permissions on Payment Entry and the documents it links to.","تم رفض الصلاحية أثناء إنشاء قيد الدفع. راجع صلاحيات المستخدم على قيد الدفع والمستندات المرتبطة به."
-No shipment yet,لا توجد شحنة بعد
 inDrive,inDrive
 Uber,Uber
 Own driver,سائق خاص
@@ -2127,5 +2126,61 @@ The Delivery Note {0} no longer exists.,مذكرة التسليم {0} لم تع�
 A Delivery Note that you cannot open already exists for this order.,توجد بالفعل مذكرة تسليم لهذا الطلب لا يمكنك فتحها.
 "{0} did not cancel the shipment, so the Delivery Note was not deleted: {1}","لم تلغِ {0} الشحنة، لذلك لم تُحذف مذكرة التسليم: {1}"
 "It is not known whether {0} cancelled the shipment, so the Delivery Note was not deleted. Try again in a few minutes. {1}","من غير المعروف ما إذا كانت {0} قد ألغت الشحنة، لذلك لم تُحذف مذكرة التسليم. حاول مرة أخرى بعد بضع دقائق. {1}"
+Cancel Sales Order,إلغاء أمر البيع
+Cancel and push to Shopify,إلغاء وإرسال الإلغاء إلى Shopify
+Cancel in ERPNext only,الإلغاء في ERPNext فقط
+Don't cancel,لا تلغِ
+"Also cancel this order on Shopify? Choose Cancel in ERPNext only when you will amend the Sales Order: the Shopify order stays open.","هل تريد إلغاء هذا الطلب في Shopify أيضًا؟ اختر «الإلغاء في ERPNext فقط» عندما ستعدّل أمر البيع: يبقى طلب Shopify مفتوحًا."
+"Payment Entry {0} is linked to Sales Order {1}. Payments are never cancelled automatically: cancel or unlink the payment first. Nothing was cancelled.","قيد الدفع {0} مرتبط بأمر البيع {1}. لا تُلغى المدفوعات تلقائيًا: ألغِ الدفعة أو افصلها أولًا. لم يُلغَ أي شيء."
+"Sales Order {0} has a return ({1}). Returns are never cancelled automatically: handle the return first. Nothing was cancelled.","أمر البيع {0} له مرتجع ({1}). لا تُلغى المرتجعات تلقائيًا: عالج المرتجع أولًا. لم يُلغَ أي شيء."
+"Sales Invoice {0} also bills other orders or items without an order, so it is not cancelled with this one. Nothing was cancelled.","فاتورة المبيعات {0} تفوتر أيضًا أوامر أخرى أو بنودًا بلا أمر، لذلك لا تُلغى مع هذا الأمر. لم يُلغَ أي شيء."
+"Sales Invoice {0} has a return ({1}). Returns are never cancelled automatically: handle the return first. Nothing was cancelled.","فاتورة المبيعات {0} لها مرتجع ({1}). لا تُلغى المرتجعات تلقائيًا: عالج المرتجع أولًا. لم يُلغَ أي شيء."
+"It is not known whether {0} cancelled the shipment of Delivery Note {1}, so Sales Order {2} was not cancelled. Try again in a few minutes. {3}","من غير المعروف ما إذا كانت {0} قد ألغت شحنة مذكرة التسليم {1}، لذلك لم يُلغَ أمر البيع {2}. حاول مرة أخرى بعد بضع دقائق. {3}"
+The order was not cancelled on Shopify: {0},لم يُلغَ الطلب في Shopify: {0}
+"Sales Invoice {0} has Payment Entry {1}. Payments are never cancelled automatically: cancel or unlink the payment first. Nothing was cancelled.","فاتورة المبيعات {0} لها قيد دفع {1}. لا تُلغى المدفوعات تلقائيًا: ألغِ الدفعة أو افصلها أولًا. لم يُلغَ أي شيء."
+"Sales Invoice {0} has Journal Entry {1}. Payments are never cancelled automatically: cancel or unlink it first. Nothing was cancelled.","فاتورة المبيعات {0} لها قيد يومية {1}. لا تُلغى المدفوعات تلقائيًا: ألغِه أو افصله أولًا. لم يُلغَ أي شيء."
+"Sales Invoice {0} is a POS invoice, paid or partly paid. Payments are never cancelled automatically: handle the payment first. Nothing was cancelled.","فاتورة المبيعات {0} فاتورة نقاط بيع أو مدفوعة أو مدفوعة جزئيًا. لا تُلغى المدفوعات تلقائيًا: عالج الدفعة أولًا. لم يُلغَ أي شيء."
+"Delivery Note {0} also holds items of other orders ({1}), so it is not cancelled with this one. Nothing was cancelled.","مذكرة التسليم {0} تحتوي أيضًا على أصناف من أوامر أخرى ({1})، لذلك لا تُلغى مع هذا الأمر. لم يُلغَ أي شيء."
+"The {0} shipment of Delivery Note {1} has an unknown result. Check it on the Delivery Note first. Nothing was cancelled.","نتيجة شحنة {0} لمذكرة التسليم {1} غير معروفة. تحقق منها في مذكرة التسليم أولًا. لم يُلغَ أي شيء."
+Cancelled automatically with Sales Order {0}.,أُلغيت تلقائيًا مع أمر البيع {0}.
+"{0} did not cancel the shipment of Delivery Note {1}, so Sales Order {2} was not cancelled: {3}","لم تلغِ {0} شحنة مذكرة التسليم {1}، لذلك لم يُلغَ أمر البيع {2}: {3}"
+{0} Already cancelled before this stopped: {1}. Cancel the Sales Order again to continue.,{0} أُلغيت قبل التوقف هذه المستندات: {1}. ألغِ أمر البيع مرة أخرى للمتابعة.
+Cancelled automatically because Noon cancelled this order and Delivery Note {0} was cancelled.,أُلغي تلقائيًا لأن Noon ألغت هذا الطلب وأُلغيت مذكرة التسليم {0}.
+"The {0} shipment of Delivery Note {1} was already picked up, so the Sales Order cannot be cancelled. Create a Sales Return against the Delivery Note instead. Nothing was cancelled.","شحنة {0} لمذكرة التسليم {1} استُلمت بالفعل، لذلك لا يمكن إلغاء أمر البيع. أنشئ مرتجع مبيعات على مذكرة التسليم بدلًا من ذلك. لم يُلغَ أي شيء."
+Delivery Note {0} was cancelled but this Sales Order could not be cancelled automatically: {1},أُلغيت مذكرة التسليم {0} لكن تعذر إلغاء أمر البيع هذا تلقائيًا: {1}
+Delivery Note {0} was cancelled but its Noon Sales Order {1} must be cancelled by hand: {2},أُلغيت مذكرة التسليم {0} لكن يجب إلغاء أمر البيع {1} الخاص بنون يدويًا: {2}
+"Sales Order {0} was cancelled, but the order was not cancelled on Shopify: {1} Handle it in Shopify.","أُلغي أمر البيع {0} لكن لم يُلغَ الطلب في Shopify: {1} عالجه في Shopify."
+Shopify order,طلب Shopify
+The order is being cancelled on Shopify.,يجري إلغاء الطلب في Shopify.
+Sales Order {0} is cancelled but cancelling the order on Shopify failed: {1} Use Cancel on Shopify on the Sales Order to retry.,أمر البيع {0} ملغى لكن فشل إلغاء الطلب في Shopify: {1} استخدم زر الإلغاء في Shopify في أمر البيع لإعادة المحاولة.
 Auto invoice failed: {0},فشلت الفوترة التلقائية: {0}
 "Auto-invoice (Bosta delivered) failed for Delivery Note {0}. See the Error Log. Please create the invoice manually.","فشلت الفوترة التلقائية (تم التسليم عبر بوسطة) لمذكرة التسليم {0}. راجع سجل الأخطاء. يرجى إنشاء الفاتورة يدويًا."
+Not prepared yet,لم يتم التجهيز بعد
+There is no Delivery Note yet. Next step: create the Delivery Note.,لا توجد مذكرة تسليم بعد. الخطوة التالية: أنشئ مذكرة التسليم.
+"Ready, waiting for pickup","جاهز، في انتظار الاستلام"
+The Delivery Note is made. Next step: hand the parcel to the courier.,تم إنشاء مذكرة التسليم. الخطوة التالية: سلّم الطرد لشركة الشحن.
+On the way,في الطريق
+"The Delivery Note is waiting for goods. Next step: receive the stock, then the note can go on.",مذكرة التسليم في انتظار البضاعة. الخطوة التالية: استلم المخزون ثم تابع مذكرة التسليم.
+The courier has the parcel. Next step: wait for the delivery.,الطرد مع شركة الشحن. الخطوة التالية: انتظر التسليم.
+"Delivered, payment not received","تم التسليم، ولم يتم استلام الدفع"
+The parcel is delivered but the payment is not in. Next step: collect the payment and make the Sales Invoice.,تم تسليم الطرد ولم يصل الدفع بعد. الخطوة التالية: حصّل المبلغ وأنشئ فاتورة المبيعات.
+Delivered and paid,تم التسليم والدفع
+The parcel is delivered and paid. Nothing left to do.,تم تسليم الطرد ودفعه. لا يوجد ما تفعله.
+Delivery problem,مشكلة في التسليم
+A parcel came back or was lost. Next step: open the Delivery Note and decide what to do.,عاد طرد أو فُقد. الخطوة التالية: افتح مذكرة التسليم وقرّر ما يجب فعله.
+There is not enough stock to reserve this order. Next step: receive stock; the order is reserved again by itself.,لا يوجد مخزون كافٍ لحجز هذا الطلب. الخطوة التالية: استلم مخزونًا وسيُحجز الطلب تلقائيًا من جديد.
+A delivery attempt failed. Next step: follow up with Bosta.,فشلت محاولة تسليم. الخطوة التالية: تابع الأمر مع Bosta.
+Paid by marketplace,مدفوع عبر المنصة
+The marketplace collects the payment. Nothing to collect.,المنصة تحصّل المبلغ. لا يوجد ما يُحصَّل.
+Paid in advance,مدفوع مقدمًا
+The customer paid before delivery. Nothing to collect.,دفع العميل قبل التسليم. لا يوجد ما يُحصَّل.
+Paid (invoice),مدفوع (فاتورة)
+The Sales Invoice is fully paid. Nothing to collect.,فاتورة المبيعات مدفوعة بالكامل. لا يوجد ما يُحصَّل.
+Pay on delivery,الدفع عند التسليم
+Not paid yet. Next step: collect the payment when the parcel is delivered.,لم يُدفع بعد. الخطوة التالية: حصّل المبلغ عند تسليم الطرد.
+An order with several Delivery Notes shows the one that is least advanced.,يعرض الطلب ذو مذكرات التسليم المتعددة المذكرة الأقل تقدمًا.
+Status states,حالات الطلب
+Payment states,حالات الدفع
+What do these states mean?,ماذا تعني هذه الحالات؟
+Too many orders were asked for at once. Ask for at most {0}.,تم طلب عدد كبير من الطلبات دفعة واحدة. اطلب {0} كحد أقصى.
+Send a list of Sales Order names.,أرسل قائمة بأسماء أوامر البيع.

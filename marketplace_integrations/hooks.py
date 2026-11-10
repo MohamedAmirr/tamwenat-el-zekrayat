@@ -213,6 +213,12 @@ doc_events = {
 	"Delivery Note": {
 		**_RECHECK_EVENTS,
 		**_PLATFORM_NAMING,
+		# Only when Noon cancelled the whole order (the carrier-initiated automatic cancel sets cancelled_by_carrier and the
+		# stored Noon order shows no eligible unit) is its Sales Order cancelled, in a queued job. A person's cancel never is.
+		"on_cancel": [
+			_RECHECK_HANDLER,
+			"marketplace_integrations.services.order_cancel_cascade.queue_noon_order_cancel",
+		],
 		"on_submit": [
 			_RECHECK_HANDLER,
 			# #498: the stage of a note just submitted comes from its stored statuses (the native submit
@@ -252,12 +258,21 @@ doc_events = {
 	"Sales Order": {
 		**_PLATFORM_NAMING,
 		# #393: ERPNext only blocks on submitted links; a draft Delivery Note with a live Noon shipment must block too.
-		"before_cancel": "marketplace_integrations.services.carrier_shipments.refuse_sales_order_cancel",
+		# Then the cascade: its Sales Invoices, then its Delivery Notes are cancelled first (docs/marketplace-integrations/
+		# delivery-note-first.md, "Cancelling a Sales Order"), blocked by payments and returns.
+		"before_cancel": [
+			"marketplace_integrations.services.carrier_shipments.refuse_sales_order_cancel",
+			"marketplace_integrations.services.order_cancel_cascade.cascade_cancel",
+		],
 		"on_update_after_submit": [
 			_RECHECK_HANDLER,
 			"marketplace_integrations.services.order_edit.guard_reservation",
 		],
-		"on_cancel": _RECHECK_HANDLER,
+		# A cancelled Shopify order is cancelled on Shopify too (a queued job; a failure is flagged, never raised).
+		"on_cancel": [
+			_RECHECK_HANDLER,
+			"marketplace_integrations.services.order_cancel_cascade.queue_shopify_cancel",
+		],
 		# #413: the Bosta count summary is written by the app only; an older form copy must not overwrite it.
 		"validate": [
 			"marketplace_integrations.integrations.bosta.statuses.keep_stored_summary",
@@ -311,8 +326,8 @@ workflow_methods = [
 # test_no_catalog_document_events_are_registered depends on this app registering
 # no doc_events for the catalog doctypes; do not add one for them here. The
 # only doc_events are the #364 Marketplace Order re-check handlers, the #368 Noon Sales
-# Order Item row check (and the #500 Shopify one), the #391/#393 Delivery Note and Sales Order carrier handlers and the platform
-# naming series before_naming hook above.
+# Order Item row check (and the #500 Shopify one), the #391/#393 Delivery Note and Sales Order carrier handlers, the Sales Order cancel
+# cascade handlers (services/order_cancel_cascade.py) and the platform naming series before_naming hook above.
 scheduler_events = {
 	# #367: the four hourly jobs run at staggered minutes instead of all at :00, where
 	# Frappe's own hourly jobs also start; prod hit "(1040) Too many connections" there.
@@ -505,6 +520,7 @@ fixtures = [
 					"Sales Order-custom_shipping_status_summary",
 					"Sales Order-custom_earliest_delivery_date",
 					"Sales Order-custom_order_stage",
+					"Sales Order-custom_payment_display",
 					"Payment Entry-custom_marketplace_order",
 					"Payment Entry-custom_marketplace_transaction_id",
 					# #374: the Item form's Marketplace Listings tab (stores nothing on Item)

@@ -33,6 +33,19 @@ class UnitTestSalesOrderListJsWiring(UnitTestCase):
 			"The app's replacement (sales_order_bulk_delivery.js) matches that label; recheck it.",
 		)
 
+	def test_frappe_list_still_has_the_hooks_the_status_and_payment_columns_use(self):
+		# sales_order_list.js (Status and Payment columns) relies on: settings.refresh called after every render,
+		# the indicator column excluding the `status` field column, the badge row markup (list-row-checkbox
+		# data-name, the status_field column) and the header spans. Verified on Frappe 16.52 dev; recheck on upgrade.
+		base_list = _read("frappe", "public", "js", "frappe", "list", "base_list.js")
+		list_view = _read("frappe", "public", "js", "frappe", "list", "list_view.js")
+		self.assertIn("this.settings.refresh(this)", base_list)
+		self.assertIn('df.fieldname === "status"', list_view)
+		self.assertIn('"status_field"', list_view)
+		self.assertIn("list-row-checkbox", list_view)
+		self.assertIn("list-row-head", list_view)
+		self.assertIn("list-col-resize-handle", list_view)
+
 	def test_this_app_loads_the_bulk_helper_on_every_desk_page(self):
 		# The progress listener is registered once at startup, so the helper is an app include, not a list file.
 		includes = frappe.get_hooks("app_include_js", app_name="marketplace_integrations")
