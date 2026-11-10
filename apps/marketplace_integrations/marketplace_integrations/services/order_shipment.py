@@ -13,8 +13,8 @@ Per order (``ship_order``):
    ``delivery_note_shipment.default_cod``): an unpaid order ships with COD = ``grand_total``; a fully paid one with COD
    0; a partly paid one with ``grand_total`` minus the paid amount. NO Sales Invoice is made here: the invoice of a
    Bosta order is made when the shipment is Delivered (decided 2026-11-09).
-3. The Delivery Note: a live DRAFT note of the order without a shipment is REUSED (``existing_draft``); otherwise a
-   new draft is made with ERPNext's mapper, transporter Bosta, ``custom_cod_amount`` and ``custom_cod_confirmed = 1``.
+3. The Delivery Note: a live DRAFT note of the order without a shipment is REUSED (``existing_draft``) and its COD is
+   overwritten with the computed amount and confirmed; otherwise a new draft is made with ERPNext's mapper, transporter Bosta, ``custom_cod_amount`` and ``custom_cod_confirmed = 1``.
    ``validate`` of a new Bosta note runs the same order guards and ``carrier_shipments.check_deliverable``: a stock
    shortage raises ``NotDeliverable`` and the order is Skipped with no note at all.
 4. After the commit (no lock held): ``carrier_shipments.request_create`` (``submit_as`` the user), which runs the
@@ -40,7 +40,7 @@ of a paid order is never touched (none is made at creation since 2026-11-09).
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, flt, strip_html_tags
+from frappe.utils import cint, cstr, flt, strip_html_tags
 
 from marketplace_integrations.integrations.bosta import delivery_note_shipment as bosta_shipment
 from marketplace_integrations.services import (
@@ -126,8 +126,12 @@ def ship_order(name, shipping_method=BOSTA):
 	created_here = not existing
 	if existing:
 		# A draft the person made (or an earlier try left): the shipment is started for it as it is, and it is
-		# kept when the shipment fails (it is not this action's note to delete).
-		note_name, cod, invoice = existing, None, None
+		# kept when the shipment fails (it is not this action's note to delete). Its shipping charge amount is
+		# restored and its COD overwritten with ``payment_plan``'s amount (the formula behind ``computed_cod``).
+		plan = payment_plan(order)
+		invoice, cod = plan["invoice"], plan["cod"]
+		note_name = existing
+		_set_draft_cod(existing, cod)
 	else:
 		plan = payment_plan(order)
 		invoice, cod = plan["invoice"], plan["cod"]
@@ -501,6 +505,26 @@ def payment_plan(order):
 	return {"cod": cod, "paid_in_full": paid_in_full, "invoice": invoice_name}
 
 
+def _set_draft_cod(note_name, cod):
+	"""A reused unsent draft: first restore the shipping charge amount ``make_delivery_note`` reset to 0
+	(``carry_order_charges``), then overwrite its COD with the order's computed amount (``payment_plan``, the same
+	formula ``computed_cod`` uses for a new note) and confirm it. Saved only when something differs, as the requesting
+	user (the shipment request needs write permission on the note anyway). Calling ``payment_plan`` for a reused draft
+	means an ambiguous payment position now refuses the order (``Refused``) instead of shipping the draft as it was."""
+	note = frappe.get_doc("Delivery Note", note_name)
+	total = flt(note.grand_total, 2)
+	bosta_shipment.carry_order_charges(note)
+	if (
+		flt(note.grand_total, 2) == total
+		and flt(note.get("custom_cod_amount"), 2) == flt(cod, 2)
+		and cint(note.get("custom_cod_confirmed"))
+	):
+		return
+	note.custom_cod_amount = cod
+	note.custom_cod_confirmed = 1
+	note.save()
+
+
 def _make_note(order, cod):
 	"""The draft Delivery Note: ERPNext's mapper, transporter Bosta, the COD confirmed. The adapter's own
 	``guard_changes`` (run by ``insert``) applies the COD rule and limit; its ``validate`` hook runs the order guards and
@@ -512,6 +536,8 @@ def _make_note(order, cod):
 	note.transporter = bosta_shipment.bosta_supplier()
 	note.custom_cod_amount = cod
 	note.custom_cod_confirmed = 1
+	# The same amount ``computed_cod`` would give (both are ``payment_plan``); marked typed so it is kept as given.
+	note.set(bosta_shipment.TYPED_FIELD, 1)
 	note.flags.ignore_permissions = False
 	# This service requests the shipment itself, so the after_insert trigger of a new Bosta note must not.
 	note.flags[carrier_shipments.SKIP_AUTO_REQUEST_FLAG] = True

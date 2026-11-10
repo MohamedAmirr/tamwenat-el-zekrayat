@@ -20,9 +20,11 @@ Bosta-only ones are ``custom_bosta_city`` and ``custom_bosta_city_name``.
 The Integration Log is the native Integration Request (service "Bosta", ``services/carrier_log.py``). It
 never holds the API key, the webhook secret, or the receiver's name, phone or address.
 
-COD: while the note is editable (Not Created / Creation Failed) the default COD is recomputed on every
-save until the person confirms it (``custom_cod_confirmed``: ticked, or a changed COD); Submit refuses a
-note whose COD was never confirmed. A typed 0 is a deliberate choice once confirmed.
+COD: a new note gets the computed COD (``computed_cod``) and ``custom_cod_confirmed`` = 1 (the field defaults to 1)
+unless the form marked an amount as typed (``custom_cod_typed``); an amended note takes the computed amount too.
+A saved amount is then the person's and is never recomputed. Only a note whose box is unticked is recomputed on
+every save while editable (Not Created / Creation Failed); Submit refuses a note whose COD is not confirmed. A
+typed 0 is a deliberate choice.
 
 Rules enforced here:
 
@@ -249,7 +251,7 @@ def cod_hint(delivery_note):
 	doc = frappe.get_doc("Delivery Note", delivery_note)
 	if doc.docstatus != 0 or status_of(doc) not in EDITABLE_STATUSES or not cint(doc.get("custom_cod_confirmed")):
 		return {"default": None}
-	default = default_cod(doc)
+	default = computed_cod(doc)
 	if flt(default, 2) == flt(doc.get("custom_cod_amount"), 2):
 		return {"default": None}
 	return {"default": default}
@@ -272,17 +274,101 @@ def _check_returned_cod(value):
 		frappe.throw(_("Returned COD cannot be negative."), title=_("Bosta shipment"))
 
 
+#: Hidden Check on the form, set by the browser when the person typed the COD of a NEW note: ``_apply_cod_rule`` then
+#: keeps the amount instead of computing it. Always cleared by the server (it is a one-shot marker, not a state).
+TYPED_FIELD = "custom_cod_typed"
+#: Set (``doc.flags``) by the caller that changes a draft's rows (``order_edit.refresh_draft_note``): the next validated
+#: save recomputes the COD once and keeps the box ticked.
+RECOMPUTE_FLAG = "recompute_cod"
+
+
+def carry_order_charges(doc):
+	"""Root cause (found on prod, DN-SHP-2026-00065 vs SO-SHP-2026-00984): ERPNext's ``make_delivery_note`` maps the
+	Sales Order's tax rows with ``reset_value``, so the "Shipping" row (an "Actual" charge) arrives on the note
+	with ``tax_amount`` 0 and the note total misses the shipping (309.5 against 414.5). A note that ships the
+	WHOLE order gets each such Actual row's amount back from the Sales Order's row (same account head and
+	description), then the taxes, totals and amount in words are recalculated, so the note's grand total equals the
+	order's and the COD matches what the customer pays. Only rows whose amount is 0 are restored, a partial note
+	is left alone (it would repeat the whole charge), and no row is ever added. Works on a new note and on a
+	reused draft."""
+	order_name = sales_order_of(doc)
+	if not order_name or doc.get("is_return"):
+		return
+	from marketplace_integrations.services import order_edit
+
+	order = frappe.get_doc("Sales Order", order_name)
+	if not order.get("taxes") or not order_edit._whole_order_note(doc, order):
+		return
+	source = {
+		(cstr(row.account_head), cstr(row.description)): row
+		for row in order.taxes
+		if row.charge_type == "Actual" and flt(row.tax_amount)
+	}
+	restored = False
+	for row in doc.get("taxes") or []:
+		match = source.get((cstr(row.account_head), cstr(row.description)))
+		if row.charge_type == "Actual" and not flt(row.tax_amount) and match:
+			row.tax_amount = match.tax_amount
+			restored = True
+	if restored:
+		doc.calculate_taxes_and_totals()
+		# The controller's own validate ran before this hook: its words belong to the old total.
+		doc.set_total_in_words()
+
+
+def computed_cod(doc):
+	"""THE computed COD of a note, for the form's first save, the Sales Order button and the bulk path. A note that
+	ships the whole Sales Order gets the order's payment position (``order_shipment.payment_plan``: the order's grand
+	total, fully paid 0, partly paid grand total minus the paid amount, an existing invoice read), the formula the
+	button and bulk path use; any other note (partial, several orders, no order) the note's own total minus its share
+	of the advance (``default_cod``). An order whose payment position is ambiguous (``Refused``) falls back to
+	``default_cod`` (the button and bulk path refuse such an order before they get here). The browser's live prefill
+	(``api.bosta_shipments.get_default_cod``) calls ``default_cod`` on an unsaved copy that has no order rows to
+	match, so it can differ only for an order with an existing invoice."""
+	order_name = sales_order_of(doc)
+	if order_name and not doc.get("is_return"):
+		from marketplace_integrations.services import order_edit, order_shipment
+
+		order = frappe.get_doc("Sales Order", order_name)
+		if order_edit._whole_order_note(doc, order):
+			try:
+				return order_shipment.payment_plan(order)["cod"]
+			except order_shipment.Refused:
+				pass
+	return default_cod(doc)
+
+
 def _apply_cod_rule(doc, before):
-	"""Editable Bosta note: until the person confirms the COD (ticks ``custom_cod_confirmed`` or changes the
-	amount) the default is recomputed on every save, so a carrier chosen after the first save or removed
-	rows never leave a stale amount. A new note keeps a typed amount only when it is marked confirmed (a
-	form sends 0 for an untouched Currency, which is not a choice)."""
+	"""Editable Bosta note (``custom_cod_confirmed`` defaults to 1).
+
+	A NEW note: an amount the person typed on the form (``custom_cod_typed``) is kept; otherwise the computed COD
+	(``computed_cod``) is set when the note comes from a Sales Order, is an amended note (it is NOT confirmed again; it
+	takes the computed amount like a new note) or has no amount (a Currency the person never touched reaches the
+	server as 0). A new note without an order and with an amount keeps it.
+
+	A SAVED note: ``RECOMPUTE_FLAG`` recomputes once; a ticked box keeps the saved amount (the person's, never
+	recomputed); an unticked box (an older note, or unticked by hand) recomputes on every save until it is ticked or
+	the amount changed."""
+	if doc.is_new() and before is doc:
+		typed = cint(doc.get(TYPED_FIELD)) and not doc.get("amended_from") and doc.get("custom_cod_amount") is not None
+		doc.set(TYPED_FIELD, 0)
+		if typed:
+			doc.custom_cod_confirmed = 1
+			return
+		if doc.get("amended_from") or sales_order_of(doc) or not flt(doc.get("custom_cod_amount")):
+			doc.custom_cod_amount = computed_cod(doc)
+			doc.custom_cod_confirmed = 1
+			return
+	elif doc.flags.get(RECOMPUTE_FLAG):
+		doc.custom_cod_amount = computed_cod(doc)
+		doc.custom_cod_confirmed = 1
+		return
 	if cint(doc.get("custom_cod_confirmed")) and doc.get("custom_cod_amount") is not None:
 		return
 	if before is not doc and flt(doc.get("custom_cod_amount"), 2) != flt(before.get("custom_cod_amount"), 2):
 		doc.custom_cod_confirmed = 1
 		return
-	doc.custom_cod_amount = default_cod(doc)
+	doc.custom_cod_amount = computed_cod(doc)
 
 
 def clear_inherited(doc):
@@ -357,8 +443,8 @@ def guard_changes(doc):
 		for fieldname in CLEARED_ON_NEW if doc.get("amended_from") else SYSTEM_FIELDS:
 			doc.set(fieldname, None)
 		if doc.get("amended_from"):
+			# An amended note is not asked to confirm the COD again: ``_apply_cod_rule`` gives it the computed amount.
 			doc.custom_cod_amount = None
-			doc.custom_cod_confirmed = 0
 		doc.custom_integration_status = NOT_CREATED
 		if doc.get("amended_from") and doc.get("lr_no"):
 			# Amend copies the old note's tracking number, which belongs to that note's shipment.
@@ -371,6 +457,7 @@ def guard_changes(doc):
 			doc.lr_date = None
 			_check_returned_cod(doc.get("custom_returned_cod"))
 		elif ours:
+			carry_order_charges(doc)
 			_apply_cod_rule(doc, doc)
 			_check_cod(doc.custom_cod_amount)
 		return

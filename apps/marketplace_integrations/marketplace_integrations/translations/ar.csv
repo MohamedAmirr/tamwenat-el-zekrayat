@@ -1651,7 +1651,9 @@ Carrier Creation Problem,مشكلة في إنشاء شحنة شركة الشحن
 Carrier Cancelled,تسليم ألغته شركة الشحن
 Bosta Delivery Notes,مذكرات تسليم Bosta
 COD confirmed,تم تأكيد مبلغ الدفع عند الاستلام
-"Cash to collect on delivery. 0 means prepaid. Until confirmed, the default (the note's total minus the order's advance) is recalculated on every save.",النقد المطلوب تحصيله عند التسليم. 0 يعني مدفوع مسبقًا. حتى يتم التأكيد، يُعاد حساب القيمة الافتراضية (إجمالي المذكرة ناقص دفعة أمر البيع المقدمة) عند كل حفظ.
+"Cash to collect on delivery. 0 means prepaid. A new note gets the amount calculated from the order unless you type one; after that the saved amount is kept. Unticked COD confirmed recalculates it on every save.",النقد المطلوب تحصيله عند التسليم. 0 يعني مدفوع مسبقًا. تحصل المذكرة الجديدة على المبلغ المحسوب من الطلب ما لم تكتب مبلغًا؛ وبعد ذلك يُحفظ المبلغ كما هو. إلغاء تفعيل «تم تأكيد مبلغ الدفع عند الاستلام» يعيد حسابه عند كل حفظ.
+COD typed,كُتب مبلغ الدفع عند الاستلام يدويًا
+"Set by the form when the COD of a new Delivery Note was typed by hand, so the server keeps it. The server clears it.",يضبطه النموذج عند كتابة مبلغ الدفع عند الاستلام لمذكرة تسليم جديدة يدويًا ليحتفظ به الخادم. ويمسحه الخادم.
 "Close, keep sending",إغلاق مع متابعة الإرسال
 "Confirm the COD amount before sending the shipment: tick COD confirmed, or change the COD. 0 is allowed.",أكّد مبلغ الدفع عند الاستلام قبل إرسال الشحنة: فعّل «تم تأكيد مبلغ الدفع عند الاستلام» أو غيّر المبلغ. القيمة 0 مسموحة.
 "Confirm the COD amount before creating the shipment: tick COD confirmed, or change the COD. 0 is allowed.",أكّد مبلغ الدفع عند الاستلام قبل إنشاء الشحنة: فعّل «تم تأكيد مبلغ الدفع عند الاستلام» أو غيّر المبلغ. القيمة 0 مسموحة.
@@ -1682,7 +1684,11 @@ Checking with Bosta...,جارٍ التحقق من Bosta...
 Bosta still shows the shipment as not cancelled.,ما زالت Bosta تعرض الشحنة غير ملغاة.
 The shipment could not be cancelled at Bosta.,تعذر إلغاء الشحنة في Bosta.
 Cancel the Bosta shipment of this Delivery Note? This cannot be undone.,إلغاء شحنة Bosta لمذكرة التسليم هذه؟ لا يمكن التراجع عن ذلك.
-The Bosta shipment was cancelled. The Delivery Note can now be deleted.,أُلغيت شحنة Bosta. يمكن الآن حذف مذكرة التسليم.
+Cancel the Bosta shipment and delete this Delivery Note? This cannot be undone.,إلغاء شحنة Bosta وحذف مذكرة التسليم هذه؟ لا يمكن التراجع عن ذلك.
+The Bosta shipment was cancelled and the Delivery Note was deleted.,أُلغيت شحنة Bosta وحُذفت مذكرة التسليم.
+The Delivery Note could not be deleted.,تعذّر حذف مذكرة التسليم.
+You do not have permission to delete this Delivery Note.,لا تملك صلاحية حذف مذكرة التسليم هذه.
+Cancelling at Bosta and deleting the Delivery Note...,جارٍ إلغاء الشحنة لدى Bosta وحذف مذكرة التسليم...
 Cancel Bosta Shipment,إلغاء شحنة Bosta
 Edit Bosta Shipment,تعديل شحنة Bosta
 Choose the Bosta city.,اختر مدينة Bosta.
@@ -2001,6 +2007,10 @@ Shopify did not confirm the SKU update.,لم يؤكد Shopify تحديث رمز 
 "Shopify created product {0} (variant {1}) and it is mapped, but setting its SKU failed: {2}. Fix the SKU in Shopify; do not create it again.","أنشأ Shopify المنتج {0} (المتغيّر {1}) وتم ربطه، لكن تعيين رمز المنتج (SKU) فشل: {2}. صحّح رمز المنتج في Shopify ولا تنشئه مرة أخرى."
 Setting its SKU also failed: {0}.,كما فشل تعيين رمز المنتج (SKU): {0}.
 "Shopify created product {0} (variant {1}) but saving the mapping failed: {2}. Check Shopify before retrying.","أنشأ Shopify المنتج {0} (المتغيّر {1}) لكن حفظ الربط فشل: {2}. تحقق من Shopify قبل إعادة المحاولة."
+Created on Shopify as a draft product. The price was not sent: {0},تم الإنشاء على Shopify كمنتج مسودة. لم يتم إرسال السعر: {0}
+An unexpected error occurred while looking up the price.,حدث خطأ غير متوقع أثناء البحث عن السعر.
+Stock,المخزون
+Price and stock,السعر والمخزون
 Order Received,تم استلام الطلب
 Waiting for Goods,بانتظار البضاعة
 Shipment Requested,تم طلب الشحنة
@@ -2144,3 +2154,5 @@ Delivery Note {0} was cancelled but its Noon Sales Order {1} must be cancelled b
 Shopify order,طلب Shopify
 The order is being cancelled on Shopify.,يجري إلغاء الطلب في Shopify.
 Sales Order {0} is cancelled but cancelling the order on Shopify failed: {1} Use Cancel on Shopify on the Sales Order to retry.,أمر البيع {0} ملغى لكن فشل إلغاء الطلب في Shopify: {1} استخدم زر الإلغاء في Shopify في أمر البيع لإعادة المحاولة.
+Auto invoice failed: {0},فشلت الفوترة التلقائية: {0}
+"Auto-invoice (Bosta delivered) failed for Delivery Note {0}. See the Error Log. Please create the invoice manually.","فشلت الفوترة التلقائية (تم التسليم عبر بوسطة) لمذكرة التسليم {0}. راجع سجل الأخطاء. يرجى إنشاء الفاتورة يدويًا."

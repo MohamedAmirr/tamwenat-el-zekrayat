@@ -320,20 +320,75 @@ class BostaFixtureMixin:
 
 		order = order or self.make_order()
 		note = make_delivery_note(order.name)
+		self.reset_actual_charges(note)
 		note.transporter = self.supplier
 		note.shipping_address_name = self.address.name
 		note.contact_mobile = "01000000000"
 		note.custom_bosta_city = city
 		note.custom_bosta_city_name = "Cairo"
 		if cod is not None:
+			# an amount the person typed: the form sends this marker with it, and the server keeps the amount
 			note.custom_cod_amount = cod
-		note.custom_cod_confirmed = 1 if confirm_cod else 0
+			note.custom_cod_typed = 1
+		note.custom_cod_confirmed = 1
 		note.update(overrides)
 		if not auto_request:
 			note.flags[SKIP_AUTO_REQUEST_FLAG] = True
 		note.insert()
+		if not confirm_cod:
+			# A new note is always confirmed on insert (the box defaults to ticked); an unconfirmed note is an
+			# older note or one the person unticked, so untick it after the insert.
+			frappe.db.set_value("Delivery Note", note.name, "custom_cod_confirmed", 0)
+			note.custom_cod_confirmed = 0
 		frappe.db.commit()
 		return note
+
+	@staticmethod
+	def reset_actual_charges(note):
+		"""Reproduce what prod showed: the mapped note carries its "Actual" charge rows with amount 0 (this test
+		site's ``make_delivery_note`` keeps the amount, so the reset is simulated to make the restore testable)."""
+		rows = [row for row in note.get("taxes") or [] if row.charge_type == "Actual"]
+		for row in rows:
+			row.tax_amount = 0
+		if rows:
+			note.calculate_taxes_and_totals()
+
+	def make_order_with_shipping(self, amount=105, rate=100, qty=2):
+		"""A submitted Sales Order with a Shopify-style "Shipping" row (an "Actual" charge) and the totals that go
+		with it. ERPNext's ``make_delivery_note`` resets the row's amount to 0 on the note (the root cause)."""
+		order = self.make_order(rate=rate, qty=qty)
+		account = frappe.db.get_value(
+			"Account", {"company": order.company, "is_group": 0, "root_type": "Income"}, "name"
+		)
+		frappe.get_doc(
+			{
+				"doctype": "Sales Taxes and Charges",
+				"parenttype": "Sales Order",
+				"parentfield": "taxes",
+				"parent": order.name,
+				"idx": 1,
+				"charge_type": "Actual",
+				"account_head": account,
+				"description": "Shipping",
+				"tax_amount": amount,
+				"base_tax_amount": amount,
+			}
+		).db_insert()
+		total = rate * qty + amount
+		frappe.db.set_value(
+			"Sales Order",
+			order.name,
+			{
+				"total_taxes_and_charges": amount,
+				"base_total_taxes_and_charges": amount,
+				"grand_total": total,
+				"base_grand_total": total,
+				"rounded_total": total,
+				"base_rounded_total": total,
+			},
+		)
+		frappe.db.commit()
+		return frappe.get_doc("Sales Order", order.name)
 
 	def submit_note(self, note):
 		"""Submit a Created Bosta draft the way the pickup job does (#500: nobody submits it by hand before the
