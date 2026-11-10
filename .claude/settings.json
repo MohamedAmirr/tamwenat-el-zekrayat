@@ -26,7 +26,12 @@
   "permissions": {
     "allow": [
       "Bash(graphify query *)",
-      "mcp__meta-devtools__devtools_discovery"
+      "mcp__meta-devtools__devtools_discovery",
+      "mcp__tamwenat-erp__list_documents",
+      "mcp__tamwenat-erp__count_documents",
+      "mcp__tamwenat-erp__get_document",
+      "mcp__tamwenat-erp__search_doctypes",
+      "mcp__tamwenat-erp__get_doctype_schema"
     ]
   }
 }

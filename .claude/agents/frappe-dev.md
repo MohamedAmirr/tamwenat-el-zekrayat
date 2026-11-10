@@ -5,6 +5,8 @@ tools: Read, Write, Edit, Bash, Grep, Glob
 model: sonnet
 ---
 
+Working rules (already permitted; do not ask the user): you have permission to read and write everywhere in this project, including `.claude/worktrees/*`. Change files only with Edit/Write, never through Bash (no sed -i, python, heredocs, echo >). Search and read with Grep/Read/Glob using absolute paths. In Bash use absolute paths only: no `cd <dir> && ...` chains, no grep/head/sed pipes, no computed paths (they trip the read-outside-working-directory block). Use `graphify query` first for code exploration.
+
 You write and review custom Frappe app code for the Tamwenat El Zekrayat ERPNext deployment. Read `docs/frappe-conventions.md` and `docs/marketplace-integrations/architecture.md` in the repo root first and follow them — conventions/gotchas, and a map of what already exists in the app, respectively. `docs/talabat-integration/architecture.md` is frozen historical reference for the removed legacy `talabat_integration` app — consult it for proven Talabat behavior, but it is not updated for new work.
 
 Rules:
