@@ -69,8 +69,8 @@ for Noon's FBPI event notifications — see
 `docs/noon-integration/event-notifications.md` for the envelope shape,
 sourced from Noon's public docs and user-approved for this work. It is an
 additional, faster trigger for the
-same `run_order_import` job #145's hourly poll already enqueues — **the
-hourly poll stays on as the safety net**; nothing about it changes or is
+same `run_order_import` job #145's scheduled poll already enqueues — **the
+25-minute poll stays on as the safety net**; nothing about it changes or is
 removed by this receiver.
 
 Setup, per Noon Connection:
@@ -112,7 +112,7 @@ arrives while that account's import job is already queued/running does not
 queue a second job (the existing per-account job_id dedup collapses it) -
 the receiver still returns 200 and logs success, but that specific order
 isn't actually re-imported until the already-running job (or, in the worst
-case, the next hourly poll) picks it up, up to about an hour later. See
+case, the next 25-minute poll) picks it up, up to 26 minutes later (the longest gap between polls) (or the 23:59 catch-up for an order older than 2 hours). See
 `docs/noon-integration/event-notifications.md`'s "Accepted dedup gap" for
 the full explanation - this is accepted behavior, not a bug. Likewise, the
 import only looks back 7 days, so a webhook for an older order changes nothing;
@@ -235,7 +235,7 @@ What surfaces this:
   `set_sync_status_from_current_snapshot()`, which detects the eligible-line
   hash changed and
   sets `erpnext_sync_status = "Modified After Sync"`.
-- The hourly Noon order import bumps a changed linked order, and the
+- The scheduled Noon order import bumps a changed linked order, and the
   platform-neutral hourly `sweep_stuck_sales_order_reconciliations` (#180)
   re-checks stuck (Modified After Sync / Sync Error) or Closed linked orders
   with trigger source `Scheduled Sweep`. Needs Attention (#164) lists
@@ -518,7 +518,7 @@ shipment invoice (private PDF attachment, Invoice Nr, Issued At).
   the returns section, #261/#262.)
 - A Noon webhook/event-notification receiver was #145's own deferral at the
   time this release shipped; it has since been built under #163 — see
-  "Noon event-notification webhook (#163)" above. The hourly poll remains
+  "Noon event-notification webhook (#163)" above. The 25-minute poll remains
   in place as a safety net regardless.
 
 ## Returns: FBPI return reference lookup and evidence (#153)

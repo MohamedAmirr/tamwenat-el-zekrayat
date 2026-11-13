@@ -17,11 +17,26 @@ PUSH_TIMEOUT_SECONDS = 60
 # (docs/noon-integration/noon_api_full.md, #145's facts table).
 ORDERS_PAGE_SIZE = 50
 
-# #145 decision 18: every hourly poll re-lists the last 7 days of orders
-# (not just since the previous run) because ListFbpiOrders only filters on
-# order creation time, so it would otherwise never surface a later item
-# status change (mp_status/integration_status) on an already-seen order.
+# #145 decision 18: the nightly 23:59 catch-up (services/marketplace_order_reconciliation.py::
+# enqueue_nightly_order_reconciliation, which is the daily 7-day re-list) and a manual or
+# webhook-queued import list the last 7 days of orders (not just since the previous run)
+# because ListFbpiOrders only filters on order creation time, so it would otherwise never
+# surface a later item status change (mp_status/integration_status) on an already-seen order.
 ORDER_IMPORT_LOOKBACK_DAYS = 7
+
+# #525: Noon's support guidance is to reconcile with ListFbpiOrders every 15-30 minutes
+# with a window that overlaps the previous run. A 25-minute cron cannot be evenly spaced,
+# so the poll runs at :01, :27 and :53 (gaps of 26, 26 and 8 minutes). All three are odd and
+# none is a multiple of 5, so none shares a tick with the */2 sweep, the */10 or the
+# on-the-5 jobs (5, 15, 30, 35, 59, Frappe's own); minute 0 is avoided (#367). The poll
+# lists only the last 2 hours, wide enough to cover a missed run; the 23:59 catch-up above
+# does the 7-day re-list.
+NOON_ORDER_POLL_CRON = "1,27,53 * * * *"
+ORDER_POLL_WINDOW_HOURS = 2
+
+# #525: a ListFbpiOrders page that answers HTTP 429 is retried (same body and next_token)
+# after each of these waits in seconds, then fails as before. Retry-After is ignored.
+LIST_ORDERS_429_BACKOFF_SECONDS = (2, 4, 8)
 
 # #146 FBPI shipment fulfillment paths - docs/noon-integration/noon_api_full.md
 # (locked plan's "Noon API facts used" table). All go through
