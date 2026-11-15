@@ -20,6 +20,9 @@ const {
 	configure_shopify_inventory,
 	reconcile_shopify_inventory,
 	RECONCILE_INVENTORY_LABEL,
+	configure_shopify_images,
+	pull_shopify_images,
+	PULL_IMAGES_LABEL,
 	LOAD_SHOPIFY_GATEWAYS_LABEL,
 	show_shopify_gateway_picker,
 	configure_view_shortcuts,
@@ -423,6 +426,90 @@ test("reconcile_shopify_inventory confirms, queues the account and opens the inv
 	);
 	assert.deepEqual(call_options.args, { account: "MKTACC-1" });
 	assert.equal(dialog_args.status_method, "inventory.status");
+});
+
+test("Pull Missing Images appears only on a saved Shopify account with a connection and write permission", () => {
+	global.frappe = { model: { can_write: () => true } };
+	let frm = make_frm({ platform: "Shopify", connection: "SHOPCONN-1" });
+	configure_shopify_images(frm);
+	assert.deepEqual(frm.buttons, [PULL_IMAGES_LABEL]);
+
+	frm = make_frm({ platform: "Shopify", connection: "SHOPCONN-1" }, { is_new: true });
+	configure_shopify_images(frm);
+	assert.deepEqual(frm.buttons, []);
+
+	frm = make_frm({ platform: "Shopify", connection: "" });
+	configure_shopify_images(frm);
+	assert.deepEqual(frm.buttons, []);
+
+	frm = make_frm({ platform: "Talabat", connection: "TALCONN-1" });
+	configure_shopify_images(frm);
+	assert.deepEqual(frm.buttons, []);
+
+	global.frappe = { model: { can_write: () => false } };
+	frm = make_frm({ platform: "Shopify", connection: "SHOPCONN-1" });
+	configure_shopify_images(frm);
+	assert.deepEqual(frm.buttons, []);
+});
+
+test("Pull Missing Images button is removed when the platform changes away from Shopify", () => {
+	global.frappe = { model: { can_write: () => true } };
+	const frm = make_frm({ platform: "Shopify", connection: "SHOPCONN-1" });
+	configure_shopify_images(frm);
+	assert.equal(frm.buttons.length, 1);
+
+	frm.doc.platform = "Talabat";
+	configure_shopify_images(frm);
+
+	assert.deepEqual(frm.buttons, []);
+});
+
+test("pull_shopify_images confirms, queues the account and opens the image dialog", async () => {
+	let call_options;
+	let dialog_args;
+	global.frappe = {
+		confirm(_message, on_yes) {
+			on_yes();
+		},
+		call(options) {
+			call_options = options;
+			return Promise.resolve({ message: { jobs: [{ account: "MKTACC-1", job_id: "job-9" }] } });
+		},
+		require: () => Promise.resolve(),
+		ui: {
+			ShopifyCatalogPushStatus: class {
+				static IMAGE_OPTIONS = { status_method: "images.status" };
+				constructor(args) {
+					dialog_args = args;
+				}
+			},
+		},
+	};
+
+	pull_shopify_images({ doc: { name: "MKTACC-1" } });
+	for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve));
+
+	assert.equal(
+		call_options.method,
+		"marketplace_integrations.api.shopify_item_images.queue_pull_missing_images"
+	);
+	assert.deepEqual(call_options.args, { account: "MKTACC-1" });
+	assert.equal(dialog_args.status_method, "images.status");
+	assert.deepEqual(dialog_args.jobs, [{ account: "MKTACC-1", job_id: "job-9" }]);
+});
+
+test("pull_shopify_images makes no call when the confirmation is declined", () => {
+	let called = false;
+	global.frappe = {
+		confirm() {},
+		call() {
+			called = true;
+		},
+	};
+
+	pull_shopify_images({ doc: { name: "MKTACC-1" } });
+
+	assert.equal(called, false);
 });
 
 test("reconcile_shopify_inventory makes no call when the confirmation is declined", () => {

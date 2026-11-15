@@ -1052,6 +1052,13 @@ class IntegrationTestBulkDeliveryNotes(BostaFixtureMixin, IntegrationTestCase):
 			frappe.db.delete("Stock Ledger Entry", {"item_code": item})
 			frappe.db.delete("Repost Item Valuation", {"item_code": item})
 			frappe.db.delete("Bin", {"item_code": item})
+		# The cancelled stock notes are purged but their GL rows stay; the naming series then reuses the name, and a
+		# later test that deletes its own note fails with "linked with GL Entry". Drop the rows of vanished notes.
+		if self._stock_entries or self._stock_items:
+			notes = frappe.get_all("Delivery Note", pluck="name", limit_page_length=0)
+			frappe.db.delete(
+				"GL Entry", {"voucher_type": "Delivery Note", "voucher_no": ("not in", notes or [""])}
+			)
 		frappe.db.commit()
 
 	def test_a_bulk_order_short_of_stock_is_skipped_with_no_draft_no_invoice_and_no_bosta_call(self):

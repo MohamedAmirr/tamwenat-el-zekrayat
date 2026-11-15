@@ -77,7 +77,16 @@ class TestMarketplaceSyncLog(IntegrationTestCase):
 		self.assertEqual(fields["sync_type"].fieldtype, "Select")
 		self.assertEqual(
 			fields["sync_type"].options.splitlines(),
-			["Sales Order Sync", "Order Import", "Fulfillment", "Return Lookup", "Order Action", "Payment", "Lifecycle Check"],
+			[
+				"Sales Order Sync",
+				"Order Import",
+				"Fulfillment",
+				"Return Lookup",
+				"Order Action",
+				"Payment",
+				"Lifecycle Check",
+				"Item Image",
+			],
 		)
 		self.assertEqual(fields["sync_type"].default, "Sales Order Sync")
 		self.assertTrue(fields["sync_type"].reqd)

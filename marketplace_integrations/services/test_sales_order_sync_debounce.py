@@ -805,13 +805,33 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 		self.assertIn(path, frappe.get_hooks("scheduler_events")["cron"]["35 * * * *"])
 		self.assertNotIn(path, frappe.get_hooks("scheduler_events").get("hourly", []))
 
-	def test_the_four_hourly_jobs_run_at_staggered_minutes_not_all_at_the_hour(self):
-		# #367: all four used to start at :00 with Frappe's own hourly jobs and hit
-		# "Too many connections" on prod.
+	@staticmethod
+	def _cron_minutes(expression):
+		"""The minutes a cron expression's minute field fires on (`*`, `*/N`, `a/N`, `a,b` or `N`)."""
+		field = expression.split()[0]
+		if field == "*":
+			return set(range(60))
+		if field.startswith("*/") and field[2:].isdigit():
+			return set(range(0, 60, int(field[2:])))
+		start, slash, step = field.partition("/")
+		if slash and start.isdigit() and step.isdigit():
+			return set(range(int(start), 60, int(step)))
+		if all(minute.isdigit() for minute in field.split(",")):
+			return {int(minute) for minute in field.split(",")}
+		frappe.throw(f"Unsupported cron minute field {field!r} in {expression!r}")
+
+	def test_scheduled_cron_jobs_run_at_staggered_minutes_not_at_the_hour(self):
+		# #367: the hourly jobs used to start at :00 with Frappe's own hourly jobs and hit
+		# "Too many connections" on prod. #525: the Noon order poll is no longer hourly; it
+		# runs about every 25 minutes (NOON_ORDER_POLL_CRON).
+		from marketplace_integrations.integrations.noon.constants import NOON_ORDER_POLL_CRON
+
+		self.assertEqual(NOON_ORDER_POLL_CRON, "1,27,53 * * * *")
+		poll = "marketplace_integrations.integrations.noon.orders.poll_all_accounts"
 		expected = {
 			"5 * * * *": "marketplace_integrations.integrations.shopify.webhooks.retry_errored_webhook_deliveries",
 			"15 * * * *": "marketplace_integrations.integrations.noon.sweep.sweep_all_accounts",
-			"25 * * * *": "marketplace_integrations.integrations.noon.orders.poll_all_accounts",
+			NOON_ORDER_POLL_CRON: poll,
 			"35 * * * *": "marketplace_integrations.services.sales_order_sync_debounce.sweep_stuck_sales_order_reconciliations",
 		}
 		events = frappe.get_hooks("scheduler_events")
@@ -819,4 +839,18 @@ class IntegrationTestSalesOrderSyncDebounce(IntegrationTestCase):
 			self.assertIn(path, events["cron"][cron])
 			self.assertNotIn(path, events.get("hourly", []))
 			self.assertTrue(callable(frappe.get_attr(path)))
-		self.assertIs(frappe.get_attr(path), debounce.sweep_stuck_sales_order_reconciliations)
+		self.assertIs(
+			frappe.get_attr(expected["35 * * * *"]), debounce.sweep_stuck_sales_order_reconciliations
+		)
+
+		# The poll is registered under exactly one cron key.
+		self.assertEqual([c for c, paths in events["cron"].items() if poll in paths], [NOON_ORDER_POLL_CRON])
+
+		# The poll never fires at minute 0 and shares no tick with any other cron key
+		# (including */2 and */10). The every-minute key fires on every tick by design.
+		poll_minutes = self._cron_minutes(NOON_ORDER_POLL_CRON)
+		self.assertNotIn(0, poll_minutes)
+		for cron in events["cron"]:
+			if cron in (NOON_ORDER_POLL_CRON, "* * * * *"):
+				continue
+			self.assertFalse(poll_minutes & self._cron_minutes(cron), cron)

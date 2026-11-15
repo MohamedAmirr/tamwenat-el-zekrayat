@@ -21,7 +21,7 @@
 	const EVENT = "bulk_delivery_note_progress";
 	// The server enforces the cap; this only avoids a pointless round trip.
 	const MAX_ORDERS = 50;
-	// Shipping methods the dialog offers. Noon and Manual delivery come later.
+	// Shipping methods the dialog offers. Noon comes later.
 	const SHIPPING_METHODS = ["Bosta"];
 	const [WAITING, CREATING, SENT, ACCEPTED, STILL_CREATING, SKIPPED, FAILED] = [
 		"waiting",
