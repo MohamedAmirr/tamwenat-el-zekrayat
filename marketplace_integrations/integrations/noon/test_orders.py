@@ -11,6 +11,7 @@ are built directly via make_* helpers.
 
 import threading
 import time
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -622,6 +623,25 @@ class IntegrationTestNoonOrderImport(IntegrationTestCase):
 			{"marketplace_account": self.account.name, "external_order_id": "ORD-IDEMPOTENT"},
 		)
 		self.assertEqual(count, 1)
+
+	def test_unchanged_reimport_makes_no_save_and_no_version_row(self):
+		"""#525: the poll re-lists an order the webhook already imported unchanged;
+		that must not save the row again or add a Version."""
+		payload = _order_payload(fbpi_order_nr="ORD-NO-RESAVE")
+		order, _ = import_order(self.account, payload)
+		modified = frappe.db.get_value("Marketplace Order", order.name, "modified")
+		versions = frappe.db.count("Version", {"ref_doctype": "Marketplace Order", "docname": order.name})
+
+		# Frappe skips the Version row under frappe.in_test, so the count check below could
+		# never fail without turning it off for the second import.
+		with patch.object(frappe, "in_test", False):
+			import_order(self.account, payload)
+
+		self.assertEqual(frappe.db.get_value("Marketplace Order", order.name, "modified"), modified)
+		self.assertEqual(
+			frappe.db.count("Version", {"ref_doctype": "Marketplace Order", "docname": order.name}),
+			versions,
+		)
 
 	def test_import_order_sku_mapped_between_polls_updates_same_row(self):
 		"""A SKU imported before it has a Marketplace Product Mapping keeps the
@@ -1616,6 +1636,68 @@ class IntegrationTestNoonOrderPagination(IntegrationTestCase):
 			client.request.side_effect = mock_request
 			list(list_orders(self.account))
 
+	def _page(self, status_code, orders=None, next_token=None):
+		response = MagicMock()
+		response.status_code = status_code
+		response.json.return_value = {"orders": orders or [], "next_token": next_token}
+		return response
+
+	def test_429_then_200_yields_the_page_and_continues_with_the_same_body_and_token(self):
+		"""#525: a rate-limited page is retried unchanged, then paging goes on."""
+		responses = [
+			self._page(200, [_order_payload(fbpi_order_nr="ORD-P1")], "TOKEN-1"),
+			self._page(429),
+			self._page(200, [_order_payload(fbpi_order_nr="ORD-P2")]),
+		]
+
+		with (
+			patch("marketplace_integrations.integrations.noon.orders.NoonClient") as client_class,
+			patch("marketplace_integrations.integrations.noon.orders.time.sleep") as sleep,
+		):
+			client = client_class.return_value
+			client.request.side_effect = responses
+			orders = list(list_orders(self.account, "2026-11-01T00:00:00Z", "2026-11-02T00:00:00Z"))
+
+		self.assertEqual([o["fbpi_order_nr"] for o in orders], ["ORD-P1", "ORD-P2"])
+		sleep.assert_called_once_with(2)
+		calls = client.request.call_args_list
+		self.assertEqual(len(calls), 3)
+		# The 429 request and its retry are identical (same body, same next_token).
+		self.assertEqual(calls[1], calls[2])
+		self.assertEqual(calls[1].kwargs["params"], {"next_token": "TOKEN-1"})
+		self.assertEqual(calls[0].kwargs["json"], calls[1].kwargs["json"])
+
+	def test_429_on_every_attempt_stops_after_three_retries_and_raises_the_client_error(self):
+		with (
+			patch("marketplace_integrations.integrations.noon.orders.NoonClient") as client_class,
+			patch("marketplace_integrations.integrations.noon.orders.time.sleep") as sleep,
+		):
+			client = client_class.return_value
+			client.request.side_effect = lambda *a, **kw: self._page(429)
+			client.error_message.return_value = "Noon rate limit reached"
+			with self.assertRaises(frappe.ValidationError) as cm:
+				list(list_orders(self.account))
+
+		self.assertIn("Noon rate limit reached", str(cm.exception))
+		# One original call plus exactly three retries; no call after the last wait.
+		self.assertEqual(client.request.call_count, 4)
+		self.assertEqual([c.args[0] for c in sleep.call_args_list], [2, 4, 8])
+
+	def test_a_non_429_error_is_not_retried(self):
+		for status in (401, 500):
+			with (
+				patch("marketplace_integrations.integrations.noon.orders.NoonClient") as client_class,
+				patch("marketplace_integrations.integrations.noon.orders.time.sleep") as sleep,
+			):
+				client = client_class.return_value
+				client.request.side_effect = lambda *a, **kw: self._page(status)
+				client.error_message.return_value = f"Noon error {status}"
+				with self.assertRaises(frappe.ValidationError):
+					list(list_orders(self.account))
+
+			self.assertEqual(client.request.call_count, 1)
+			sleep.assert_not_called()
+
 
 class IntegrationTestNoonOrderRefresh(IntegrationTestCase):
 	"""Tests for refresh_order() - manual per-order troubleshooting action."""
@@ -1900,7 +1982,7 @@ class IntegrationTestNoonOrderRefresh(IntegrationTestCase):
 
 
 class IntegrationTestNoonPoll(IntegrationTestCase):
-	"""Tests for poll_all_accounts() - the scheduled hourly sweep."""
+	"""Tests for poll_all_accounts() - the scheduled 25-minute sweep."""
 
 	def setUp(self):
 		# Patch warehouse code validation to avoid making real Noon API calls
@@ -1953,8 +2035,8 @@ class IntegrationTestNoonPoll(IntegrationTestCase):
 				self.account.name, trigger_source, catch_up_unlinked=catch_up_unlinked
 			)
 
-	def test_hourly_poll_does_not_run_the_catch_up(self):
-		name = self._unlinked_order("ORD-HOURLY")
+	def test_scheduled_poll_does_not_run_the_catch_up(self):
+		name = self._unlinked_order("ORD-SCHEDULED")
 
 		result = self._run("Scheduled Reconciliation", catch_up_unlinked=False)
 
@@ -2005,7 +2087,7 @@ class IntegrationTestNoonPoll(IntegrationTestCase):
 
 		self.assertEqual(self._debounce(name).sync_debounce_until, first)
 
-	def test_catch_up_has_its_own_job_id_so_it_is_not_deduplicated_against_the_hourly_job(self):
+	def test_catch_up_has_its_own_job_id_so_it_is_not_deduplicated_against_the_poll_job(self):
 		from marketplace_integrations.integrations.noon.orders import enqueue_order_import
 
 		with patch("marketplace_integrations.integrations.noon.orders.frappe.enqueue") as enqueue:
@@ -2022,12 +2104,11 @@ class IntegrationTestNoonPoll(IntegrationTestCase):
 	def test_poll_all_accounts_enqueues_one_deduplicated_job_per_account(self):
 		"""poll_all_accounts() is lightweight (post-#145-review fix): it never
 		lists/imports orders itself, it only enqueues one background job per
-		enabled Noon account on the ``long`` queue, using the exact same
-		job_id scheme (``_ORDER_IMPORT_RQ_JOB_PREFIX-<account>``) and worker
-		(``run_order_import``) that ``queue_order_import()`` already uses for
-		a manual Desk-triggered import - so a manual import and this hourly
-		poll for the same account properly dedupe against each other via
-		RQ's own deduplicate=True."""
+		enabled Noon account on the ``long`` queue, with its own job_id
+		(``_ORDER_IMPORT_RQ_JOB_PREFIX-poll-<account>``) and the same worker
+		(``run_order_import``) a manual import uses - so polls dedupe against
+		each other via RQ's deduplicate=True but never against a webhook or
+		manual import."""
 
 		from marketplace_integrations.integrations.noon.orders import run_order_import
 
@@ -2048,16 +2129,101 @@ class IntegrationTestNoonPoll(IntegrationTestCase):
 			run_order_import,
 			queue="long",
 			timeout=3600,
-			job_id=f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{self.account.name}",
+			job_id=f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-poll-{self.account.name}",
 			deduplicate=True,
 			account_name=self.account.name,
 			trigger_source="Scheduled Reconciliation",
 			catch_up_unlinked=False,
+			window_hours=2,
 		)
 		# Result contains the count of all enabled accounts queued (including
 		# stale ones from prior test runs), so just verify it's present and >= 1
 		self.assertIn("queued", result)
 		self.assertGreaterEqual(result["queued"], 1)
+
+	def _listed_window(self, **run_kwargs):
+		"""Run an import and return the (created_after, created_before) it listed."""
+		from marketplace_integrations.integrations.noon.orders import run_order_import
+
+		base = "marketplace_integrations.integrations.noon.orders"
+		with (
+			patch(f"{base}.validate_connection_enabled"),
+			patch(f"{base}._validate_order_import_setup"),
+			patch(f"{base}.import_orders_created_between", return_value=([], [])) as listed,
+		):
+			run_order_import(self.account.name, "Scheduled Reconciliation", **run_kwargs)
+		after, before = listed.call_args.args[1:3]
+		fmt = "%Y-%m-%dT%H:%M:%SZ"
+		return datetime.strptime(after, fmt), datetime.strptime(before, fmt)
+
+	def test_poll_lists_a_two_hour_window_and_a_run_without_a_window_lists_seven_days(self):
+		# The 23:59 catch-up and the manual import pass no window.
+		after, before = self._listed_window(window_hours=2)
+		self.assertEqual(before - after, timedelta(hours=2))
+
+		after, before = self._listed_window()
+		self.assertEqual(before - after, timedelta(days=7))
+
+	def test_a_second_tick_while_a_poll_is_queued_or_running_enqueues_nothing(self):
+		"""The real frappe.enqueue(deduplicate=True) returns None while the job id is queued
+		or started. Only the RQ lookup (get_job) is faked, so the dedup branch itself runs."""
+		from rq.job import JobStatus
+
+		for status in (JobStatus.QUEUED, JobStatus.STARTED):
+			with self.subTest(status=status):
+				live_job = MagicMock()
+				live_job.get_status.return_value = status
+
+				with patch("frappe.utils.background_jobs.get_job", return_value=live_job) as get_job:
+					first = poll_all_accounts()
+					second = poll_all_accounts()
+
+				self.assertEqual(first, {"queued": 0})
+				self.assertEqual(second, {"queued": 0})
+				get_job.assert_any_call(f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-poll-{self.account.name}")
+
+	def test_webhook_and_manual_imports_are_not_dropped_while_a_poll_is_queued_or_running(self):
+		"""The poll has its own job id, so a live poll job never dedupes a webhook or manual
+		7-day import (whose job id has no ``-poll``), while a second poll is still deduped."""
+		from rq.job import JobStatus
+
+		from marketplace_integrations.integrations.noon.orders import enqueue_order_import
+
+		poll_id = f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-poll-{self.account.name}"
+
+		def fake_enqueue(worker, job_id=None, deduplicate=False, **kwargs):
+			# Mirrors RQ's deduplicate=True: refuse only the job id that is already live.
+			return None if deduplicate and job_id == poll_id else MagicMock(job_id=job_id)
+
+		for status in (JobStatus.QUEUED, JobStatus.STARTED):
+			with (
+				self.subTest(status=status),
+				patch(
+					"marketplace_integrations.integrations.noon.orders.frappe.enqueue",
+					side_effect=fake_enqueue,
+				) as enqueue,
+			):
+				webhook = enqueue_order_import(self.account.name, trigger_source="Webhook")
+				manual = enqueue_order_import(self.account.name, trigger_source="Manual")
+				poll = enqueue_order_import(
+					self.account.name, trigger_source="Scheduled Reconciliation", window_hours=2
+				)
+
+			self.assertIsNotNone(webhook)
+			self.assertIsNotNone(manual)
+			self.assertIsNone(poll)
+			job_ids = [call.kwargs["job_id"] for call in enqueue.call_args_list]
+			self.assertEqual(
+				job_ids,
+				[
+					f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{self.account.name}",
+					f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{self.account.name}",
+					poll_id,
+				],
+			)
+			# Webhook/manual keep the 7-day window (no window_hours kwarg).
+			self.assertNotIn("window_hours", enqueue.call_args_list[0].kwargs)
+			self.assertNotIn("window_hours", enqueue.call_args_list[1].kwargs)
 
 	def test_poll_all_accounts_isolates_enqueue_failures(self):
 		"""One account's enqueue failure (e.g. a transient Redis error) doesn't

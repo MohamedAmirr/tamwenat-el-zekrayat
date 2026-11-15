@@ -262,6 +262,26 @@
 		},
 	};
 
+	// Constructor options for the Shopify missing-image pull (#526). Result rows are Item codes
+	// (`mapping_name` carries the Item), so the table links to /app/item/<code>; a pulled image
+	// counts as "Updated".
+	frappe.ui.ShopifyCatalogPushStatus.IMAGE_OPTIONS = {
+		status_method: "marketplace_integrations.api.shopify_item_images.get_pull_missing_images_status",
+		result_link_route: "item",
+		result_column_label: __("Item"),
+		status_labels: { ok: __("Updated") },
+		detail_column_label: __("Details"),
+		labels: {
+			title: () => __("Pulling images from Shopify"),
+			nothing: () => __("Nothing to pull."),
+			running: (counts) => __("Pulling... {0} updated, {1} failed, {2} skipped so far.", counts),
+			complete: (counts) => __("Pull complete: {0} updated, {1} failed, {2} skipped.", counts),
+			account_failed: (account, error) =>
+				__("Image pull failed for account {0}: {1}", [account, error]),
+			poll_failed: () => __("Could not retrieve the image pull status."),
+		},
+	};
+
 	// Constructor options for the Shopify order import (#109 review finding
 	// #7 - get_order_import_status() was never wired to any UI). Result rows
 	// here are Marketplace Order names, not Marketplace Product Mapping

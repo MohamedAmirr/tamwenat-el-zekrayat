@@ -8,8 +8,7 @@
 //
 // The native Carrier (`transporter`, a Supplier name) is a list column too (Property Setter
 // Delivery Note-transporter-in_list_view, fixtures/property_setter.json) shown as a colored pill:
-// Noon yellow, Bosta red, Manual delivery green, any other carrier grey (platform_badge.js, also loaded before this
-// file).
+// Noon yellow, Bosta red, any other carrier grey (platform_badge.js, also loaded before this file).
 //
 // Wrapped in a function: doctype_list_js files share one scope with ERPNext's own list script.
 (function () {

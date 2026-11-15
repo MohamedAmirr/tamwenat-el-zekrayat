@@ -65,6 +65,25 @@ test("inventory options change the title and poll the inventory status method", 
 	assert.deepEqual(calls[0].args, { job_id: "j1" });
 });
 
+test("image options poll the image status method and show Items as Updated", async () => {
+	dialogs = [];
+	const calls = install_call(() => Promise.resolve({ message: { status: "completed" } }));
+
+	const status = new Status({ jobs: [{ account: "A", job_id: "j1" }], poll_interval: 1, ...Status.IMAGE_OPTIONS });
+	await tick();
+
+	assert.equal(dialogs[0].options.title, "Pulling images from Shopify");
+	assert.equal(
+		calls[0].method,
+		"marketplace_integrations.api.shopify_item_images.get_pull_missing_images_status"
+	);
+	assert.equal(status.result_link_route, "item");
+	assert.equal(status.result_column_label, "Item");
+	assert.equal(status.status_labels.ok, "Updated");
+	assert.equal(status.detail_column_label, "Details");
+	assert.equal(status.labels.complete([2, 1, 3]), "Pull complete: 2 updated, 1 failed, 3 skipped.");
+});
+
 test("polling stops for a job once it is terminal, and on_done fires once", async () => {
 	dialogs = [];
 	let on_done_count = 0;
