@@ -178,7 +178,11 @@ Accepted `FBPI::ORDER_SYNC`:
   (`marketplace-noon-order-refresh-<order>`) and per account
   (`marketplace-noon-order-import-<account>`), with RQ `deduplicate=True`. A
   delivery that arrives while the same job is queued or running queues nothing,
-  still gets 200, and logs `refresh_queued: false` (or `import_queued: false`).
+  still gets 200, and logs `refresh_queued: false` (or `import_queued: false`). The
+  25-minute poll uses its own id (`marketplace-noon-order-import-poll-<account>`), so a
+  queued or running poll never makes the webhook's 7-day import drop; the two may run
+  at once, which is safe because of the per-order `FOR UPDATE` identity lock and the
+  unique `order_identity_key` backstop.
   The job fetches the order when it runs, so a queued job already sees what the
   redelivered event announced; if the fetch had already happened (job running), the
   next webhook or the 25-minute poll (#145, #525) picks the change up. There is no

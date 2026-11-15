@@ -41,7 +41,13 @@ events). Noon's answers, relayed by the user (not a checked-in spec):
 
 What the app does: `integrations/noon/orders.py::poll_all_accounts` runs at minutes
 `1,27,53` (about every 25 minutes at :01, :27 and :53; `NOON_ORDER_POLL_CRON`, gaps of 26, 26 and 8 minutes, all odd and none a multiple of 5, so none shares a tick with the `*/2` sweep or the `*/10` and on-the-5 jobs) and lists the last
-2 hours. The daily 7-day re-list is the existing 23:59
+2 hours. The poll has its own per-account RQ job id
+(`marketplace-noon-order-import-poll-<account>`), like the nightly `-catch-up` one, so a
+queued or running poll never drops a webhook or manual 7-day import (which keep
+`marketplace-noon-order-import-<account>`), and a second poll is still deduped. Overlapping
+jobs on one account are safe: `import_order` takes the `FOR UPDATE` lock on the order's
+identity key first, and `upsert_marketplace_order` falls back on the unique
+`order_identity_key` when two workers insert the same new order. The daily 7-day re-list is the existing 23:59
 `enqueue_nightly_order_reconciliation` catch-up (`services/marketplace_order_reconciliation.py`),
 so later status changes on already-seen orders are still caught. An order whose import
 failed more than about 2 hours ago is not retried by the poll; it is retried by the

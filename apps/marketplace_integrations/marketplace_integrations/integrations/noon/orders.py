@@ -734,9 +734,20 @@ def enqueue_order_import(account_name, trigger_source="Manual", catch_up_unlinke
 	(e.g. Redis down) - callers that need per-call isolation from that
 	(``poll_all_accounts()``) catch it themselves.
 	"""
-	# The nightly catch-up has its own job id so it is not dropped as a duplicate of
-	# a running poll/manual import (and vice versa); both are still one per account.
-	job_prefix = f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-catch-up" if catch_up_unlinked else _ORDER_IMPORT_RQ_JOB_PREFIX
+	# The nightly catch-up and the 25-minute poll (the only caller that narrows the window)
+	# each have their own job id, so neither is dropped as a duplicate of a queued/running
+	# webhook or manual import (and vice versa): a dropped 7-day import could otherwise be
+	# replaced by a poll whose 2h window misses the order. Each kind is still deduplicated
+	# within itself, one per account. Overlapping jobs are safe: ``import_order()`` takes the
+	# ``FOR UPDATE`` lock on the order's identity key before anything else, and
+	# ``upsert_marketplace_order()`` falls back on the unique ``order_identity_key``
+	# (``UniqueValidationError``) when two workers insert the same new order.
+	if catch_up_unlinked:
+		job_prefix = f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-catch-up"
+	elif window_hours is not None:
+		job_prefix = f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-poll"
+	else:
+		job_prefix = _ORDER_IMPORT_RQ_JOB_PREFIX
 	kwargs = {}
 	if window_hours is not None:
 		# Only the scheduled poll narrows the window; every other caller keeps the 7-day lookback.
@@ -956,15 +967,16 @@ def poll_all_accounts():
 	as a normal RQ job failure instead of silently truncating the sweep.
 
 	Reuses ``run_order_import()`` (the same worker ``queue_order_import()``
-	already enqueues for a manual Desk-triggered import) under the exact
-	same ``job_id`` scheme - ``f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{account_name}"``
-	with ``deduplicate=True`` - so a manual import and this
-	poll for the same account properly dedupe against each other: RQ refuses to
-	enqueue a second job under a job_id that is already queued/running, so
-	no path can ever run concurrently against the same account. Only
-	``trigger_source`` and the window differ ("Scheduled Reconciliation" with
-	the short window here vs. "Manual" with the 7-day window for the
-	Desk-triggered path).
+	already enqueues for a manual Desk-triggered import) under its own
+	``job_id`` - ``f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-poll-{account_name}"`` with
+	``deduplicate=True`` - so a second poll for the same account is dropped while one
+	is queued/running, but a webhook or manual import (which keep the plain
+	``-{account_name}`` id and the 7-day window) is never dropped because a poll is in
+	flight. The jobs may therefore overlap on one account; per-order safety comes from
+	``import_order()``'s ``FOR UPDATE`` identity lock and the unique-key backstop in
+	``upsert_marketplace_order()``. ``trigger_source`` and the window differ
+	("Scheduled Reconciliation" with the short window here vs. "Manual" with the
+	7-day window for the Desk-triggered path).
 
 	Enqueuing itself is wrapped per account so that a failure to enqueue one
 	account's job (e.g. a transient Redis error) cannot stop the remaining

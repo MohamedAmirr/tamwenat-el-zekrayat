@@ -632,7 +632,10 @@ class IntegrationTestNoonOrderImport(IntegrationTestCase):
 		modified = frappe.db.get_value("Marketplace Order", order.name, "modified")
 		versions = frappe.db.count("Version", {"ref_doctype": "Marketplace Order", "docname": order.name})
 
-		import_order(self.account, payload)
+		# Frappe skips the Version row under frappe.in_test, so the count check below could
+		# never fail without turning it off for the second import.
+		with patch.object(frappe, "in_test", False):
+			import_order(self.account, payload)
 
 		self.assertEqual(frappe.db.get_value("Marketplace Order", order.name, "modified"), modified)
 		self.assertEqual(
@@ -2101,12 +2104,11 @@ class IntegrationTestNoonPoll(IntegrationTestCase):
 	def test_poll_all_accounts_enqueues_one_deduplicated_job_per_account(self):
 		"""poll_all_accounts() is lightweight (post-#145-review fix): it never
 		lists/imports orders itself, it only enqueues one background job per
-		enabled Noon account on the ``long`` queue, using the exact same
-		job_id scheme (``_ORDER_IMPORT_RQ_JOB_PREFIX-<account>``) and worker
-		(``run_order_import``) that ``queue_order_import()`` already uses for
-		a manual Desk-triggered import - so a manual import and this
-		poll for the same account properly dedupe against each other via
-		RQ's own deduplicate=True."""
+		enabled Noon account on the ``long`` queue, with its own job_id
+		(``_ORDER_IMPORT_RQ_JOB_PREFIX-poll-<account>``) and the same worker
+		(``run_order_import``) a manual import uses - so polls dedupe against
+		each other via RQ's deduplicate=True but never against a webhook or
+		manual import."""
 
 		from marketplace_integrations.integrations.noon.orders import run_order_import
 
@@ -2127,7 +2129,7 @@ class IntegrationTestNoonPoll(IntegrationTestCase):
 			run_order_import,
 			queue="long",
 			timeout=3600,
-			job_id=f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{self.account.name}",
+			job_id=f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-poll-{self.account.name}",
 			deduplicate=True,
 			account_name=self.account.name,
 			trigger_source="Scheduled Reconciliation",
@@ -2162,21 +2164,66 @@ class IntegrationTestNoonPoll(IntegrationTestCase):
 		after, before = self._listed_window()
 		self.assertEqual(before - after, timedelta(days=7))
 
-	def test_a_second_tick_while_a_run_is_queued_enqueues_nothing(self):
-		"""The real frappe.enqueue(deduplicate=True) returns None while the job id is queued.
-		Only the RQ lookup (get_job) is faked, so the dedup branch itself runs."""
+	def test_a_second_tick_while_a_poll_is_queued_or_running_enqueues_nothing(self):
+		"""The real frappe.enqueue(deduplicate=True) returns None while the job id is queued
+		or started. Only the RQ lookup (get_job) is faked, so the dedup branch itself runs."""
 		from rq.job import JobStatus
 
-		queued_job = MagicMock()
-		queued_job.get_status.return_value = JobStatus.QUEUED
+		for status in (JobStatus.QUEUED, JobStatus.STARTED):
+			with self.subTest(status=status):
+				live_job = MagicMock()
+				live_job.get_status.return_value = status
 
-		with patch("frappe.utils.background_jobs.get_job", return_value=queued_job) as get_job:
-			first = poll_all_accounts()
-			second = poll_all_accounts()
+				with patch("frappe.utils.background_jobs.get_job", return_value=live_job) as get_job:
+					first = poll_all_accounts()
+					second = poll_all_accounts()
 
-		self.assertEqual(first, {"queued": 0})
-		self.assertEqual(second, {"queued": 0})
-		get_job.assert_any_call(f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{self.account.name}")
+				self.assertEqual(first, {"queued": 0})
+				self.assertEqual(second, {"queued": 0})
+				get_job.assert_any_call(f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-poll-{self.account.name}")
+
+	def test_webhook_and_manual_imports_are_not_dropped_while_a_poll_is_queued_or_running(self):
+		"""The poll has its own job id, so a live poll job never dedupes a webhook or manual
+		7-day import (whose job id has no ``-poll``), while a second poll is still deduped."""
+		from rq.job import JobStatus
+
+		from marketplace_integrations.integrations.noon.orders import enqueue_order_import
+
+		poll_id = f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-poll-{self.account.name}"
+
+		def fake_enqueue(worker, job_id=None, deduplicate=False, **kwargs):
+			# Mirrors RQ's deduplicate=True: refuse only the job id that is already live.
+			return None if deduplicate and job_id == poll_id else MagicMock(job_id=job_id)
+
+		for status in (JobStatus.QUEUED, JobStatus.STARTED):
+			with (
+				self.subTest(status=status),
+				patch(
+					"marketplace_integrations.integrations.noon.orders.frappe.enqueue",
+					side_effect=fake_enqueue,
+				) as enqueue,
+			):
+				webhook = enqueue_order_import(self.account.name, trigger_source="Webhook")
+				manual = enqueue_order_import(self.account.name, trigger_source="Manual")
+				poll = enqueue_order_import(
+					self.account.name, trigger_source="Scheduled Reconciliation", window_hours=2
+				)
+
+			self.assertIsNotNone(webhook)
+			self.assertIsNotNone(manual)
+			self.assertIsNone(poll)
+			job_ids = [call.kwargs["job_id"] for call in enqueue.call_args_list]
+			self.assertEqual(
+				job_ids,
+				[
+					f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{self.account.name}",
+					f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{self.account.name}",
+					poll_id,
+				],
+			)
+			# Webhook/manual keep the 7-day window (no window_hours kwarg).
+			self.assertNotIn("window_hours", enqueue.call_args_list[0].kwargs)
+			self.assertNotIn("window_hours", enqueue.call_args_list[1].kwargs)
 
 	def test_poll_all_accounts_isolates_enqueue_failures(self):
 		"""One account's enqueue failure (e.g. a transient Redis error) doesn't
