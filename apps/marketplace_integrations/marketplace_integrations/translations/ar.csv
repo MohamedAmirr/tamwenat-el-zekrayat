@@ -2183,3 +2183,24 @@ Payment states,حالات الدفع
 What do these states mean?,ماذا تعني هذه الحالات؟
 Too many orders were asked for at once. Ask for at most {0}.,تم طلب عدد كبير من الطلبات دفعة واحدة. اطلب {0} كحد أقصى.
 Send a list of Sales Order names.,أرسل قائمة بأسماء أوامر البيع.
+Item Image,صورة العنصر
+Pull Missing Images,سحب الصور الناقصة
+Download images from Shopify for mapped Items that have no image? Existing images are never replaced.,هل تريد تنزيل الصور من Shopify للعناصر المرتبطة التي ليس لها صورة؟ لا يتم استبدال الصور الموجودة أبدًا.
+Queuing image pull...,جارٍ إضافة سحب الصور إلى قائمة الانتظار...
+Updated,تم التحديث
+Pulling images from Shopify,جارٍ سحب الصور من Shopify
+Nothing to pull.,لا يوجد ما يمكن سحبه.
+"Pulling... {0} updated, {1} failed, {2} skipped so far.","جارٍ السحب... تم تحديث {0} وفشل {1} وتم تخطي {2} حتى الآن."
+"Pull complete: {0} updated, {1} failed, {2} skipped.","اكتمل السحب: تم تحديث {0} وفشل {1} وتم تخطي {2}."
+Image pull failed for account {0}: {1},فشل سحب الصور للحساب {0}: {1}
+Could not retrieve the image pull status.,تعذر استرجاع حالة سحب الصور.
+A missing-image pull is already running for Marketplace Account {0}.,يوجد سحب للصور الناقصة قيد التشغيل بالفعل لحساب السوق {0}.
+Image pull job not found.,لم يتم العثور على مهمة سحب الصور.
+The image pull timed out.,انتهت مهلة سحب الصور.
+Variant not found on Shopify,لم يتم العثور على النسخة في Shopify
+No image on Shopify,لا توجد صورة في Shopify
+The image URL is not https.,رابط الصورة ليس https.
+The image download failed with HTTP {0}.,فشل تنزيل الصورة بالرمز HTTP {0}.
+The download is not an image.,الملف الذي تم تنزيله ليس صورة.
+SVG images are not accepted.,صور SVG غير مقبولة.
+Item already has an image,العنصر لديه صورة بالفعل
