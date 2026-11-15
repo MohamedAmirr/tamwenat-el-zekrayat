@@ -25,6 +25,35 @@ For issue #143's authentication flow, also consult the official
 and [Static Sandbox](https://noon-docs.noonpartners.dev/docs/overview/sandbox)
 guides. These guides are online sources, not copied into this snapshot.
 
+## Order reconciliation and Noon support guidance (#525)
+
+Noon API Platform support case (incident 8-9 Nov 2026, delayed `FBPI::ORDER_SYNC`
+events). Noon's answers, relayed by the user (not a checked-in spec):
+
+- There is no guaranteed maximum webhook delay. Reconcile with `ListFbpiOrders`
+  every 15-30 minutes per FBPI warehouse, with a `created_after`/`created_before`
+  window that overlaps the previous run, 50 orders per page via `next_token`,
+  idempotent against the webhook.
+- Retry HTTP 429 with exponential backoff.
+- Rate Limit Analytics: Noon Developer Portal > Monitoring > Rate Limit Analytics.
+  Noon also has an API health page for platform incidents.
+- Express orders use the same event and the same APIs.
+
+What the app does: `integrations/noon/orders.py::poll_all_accounts` runs at minutes
+`1,27,53` (about every 25 minutes at :01, :27 and :53; `NOON_ORDER_POLL_CRON`, gaps of 26, 26 and 8 minutes, all odd and none a multiple of 5, so none shares a tick with the `*/2` sweep or the `*/10` and on-the-5 jobs) and lists the last
+2 hours. The poll has its own per-account RQ job id
+(`marketplace-noon-order-import-poll-<account>`), like the nightly `-catch-up` one, so a
+queued or running poll never drops a webhook or manual 7-day import (which keep
+`marketplace-noon-order-import-<account>`), and a second poll is still deduped. Overlapping
+jobs on one account are safe: `import_order` takes the `FOR UPDATE` lock on the order's
+identity key first, and `upsert_marketplace_order` falls back on the unique
+`order_identity_key` when two workers insert the same new order. The daily 7-day re-list is the existing 23:59
+`enqueue_nightly_order_reconciliation` catch-up (`services/marketplace_order_reconciliation.py`),
+so later status changes on already-seen orders are still caught. An order whose import
+failed more than about 2 hours ago is not retried by the poll; it is retried by the
+23:59 catch-up or by the manual "Import Noon Orders" action. `list_orders` retries a 429 page
+3 times (2, 4, 8 s, `Retry-After` ignored); `NoonClient.request()` never retries.
+
 ## Noon shipment from the Delivery Note (#415)
 
 The Delivery Note of a Noon Sales Order is the shipment. The Noon adapter

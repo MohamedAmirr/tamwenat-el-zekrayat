@@ -178,17 +178,21 @@ Accepted `FBPI::ORDER_SYNC`:
   (`marketplace-noon-order-refresh-<order>`) and per account
   (`marketplace-noon-order-import-<account>`), with RQ `deduplicate=True`. A
   delivery that arrives while the same job is queued or running queues nothing,
-  still gets 200, and logs `refresh_queued: false` (or `import_queued: false`).
+  still gets 200, and logs `refresh_queued: false` (or `import_queued: false`). The
+  25-minute poll uses its own id (`marketplace-noon-order-import-poll-<account>`), so a
+  queued or running poll never makes the webhook's 7-day import drop; the two may run
+  at once, which is safe because of the per-order `FOR UPDATE` identity lock and the
+  unique `order_identity_key` backstop.
   The job fetches the order when it runs, so a queued job already sees what the
   redelivered event announced; if the fetch had already happened (job running), the
-  next webhook or the hourly poll (#145) picks the change up. There is no
+  next webhook or the 25-minute poll (#145, #525) picks the change up. There is no
   `message_id` dedup doctype.
 - **404 from `GetFbpiOrder`**: the refresh only runs for an order we already
   imported, so a 404 means Noon no longer returns it (or is transiently unavailable).
   The refresh logs an `Error` row with trigger source "Noon Webhook" and falls back
   once to the account import (the import never calls back into a refresh, so there is
   no loop; bounded per delivery). That import re-lists only the last 7 days, so for an
-  older order only the `Error` row is written. The hourly poll remains the safety net. A Desk "Refresh from Noon" (source
+  older order only the `Error` row is written. The poll (about every 25 minutes, 2-hour window) and the 23:59 catch-up's 7-day re-list remain the safety net. A Desk "Refresh from Noon" (source
   "Manual") that gets a 404 still fails visibly. 401 re-authentication is not
   handled here.
 

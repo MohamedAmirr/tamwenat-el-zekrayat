@@ -274,6 +274,6 @@ window. Each account's run writes one `Marketplace Sync Log` row
 holds the orders imported, first syncs scheduled (including those the import
 itself scheduled for newly inserted orders, cancelled ones too) and failures; an account that
 raised records an Error row with the traceback. The Noon catch-up job has its
-own job id, so the hourly Noon poll never runs it and is not deduplicated
+own job id, so the scheduled Noon poll never runs it and is not deduplicated
 against it. See `docs/user-actions.md` for scheduler restart and the
 production timezone check.

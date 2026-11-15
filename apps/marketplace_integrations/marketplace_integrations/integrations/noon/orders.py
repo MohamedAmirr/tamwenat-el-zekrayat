@@ -3,11 +3,12 @@
 
 """Noon FBPI order polling and persistence (#145).
 
-Triggered by the hourly poll, a manual Desk action, and the
+Triggered by the scheduled poll (about every 25 minutes, 2-hour window, #525), the nightly
+23:59 catch-up (7-day window), a manual Desk action, and the
 ``FBPI::ORDER_SYNC`` webhook (``api/noon_webhooks.py``, #163, #400), which queues
 this same deduplicated import, or - when the event's ``order_nr`` names an order
 already imported - the per-order refresh (``enqueue_order_refresh()`` below).
-``poll_all_accounts()`` is the hourly ``hooks.py``
+``poll_all_accounts()`` is the ``hooks.py``
 scheduler entry; ``queue_order_import()``/``run_order_import()`` are the
 manual Desk-triggered equivalent, both funnelled through the same
 ``import_orders_created_between()`` so neither path reimplements the
@@ -29,6 +30,7 @@ stored customer name is still blank (see ``_maybe_fetch_customer_data()``
 below).
 """
 
+import time
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
@@ -39,7 +41,9 @@ from frappe.utils import cstr, flt
 from marketplace_integrations.integrations.noon.catalog import get_account, validate_connection_enabled
 from marketplace_integrations.integrations.noon.client import NoonClient
 from marketplace_integrations.integrations.noon.constants import (
+	LIST_ORDERS_429_BACKOFF_SECONDS,
 	ORDER_IMPORT_LOOKBACK_DAYS,
+	ORDER_POLL_WINDOW_HOURS,
 	ORDERS_PAGE_SIZE,
 )
 from marketplace_integrations.integrations.noon.expected_change import incoming_matcher
@@ -109,6 +113,14 @@ def list_orders(account, created_after=None, created_before=None):
 	while True:
 		params = {"next_token": next_token} if next_token else None
 		response = client.request("POST", LIST_ORDERS_PATH, json=body, params=params)
+		# #525: a read-only list is idempotent, so a rate-limited page is retried (same
+		# body and next_token) after 2, 4 and 8 s; Retry-After is ignored. NoonClient
+		# itself never replays a 429.
+		for wait in LIST_ORDERS_429_BACKOFF_SECONDS:
+			if response.status_code != 429:
+				break
+			time.sleep(wait)
+			response = client.request("POST", LIST_ORDERS_PATH, json=body, params=params)
 		if response.status_code != 200:
 			frappe.throw(client.error_message(response))
 		try:
@@ -657,11 +669,11 @@ def _as_noon_timestamp(value):
 	return value.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _run_import_for_account(account_name, trigger_source, catch_up_unlinked=False):
-	"""Shared by ``run_order_import()`` (manual) and ``poll_all_accounts()``
-	(scheduled): resolve and validate the account, then re-list and import
-	the fixed lookback window (decision 18) - ``created_before`` is fixed at
-	this call's own start, per decision 11.
+def _run_import_for_account(account_name, trigger_source, catch_up_unlinked=False, window_hours=None):
+	"""Shared by ``run_order_import()`` (manual) and the scheduled jobs: resolve
+	and validate the account, then re-list and import the lookback window - the
+	last ``window_hours`` hours, or the 7-day ``ORDER_IMPORT_LOOKBACK_DAYS`` (decision 18)
+	when None. ``created_before`` is fixed at this call's own start, per decision 11.
 	"""
 	account = get_account(account_name)
 	validate_connection_enabled(account)
@@ -680,7 +692,10 @@ def _run_import_for_account(account_name, trigger_source, catch_up_unlinked=Fals
 	# commit and the lock. See ``docs/frappe-conventions.md`` and
 	# ``_import_order_isolated()``'s/``import_order()``'s own docstrings.
 	run_started = datetime.now(UTC)
-	created_after = _as_noon_timestamp(run_started - timedelta(days=ORDER_IMPORT_LOOKBACK_DAYS))
+	window = (
+		timedelta(days=ORDER_IMPORT_LOOKBACK_DAYS) if window_hours is None else timedelta(hours=window_hours)
+	)
+	created_after = _as_noon_timestamp(run_started - window)
 	created_before = _as_noon_timestamp(run_started)
 
 	imported, errors = import_orders_created_between(
@@ -705,7 +720,7 @@ def _run_import_for_account(account_name, trigger_source, catch_up_unlinked=Fals
 	return {"imported": len(imported), "errors": len(errors), "scheduled": scheduled}
 
 
-def enqueue_order_import(account_name, trigger_source="Manual", catch_up_unlinked=False):
+def enqueue_order_import(account_name, trigger_source="Manual", catch_up_unlinked=False, window_hours=None):
 	"""Shared enqueue helper for a per-account, deduplicated
 	``run_order_import`` job on the ``long`` queue (decision 12's job_id
 	scheme) - the one place ``queue_order_import()``, ``poll_all_accounts()``,
@@ -719,9 +734,24 @@ def enqueue_order_import(account_name, trigger_source="Manual", catch_up_unlinke
 	(e.g. Redis down) - callers that need per-call isolation from that
 	(``poll_all_accounts()``) catch it themselves.
 	"""
-	# The nightly catch-up has its own job id so it is not dropped as a duplicate of
-	# a running hourly/manual import (and vice versa); both are still one per account.
-	job_prefix = f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-catch-up" if catch_up_unlinked else _ORDER_IMPORT_RQ_JOB_PREFIX
+	# The nightly catch-up and the 25-minute poll (the only caller that narrows the window)
+	# each have their own job id, so neither is dropped as a duplicate of a queued/running
+	# webhook or manual import (and vice versa): a dropped 7-day import could otherwise be
+	# replaced by a poll whose 2h window misses the order. Each kind is still deduplicated
+	# within itself, one per account. Overlapping jobs are safe: ``import_order()`` takes the
+	# ``FOR UPDATE`` lock on the order's identity key before anything else, and
+	# ``upsert_marketplace_order()`` falls back on the unique ``order_identity_key``
+	# (``UniqueValidationError``) when two workers insert the same new order.
+	if catch_up_unlinked:
+		job_prefix = f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-catch-up"
+	elif window_hours is not None:
+		job_prefix = f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-poll"
+	else:
+		job_prefix = _ORDER_IMPORT_RQ_JOB_PREFIX
+	kwargs = {}
+	if window_hours is not None:
+		# Only the scheduled poll narrows the window; every other caller keeps the 7-day lookback.
+		kwargs["window_hours"] = window_hours
 	return frappe.enqueue(
 		run_order_import,
 		queue="long",
@@ -731,6 +761,7 @@ def enqueue_order_import(account_name, trigger_source="Manual", catch_up_unlinke
 		account_name=account_name,
 		trigger_source=trigger_source,
 		catch_up_unlinked=catch_up_unlinked,
+		**kwargs,
 	)
 
 
@@ -747,8 +778,9 @@ def queue_order_import(account_name):
 	return {"queued": job is not None}
 
 
-def run_order_import(account_name, trigger_source="Manual", catch_up_unlinked=False):
-	"""The enqueued worker target for a manual order-import run.
+def run_order_import(account_name, trigger_source="Manual", catch_up_unlinked=False, window_hours=None):
+	"""The enqueued worker target for an order-import run (manual, webhook,
+	scheduled poll or nightly catch-up). ``window_hours`` None lists the 7-day lookback.
 
 	Switches to Administrator (decision 12, matching Talabat's/Shopify's
 	webhook/background workers) since this runs detached from whatever
@@ -756,7 +788,7 @@ def run_order_import(account_name, trigger_source="Manual", catch_up_unlinked=Fa
 	"""
 	frappe.set_user("Administrator")
 	if not catch_up_unlinked:
-		return _run_import_for_account(account_name, trigger_source)
+		return _run_import_for_account(account_name, trigger_source, window_hours=window_hours)
 	try:
 		return _run_import_for_account(account_name, trigger_source, catch_up_unlinked=True)
 	except Exception:
@@ -910,17 +942,24 @@ def run_order_refresh(marketplace_order_name, trigger_source="Manual"):
 
 
 def poll_all_accounts():
-	"""Hourly scheduler entry (decision 18, ``hooks.py``'s
-	``scheduler_events``) - deliberately lightweight: lists enabled Noon
+	"""Scheduler entry, about every 25 minutes (at :01, :27 and :53; #525, ``NOON_ORDER_POLL_CRON`` in
+	``hooks.py``) - deliberately lightweight: lists enabled Noon
 	accounts and enqueues one deduplicated background job per account on the
 	``long`` queue, then returns immediately. It never lists or imports
 	orders itself.
+
+	The job lists only the last ``ORDER_POLL_WINDOW_HOURS`` (2) hours, an
+	overlapping window that also covers a missed run - Noon's guidance for
+	reconciling a delayed ``FBPI::ORDER_SYNC`` webhook. The 7-day lookback re-list
+	(for later status changes on already-seen orders, decision 18) is the nightly 23:59
+	catch-up (``enqueue_nightly_order_reconciliation()``), which runs this same import
+	without a window.
 
 	Previously this function ran the full "list, then import" loop for every
 	enabled account inline, as one job on the scheduler's own ``default``
 	queue - which has a short timeout. At any real order volume that risks a
 	silent RQ timeout mid-sweep, which would then skip every account after
-	the one that timed out, every single hour, with no visible error beyond
+	the one that timed out, on every run, with no visible error beyond
 	an RQ timeout log entry (post-#145-review finding). Moving the actual
 	per-account work into its own enqueued ``long``-queue job, one job per
 	account, means one account's work can run arbitrarily long without ever
@@ -928,19 +967,16 @@ def poll_all_accounts():
 	as a normal RQ job failure instead of silently truncating the sweep.
 
 	Reuses ``run_order_import()`` (the same worker ``queue_order_import()``
-	already enqueues for a manual Desk-triggered import) under the exact
-	same ``job_id`` scheme - ``f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-{account_name}"``
-	with ``deduplicate=True`` - so a manual import and this hourly poll for
-	the same account properly dedupe against each other: RQ refuses to
-	enqueue a second job under a job_id that is already queued/running, so
-	neither path can ever run concurrently against the same account. Only
-	``trigger_source`` differs ("Scheduled Reconciliation" here vs. "Manual"
-	for the Desk-triggered path) - both still re-list the same fixed 7-day
-	lookback window (decision 18) via ``_run_import_for_account()``, which
-	every enabled Noon account gets fresh on every run, not just orders
-	created since the previous run, because ``ListFbpiOrders`` only filters
-	on order creation time and would otherwise never surface a later
-	``mp_status``/``integration_status`` change on an already-seen order.
+	already enqueues for a manual Desk-triggered import) under its own
+	``job_id`` - ``f"{_ORDER_IMPORT_RQ_JOB_PREFIX}-poll-{account_name}"`` with
+	``deduplicate=True`` - so a second poll for the same account is dropped while one
+	is queued/running, but a webhook or manual import (which keep the plain
+	``-{account_name}`` id and the 7-day window) is never dropped because a poll is in
+	flight. The jobs may therefore overlap on one account; per-order safety comes from
+	``import_order()``'s ``FOR UPDATE`` identity lock and the unique-key backstop in
+	``upsert_marketplace_order()``. ``trigger_source`` and the window differ
+	("Scheduled Reconciliation" with the short window here vs. "Manual" with the
+	7-day window for the Desk-triggered path).
 
 	Enqueuing itself is wrapped per account so that a failure to enqueue one
 	account's job (e.g. a transient Redis error) cannot stop the remaining
@@ -959,7 +995,9 @@ def poll_all_accounts():
 	queued = 0
 	for account_name in accounts:
 		try:
-			job = enqueue_order_import(account_name, trigger_source="Scheduled Reconciliation")
+			job = enqueue_order_import(
+				account_name, trigger_source="Scheduled Reconciliation", window_hours=ORDER_POLL_WINDOW_HOURS
+			)
 		except Exception:
 			frappe.log_error(
 				title="Noon order poll: failed to enqueue account", message=frappe.get_traceback()
