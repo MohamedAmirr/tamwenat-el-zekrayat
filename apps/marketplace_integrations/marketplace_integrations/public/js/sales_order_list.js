@@ -8,8 +8,10 @@
 // - Two columns that say where an order is, in plain words (text plus colour, one meaning per pill):
 //   * Status (replaces ERPNext's indicator for a submitted order that is not Closed / On Hold / Cancelled / Draft
 //     and has no advance payment pending): Not prepared yet, Ready waiting for pickup, On the way, Delivered with
-//     payment not received, Delivered and paid, Delivery problem, plus the red Waiting for Stock (#500).
-//   * Payment (the placeholder Custom Field custom_payment_display): Paid in advance, Paid (invoice), Pay on delivery.
+//     payment not received, Delivered and paid, Delivery problem, plus the red Waiting for Stock (#500). The red
+//     Needs Attention pill (#533, custom_needs_attention, hover = custom_attention_reason) comes before all of them.
+//   * Payment (the placeholder Custom Field custom_payment_display): Paid in advance, Paid (invoice), Partially paid (#534, hover = the amount
+//     still owed), Pay on delivery.
 //   Both come from ONE call per list page (api/order_list_status.py): the list row alone cannot tell whether a draft
 //   Delivery Note exists or whether an invoice is paid. Rows show "Loading..." until it answers; if the call fails the
 //   native indicator stays and the Payment cell is empty. Every pill has a one-line hover title (meaning and next
@@ -29,6 +31,8 @@
 	const EARLIEST_FIELD = "custom_earliest_delivery_date";
 	const STAGE_FIELD = "custom_order_stage";
 	const PAYMENT_FIELD = "custom_payment_display";
+	const ATTENTION_FIELD = "custom_needs_attention";
+	const ATTENTION_REASON_FIELD = "custom_attention_reason";
 	// Frappe's data-fieldname of the indicator column in the list header and rows.
 	const STATUS_COLUMN = "status_field";
 	const WAITING_FOR_STOCK = "Waiting for Stock";
@@ -51,6 +55,12 @@
 	// Evaluated on use (not at load) so the strings are translated once the user's language is loaded.
 	function status_pills() {
 		return {
+			// The legend's generic line; a row shows its own custom_attention_reason instead (status_info).
+			needs_attention: {
+				label: __("Needs Attention"),
+				color: "red",
+				tip: __("Something about this order needs a person. Hover the pill on the order to read what, then open the order."),
+			},
 			not_prepared: {
 				label: __("Not prepared yet"),
 				color: "gray",
@@ -119,6 +129,11 @@
 				color: "green",
 				tip: __("The marketplace collects the payment. Nothing to collect."),
 			},
+			partially_paid: {
+				label: __("Partially paid"),
+				color: "orange",
+				tip: __("Part of the total is paid. Next step: collect the rest when the parcel is delivered."),
+			},
 			cod: {
 				label: __("Pay on delivery"),
 				color: "gray",
@@ -169,6 +184,13 @@
 	// The Status pill of an order: {label, color, tip, filter?}, or null when ERPNext's own indicator stays.
 	// Waiting for Stock (written by services/order_reservation.py) comes first; delivered splits on payment.
 	function status_info(doc) {
+		// Needs Attention (#533) comes before every other pill, Waiting for Stock included. Its hover title is the
+		// order's own reason (escaped when the badge is built). The form header gets it too (same function).
+		// Submitted orders only (Closed and On Hold included); a cancelled order keeps ERPNext's indicator.
+		if (doc && doc.docstatus === 1 && Number(doc[ATTENTION_FIELD]) === 1) {
+			const pill = status_pills().needs_attention;
+			return { ...pill, tip: doc[ATTENTION_REASON_FIELD] || pill.tip, filter: `${ATTENTION_FIELD},=,1` };
+		}
 		if (!covered(doc)) return null;
 		const pills = status_pills();
 		if (doc[STAGE_FIELD] === WAITING_FOR_STOCK) {
@@ -183,8 +205,11 @@
 		const filter = `status,=,${doc.status}`;
 		if (entry.loading) return { ...loading_pill(), filter };
 		let key = entry.state.stage;
-		// delivered splits on payment: only "pay on delivery" is still unpaid (advance, invoice and marketplace are paid)
-		if (key === "delivered") key = entry.state.payment === "cod" ? "delivered_unpaid" : "delivered_paid";
+		// delivered splits on payment: "pay on delivery" and "partially paid" are still unpaid (advance, invoice and
+		// marketplace are paid)
+		if (key === "delivered") {
+			key = ["cod", "partially_paid"].includes(entry.state.payment) ? "delivered_unpaid" : "delivered_paid";
+		}
 		return pills[key] ? { ...pills[key], filter } : null;
 	}
 
@@ -195,6 +220,11 @@
 		if (!entry || entry.failed) return "";
 		if (entry.loading) return pill_html(loading_pill());
 		const pill = payment_pills()[entry.state.payment];
+		if (pill && entry.state.payment === "partially_paid" && entry.state.owed !== undefined) {
+			// the hover says how much is still owed (the pill title is escaped when the badge is built)
+			const owed = `${Number(entry.state.owed).toFixed(2)} ${doc.currency || ""}`.trim();
+			return pill_html({ ...pill, tip: __("Still owed: {0}. Next step: collect it when the parcel is delivered.", [owed]) });
+		}
 		return pill ? pill_html(pill) : "";
 	}
 
@@ -355,6 +385,8 @@
 				PLATFORM_FIELD,
 				EARLIEST_FIELD,
 				STAGE_FIELD,
+				ATTENTION_FIELD,
+				ATTENTION_REASON_FIELD,
 				"advance_payment_status",
 			]),
 		];

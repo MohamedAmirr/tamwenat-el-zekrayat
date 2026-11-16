@@ -13,9 +13,9 @@
 	const COLORS = { Noon: "yellow", Shopify: "green", Talabat: "orange" };
 	const FALLBACK_COLOR = "grey";
 
-	// Delivery Note carrier (the native `transporter`, a Supplier name): Noon, Bosta and the manual courier
-	// "Manual delivery" have a color; any other carrier is grey.
-	const CARRIER_COLORS = { Noon: "yellow", Bosta: "red", "Manual delivery": "green" };
+	// Delivery Note carrier (the native `transporter`, a Supplier name): Noon and Bosta have a color;
+	// any other carrier is grey.
+	const CARRIER_COLORS = { Noon: "yellow", Bosta: "red" };
 
 	function lookup(map, name) {
 		return Object.prototype.hasOwnProperty.call(map, name) ? map[name] : FALLBACK_COLOR;

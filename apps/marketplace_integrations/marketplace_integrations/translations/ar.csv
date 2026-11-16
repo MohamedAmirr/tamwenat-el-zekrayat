@@ -121,7 +121,7 @@ The marketplace refunded this order,استرد السوق هذا الطلب
 The marketplace reported a return for this order,أفاد السوق بوجود مرتجع لهذا الطلب
 The marketplace snapshot has duplicate or missing line identities.,تحتوي لقطة السوق على هويات بنود مكرّرة أو مفقودة.
 The reconciled Sales Order line is missing from ERPNext.,بند أمر البيع المتوافق مفقود من ERPNext.
-"The shipping charge differs from the submitted Sales Order (Sales Order {0}, marketplace {1}). A submitted Sales Order's charges are not edited automatically; cancel and amend it (choose Cancel in ERPNext only when asked, so the marketplace order stays open).",تختلف رسوم الشحن عن أمر البيع المقدَّم (أمر البيع {0}، السوق {1}). لا تُعدَّل رسوم أمر البيع المقدَّم تلقائيًا؛ ألغِه وعدّله (اختر «الإلغاء في ERPNext فقط» عند السؤال ليبقى طلب السوق مفتوحًا).
+"The shipping charge differs from the submitted Sales Order (Sales Order {0}, marketplace {1}) while an item edit waits for the marketplace's confirmation. Run the update again once the edit is confirmed.","تختلف رسوم الشحن عن أمر البيع المقدَّم (أمر البيع {0}، السوق {1}) بينما ينتظر تعديل الأصناف تأكيد السوق. شغّل التحديث مرة أخرى بعد تأكيد التعديل."
 The submitted Sales Order changes are eligible for ERPNext validation.,تغييرات أمر البيع المقدَّم مؤهّلة للتحقق في ERPNext.
 {0} The Sales Order is Closed; it will be reopened first.,{0} أمر البيع مغلق؛ سيُعاد فتحه أولًا.
 "{0}, but ERPNext already delivered ({1}) and invoiced ({2}) it. The Sales Order was not changed. Create a Sales Return and a Credit Note (compensating transactions) as needed, or review the order manually.",{0}، لكن ERPNext سلّمه ({1}) وفوّتره ({2}) مسبقًا. لم يُغيَّر أمر البيع. أنشئ مرتجع بيع وإشعار دائن (معاملتين تعويضيتين) حسب الحاجة، أو راجع الطلب يدويًا.
@@ -1499,7 +1499,7 @@ The marketplace cancelled the order after fulfillment and ERPNext has delivery. 
 The order was cancelled after fulfillment and ERPNext has billing without delivery. Review what happened to the goods.,أُلغي الطلب بعد التنفيذ، ولدى ERPNext فوترة بلا تسليم. راجع ما حدث للبضاعة.
 No reconciled snapshot baseline is available for this Sales Order. Review the order against ERPNext.,لا توجد لقطة أساس مطابَقة لأمر البيع هذا. راجع الطلب مقابل ERPNext.
 The marketplace snapshot has duplicate or missing line identities. Review the order data.,لقطة السوق فيها هويات سطور مكررة أو مفقودة. راجع بيانات الطلب.
-"The shipping charge differs from the submitted Sales Order; cancel and amend it (choose Cancel in ERPNext only when asked, so the Shopify order stays open).",رسوم الشحن تختلف عن أمر البيع المعتمد؛ ألغه وعدّله (اختر «الإلغاء في ERPNext فقط» عند السؤال ليبقى طلب Shopify مفتوحًا).
+"The shipping charge changed while an item edit waits for Shopify's confirmation; run the update again once the edit is confirmed.",تغيرت رسوم الشحن بينما ينتظر تعديل الأصناف تأكيد Shopify؛ شغّل التحديث مرة أخرى بعد تأكيد التعديل.
 "ERPNext refused to add or remove a Sales Order row (it is delivered, ordered, in a work order or billed). Amend the Sales Order manually.",رفض ERPNext إضافة صف إلى أمر البيع أو حذفه (مسلَّم أو مطلوب أو في أمر عمل أو مفوتر). عدّل أمر البيع يدويًا.
 A submitted Sales Order line is already billed in ERPNext. Cancel the invoice or issue a Credit Note.,أحد سطور أمر البيع المعتمد مفوتر مسبقًا في ERPNext. ألغِ الفاتورة أو أصدر إشعارًا دائنًا.
 ERPNext delivery or billing execution blocks an automatic submitted-order update.,تنفيذ التسليم أو الفوترة في ERPNext يمنع تعديل أمر البيع المعتمد تلقائيًا.
@@ -1903,7 +1903,6 @@ Saving this listing can re-sync this account's failed orders and push stock auto
 inDrive,inDrive
 Uber,Uber
 Own driver,سائق خاص
-Manual delivery,توصيل يدوي
 Earliest Delivery Date,أقرب تاريخ تسليم
 In {0} days,متبقٍ: {0} يوم
 Overdue 1 day,متأخر يوم واحد
@@ -2184,3 +2183,53 @@ Payment states,حالات الدفع
 What do these states mean?,ماذا تعني هذه الحالات؟
 Too many orders were asked for at once. Ask for at most {0}.,تم طلب عدد كبير من الطلبات دفعة واحدة. اطلب {0} كحد أقصى.
 Send a list of Sales Order names.,أرسل قائمة بأسماء أوامر البيع.
+Item Image,صورة العنصر
+Pull Missing Images,سحب الصور الناقصة
+Download images from Shopify for mapped Items that have no image? Existing images are never replaced.,هل تريد تنزيل الصور من Shopify للعناصر المرتبطة التي ليس لها صورة؟ لا يتم استبدال الصور الموجودة أبدًا.
+Queuing image pull...,جارٍ إضافة سحب الصور إلى قائمة الانتظار...
+Updated,تم التحديث
+Pulling images from Shopify,جارٍ سحب الصور من Shopify
+Nothing to pull.,لا يوجد ما يمكن سحبه.
+"Pulling... {0} updated, {1} failed, {2} skipped so far.","جارٍ السحب... تم تحديث {0} وفشل {1} وتم تخطي {2} حتى الآن."
+"Pull complete: {0} updated, {1} failed, {2} skipped.","اكتمل السحب: تم تحديث {0} وفشل {1} وتم تخطي {2}."
+Image pull failed for account {0}: {1},فشل سحب الصور للحساب {0}: {1}
+Could not retrieve the image pull status.,تعذر استرجاع حالة سحب الصور.
+A missing-image pull is already running for Marketplace Account {0}.,يوجد سحب للصور الناقصة قيد التشغيل بالفعل لحساب السوق {0}.
+Image pull job not found.,لم يتم العثور على مهمة سحب الصور.
+The image pull timed out.,انتهت مهلة سحب الصور.
+Variant not found on Shopify,لم يتم العثور على النسخة في Shopify
+No image on Shopify,لا توجد صورة في Shopify
+The image URL is not https.,رابط الصورة ليس https.
+The image download failed with HTTP {0}.,فشل تنزيل الصورة بالرمز HTTP {0}.
+The download is not an image.,الملف الذي تم تنزيله ليس صورة.
+SVG images are not accepted.,صور SVG غير مقبولة.
+Item already has an image,العنصر لديه صورة بالفعل
+Attention Reason,سبب الانتباه
+Mark as Resolved,تحديد كمحلول
+Marking as resolved...,جارٍ التحديد كمحلول...
+The order was marked as resolved.,تم تحديد الطلب كمحلول.
+Something about this order needs a person.,هناك أمر في هذا الطلب يحتاج إلى تدخل شخص.
+"Something about this order needs a person. Hover the pill on the order to read what, then open the order.","هناك أمر في هذا الطلب يحتاج إلى تدخل شخص. مرر المؤشر فوق الشارة على الطلب لقراءة التفاصيل ثم افتح الطلب."
+A reason is needed to flag an order.,يلزم ذكر سبب لتمييز الطلب.
+Needs Attention: {0},يحتاج إلى انتباه: {0}
+Needs Attention resolved. The reason was: {0},تم حل ما يحتاج إلى انتباه. كان السبب: {0}
+Only a submitted or cancelled Sales Order can be marked as resolved.,يمكن تحديد أمر البيع كمحلول فقط بعد اعتماده أو إلغائه.
+"The Marketplace Account has no ERPNext Shipping Income Account, so a shipping charge cannot be added.","لا يحتوي حساب السوق على حساب دخل الشحن في ERPNext، لذلك لا يمكن إضافة رسوم شحن."
+Sales Invoice {0} already bills this order.,فاتورة المبيعات {0} تحاسب هذا الطلب بالفعل.
+The parcel was already picked up (Delivery Note {0}).,تم استلام الطرد بالفعل (مذكرة التسليم {0}).
+Shopify changed the shipping from {0} to {1}.,غيّرت Shopify الشحن من {0} إلى {1}.
+"The Sales Order was not changed. Make a Credit Note / Debit Note for the difference.",لم يتغير أمر البيع. أنشئ إشعار دائن / إشعار مدين للفرق.
+"Shopify changed the shipping from {0} to {1}, but the change was not applied.","غيّرت Shopify الشحن من {0} إلى {1}، لكن التغيير لم يُطبَّق."
+"The order changed while Bosta was being updated, so nothing was changed. Use Retry Sync.","تغيّر الطلب أثناء تحديث Bosta، لذلك لم يتغير شيء. استخدم إعادة محاولة المزامنة."
+"Shopify's shipping change could not be applied to the Sales Order; the order was not changed. Use Retry Sync after the cause is fixed.",تعذر تطبيق تغيير الشحن من Shopify على أمر البيع؛ لم يتغير الطلب. استخدم إعادة محاولة المزامنة بعد إصلاح السبب.
+"Bosta did not accept the new COD of Delivery Note {0}: {1}",لم تقبل Bosta مبلغ التحصيل الجديد لمذكرة التسليم {0}: {1}
+"Could not confirm that Bosta updated the COD of Delivery Note {0}. It is listed in Needs Attention as Bosta COD Differs: Retry there puts the old COD back.",تعذر التأكد من أن Bosta حدّثت مبلغ التحصيل لمذكرة التسليم {0}. هي مدرجة في «يحتاج إلى انتباه» باسم «اختلاف مبلغ التحصيل في Bosta»: إعادة المحاولة هناك تعيد المبلغ القديم.
+Shipping changed from {0} to {1}. Source: Shopify.,تغيّر الشحن من {0} إلى {1}. المصدر: Shopify.
+Refund owed: {0}. Refund it in Shopify.,مبلغ مستحق الاسترداد: {0}. استرده في Shopify.
+Bosta shipment started; cancel it if the customer picks up from the store.,بدأت شحنة Bosta؛ ألغها إذا استلم العميل من المتجر.
+The shipping charge changed in the marketplace from {0} to {1}.,تغيّرت رسوم الشحن في السوق من {0} إلى {1}.
+Shipping of Sales Order {0} changed from {1} to {2},تغيّر شحن أمر البيع {0} من {1} إلى {2}
+Shipping of Sales Order {0} was not changed (Shopify: from {1} to {2}),لم يتغير شحن أمر البيع {0} (Shopify: من {1} إلى {2})
+Partially paid,مدفوع جزئيًا
+Part of the total is paid. Next step: collect the rest when the parcel is delivered.,تم دفع جزء من الإجمالي. الخطوة التالية: حصّل الباقي عند تسليم الطرد.
+Still owed: {0}. Next step: collect it when the parcel is delivered.,المتبقي: {0}. الخطوة التالية: حصّله عند تسليم الطرد.

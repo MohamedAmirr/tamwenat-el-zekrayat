@@ -45,7 +45,7 @@ from copy import deepcopy
 
 import frappe
 from frappe import _
-from frappe.utils import add_days, add_to_date, cint, cstr, flt, getdate, now_datetime, strip_html
+from frappe.utils import add_days, add_to_date, cint, cstr, flt, fmt_money, getdate, now_datetime, strip_html
 
 from marketplace_integrations.integrations.shopify.order_reconciliation import refund_ids as _refund_ids
 from marketplace_integrations.marketplace_integrations.doctype.marketplace_account.marketplace_account import (
@@ -71,6 +71,7 @@ from marketplace_integrations.services.sales_order_reconciliation import (
 	NEEDS_ATTENTION,
 	NO_ACTION,
 	UNSUPPORTED_COMPENSATING_TRANSACTION,
+	UPDATE_SHIPPING,
 	UPDATE_SUBMITTED_ORDER,
 	ReconciliationMismatch,
 	SalesOrderLinesMismatch,
@@ -140,7 +141,7 @@ _RECONCILE_EXECUTE_SAVEPOINT = "marketplace_reconcile_execute"
 # Plan outcomes `_reconcile_submitted_order()` executes against ERPNext (#179): cancel,
 # close the undelivered remainder, and update quantities/rates; every other outcome stays
 # an advisory.  Form load/save (`set_sync_status_from_current_snapshot`) never executes.
-_EXECUTABLE_OUTCOMES = {CANCEL_ORDER, CLOSE_REMAINDER, UPDATE_SUBMITTED_ORDER}
+_EXECUTABLE_OUTCOMES = {CANCEL_ORDER, CLOSE_REMAINDER, UPDATE_SUBMITTED_ORDER, UPDATE_SHIPPING}
 
 
 class SyncBlocker(frappe.ValidationError):
@@ -1899,16 +1900,9 @@ def _apply_snapshot(sales_order, snapshot, marketplace_order_name, shipping_acco
 	# The one charge row, rebuilt from scratch on every call (no template or Shipping Rule is
 	# used).  Shopify's shipping is already net of shipping discounts.
 	if snapshot.get("shipping"):
-		sales_order.append(
-			"taxes",
-			{
-				"charge_type": "Actual",
-				"account_head": shipping_account,
-				"description": "Shipping",
-				"tax_amount": snapshot["shipping"],
-				"included_in_print_rate": 0,
-			},
-		)
+		from marketplace_integrations.services.order_shipping_change import shipping_row
+
+		sales_order.append("taxes", shipping_row(snapshot["shipping"], shipping_account))
 
 	# Recalculates net/grand totals from the rates just overridden above and
 	# the header fields just reset - no Sales Taxes and Charges Template,
@@ -2189,6 +2183,10 @@ def _reconcile_submitted_order(order, sales_order, snapshot, evidence, trigger_s
 		if waiting:
 			return _save_waiting_for_stock(order, waiting, trigger_source, snapshot, reconciliation_plan, erp_state)
 	# Single dispatch point between "act on ERPNext" and "advise only".
+	if reconciliation_plan["outcome"] == UPDATE_SHIPPING:
+		return _execute_shipping_change(
+			order, sales_order, snapshot, reconciliation_plan, erp_state, trigger_source
+		)
 	if reconciliation_plan["outcome"] in _EXECUTABLE_OUTCOMES:
 		return _execute_reconciliation_plan(
 			order, sales_order, snapshot, reconciliation_plan, erp_state, trigger_source
@@ -2196,6 +2194,11 @@ def _reconcile_submitted_order(order, sales_order, snapshot, evidence, trigger_s
 	if reconciliation_plan["outcome"] == NO_ACTION and snapshot:
 		_advance_baseline(order, previous, snapshot)
 	result = _save_reconciliation_advisory(order, reconciliation_plan)
+	if reconciliation_plan.get("shipping") and reconciliation_plan["outcome"] == NEEDS_ATTENTION:
+		# A shipping change held by the planner (#534): nothing was changed, a person is told on the order itself.
+		from marketplace_integrations.services.order_attention import flag_attention
+
+		flag_attention(sales_order.name, reconciliation_plan["message"])
 	_create_sync_log(
 		order,
 		trigger_source,
@@ -2205,6 +2208,202 @@ def _reconcile_submitted_order(order, sales_order, snapshot, evidence, trigger_s
 		reconciliation_plan=reconciliation_plan,
 		erp_state=erp_state,
 	)
+	return result
+
+
+def _execute_shipping_change(order, sales_order, snapshot, reconciliation_plan, erp_state, trigger_source):
+	"""Apply Shopify's shipping change to the submitted Sales Order (#534, ``services/order_shipping_change.py``).
+
+	1. An invoice or a pickup (``blocker``): the order is NOT changed; the baseline moves (the change is reported once)
+	   and the order is flagged "make a Credit Note / Debit Note".
+	2. A Bosta shipment that forbids a COD update, or whose update fails: nothing is changed, the baseline is kept (Retry
+	   Sync applies the change later) and the order is flagged.
+	3. A Created Bosta shipment gets the new COD first. That call commits, so it runs before the savepoint, and the
+	   Marketplace Order row is locked again and reloaded after it.
+	4. The change itself runs in a savepoint; any ERPNext refusal rolls it back, puts the old COD back at Bosta and holds
+	   the change like step 2.
+
+	The Needs Attention flags are written last, after every save of the Sales Order (``order_attention``). Never commits
+	(except Bosta's own COD call, see 3)."""
+	from marketplace_integrations.services import order_shipping_change as shipping_change
+
+	name = sales_order.name
+	currency = erp_state.get("currency")
+	shipping = reconciliation_plan["shipping"]
+	old, new = flt(shipping["previous"]), flt(shipping["current"])
+	args = (order, name, snapshot, reconciliation_plan, erp_state, trigger_source)
+	if order.get("sync_reason_code") in (reasons.SHIPPING_CHANGE_FAILED, reasons.PERMISSION_DENIED) and trigger_source not in (
+		"Manual",
+		"Manual Resync",
+	):
+		# An earlier run failed after (maybe) calling Bosta: only a person's Retry Sync tries again, so a sweep or a
+		# re-import never sends the same COD twice.
+		return {"ok": False, "status": order.erpnext_sync_status, "error": order.last_sync_error}
+	why = shipping_change.blocker(name)
+	if why:
+		return _finish_shipping_change(
+			*args, [shipping_change.blocked_reason(old, new, why, currency)], applied=False
+		)
+	account = _get_account(order).erpnext_shipping_account
+	try:
+		cod, cod_reasons = shipping_change.cod_plan(sales_order, new, account)
+	except frappe.ValidationError as exc:
+		return _hold_shipping_change(*args, strip_html(cstr(exc)))
+	if cod_reasons:
+		return _hold_shipping_change(*args, " ".join(cod_reasons))
+	sent = bool(cod) and cod.new != cod.old
+	if sent:
+		stored_hash, stored_modified = order.last_synced_hash, sales_order.modified
+		problem = shipping_change.send_cod(cod)
+		# The COD call committed and freed the locks: lock the Marketplace Order and the Sales Order again and check that
+		# the change planned above is still the current one.
+		frappe.db.get_value("Marketplace Order", order.name, "name", for_update=True)
+		order.reload()
+		if problem:
+			return _hold_shipping_change(*args, problem)
+		if (
+			order.last_synced_hash != stored_hash
+			or frappe.db.get_value("Sales Order", name, "modified", for_update=True) != stored_modified
+		):
+			why = _("The order changed while Bosta was being updated, so nothing was changed. Use Retry Sync.")
+			return _hold_shipping_change(*args, _undo_cod(order, cod, why))
+	frappe.db.savepoint(_RECONCILE_EXECUTE_SAVEPOINT)
+	try:
+		applied = shipping_change.apply(name, new, account, cod=cod.new if cod else None)
+	except shipping_change.ShippingChangeBlocked as exc:
+		_rollback_reconcile_savepoint()
+		frappe.clear_messages()
+		blocked = [shipping_change.blocked_reason(old, new, strip_html(cstr(exc)), currency)]
+		if sent:
+			blocked.append(_undo_cod(order, cod, ""))
+		return _finish_shipping_change(*args, [text.strip() for text in blocked if text.strip()], applied=False)
+	except frappe.PermissionError:
+		_rollback_reconcile_savepoint()
+		if sent:
+			_undo_cod(order, cod, "")
+		frappe.clear_messages()
+		order.reload()
+		result = _save_failure(
+			order,
+			_("You do not have permission to change the linked Sales Order in ERPNext."),
+			reasons.PERMISSION_DENIED,
+		)
+		result["reconciliation"] = reconciliation_plan
+		_create_sync_log(
+			order,
+			trigger_source,
+			"Invalid",
+			snapshot,
+			result,
+			reconciliation_plan=reconciliation_plan,
+			erp_state=erp_state,
+		)
+		return result
+	except frappe.ValidationError as exc:
+		_rollback_reconcile_savepoint()
+		frappe.clear_messages()
+		why = strip_html(cstr(exc))
+		if sent:
+			why = _undo_cod(order, cod, why)
+		return _hold_shipping_change(*args, why)
+	except Exception:
+		_rollback_reconcile_savepoint()
+		if sent:
+			_undo_cod(order, cod, "")
+		raise
+	result = _finish_shipping_change(
+		order, name, snapshot, reconciliation_plan, erp_state, trigger_source,
+		shipping_change.flags_after_apply(applied), applied=True,
+	)  # fmt: skip
+	frappe.db.release_savepoint(_RECONCILE_EXECUTE_SAVEPOINT)
+	return result
+
+
+def _undo_cod(order, cod, why):
+	"""The order could not be changed after Bosta took the new COD: send the old COD back, lock the Marketplace Order
+	again (the Bosta call commits, and a failed restore rolls back) and reload it. Returns ``why`` plus, when Bosta did
+	not confirm the old COD, the sentence that says the difference is listed as Bosta COD Differs."""
+	from marketplace_integrations.services import order_shipping_change as shipping_change
+
+	restored = shipping_change.restore_cod(cod)
+	frappe.db.get_value("Marketplace Order", order.name, "name", for_update=True)
+	order.reload()
+	return why if restored else f"{why} {shipping_change.restore_failed_note(cod)}".strip()
+
+
+def _finish_shipping_change(order, sales_order, snapshot, reconciliation_plan, erp_state, trigger_source, flags, applied):
+	"""The shipping change is settled (applied, or deliberately not applied because of an invoice or a pickup): the
+	baseline moves, the Marketplace Order is Synced, the sync log is written, and the flags are written last."""
+	from marketplace_integrations.services.order_attention import flag_attention
+
+	_advance_baseline(order, _parse_last_synced_snapshot(order), snapshot)
+	order.last_erpnext_sync_on = now_datetime()
+	reasons.apply_synced(order)
+	order.flags.skip_sync_status_update = True
+	order.save()
+	shipping = reconciliation_plan["shipping"]
+	result = {
+		"ok": True,
+		"status": order.erpnext_sync_status,
+		"sales_order": order.erpnext_sales_order,
+		"updated": False,
+		"error": None,
+		"reconciliation": reconciliation_plan,
+		"executed_action": UPDATE_SHIPPING if applied else NEEDS_ATTENTION,
+		"executed_message": (
+			_("Shipping of Sales Order {0} changed from {1} to {2}")
+			if applied
+			else _("Shipping of Sales Order {0} was not changed (Shopify: from {1} to {2})")
+		).format(
+			sales_order,
+			fmt_money(shipping["previous"], currency=erp_state.get("currency")),
+			fmt_money(shipping["current"], currency=erp_state.get("currency")),
+		),
+	}
+	_create_sync_log(
+		order,
+		trigger_source,
+		"Success" if applied else "Invalid",
+		snapshot,
+		result,
+		reconciliation_plan=reconciliation_plan,
+		erp_state=erp_state,
+		action=UPDATE_SHIPPING,
+	)
+	for text in flags:
+		flag_attention(sales_order, text)
+	return result
+
+
+def _hold_shipping_change(order, sales_order, snapshot, reconciliation_plan, erp_state, trigger_source, why):
+	"""The shipping change failed in the executor (a COD Bosta refused, an ERPNext refusal ...): nothing is changed, the
+	baseline is kept, the Marketplace Order shows Needs Action with ``SHIPPING_CHANGE_FAILED`` and the Sales Order is
+	flagged. That code is an execution failure (``EXECUTION_FAILED_REASONS``): the form load does not queue the change
+	again, and an automatic run skips it (``_execute_shipping_change``), so only a person's Retry Sync tries again (and may
+	call Bosta again)."""
+	from marketplace_integrations.services import order_shipping_change as shipping_change
+	from marketplace_integrations.services.order_attention import flag_attention
+
+	shipping = reconciliation_plan["shipping"]
+	attention = {
+		"outcome": NEEDS_ATTENTION,
+		"message": shipping_change.held_reason(
+			shipping["previous"], shipping["current"], why, erp_state.get("currency")
+		),
+		"changes": reconciliation_plan["changes"],
+		"reason_code": reasons.SHIPPING_CHANGE_FAILED,
+	}
+	result = _save_reconciliation_advisory(order, attention)
+	_create_sync_log(
+		order,
+		trigger_source,
+		"Invalid",
+		snapshot,
+		result,
+		reconciliation_plan=attention,
+		erp_state=erp_state,
+	)
+	flag_attention(sales_order, attention["message"])
 	return result
 
 
@@ -2258,13 +2457,25 @@ def _execute_reconciliation_plan(
 		)
 		if outcome == UPDATE_SUBMITTED_ORDER:
 			# Carry the exact line-to-row names execute() used (no re-pairing).
-			order.last_synced_hash = snapshot_hash(snapshot)
+			baseline = snapshot
+			if reconciliation_plan.get("shipping_deferred"):
+				# #534: Shopify changed the shipping beside the items. Only the items were applied; the baseline keeps the
+				# OLD shipping, so the next run sees a shipping-only change and applies it (``_execute_shipping_change``).
+				baseline = {**snapshot}
+				before = _parse_last_synced_snapshot(order) or {}
+				if "shipping" in before:
+					baseline["shipping"] = before["shipping"]
+				else:
+					baseline.pop("shipping", None)
+			order.last_synced_hash = snapshot_hash(baseline)
 			order.last_synced_snapshot = frappe.as_json(
-				snapshot_with_line_rows(snapshot, executed["line_rows"], refund_ids=_refund_ids(order))
+				snapshot_with_line_rows(baseline, executed["line_rows"], refund_ids=_refund_ids(order))
 			)
 			release_outbound_edit_marker(order)
 		order.last_erpnext_sync_on = now_datetime()
 		reasons.apply_synced(order)
+		if reconciliation_plan.get("shipping_deferred"):
+			queue_resync_in_memory(order, trigger_source)
 		order.flags.skip_sync_status_update = True
 		order.save()
 		result = {

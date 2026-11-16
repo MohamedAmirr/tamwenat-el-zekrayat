@@ -1,4 +1,7 @@
-from marketplace_integrations.integrations.noon.constants import NOON_INVENTORY_SWEEP_CRON
+from marketplace_integrations.integrations.noon.constants import (
+	NOON_INVENTORY_SWEEP_CRON,
+	NOON_ORDER_POLL_CRON,
+)
 from marketplace_integrations.integrations.shopify.constants import SHOPIFY_INVENTORY_SWEEP_CRON
 
 app_name = "marketplace_integrations"
@@ -276,11 +279,13 @@ doc_events = {
 		# #413: the Bosta count summary is written by the app only; an older form copy must not overwrite it.
 		"validate": [
 			"marketplace_integrations.integrations.bosta.statuses.keep_stored_summary",
+			"marketplace_integrations.services.order_attention.keep_stored_attention",
 			"marketplace_integrations.services.sales_order_delivery.sync_earliest_delivery_date",
 		],
 		# The countdown date follows the item delivery dates (marketplace orders only), for staff and system edits.
 		"before_update_after_submit": [
 			"marketplace_integrations.integrations.bosta.statuses.keep_stored_summary",
+			"marketplace_integrations.services.order_attention.keep_stored_attention",
 			"marketplace_integrations.services.sales_order_delivery.sync_earliest_delivery_date",
 		],
 	},
@@ -329,19 +334,18 @@ workflow_methods = [
 # Order Item row check (and the #500 Shopify one), the #391/#393 Delivery Note and Sales Order carrier handlers, the Sales Order cancel
 # cascade handlers (services/order_cancel_cascade.py) and the platform naming series before_naming hook above.
 scheduler_events = {
-	# #367: the four hourly jobs run at staggered minutes instead of all at :00, where
+	# #367: the hourly jobs run at staggered minutes instead of all at :00, where
 	# Frappe's own hourly jobs also start; prod hit "(1040) Too many connections" there.
-	# Each is still once an hour. :05/:15/:25/:35 are odd minutes, so none lands on the
-	# every-2-minute inventory sweep tick either.
+	# Each is still once an hour. :05/:15/:35 are odd minutes, so none lands on the
+	# every-2-minute inventory sweep tick either. #525: the Noon order poll left this
+	# group (now about every 25 minutes, at :01, :27 and :53, registered below from
+	# NOON_ORDER_POLL_CRON); the Noon 7-day order re-list is the 23:59 nightly catch-up.
 	"cron": {
 		"5 * * * *": [
 			"marketplace_integrations.integrations.shopify.webhooks.retry_errored_webhook_deliveries",
 		],
 		"15 * * * *": [
 			"marketplace_integrations.integrations.noon.sweep.sweep_all_accounts",
-		],
-		"25 * * * *": [
-			"marketplace_integrations.integrations.noon.orders.poll_all_accounts",
 		],
 		"35 * * * *": [
 			"marketplace_integrations.services.sales_order_sync_debounce.sweep_stuck_sales_order_reconciliations",
@@ -387,6 +391,11 @@ scheduler_events["cron"].setdefault(SHOPIFY_INVENTORY_SWEEP_CRON, []).append(
 )
 scheduler_events["cron"].setdefault(NOON_INVENTORY_SWEEP_CRON, []).append(
 	"marketplace_integrations.integrations.noon.sweep.sweep_changed_bins"
+)
+# #525: Noon order reconciliation about every 25 minutes (:01, :27, :53; 2-hour window). The
+# 7-day re-list is the existing 23:59 enqueue_nightly_order_reconciliation catch-up above.
+scheduler_events["cron"].setdefault(NOON_ORDER_POLL_CRON, []).append(
+	"marketplace_integrations.integrations.noon.orders.poll_all_accounts"
 )
 
 # Testing
@@ -521,6 +530,8 @@ fixtures = [
 					"Sales Order-custom_earliest_delivery_date",
 					"Sales Order-custom_order_stage",
 					"Sales Order-custom_payment_display",
+					"Sales Order-custom_needs_attention",
+					"Sales Order-custom_attention_reason",
 					"Payment Entry-custom_marketplace_order",
 					"Payment Entry-custom_marketplace_transaction_id",
 					# #374: the Item form's Marketplace Listings tab (stores nothing on Item)

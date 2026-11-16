@@ -56,7 +56,7 @@ from marketplace_integrations.services.order_shipment import (
 )
 
 MAX_ORDERS = 50
-#: The shipping methods the dialog offers. Noon and Manual delivery are decided later.
+#: The shipping methods the dialog offers. Noon is decided later.
 SHIPPING_METHODS = (BOSTA,)
 EVENT = "bulk_delivery_note_progress"
 JOB_ID = "bulk-delivery-notes|{}"

@@ -76,6 +76,7 @@ SO_LINE_MISSING = "SO_LINE_MISSING"
 EDIT_OUTCOME_UNKNOWN = "EDIT_OUTCOME_UNKNOWN"
 RECONCILIATION_MISMATCH = "RECONCILIATION_MISMATCH"
 VERIFY_ERP_STATE = "VERIFY_ERP_STATE"
+SHIPPING_CHANGE_FAILED = "SHIPPING_CHANGE_FAILED"
 OUTBOUND_EDIT_MISMATCH = "OUTBOUND_EDIT_MISMATCH"
 SALES_ORDER_CHANGED_IN_ERP = "SALES_ORDER_CHANGED_IN_ERP"
 LEGACY_NOT_SYNCED_REVIEW = "LEGACY_NOT_SYNCED_REVIEW"
@@ -205,8 +206,8 @@ REASONS = {
 	SHIPPING_CHANGED: _entry(
 		NEEDS_ACTION,
 		MANUAL,
-		"AMEND_SALES_ORDER",
-		"The shipping charge differs from the submitted Sales Order; cancel and amend it (choose Cancel in ERPNext only when asked, so the Shopify order stays open).",
+		"RETRY_SYNC",
+		"The shipping charge changed while an item edit waits for Shopify's confirmation; run the update again once the edit is confirmed.",
 	),
 	HEADER_CHANGED: _entry(
 		NEEDS_ACTION,
@@ -330,6 +331,12 @@ REASONS = {
 		"VERIFY_ERP_STATE",
 		"The database transaction was already rolled back; verify the Sales Order state in ERPNext.",
 	),
+	SHIPPING_CHANGE_FAILED: _entry(
+		NEEDS_ACTION,
+		MANUAL,
+		"RETRY_SYNC",
+		"Shopify's shipping change could not be applied to the Sales Order; the order was not changed. Use Retry Sync after the cause is fixed.",
+	),
 	OUTBOUND_EDIT_MISMATCH: _entry(
 		NEEDS_ACTION,
 		MANUAL,
@@ -369,7 +376,7 @@ RECEIPT_GATED_REASONS = (
 
 # Needs Action reasons recorded after ERPNext refused an update the planner thought executable.
 # A form load must not queue the same failing attempt again.
-EXECUTION_FAILED_REASONS = (ROW_CHANGE_REFUSED, RECONCILIATION_MISMATCH, VERIFY_ERP_STATE)
+EXECUTION_FAILED_REASONS = (ROW_CHANGE_REFUSED, RECONCILIATION_MISMATCH, VERIFY_ERP_STATE, SHIPPING_CHANGE_FAILED)
 
 _MESSAGE_LIMIT = 500
 

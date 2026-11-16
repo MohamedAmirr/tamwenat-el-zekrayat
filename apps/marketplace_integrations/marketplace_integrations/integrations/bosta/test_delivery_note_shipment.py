@@ -90,6 +90,32 @@ class IntegrationTestBostaDeliveryNoteShipment(BostaFixtureMixin, IntegrationTes
 			with self.assertRaises(frappe.ValidationError):
 				self.make_note()
 
+	def test_a_carrier_without_an_adapter_leaves_the_note_alone(self):
+		supplier = self._track(
+			frappe.get_doc(
+				{
+					"doctype": "Supplier",
+					"supplier_name": f"Plain Courier {self.suffix}",
+					"supplier_group": "All Supplier Groups",
+					"supplier_type": "Company",
+					"is_transporter": 1,
+				}
+			).insert()
+		).name
+		note = self.make_note(transporter=supplier)
+
+		self.assertIsNone(carrier_shipments.adapter_for(frappe.get_doc("Delivery Note", note.name)))
+		self.assertFalse(frappe.db.get_value("Delivery Note", note.name, "custom_integration_status"))
+		with self.assertRaises(frappe.ValidationError):
+			carrier_shipments.request_create(note.name)
+		self.enqueue.assert_not_called()
+
+		note = frappe.get_doc("Delivery Note", note.name)
+		note.submit()
+		note.cancel()
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "docstatus"), 2)
+		self.assertEqual(self.http.sent(), [])
+
 	# -- notes: the Shopify order name ---------------------------------------------------------
 
 	def test_a_shopify_order_sends_its_name_as_notes(self):

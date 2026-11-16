@@ -19,6 +19,7 @@ const TALABAT_OUTLET_FIELDS = [
 ];
 
 const RECONCILE_INVENTORY_LABEL = "Reconcile Shopify Inventory";
+const PULL_IMAGES_LABEL = "Pull Missing Images";
 const LOAD_SHOPIFY_GATEWAYS_LABEL = "Load Shopify Payment Gateways";
 
 const SHOPIFY_LOCATION_FIELDS = ["shopify_location_section", "shopify_location_gid", "shopify_location_name"];
@@ -58,6 +59,7 @@ if (typeof frappe !== "undefined") {
 			configure_outlet_management(frm);
 			configure_shopify_location(frm);
 			configure_shopify_inventory(frm);
+			configure_shopify_images(frm);
 			configure_noon(frm);
 			configure_view_shortcuts(frm);
 		},
@@ -66,6 +68,7 @@ if (typeof frappe !== "undefined") {
 			configure_outlet_management(frm);
 			configure_shopify_location(frm);
 			configure_shopify_inventory(frm);
+			configure_shopify_images(frm);
 			configure_noon(frm);
 		},
 		connection(frm) {
@@ -432,6 +435,44 @@ function reconcile_shopify_inventory(frm) {
 	);
 }
 
+// #526: "Pull Missing Images" - only on a saved Shopify account with a connection and only for a
+// user who can write Marketplace Accounts (the server re-checks write on the account, in the
+// request and in the worker). The button is removed first so a platform change leaves no stale one.
+function configure_shopify_images(frm) {
+	frm.remove_custom_button(__(PULL_IMAGES_LABEL));
+	if (frm.is_new()) return;
+	if (!should_show_shopify_location(frm.doc.platform) || !frm.doc.connection) return;
+	if (!frappe.model.can_write("Marketplace Account")) return;
+	frm.add_custom_button(__(PULL_IMAGES_LABEL), () => pull_shopify_images(frm));
+}
+
+function pull_shopify_images(frm) {
+	frappe.confirm(
+		__("Download images from Shopify for mapped Items that have no image? Existing images are never replaced."),
+		() => {
+			frappe
+				.call({
+					method: "marketplace_integrations.api.shopify_item_images.queue_pull_missing_images",
+					args: { account: frm.doc.name },
+					freeze: true,
+					freeze_message: __("Queuing image pull..."),
+				})
+				.then((response) => {
+					const jobs = (response.message && response.message.jobs) || [];
+					if (!jobs.length) return;
+					return frappe
+						.require("/assets/marketplace_integrations/js/shopify_catalog_push_status.js")
+						.then(() => {
+							new frappe.ui.ShopifyCatalogPushStatus({
+								jobs,
+								...frappe.ui.ShopifyCatalogPushStatus.IMAGE_OPTIONS,
+							});
+						});
+				});
+		}
+	);
+}
+
 // #167: a pure-navigation "View" button group - no new business logic, just
 // routes to the existing Marketplace Order / Marketplace Product Mapping /
 // Marketplace Sync Log lists, each filtered to this one Marketplace Account.
@@ -696,6 +737,9 @@ if (typeof module !== "undefined") {
 		configure_shopify_inventory,
 		reconcile_shopify_inventory,
 		RECONCILE_INVENTORY_LABEL,
+		configure_shopify_images,
+		pull_shopify_images,
+		PULL_IMAGES_LABEL,
 		LOAD_SHOPIFY_GATEWAYS_LABEL,
 		show_shopify_gateway_picker,
 		configure_view_shortcuts,

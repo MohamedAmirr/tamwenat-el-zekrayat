@@ -81,8 +81,34 @@ test("the list loads the platform and stage fields without dropping ERPNext's ow
 		"custom_marketplace_platform",
 		"custom_earliest_delivery_date",
 		"custom_order_stage",
+		"custom_needs_attention",
+		"custom_attention_reason",
 		"advance_payment_status",
 	]);
+});
+
+test("a flagged order shows the red Needs Attention pill before Waiting for Stock, with its own reason", () => {
+	const { module_exports } = load();
+	const reason = 'Shopify changed the order. Next step: open it <b>now</b>.';
+	const info = module_exports.status_info(
+		row("SO-1", { custom_needs_attention: 1, custom_attention_reason: reason, custom_order_stage: "Waiting for Stock" })
+	);
+	assert.equal(info.label, "Needs Attention");
+	assert.equal(info.color, "red");
+	assert.equal(info.tip, reason);
+	assert.equal(info.filter, "custom_needs_attention,=,1");
+	const html = global.frappe.ui.badge.html({ label: info.label, theme: info.color, title: info.tip });
+	assert.ok(!html.includes("<b>"));
+});
+
+test("an unflagged order is not touched by Needs Attention, and the legend lists it", () => {
+	const { module_exports } = load();
+	assert.equal(module_exports.status_info(row("SO-1", { custom_needs_attention: 0 })), null);
+	// a cancelled order keeps ERPNext's own indicator
+	assert.equal(module_exports.status_info(row("SO-1", { docstatus: 2, custom_needs_attention: 1, custom_attention_reason: "x" })), null);
+	// Closed and On Hold submitted orders still show the pill
+	assert.equal(module_exports.status_info(row("SO-1", { status: "Closed", custom_needs_attention: 1 })).label, "Needs Attention");
+	assert.match(module_exports.legend_html("status"), /Needs Attention/);
 });
 
 test("onload attaches the order hover card and ERPNext's own onload still runs", async () => {
@@ -204,6 +230,7 @@ test("each stage and payment shows one plain pill with a colour and a hover line
 		[{ stage: "ready", payment: "advance" }, "Ready, waiting for pickup", "blue"],
 		[{ stage: "on_the_way", payment: "invoice" }, "On the way", "orange"],
 		[{ stage: "delivered", payment: "cod" }, "Delivered, payment not received", "violet"],
+		[{ stage: "delivered", payment: "partially_paid" }, "Delivered, payment not received", "violet"],
 		[{ stage: "delivered", payment: "advance" }, "Delivered and paid", "green"],
 		[{ stage: "delivered", payment: "invoice" }, "Delivered and paid", "green"],
 		[{ stage: "delivered", payment: "marketplace" }, "Delivered and paid", "green"],
@@ -219,6 +246,14 @@ test("each stage and payment shows one plain pill with a colour and a hover line
 		// every pill filters the list like ERPNext's own pill does, never an empty data-filter
 		assert.equal(info.filter, "status,=,To Deliver");
 	}
+});
+
+test("a partly paid order shows the Partially paid pill and the amount still owed on hover", async () => {
+	const { module_exports } = load();
+	await load_page(module_exports, { "SO-1": { stage: "ready", payment: "partially_paid", owed: 25 } }, [row("SO-1", { currency: "EGP" })]);
+	const html = module_exports.format_payment("", {}, row("SO-1", { currency: "EGP" }));
+	assert.match(html, /Partially paid/);
+	assert.match(html, /Still owed: 25\.00 EGP/);
 });
 
 test("the colours on screen differ: on the way is not the same badge colour as delivered, payment not received", async () => {

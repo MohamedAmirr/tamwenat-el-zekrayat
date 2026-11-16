@@ -38,6 +38,7 @@ PROBLEM_STAGES = (PROBLEM, ATTEMPT_FAILED)
 PAID_IN_ADVANCE = "advance"
 PAID_BY_INVOICE = "invoice"
 PAID_BY_MARKETPLACE = "marketplace"
+PARTIALLY_PAID = "partially_paid"
 PAY_ON_DELIVERY = "cod"
 
 #: Platforms whose marketplace collects the customer's money (decided 2026-11-10): their orders are paid.
@@ -98,7 +99,9 @@ def payment_kind(order, invoice_outstanding):
 	``invoice_outstanding``: the outstanding amounts of the order's submitted, non-return Sales Invoices. Paid by
 	the marketplace for a platform that collects the money (``MARKETPLACE_COLLECTS``); else paid in advance when
 	the advance covers the total (the rounded total when there is one: ERPNext asks for that amount); paid by
-	invoice when the order is fully billed by a submitted invoice; otherwise pay on delivery.
+	invoice when the order is fully billed by a submitted invoice; partially paid when some advance is in but less
+	than the total (a shipping change of Shopify raises the total after the customer paid, #534); otherwise pay on
+	delivery.
 
 	INTERIM (decided 2026-11-10): an invoice counts as paid EVEN WHEN IT STILL HAS OUTSTANDING. Until the accounting
 	"Option A" exists (the Bosta COD receivable is recorded with a Payment Entry at delivery), a Bosta order is
@@ -114,7 +117,18 @@ def payment_kind(order, invoice_outstanding):
 	# non-return invoice exists.
 	if invoice_outstanding and flt(order.get("per_billed")) >= 100 - _TOLERANCE:
 		return PAID_BY_INVOICE
+	if flt(order.get("advance_paid")) > _TOLERANCE:
+		return PARTIALLY_PAID
 	return PAY_ON_DELIVERY
+
+
+def amount_owed(order, invoice_outstanding=None):
+	"""What the customer still owes: the outstanding amounts of the order's submitted Sales Invoices when it is invoiced
+	(payments on the invoice count), else its total (the rounded total when there is one) minus the advance."""
+	if invoice_outstanding:
+		return flt(sum(flt(amount) for amount in invoice_outstanding), 2)
+	total = flt(order.get("rounded_total")) or flt(order.get("grand_total"))
+	return flt(total - flt(order.get("advance_paid")), 2)
 
 
 def get_states(names):
@@ -154,6 +168,8 @@ def get_states(names):
 			"stage": combine_stages(stages, order.per_delivered, covered, order_qty.get(order.name)),
 			"payment": payment_kind(order, outstanding_of.get(order.name, [])),
 		}
+		if result[order.name]["payment"] == PARTIALLY_PAID:
+			result[order.name]["owed"] = amount_owed(order, outstanding_of.get(order.name, []))
 	return result
 
 
