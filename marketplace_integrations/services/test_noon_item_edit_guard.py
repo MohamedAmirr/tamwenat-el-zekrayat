@@ -59,12 +59,13 @@ class IntegrationTestNoonItemEditGuard(IntegrationTestNoonFulfillmentBase):
 		self.assertIn(f"{GUARD}.block_row_add", events["before_insert"])
 		self.assertIn(f"{GUARD}.block_row_remove", events["on_trash"])
 		# The Noon guard is not on the parent; the parent hooks are the Bosta summary restore (#413) and the
-		# earliest-delivery-date follower (it reads the item dates, it blocks nothing).
+		# Needs Attention restore (#533) and the earliest-delivery-date follower (it reads the item dates, it blocks nothing).
 		parent = frappe.get_hooks("doc_events", app_name="marketplace_integrations")["Sales Order"]
 		self.assertEqual(
 			parent["before_update_after_submit"],
 			[
 				"marketplace_integrations.integrations.bosta.statuses.keep_stored_summary",
+				"marketplace_integrations.services.order_attention.keep_stored_attention",
 				"marketplace_integrations.services.sales_order_delivery.sync_earliest_delivery_date",
 			],
 		)
