@@ -3,6 +3,7 @@
 
 from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import patch
 
 import frappe
@@ -4058,8 +4059,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		customer = frappe.db.get_value("Sales Order", result["sales_order"], "customer")
 		address_count = frappe.db.count("Address")
 
-		own = sales_order_sync_service._resolve_shopify_address(first, customer, create=False)
-		other = sales_order_sync_service._resolve_shopify_address(second, customer, create=False)
+		own = sales_order_sync_service._resolve_shopify_address(first, customer, account, create=False)
+		other = sales_order_sync_service._resolve_shopify_address(second, customer, account, create=False)
 
 		self.assertEqual(
 			own["name"], frappe.db.get_value("Sales Order", result["sales_order"], "shipping_address_name")
@@ -4221,6 +4222,215 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertTrue(result["ok"], result.get("error"))
 		address_name = frappe.db.get_value("Sales Order", result["sales_order"], "shipping_address_name")
 		self.assertEqual(frappe.db.get_value("Address", address_name, "phone"), "+201069452847")
+
+	# --- #528: Address for a phone-only buyer ---------------------------------
+
+	_PHONE_ONLY_ADDRESS: ClassVar[dict] = {"address1": "5 Phone Only Street", "city": "Cairo", "country": "Egypt"}
+
+	def _make_phone_only_order(self, account, phone=None, **kwargs):
+		return self._make_shopify_order(
+			account,
+			# Unique name: a leftover "Aya Yahia" Customer would break order-dependent tests.
+			customer_first_name=f"Phone{frappe.generate_hash(length=6)}",
+			customer_last_name="Buyer",
+			customer_phone_number=phone or self._unique_egypt_phone(),
+			**kwargs,
+		)[0]
+
+	def _customer_address_count(self, customer):
+		return frappe.db.count("Dynamic Link", {"parenttype": "Address", "link_doctype": "Customer", "link_name": customer})
+
+	def test_shopify_phone_only_order_gets_its_own_address_on_the_phone_customer(self):
+		from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
+
+		from marketplace_integrations.integrations.bosta import delivery_note_shipment
+
+		account = self._make_shopify_account()
+		phone = self._unique_egypt_phone()
+		order = self._make_phone_only_order(account, phone, shipping_address=self._PHONE_ONLY_ADDRESS)
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		account.reload()
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+		self.assertNotEqual(sales_order.customer, account.erpnext_customer)
+		address = frappe.get_doc("Address", sales_order.shipping_address_name)
+		self.assertEqual(address.address_title, sales_order_sync_service._shopify_address_title(sales_order.customer, order))
+		self.assertFalse(address.email_id)
+		self.assertEqual(address.phone, phone)
+		self.assertEqual(address.address_line1, "5 Phone Only Street")
+		self.assertTrue(
+			any(link.link_doctype == "Customer" and link.link_name == sales_order.customer for link in address.links)
+		)
+		note = make_delivery_note(result["sales_order"])
+		note.insert()
+		note = frappe.get_doc("Delivery Note", note.name)
+		self.assertEqual(
+			delivery_note_shipment._address_for(note, result["sales_order"])["first_line"], "5 Phone Only Street"
+		)
+
+	def test_shopify_generic_customer_order_never_gets_an_address(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(
+			account,
+			customer_first_name="Aya",
+			customer_phone_number=None,
+			shipping_address=self._PHONE_ONLY_ADDRESS,
+		)
+		account.reload()
+		before = self._customer_address_count(account.erpnext_customer)
+		address_count = frappe.db.count("Address")
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+		account.reload()
+		self.assertEqual(sales_order.customer, account.erpnext_customer)
+		self.assertEqual(self._customer_address_count(account.erpnext_customer), before)
+		self.assertEqual(frappe.db.count("Address"), address_count)
+		self.assertFalse(sales_order.shipping_address_name)
+		self.assertFalse(sales_order.customer_address)
+
+	def test_shopify_two_phone_only_orders_of_one_customer_get_two_addresses_one_primary(self):
+		account = self._make_shopify_account()
+		phone = self._unique_egypt_phone()
+		orders = [
+			self._make_phone_only_order(
+				account,
+				phone,
+				shipping_address={"address1": f"{index} Phone Street", "city": "Cairo", "country": "Egypt"},
+			)
+			for index in (1, 2)
+		]
+		results = [sync_sales_order(order.name) for order in orders]
+		self.assertTrue(all(result["ok"] for result in results), results)
+
+		sales_orders = [frappe.get_doc("Sales Order", result["sales_order"]) for result in results]
+		self.assertEqual(sales_orders[0].customer, sales_orders[1].customer)
+		first, second = (sales_order.shipping_address_name for sales_order in sales_orders)
+		self.assertTrue(first and second)
+		self.assertNotEqual(first, second)
+		self.assertTrue(frappe.db.get_value("Address", first, "is_primary_address"))
+		self.assertFalse(frappe.db.get_value("Address", second, "is_primary_address"))
+
+	def test_shopify_linked_phone_only_order_with_no_address_stays_frozen_when_one_arrives(self):
+		account = self._make_shopify_account()
+		order = self._make_phone_only_order(account)
+		first = sync_sales_order(order.name)
+		self.assertTrue(first["ok"], first.get("error"))
+		self.assertFalse(frappe.db.get_value("Sales Order", first["sales_order"], "shipping_address_name"))
+		order.reload()
+		hash_before = order.last_synced_hash
+		status_before = order.erpnext_sync_status
+
+		order_doc = frappe.get_doc("Marketplace Order", order.name)
+		order_doc.shipping_address = self._PHONE_ONLY_ADDRESS
+		order_doc.save(ignore_permissions=True)
+		address_count = frappe.db.count("Address")
+		second = sync_sales_order(order.name)
+		status = get_current_sync_status(order.name)
+
+		self.assertTrue(second["ok"], second.get("error"))
+		order.reload()
+		self.assertEqual(order.last_synced_hash, hash_before)
+		self.assertEqual(order.erpnext_sync_status, status_before)
+		self.assertEqual(status, status_before)
+		self.assertEqual(frappe.db.count("Address"), address_count)
+
+	def test_shopify_linked_phone_only_order_with_address_set_directly_stays_synced(self):
+		account = self._make_shopify_account()
+		order = self._make_phone_only_order(account)
+		result = sync_sales_order(order.name)
+		self.assertTrue(result["ok"], result.get("error"))
+		customer = frappe.db.get_value("Sales Order", result["sales_order"], "customer")
+		address = frappe.get_doc(
+			{
+				"doctype": "Address",
+				"address_title": f"Typed by hand {self.suffix}",
+				"address_type": "Shipping",
+				"address_line1": "Typed Street",
+				"city": "Cairo",
+				"links": [{"link_doctype": "Customer", "link_name": customer}],
+			}
+		).insert()
+		frappe.db.set_value(
+			"Sales Order", result["sales_order"], "shipping_address_name", address.name, update_modified=False
+		)
+		order.reload()
+		hash_before = order.last_synced_hash
+
+		status = get_current_sync_status(order.name)
+
+		order.reload()
+		self.assertEqual(status, "Synced")
+		# The snapshot now names the Address; NO_ACTION advances the baseline silently once.
+		self.assertNotEqual(order.last_synced_hash, hash_before)
+
+	def test_shopify_snapshot_of_an_unlinked_phone_only_order_creates_nothing(self):
+		account = self._make_shopify_account()
+		phone = self._unique_egypt_phone()
+		customer = self._make_phone_customer(f"Existing Phone {self.suffix}", phone)
+		order = self._make_phone_only_order(account, phone, shipping_address=self._PHONE_ONLY_ADDRESS)
+		customer_count = frappe.db.count("Customer")
+		address_count = frappe.db.count("Address")
+
+		address = sales_order_sync_service._resolve_shopify_address(order, customer.name, account, create=False)
+		snapshot = build_sales_order_snapshot(order, account=account)
+
+		self.assertIsNone(address)
+		self.assertEqual(snapshot["customer"], customer.name)
+		self.assertFalse(snapshot["shipping_address_name"])
+		self.assertEqual(frappe.db.count("Customer"), customer_count)
+		self.assertEqual(frappe.db.count("Address"), address_count)
+
+	def test_shopify_unmatched_phone_without_name_uses_generic_customer_and_creates_no_address(self):
+		account = self._make_shopify_account()
+		order, _mapping = self._make_shopify_order(
+			account,
+			customer_phone_number=self._unique_egypt_phone(),
+			shipping_address=self._PHONE_ONLY_ADDRESS,
+		)
+
+		result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		account.reload()
+		sales_order = frappe.get_doc("Sales Order", result["sales_order"])
+		self.assertEqual(sales_order.customer, account.erpnext_customer)
+		self.assertEqual(self._customer_address_count(account.erpnext_customer), 0)
+		self.assertFalse(sales_order.shipping_address_name)
+
+	def test_shopify_phone_only_address_failure_keeps_the_order_and_logs_without_personal_data(self):
+		from frappe.model.document import Document
+
+		account = self._make_shopify_account()
+		phone = self._unique_egypt_phone()
+		order = self._make_phone_only_order(
+			account,
+			phone,
+			shipping_address={"address1": "Secret Phone Street 9", "city": "Cairo", "country": "Egypt"},
+		)
+		original_insert = Document.insert
+
+		def failing_insert(doc, *args, **kwargs):
+			if doc.doctype == "Address":
+				raise frappe.ValidationError("boom")
+			return original_insert(doc, *args, **kwargs)
+
+		frappe.db.delete("Error Log", {"method": "Shopify buyer Address could not be saved"})
+		with patch.object(Document, "insert", autospec=True, side_effect=failing_insert):
+			result = sync_sales_order(order.name)
+
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertFalse(frappe.db.get_value("Sales Order", result["sales_order"], "shipping_address_name"))
+		logs = frappe.get_all(
+			"Error Log", filters={"method": "Shopify buyer Address could not be saved"}, fields=["error"]
+		)
+		self.assertEqual(len(logs), 1)
+		self.assertNotIn("Secret Phone Street", logs[0].error)
+		self.assertNotIn(phone, logs[0].error)
 
 	def test_blank_platform_is_treated_as_talabat_not_blocked(self):
 		"""A pre-#108 order whose platform backfill has not run yet must not

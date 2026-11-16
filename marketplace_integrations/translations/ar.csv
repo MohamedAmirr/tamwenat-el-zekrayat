@@ -2174,7 +2174,7 @@ The marketplace collects the payment. Nothing to collect.,المنصة تحصّ�
 Paid in advance,مدفوع مقدمًا
 The customer paid before delivery. Nothing to collect.,دفع العميل قبل التسليم. لا يوجد ما يُحصَّل.
 Paid (invoice),مدفوع (فاتورة)
-The Sales Invoice is fully paid. Nothing to collect.,فاتورة المبيعات مدفوعة بالكامل. لا يوجد ما يُحصَّل.
+The order is invoiced. The cash is collected by the carrier and is settled with the carrier later.,تم إصدار فاتورة للطلب. تحصّل شركة الشحن المبلغ نقدًا وتتم التسوية معها لاحقًا.
 Pay on delivery,الدفع عند التسليم
 Not paid yet. Next step: collect the payment when the parcel is delivered.,لم يُدفع بعد. الخطوة التالية: حصّل المبلغ عند تسليم الطرد.
 An order with several Delivery Notes shows the one that is least advanced.,يعرض الطلب ذو مذكرات التسليم المتعددة المذكرة الأقل تقدمًا.
