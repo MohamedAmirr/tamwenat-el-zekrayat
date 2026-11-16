@@ -250,7 +250,10 @@ def _sync_sales_order(marketplace_order, trigger_source):
 			)
 			if order.platform == "Shopify":
 				customer = _get_or_create_shopify_customer(order, account)
-				address = _resolve_shopify_address(order, customer) or {"name": None, "address_type": None}
+				address = _resolve_shopify_address(order, customer, account) or {
+					"name": None,
+					"address_type": None,
+				}
 			else:
 				customer = _get_or_create_customer(account)
 				address = None
@@ -575,7 +578,7 @@ def build_sales_order_snapshot(order, account=None, customer=None, for_submitted
 			customer = (
 				_get_or_create_shopify_customer(order, account, create=False) or account.erpnext_customer
 			)
-			address = _resolve_shopify_address(order, customer, create=False) or {
+			address = _resolve_shopify_address(order, customer, account, create=False) or {
 				"name": None,
 				"address_type": None,
 			}
@@ -584,7 +587,10 @@ def build_sales_order_snapshot(order, account=None, customer=None, for_submitted
 			address = None
 	else:
 		address = (
-			(_resolve_shopify_address(order, customer, create=False) or {"name": None, "address_type": None})
+			(
+				_resolve_shopify_address(order, customer, account, create=False)
+				or {"name": None, "address_type": None}
+			)
 			if order.platform == "Shopify"
 			else None
 		)
@@ -1651,12 +1657,19 @@ def _log_address_failure(exc):
 		pass
 
 
-def _resolve_shopify_address(order, customer, create=True):
+def _resolve_shopify_address(order, customer, account, create=True):
 	"""Create/update the dedicated Address of one Shopify order (one Address per order).
 
-	Each order has its own Address linked to the buyer's Customer, so the Sales Order
-	and its Delivery Note keep that order's address and a correction applies to that
-	order only. A linked order is frozen (``_frozen_shopify_address()``).
+	Each order has its own Address linked to the buyer's own Customer (resolved by email
+	or by phone), so the Sales Order and its Delivery Note keep that order's address and
+	a correction applies to that order only. A linked order is frozen
+	(``_frozen_shopify_address()``). The account's generic Customer (the fallback when
+	there is no usable phone, or no match and no name, or the phone Customer could not be
+	created) never gets a buyer Address, because it is shared by unrelated buyers. A
+	phone-only buyer's Address has a blank ``email_id``. Returns ``None`` for: no
+	customer, a frozen order whose Sales Order has no Address, no usable address data, a
+	failed save, a ``create=False`` lookup that finds nothing, and the generic Customer
+	without an email.
 
 	``create=False`` is the read-only snapshot-preview/status-check mode used
 	by ``build_sales_order_snapshot()`` (see that function's docstring): it
@@ -1666,7 +1679,9 @@ def _resolve_shopify_address(order, customer, create=True):
 
 	A failure never fails the order: it degrades to no Address and one Error Log entry.
 	"""
-	if not cstr(order.customer_email).strip() or not customer:
+	if not customer:
+		return None
+	if not cstr(order.customer_email).strip() and customer == account.erpnext_customer:
 		return None
 
 	try:
