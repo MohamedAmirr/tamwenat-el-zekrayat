@@ -905,6 +905,54 @@
 		frm.__mi_cancel_all_owned = true;
 	}
 
+	// Needs Attention (#533, services/order_attention.py): a red header indicator, a red banner with the reason,
+	// and Mark as Resolved. An unflagged order gets nothing, so it looks exactly as before.
+	const MARK_RESOLVED_METHOD = "marketplace_integrations.api.order_attention.mark_resolved";
+
+	function is_flagged(doc) {
+		return Boolean(doc) && Number(doc.custom_needs_attention) === 1;
+	}
+
+	function attention_banner_html(reason) {
+		const escape = frappe.utils.escape_html;
+		return String(reason || "")
+			.split("\n")
+			.map((line) => escape(line))
+			.join("<br>");
+	}
+
+	function run_mark_resolved(frm) {
+		return frappe
+			.call({
+				method: MARK_RESOLVED_METHOD,
+				type: "POST",
+				args: { sales_order: frm.doc.name },
+				freeze: true,
+				freeze_message: __("Marking as resolved..."),
+			})
+			.then(() => {
+				frappe.show_alert({ message: __("The order was marked as resolved."), indicator: "green" });
+				return frm.reload_doc();
+			})
+			// A server error already showed Frappe's standard message.
+			.catch(() => {});
+	}
+
+	function show_needs_attention(frm) {
+		if (!is_flagged(frm.doc)) return;
+		// The header indicator only on a submitted order; a cancelled one keeps its own, but still shows the banner.
+		if (frm.doc.docstatus === 1 && frm.page && typeof frm.page.set_indicator === "function") {
+			frm.page.set_indicator(__("Needs Attention"), "red");
+		}
+		const reason = frm.doc.custom_attention_reason || __("Something about this order needs a person.");
+		if (frm.dashboard && typeof frm.dashboard.set_headline_alert === "function") {
+			frm.dashboard.set_headline_alert(attention_banner_html(reason), "red");
+		}
+		if ([1, 2].includes(frm.doc.docstatus) && frappe.model.can_write("Sales Order")) {
+			frm.add_custom_button(__("Mark as Resolved"), () => run_mark_resolved(frm));
+		}
+	}
+
 	function on_setup(frm) {
 		suppress_update_items(frm);
 		own_cancel_all_documents(frm);
@@ -913,6 +961,7 @@
 	function on_refresh(frm) {
 		suppress_update_items(frm);
 		own_cancel_all_documents(frm);
+		show_needs_attention(frm);
 		load_noon_fulfillment(frm);
 		add_marketplace_order_tab(frm);
 		if (!wrap_close_sales_order(frm)) {
@@ -1026,6 +1075,9 @@
 	if (typeof module !== "undefined") {
 		module.exports = {
 			add_marketplace_order_tab,
+			attention_banner_html,
+			run_mark_resolved,
+			show_needs_attention,
 			add_noon_item_edit_hint,
 			load_noon_fulfillment,
 			add_edit_order_button,

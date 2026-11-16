@@ -109,15 +109,33 @@ class UnitTestPaymentKind(UnitTestCase):
 	def test_the_advance_covers_the_total(self):
 		order = {"grand_total": 100, "advance_paid": 100, "per_billed": 0}
 		self.assertEqual(service.payment_kind(order, []), service.PAID_IN_ADVANCE)
-		self.assertEqual(service.payment_kind({**order, "advance_paid": 60}, []), service.PAY_ON_DELIVERY)
+		self.assertEqual(service.payment_kind({**order, "advance_paid": 60}, []), service.PARTIALLY_PAID)
+		self.assertEqual(service.amount_owed({**order, "advance_paid": 60}), 40)
+		self.assertEqual(service.amount_owed({**order, "advance_paid": 60}, [30, 5]), 35)
+		self.assertEqual(
+			service.payment_kind({**order, "advance_paid": 0}, []), service.PAY_ON_DELIVERY
+		)
 		self.assertEqual(
 			service.payment_kind({"grand_total": 0, "advance_paid": 0, "per_billed": 0}, []),
 			service.PAY_ON_DELIVERY,
 		)
 
+	def test_an_invoiced_order_with_part_of_the_advance_left_to_pay_is_partially_paid(self):
+		order = {"grand_total": 100, "advance_paid": 60, "per_billed": 100}
+		# the invoice still has 35 outstanding: the owed amount is the invoice's, not total minus advance
+		self.assertEqual(service.payment_kind(order, [35]), service.PARTIALLY_PAID)
+		self.assertEqual(service.amount_owed(order, [35]), 35)
+		# every invoice settled: paid by invoice, not partially paid
+		self.assertEqual(service.payment_kind(order, [0, 0]), service.PAID_BY_INVOICE)
+
+	def test_no_advance_is_pay_on_delivery_and_an_advance_over_the_total_is_paid_in_advance(self):
+		order = {"grand_total": 100, "advance_paid": 0, "per_billed": 0}
+		self.assertEqual(service.payment_kind(order, []), service.PAY_ON_DELIVERY)
+		self.assertEqual(service.payment_kind({**order, "advance_paid": 130}, []), service.PAID_IN_ADVANCE)
+
 	def test_the_rounded_total_is_the_amount_to_cover(self):
 		order = {"grand_total": 99.6, "rounded_total": 100, "advance_paid": 99.6, "per_billed": 0}
-		self.assertEqual(service.payment_kind(order, []), service.PAY_ON_DELIVERY)
+		self.assertEqual(service.payment_kind(order, []), service.PARTIALLY_PAID)
 		self.assertEqual(service.payment_kind({**order, "advance_paid": 100}, []), service.PAID_IN_ADVANCE)
 
 	def test_talabat_and_noon_orders_are_paid_by_the_marketplace(self):

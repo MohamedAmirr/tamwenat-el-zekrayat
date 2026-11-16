@@ -279,11 +279,13 @@ doc_events = {
 		# #413: the Bosta count summary is written by the app only; an older form copy must not overwrite it.
 		"validate": [
 			"marketplace_integrations.integrations.bosta.statuses.keep_stored_summary",
+			"marketplace_integrations.services.order_attention.keep_stored_attention",
 			"marketplace_integrations.services.sales_order_delivery.sync_earliest_delivery_date",
 		],
 		# The countdown date follows the item delivery dates (marketplace orders only), for staff and system edits.
 		"before_update_after_submit": [
 			"marketplace_integrations.integrations.bosta.statuses.keep_stored_summary",
+			"marketplace_integrations.services.order_attention.keep_stored_attention",
 			"marketplace_integrations.services.sales_order_delivery.sync_earliest_delivery_date",
 		],
 	},
@@ -528,6 +530,8 @@ fixtures = [
 					"Sales Order-custom_earliest_delivery_date",
 					"Sales Order-custom_order_stage",
 					"Sales Order-custom_payment_display",
+					"Sales Order-custom_needs_attention",
+					"Sales Order-custom_attention_reason",
 					"Payment Entry-custom_marketplace_order",
 					"Payment Entry-custom_marketplace_transaction_id",
 					# #374: the Item form's Marketplace Listings tab (stores nothing on Item)
