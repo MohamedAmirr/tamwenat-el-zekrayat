@@ -436,8 +436,13 @@ def _resolve_added(order, edit):
 
 def _proposed(sales_order, edit):
 	"""A copy of the Sales Order, never saved, with the proposed quantities (a row at 0 is dropped) and the added
-	rows."""
+	rows. ``edit.shipping`` (``(amount, shipping income account)``, #534: a shipping change from Shopify) also sets the
+	Shipping row."""
 	proposed = frappe.get_doc("Sales Order", sales_order.name)
+	if edit.get("shipping"):
+		from marketplace_integrations.services.order_shipping_change import set_shipping_row
+
+		set_shipping_row(proposed, *edit.shipping)
 	for row in list(proposed.items):
 		qty = flt(edit.qty.get(row.name, row.qty))
 		if qty <= 0:
@@ -683,7 +688,7 @@ def _trans_items(order, new_qty):
 # ---------------------------------------------------------------------------
 
 
-def refresh_draft_note(sales_order, cod=None):
+def refresh_draft_note(sales_order, cod=None, shipping=None):
 	"""Bring the draft Delivery Note of the order (if any) in line with the Sales Order: quantities of its rows
 	matched by ``so_detail``, rows whose Sales Order row is gone removed, rows it lacks added through ERPNext's own
 	mapper. Rows without ``so_detail`` are left alone. A note without a draft does nothing (a person or the bulk
@@ -698,7 +703,9 @@ def refresh_draft_note(sales_order, cod=None):
 	again, so the amount is the computed one). The COD of a draft Bosta note whose shipment is started (#501) is set to ``cod`` (what
 	the edit already sent to Bosta) or, when the change comes from Shopify, to the COD rule on the new totals; Bosta
 	is not called here, so for the second case the difference is listed in Needs Attention (Bosta COD Differs) with
-	Retry. Returns the note name or ``None``."""
+	Retry. ``shipping`` (``(amount, shipping income account)``, #534): the note's "Shipping" row is set to the amount
+	too (a shipping change from Shopify; the note then ships the whole order by the precondition). Returns the note
+	name or ``None``."""
 	name = draft_note(sales_order)
 	if not name:
 		return None
@@ -732,8 +739,15 @@ def refresh_draft_note(sales_order, cod=None):
 		for mapped in make_delivery_note(sales_order, kwargs={"filtered_children": missing}).items:
 			note.append("items", {key: value for key, value in mapped.as_dict().items() if key not in _NOTE_ROW_SKIP})
 		changed = True
+	if shipping is not None:
+		from marketplace_integrations.services.order_shipping_change import set_shipping_row
+
+		changed = set_shipping_row(note, *shipping) or changed
 	if not changed:
 		return name
+	if shipping is not None:
+		note.calculate_taxes_and_totals()
+		note.set_total_in_words()
 	if not note.items:
 		frappe.throw(_("Delivery Note {0} would have no items left.").format(name))
 	for idx, row in enumerate(note.items, start=1):

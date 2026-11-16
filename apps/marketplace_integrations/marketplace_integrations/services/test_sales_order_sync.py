@@ -5026,12 +5026,12 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual([row.tax_amount for row in rows], [60])
 		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "grand_total"), 96)
 
-	def test_changed_shipping_on_a_submitted_order_needs_attention_and_changes_nothing(self):
+	def test_changed_shipping_on_a_submitted_order_is_applied_to_the_order(self):
+		# #534: a shipping change is applied (it used to be Needs Attention "cancel and amend").
 		_account, order, first = self._sync_shopify(
 			transaction_amount=74.99, current_quantity=1, shipping_total=419.22, order_total=494.21
 		)
-		baseline = (order.last_synced_hash, order.last_synced_snapshot)
-		before = frappe.get_doc("Sales Order", first["sales_order"]).as_dict()
+		baseline = order.last_synced_hash
 
 		# e.g. a shipping refund: Shopify's current* fields drop the charge
 		order.shipping_total = 0
@@ -5040,14 +5040,13 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		result = sync_sales_order(order.name)
 		order.reload()
 
-		self.assertFalse(result["ok"])
-		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
-		self.assertIn("shipping", result["error"])
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["reconciliation"]["outcome"], "UPDATE_SHIPPING")
 		self.assertIn("shipping", [change["field"] for change in result["reconciliation"]["changes"]])
-		self.assertEqual(order.erpnext_sync_status, "Needs Action")
-		self.assertEqual((order.last_synced_hash, order.last_synced_snapshot), baseline)
+		self.assertEqual(order.erpnext_sync_status, "Synced")
+		self.assertNotEqual(order.last_synced_hash, baseline)
 		after = frappe.get_doc("Sales Order", first["sales_order"])
-		self.assertEqual((after.grand_total, len(after.taxes), after.modified), (494.21, 1, before.modified))
+		self.assertEqual((after.docstatus, after.grand_total, len(after.taxes)), (1, 74.99, 0))
 
 	# --- Shopify full refund before fulfillment (shipping charge on the Sales Order) -----
 
@@ -5156,20 +5155,18 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 				self.assertEqual(result["reconciliation"]["outcome"], outcome)
 				self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 1)
 
-	def test_fully_refunded_order_shopify_shows_fulfilled_keeps_the_shipping_attention(self):
+	def test_fully_refunded_order_shopify_shows_fulfilled_is_cancelled_the_shipping_change_does_not_hold_it(self):
+		# #534: the shipping change beside a cancellation no longer produces its own Needs Attention (the cancel stands).
 		_account, order, sales_order = self._synced_shipping_order()
 		self._fully_refund(order, "FULFILLED")
-		modified = frappe.db.get_value("Sales Order", sales_order, "modified")
 
 		result = sync_sales_order(order.name)
 
-		self.assertFalse(result["ok"])
-		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
-		self.assertIn("shipping", result["error"])
-		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 1)
-		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "modified"), modified)
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["reconciliation"]["outcome"], "CANCEL_ORDER")
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 2)
 
-	def test_partial_refund_of_shipping_only_stays_attention(self):
+	def test_partial_refund_of_shipping_only_is_applied(self):
 		_account, order, sales_order = self._synced_shipping_order()
 		order.external_financial_status = "PARTIALLY_REFUNDED"
 		order.shipping_total = 0
@@ -5179,8 +5176,9 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 
 		result = sync_sales_order(order.name)
 
-		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
+		self.assertEqual(result["reconciliation"]["outcome"], "UPDATE_SHIPPING")
 		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "docstatus"), 1)
+		self.assertEqual(frappe.db.get_value("Sales Order", sales_order, "grand_total"), 74.99)
 
 	# --- Merchant-readable blocker messages with real linked documents -------------------
 
@@ -5469,8 +5467,8 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		self.assertEqual(result["reconciliation"]["outcome"], "UNSUPPORTED_COMPENSATING_TRANSACTION")
 		self.assertEqual(frappe.db.get_value("Sales Order", first["sales_order"], "docstatus"), 1)
 
-	def test_existing_submitted_order_synced_without_shipping_needs_attention_and_is_not_mutated(self):
-		"""An order synced before shipping was carried has a baseline without the key."""
+	def test_existing_submitted_order_synced_without_shipping_gets_the_shipping_applied(self):
+		"""An order synced before shipping was carried has a baseline without the key (#534 applies the charge)."""
 		account = self._make_shopify_account(self._income_account())
 		order, _mapping = self._make_shopify_order(account, transaction_amount=74.99, current_quantity=1)
 		first = sync_sales_order(order.name)
@@ -5480,19 +5478,16 @@ class IntegrationTestSalesOrderSync(IntegrationTestCase):
 		order.shipping_total = 419.22
 		order.order_total = 494.21
 		order.save()
-		baseline = (order.last_synced_hash, order.last_synced_snapshot)
-		modified = frappe.db.get_value("Sales Order", first["sales_order"], "modified")
 
 		result = sync_sales_order(order.name)
 		order.reload()
 
-		self.assertFalse(result["ok"])
-		self.assertEqual(result["reconciliation"]["outcome"], "NEEDS_ATTENTION")
-		self.assertIn("cancel and amend", result["error"])
-		self.assertEqual((order.last_synced_hash, order.last_synced_snapshot), baseline)
+		self.assertTrue(result["ok"], result.get("error"))
+		self.assertEqual(result["reconciliation"]["outcome"], "UPDATE_SHIPPING")
+		self.assertEqual(frappe.parse_json(order.last_synced_snapshot)["shipping"], 419.22)
 		after = frappe.get_doc("Sales Order", first["sales_order"])
-		self.assertEqual((after.grand_total, len(after.taxes), after.modified), (74.99, 0, modified))
-		self.assertEqual(get_current_sync_status(order.name), "Needs Action")
+		self.assertEqual((after.grand_total, [row.tax_amount for row in after.taxes]), (494.21, [419.22]))
+		self.assertEqual(get_current_sync_status(order.name), "Synced")
 
 	def test_shopify_shipping_without_a_shipping_account_blocks_with_an_actionable_message(self):
 		before = frappe.db.count("Sales Order")
