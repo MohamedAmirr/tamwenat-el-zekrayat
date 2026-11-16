@@ -13,12 +13,16 @@ from copy import deepcopy
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, flt
+from frappe.utils import cstr, flt, fmt_money
 
 from marketplace_integrations.services import sync_reason_codes as reasons
 
 NO_ACTION = "NO_ACTION"
 UPDATE_SUBMITTED_ORDER = "UPDATE_SUBMITTED_ORDER"
+#: Only the shipping charge changed (#534): ``order_shipping_change`` applies it to the submitted order. ``plan`` adds
+#: ``shipping: {"previous", "current"}`` to the result. A shipping change beside item changes rides on
+#: ``UPDATE_SUBMITTED_ORDER`` with ``shipping_deferred`` (items first; the shipping follows on the next run).
+UPDATE_SHIPPING = "UPDATE_SHIPPING"
 CANCEL_ORDER = "CANCEL_ORDER"
 CLOSE_REMAINDER = "CLOSE_REMAINDER"
 NEEDS_ATTENTION = "NEEDS_ATTENTION"
@@ -28,6 +32,7 @@ INACTIVE_ERP_ORDER_STATUSES = {"Cancelled", "Closed"}
 OUTCOMES = {
 	NO_ACTION,
 	UPDATE_SUBMITTED_ORDER,
+	UPDATE_SHIPPING,
 	CANCEL_ORDER,
 	CLOSE_REMAINDER,
 	NEEDS_ATTENTION,
@@ -61,6 +66,7 @@ def read_erp_state(sales_order):
 		"sales_order": sales_order.name,
 		"docstatus": sales_order.docstatus,
 		"status": sales_order.status,
+		"currency": sales_order.currency,
 		"per_delivered": flt(sales_order.per_delivered),
 		"per_billed": flt(sales_order.per_billed),
 		"advance_paid": flt(sales_order.advance_paid),
@@ -152,9 +158,29 @@ def hold_update_for_shipment(reconciliation_plan, sales_order_name):
 
 	The marketplace is right, but the change is held for a person (or a later Retry Sync) instead of failing half
 	way or overwriting a note. A draft note whose carrier shipment is Created is NOT a reason: the change is applied and
-	the COD difference is listed as a COD difference. Queries run only for an ``UPDATE_SUBMITTED_ORDER`` plan;
+	the COD difference is listed as a COD difference. Queries run only for an ``UPDATE_SUBMITTED_ORDER`` or
+	``UPDATE_SHIPPING`` plan (the latter: see below);
 	``plan()`` itself stays free of database access.
 	"""
+	if reconciliation_plan["outcome"] == UPDATE_SHIPPING:
+		# #534: only a Bosta shipment whose result is not known holds a shipping change (a pickup or an invoice is
+		# handled by the executor: the order stays as it is and is flagged).
+		from marketplace_integrations.services import order_shipping_change
+
+		reason = order_shipping_change.hold_reason(sales_order_name)
+		if not reason:
+			return reconciliation_plan
+		shipping = reconciliation_plan["shipping"]
+		return {
+			**_attention(
+				order_shipping_change.held_reason(
+					shipping["previous"], shipping["current"], reason, frappe.db.get_value("Sales Order", sales_order_name, "currency")
+				),
+				reconciliation_plan["changes"],
+				reasons.ORDER_LOCKED_BY_SHIPMENT,
+			),
+			"shipping": shipping,
+		}
 	if reconciliation_plan["outcome"] != UPDATE_SUBMITTED_ORDER:
 		return reconciliation_plan
 	from marketplace_integrations.services import order_edit
@@ -264,7 +290,61 @@ def snapshot_advanced_from(previous, current):
 	return advanced
 
 
+def _shipping_change(previous, current, erp_state):
+	"""``{"previous", "current"}`` when the shipping charge differs between the two snapshots (an absent key is 0, compared
+	at the order currency's precision), else ``None``. Nothing to compare without a baseline or a current snapshot."""
+	if not previous or not current:
+		return None
+	precision = (erp_state.get("precision") or {}).get("currency", 2)
+	old, new = flt(previous.get("shipping"), precision), flt(current.get("shipping"), precision)
+	if old == new:
+		return None
+	return {"previous": old, "current": new}
+
+
 def plan(previous, current, evidence, erp_state):
+	"""Classify a desired commercial snapshot (``_plan``) with a marketplace shipping change (#534) handled:
+	the planner judges everything else as if the shipping had not changed, then
+
+	- nothing else to do on an active submitted order: ``UPDATE_SHIPPING`` (``shipping`` = old and new amount);
+	- items change too: the ``UPDATE_SUBMITTED_ORDER`` plan carries ``shipping_deferred`` (the items are applied first,
+	  the baseline keeps the old shipping, and the next run applies the shipping alone);
+	- any other result (cancel, close, a Needs Attention reason) stands as it is: the shipping does not change it.
+
+	While an item edit waits for the marketplace's confirmation (``outbound_edit_requested`` / ``_in_flight``) the
+	shipping change is not looked at separately: ``_plan`` reports it (``SHIPPING_CHANGED``) until the edit settles."""
+	evidence = evidence or {}
+	shipping = _shipping_change(previous, current, erp_state)
+	if not shipping or evidence.get("outbound_edit_requested") or evidence.get("outbound_edit_in_flight"):
+		return _plan(previous, current, evidence, erp_state)
+	rest = {**current}
+	if "shipping" in previous:
+		rest["shipping"] = previous["shipping"]
+	else:
+		rest.pop("shipping", None)
+	result = _plan(previous, rest, evidence, erp_state)
+	if result["outcome"] == UPDATE_SUBMITTED_ORDER:
+		return {**result, "shipping_deferred": True}
+	if (
+		result["outcome"] == NO_ACTION
+		and erp_state.get("docstatus") == 1
+		and erp_state.get("status") not in INACTIVE_ERP_ORDER_STATUSES
+	):
+		return {
+			**_result(
+				UPDATE_SHIPPING,
+				_("The shipping charge changed in the marketplace from {0} to {1}.").format(
+					fmt_money(shipping["previous"], currency=erp_state.get("currency")),
+					fmt_money(shipping["current"], currency=erp_state.get("currency")),
+				),
+				[{"kind": "header_changed", "field": "shipping", **shipping}],
+			),
+			"shipping": shipping,
+		}
+	return result
+
+
+def _plan(previous, current, evidence, erp_state):
 	"""Classify a desired commercial snapshot without applying any ERP change.
 
 	``evidence`` is the platform-neutral dict an integration adapter builds; every
@@ -351,7 +431,7 @@ def plan(previous, current, evidence, erp_state):
 		if _is_reopenable_closed_order(erp_state):
 			# Closed with no delivery or billing: judge it as the open order it would be after
 			# a reopen; only a cancel/update result carries the reopen flag (#180).
-			reopened = plan(previous, current, evidence, {**erp_state, "status": "To Deliver and Bill"})
+			reopened = _plan(previous, current, evidence, {**erp_state, "status": "To Deliver and Bill"})
 			if reopened["outcome"] in (CANCEL_ORDER, UPDATE_SUBMITTED_ORDER):
 				reopened["reopen"] = True
 				reopened["message"] = _("{0} The Sales Order is Closed; it will be reopened first.").format(
@@ -411,12 +491,12 @@ def plan(previous, current, evidence, erp_state):
 	if header_changes:
 		shipping_change = next((change for change in header_changes if change["field"] == "shipping"), None)
 		if shipping_change:
+			# Reached only while an item edit waits for the marketplace (``plan`` handles every other shipping change).
 			return _attention(
 				_(
 					"The shipping charge differs from the submitted Sales Order "
-					"(Sales Order {0}, marketplace {1}). "
-					"A submitted Sales Order's charges are not edited automatically; cancel and amend it "
-					"(choose Cancel in ERPNext only when asked, so the marketplace order stays open)."
+					"(Sales Order {0}, marketplace {1}) while an item edit waits for the marketplace's confirmation. "
+					"Run the update again once the edit is confirmed."
 				).format(shipping_change["previous"] or 0, shipping_change["current"] or 0),
 				header_changes + changes,
 				reasons.SHIPPING_CHANGED,

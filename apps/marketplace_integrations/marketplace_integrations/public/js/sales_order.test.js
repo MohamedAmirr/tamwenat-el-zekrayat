@@ -1214,3 +1214,54 @@ test("the refusal text is escaped", async () => {
 	await settle();
 	assert.doesNotMatch(msgprints[0].message, /<img/);
 });
+
+// -- Needs Attention (#533) ---------------------------------------------------------------------
+
+function attention_frm(doc) {
+	const frm = make_frm({ custom_marketplace_order: "", ...doc });
+	frm.shown = { indicator: null, headline: null };
+	frm.page = { set_indicator: (label, color) => (frm.shown.indicator = { label, color }) };
+	frm.dashboard.set_headline_alert = (html, color) => (frm.shown.headline = { html, color });
+	return frm;
+}
+
+test("a flagged order shows the red indicator, the escaped reason banner and Mark as Resolved", () => {
+	const { module_exports } = load();
+	const frm = attention_frm({ custom_needs_attention: 1, custom_attention_reason: "Fix <b>it</b>\nThen retry" });
+	module_exports.show_needs_attention(frm);
+	assert.deepEqual(frm.shown.indicator, { label: "Needs Attention", color: "red" });
+	assert.equal(frm.shown.headline.color, "red");
+	assert.equal(frm.shown.headline.html, "Fix &lt;b&gt;it&lt;/b&gt;<br>Then retry");
+	assert.deepEqual(frm.buttons.map((button) => button.label), ["Mark as Resolved"]);
+});
+
+test("an unflagged order, or a draft flagged order, gets no indicator, banner or button", () => {
+	const { module_exports } = load();
+	const plain = attention_frm({ custom_needs_attention: 0 });
+	module_exports.show_needs_attention(plain);
+	assert.deepEqual(plain.shown, { indicator: null, headline: null });
+	assert.equal(plain.buttons.length, 0);
+	const draft = attention_frm({ custom_needs_attention: 1, custom_attention_reason: "x", docstatus: 0 });
+	module_exports.show_needs_attention(draft);
+	assert.equal(draft.buttons.length, 0);
+});
+
+test("a cancelled flagged order shows the banner and Mark as Resolved but no header indicator", () => {
+	const { module_exports } = load();
+	const frm = attention_frm({ custom_needs_attention: 1, custom_attention_reason: "x", docstatus: 2 });
+	module_exports.show_needs_attention(frm);
+	assert.equal(frm.shown.indicator, null);
+	assert.equal(frm.shown.headline.html, "x");
+	assert.deepEqual(frm.buttons.map((button) => button.label), ["Mark as Resolved"]);
+});
+
+test("Mark as Resolved posts the order name, then reloads", async () => {
+	const { module_exports, calls, alerts } = load();
+	const frm = attention_frm({ custom_needs_attention: 1, custom_attention_reason: "x" });
+	await module_exports.run_mark_resolved(frm);
+	assert.equal(calls[0].method, "marketplace_integrations.api.order_attention.mark_resolved");
+	assert.equal(calls[0].type, "POST");
+	assert.deepEqual(calls[0].args, { sales_order: "SAL-ORD-1" });
+	assert.equal(frm.reloads, 1);
+	assert.equal(alerts.length, 1);
+});

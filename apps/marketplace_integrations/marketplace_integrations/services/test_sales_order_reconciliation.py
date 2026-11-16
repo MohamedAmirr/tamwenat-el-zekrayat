@@ -12,6 +12,7 @@ from marketplace_integrations.services.sales_order_reconciliation import (
 	NEEDS_ATTENTION,
 	NO_ACTION,
 	UNSUPPORTED_COMPENSATING_TRANSACTION,
+	UPDATE_SHIPPING,
 	UPDATE_SUBMITTED_ORDER,
 	plan,
 	snapshot_advanced_from,
@@ -378,7 +379,7 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 			"DUPLICATE_LINE_IDENTITY": code(current=duplicate),
 			"LINE_RESTORED_FROM_ZERO": code(previous=restored),
 			"HEADER_CHANGED": code(current=header),
-			"SHIPPING_CHANGED": code(current=shipping),
+			"SHIPPING_CHANGED": code(current=shipping, evidence={"outbound_edit_requested": True}),
 			"CANCELLED_FULLY_DELIVERED": code(evidence={"cancellation": "full"}, erp=delivered()),
 			"CANCELLED_AFTER_FULFILLMENT_DELIVERED": code(
 				evidence={"cancellation": "full", "cancelled_after_fulfillment": True}, erp=delivered()
@@ -984,7 +985,7 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 
 		self.assertEqual(plan(self.previous, current, {}, self.erp_state)["outcome"], NO_ACTION)
 
-	def test_changed_or_new_shipping_on_a_submitted_order_needs_attention_and_executes_nothing(self):
+	def test_changed_or_new_shipping_on_a_submitted_order_is_an_update_shipping_plan(self):
 		cases = {"refunded": (419.22, None), "changed": (419.22, 100.0), "never synced": (None, 419.22)}
 		for label, (previous_shipping, current_shipping) in cases.items():
 			with self.subTest(case=label):
@@ -997,9 +998,29 @@ class UnitTestSalesOrderReconciliation(UnitTestCase):
 
 				result = plan(previous, current, {}, self.erp_state)
 
-				self.assertEqual(result["outcome"], NEEDS_ATTENTION)
-				self.assertIn("cancel and amend", result["message"])
+				self.assertEqual(result["outcome"], UPDATE_SHIPPING, result["message"])
+				self.assertEqual(result["shipping"], {"previous": previous_shipping or 0, "current": current_shipping or 0})
 				self.assertEqual([change["field"] for change in result["changes"]], ["shipping"])
+
+	def test_shipping_change_beside_an_item_change_defers_the_shipping(self):
+		previous = deepcopy(self.previous)
+		current = self._current()
+		current["shipping"] = 20
+		current["items"][0].update({"qty": 3, "fulfilled_total_price": 150})
+		erp_state = deepcopy(self.erp_state)
+
+		result = plan(previous, current, {}, erp_state)
+
+		self.assertEqual(result["outcome"], UPDATE_SUBMITTED_ORDER, result["message"])
+		self.assertTrue(result["shipping_deferred"])
+
+	def test_shipping_change_of_a_cancelled_order_is_not_an_update_shipping_plan(self):
+		current = self._current()
+		current["shipping"] = 20
+
+		result = plan(self.previous, current, {}, {**self.erp_state, "status": "Cancelled"})
+
+		self.assertNotEqual(result["outcome"], UPDATE_SHIPPING)
 
 	def _current(self):
 		current = deepcopy(self.previous)
