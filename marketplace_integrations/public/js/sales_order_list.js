@@ -121,7 +121,8 @@
 			invoice: {
 				label: __("Paid (invoice)"),
 				color: "green",
-				tip: __("The Sales Invoice is fully paid. Nothing to collect."),
+				// INTERIM (until the Bosta COD receivable "Option A" exists): an invoiced order counts as paid.
+				tip: __("The order is invoiced. The cash is collected by the carrier and is settled with the carrier later."),
 			},
 			marketplace: {
 				label: __("Paid by marketplace"),
