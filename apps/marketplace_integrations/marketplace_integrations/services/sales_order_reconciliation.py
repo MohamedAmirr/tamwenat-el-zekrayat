@@ -784,7 +784,14 @@ def _items_by_external_id(snapshot):
 
 
 def _header_changes(previous, current):
-	ignored = {"items", "refund_ids"}
+	"""Commercial header differences between two snapshots.
+
+	``items`` and ``refund_ids`` are compared elsewhere. The Address links
+	(``shipping_address_name``, ``customer_address``) are not commercial: a submitted Sales
+	Order cannot change them, so a difference (e.g. a phone-only order whose Sales Order
+	got an Address after the sync) is no reason for attention and the baseline just advances.
+	"""
+	ignored = {"items", "refund_ids", "shipping_address_name", "customer_address"}
 	keys = (set(previous) | set(current)) - ignored
 	return [
 		{"kind": "header_changed", "field": key, "previous": previous.get(key), "current": current.get(key)}
