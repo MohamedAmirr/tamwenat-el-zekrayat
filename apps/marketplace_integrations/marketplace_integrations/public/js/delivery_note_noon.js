@@ -226,6 +226,45 @@
 		});
 	}
 
+	// Form hook for the Delivery Note Lifecycle workflow's Cancel action (Status menu), which does not go through
+	// before_cancel: without this the server guard refuses the cancel of a note with a live shipment (a Shipped note in
+	// Ready for Pickup included) and the form offers no other way out. Frappe applies the workflow action after this
+	// hook whatever frappe.validated says (form/workflow.js), so the only way to stop it is a promise that never
+	// settles; the screen it froze is released here. The server guard (guard_cancel_or_delete) stays the safety net.
+	function before_workflow_action(frm) {
+		if (frm.selected_workflow_action !== "Cancel") return;
+		if (frm.doc.transporter_name !== CARRIER || !CANCELLABLE.includes(frm.doc.custom_integration_status || "")) return;
+		const unfreeze = () => {
+			if (frappe.dom && frappe.dom.unfreeze) frappe.dom.unfreeze();
+		};
+		const halt = () => {
+			frm.selected_workflow_action = null;
+			unfreeze();
+			return new Promise(() => {});
+		};
+		unfreeze();
+		return new Promise((resolve) => {
+			frappe.confirm(
+				cancel_warning(),
+				() =>
+					cancel_at_noon(frm, {
+						done: () =>
+							Promise.resolve(frm.reload_doc()).then(() => {
+								// Already cancelled (a Check read found Noon's cancel): the workflow must not go on.
+								if (frm.doc.docstatus === 2) {
+									frappe.show_alert({ message: __("The Delivery Note was already cancelled."), indicator: "green" });
+									return halt();
+								}
+								if (frappe.dom && frappe.dom.freeze) frappe.dom.freeze();
+								resolve();
+							}),
+						stop: halt,
+					}),
+				halt
+			);
+		});
+	}
+
 	// A draft note with a live shipment cannot be deleted until the shipment is cancelled at Noon.
 	function cancel_shipment(frm) {
 		return new Promise((resolve) => {
@@ -306,7 +345,7 @@
 	if (typeof frappe !== "undefined" && frappe.marketplace_integrations && frappe.marketplace_integrations.shipping) {
 		frappe.marketplace_integrations.shipping.register_carrier(CARRIER, hooks);
 		if (frappe.ui && frappe.ui.form) {
-			frappe.ui.form.on("Delivery Note", { before_cancel, custom_noon_generate_awb });
+			frappe.ui.form.on("Delivery Note", { before_cancel, before_workflow_action, custom_noon_generate_awb });
 		}
 	}
 
@@ -319,6 +358,7 @@
 			awb_generated,
 			custom_noon_generate_awb,
 			before_cancel,
+			before_workflow_action,
 			cancel_shipment,
 			add_buttons,
 			upload_shipment_invoice,

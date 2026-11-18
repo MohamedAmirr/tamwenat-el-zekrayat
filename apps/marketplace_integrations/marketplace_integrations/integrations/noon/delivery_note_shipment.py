@@ -848,10 +848,12 @@ def cancel_remote(doc):
 
 
 def picked_up(doc):
-	"""The contract's optional ``picked_up``: Noon shows (some of) the units Shipped. The states in which Noon
-	still allows a cancel are not documented (business-spec, "Which states allow cancellation"), so only a
-	shipment Noon itself shows as Shipped or Mixed counts as past the point."""
-	return cstr(doc.get("custom_shipping_status")) in (SHIPPING_SHIPPED, SHIPPING_MIXED)
+	"""The contract's optional ``picked_up``: a person confirmed the pickup, i.e. the note's workflow stage is Picked
+	Up, In Transit or Delivered. Noon's own "Shipped" is NOT a pickup: Noon sets it right after the shipment is
+	created, and the note is then Ready for Pickup, where the shipment can still be cancelled at Noon (#541). The
+	states in which Noon itself refuses a cancel are not documented (business-spec, "Which states allow
+	cancellation"); a refusal is shown when Noon gives one."""
+	return cstr(doc.get(lifecycle.FIELD)) in lifecycle.NOON_MANUAL_STATES
 
 
 def after_cancelled(delivery_note):
@@ -1269,21 +1271,27 @@ def run_reconcile():
 			"custom_integration_status",
 			"custom_carrier_reference",
 			"custom_shipping_status",
+			lifecycle.FIELD,
 			"creation",
 		],
 		limit_page_length=0,
 	)
 	cutoff = add_days(now_datetime(), -REFRESH_MAX_AGE_DAYS)
-	# A Created note stops being read once Noon shows it Shipped or Cancelled, or after 60 days (two calls per
-	# note per night are not spent forever); the webhook and the Refresh button still work on it. A submitted
-	# Created note that shows Cancelled is kept: the refresh makes its Integration Status Cancelled, which
-	# cancels the note natively.
+	# A Created note stops being read once its stage is Delivered or Noon shows it Cancelled, or after 60 days (two
+	# calls per note per night are not spent forever); the webhook and the Refresh button still work on it. Noon's
+	# "Shipped" no longer stops it (#541): Noon sets it right after creation, and a Ready for Pickup note can still
+	# be cancelled at Noon. A submitted Created note that shows Cancelled is kept: the refresh makes its
+	# Integration Status Cancelled, which cancels the note natively.
 	notes = [
 		note
 		for note in notes
 		if cstr(note.custom_integration_status) != CREATED
 		or (note.docstatus == 1 and cstr(note.custom_shipping_status) == SHIPPING_CANCELLED)
-		or (cstr(note.custom_shipping_status) not in (SHIPPING_SHIPPED, SHIPPING_CANCELLED) and note.creation >= cutoff)
+		or (
+			cstr(note.custom_shipping_status) != SHIPPING_CANCELLED
+			and cstr(note.get(lifecycle.FIELD)) != lifecycle.DELIVERED
+			and note.creation >= cutoff
+		)
 	]
 	for note in notes:
 		try:

@@ -134,6 +134,34 @@ class IntegrationTestBostaPickedUp(IntegrationTestCase):
 			cascade._check_note("DN-1", "SO-1", True)  # no refusal
 
 
+class IntegrationTestNoonPickedUp(IntegrationTestCase):
+	"""#541: Noon's "Shipped" is not a pickup; the note's stage is (Ready for Pickup is cancelled at Noon first)."""
+
+	def _check(self, stage, shipping="Shipped"):
+		from marketplace_integrations.integrations.noon import delivery_note_shipment as noon
+
+		adapter = SimpleNamespace(SERVICE_NAME="Noon", picked_up=noon.picked_up)
+		# A plain object, not a ``frappe._dict``: ``note.items`` on a dict is the ``dict.items`` method.
+		fields = {"workflow_state": stage, "custom_shipping_status": shipping}
+		note = SimpleNamespace(items=[{"against_sales_order": "SO-1"}], get=lambda key, default=None: fields.get(key, default))
+		with (
+			patch.object(frappe, "get_doc", return_value=note),
+			patch.object(carrier_shipments, "status_of", return_value=carrier_shipments.CREATED),
+			patch.object(carrier_shipments, "adapter_for", return_value=adapter),
+		):
+			cascade._check_note("DN-1", "SO-1", True)
+
+	def test_a_shipped_note_in_ready_for_pickup_is_not_refused(self):
+		self._check("Ready for Pickup")
+
+	def test_a_note_at_picked_up_or_later_is_refused_with_the_sales_return_message(self):
+		for stage in ("Picked Up", "In Transit", "Delivered"):
+			with self.assertRaises(frappe.ValidationError) as caught:
+				self._check(stage)
+			self.assertIn("Sales Return", str(caught.exception), stage)
+			self.assertIn("Nothing was cancelled", str(caught.exception), stage)
+
+
 class IntegrationTestCascadeApply(IntegrationTestCase):
 	"""``_apply``: the order of the cancels and what the error reports after a carrier commit."""
 

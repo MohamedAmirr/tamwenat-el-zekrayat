@@ -375,6 +375,83 @@ test("a second cancel while one is in flight sends nothing and stops; the lock i
 	assert.equal(shell.is_busy(frm), false);
 });
 
+// The workflow's Cancel action (Status menu) does not run before_cancel; Frappe applies it after this hook
+// whatever frappe.validated says, so "stop" is a promise that never settles.
+async function settled(promise) {
+	const pending = Symbol("pending");
+	const outcome = await Promise.race([promise.then(() => "resolved"), new Promise((r) => setTimeout(() => r(pending), 20))]);
+	return outcome === pending ? "pending" : outcome;
+}
+
+const workflow_form = (action, doc) => Object.assign(make_form(doc), { selected_workflow_action: action });
+
+test("a workflow action other than Cancel, or a note without a live Noon shipment, is left alone", () => {
+	const { mod, calls, confirms } = load();
+	assert.equal(mod.before_workflow_action(workflow_form("Confirm Shipment", { custom_integration_status: "Created" })), undefined);
+	for (const doc of [{ custom_integration_status: "Cancelled" }, { custom_integration_status: "Creation Failed" }, { transporter_name: "Bosta", custom_integration_status: "Created" }]) {
+		assert.equal(mod.before_workflow_action(workflow_form("Cancel", doc)), undefined);
+	}
+	assert.equal(calls.length, 0);
+	assert.equal(confirms.length, 0);
+});
+
+test("the workflow Cancel on a Created note (Shipped at Noon) asks once, cancels at Noon, then lets the workflow go on", async () => {
+	const { mod, calls, confirms } = load({ responses: { cancel_shipment: { status: "Cancelled", outcome: "cancelled", message: "" } } });
+	const frm = workflow_form("Cancel", { docstatus: 1, custom_integration_status: "Created" });
+	assert.equal(await settled(mod.before_workflow_action(frm)), "resolved");
+	assert.equal(confirms.length, 1);
+	assert.match(confirms[0], /also cancels its items at Noon/);
+	assert.ok(calls[0].method.endsWith("carrier_shipments.cancel_shipment"));
+	assert.deepEqual(calls[0].args, { delivery_note: "MAT-DN-1" });
+	assert.equal(frm.reloads, 1);
+});
+
+test("the workflow Cancel stops for good when Noon refuses, with the reason escaped", async () => {
+	const { mod, calls, msgprints } = load({ responses: { cancel_shipment: { outcome: "refused", message: "Too <b>late</b>" } } });
+	let unfrozen = 0;
+	global.frappe.dom = { unfreeze: () => unfrozen++, freeze() {} };
+	const frm = workflow_form("Cancel", { docstatus: 1, custom_integration_status: "Created" });
+	assert.equal(await settled(mod.before_workflow_action(frm)), "pending");
+	assert.equal(calls.length, 1);
+	assert.match(msgprints[0].message, /Noon refused: Too &lt;b&gt;late/);
+	assert.match(msgprints[0].message, /Nothing was cancelled in ERPNext/);
+	assert.equal(frm.selected_workflow_action, null);
+	assert.ok(unfrozen >= 2);
+	delete global.frappe.dom;
+});
+
+test("the workflow Cancel with an unknown answer offers Retry and Check with Noon", async () => {
+	const { mod, dialogs } = load({ responses: { cancel_shipment: { outcome: "unknown", message: "timeout" } } });
+	const frm = workflow_form("Cancel", { docstatus: 1, custom_integration_status: "Created" });
+	const result = settled(mod.before_workflow_action(frm));
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(dialogs[0].config.primary_action_label, "Retry");
+	assert.equal(dialogs[0].config.secondary_action_label, "Check with Noon");
+	dialogs[0].hide();
+	assert.equal(await result, "pending");
+	assert.equal(frm.selected_workflow_action, null);
+});
+
+test("an already cancelled note halts the workflow Cancel with the existing alert", async () => {
+	const { mod, alerts } = load({ responses: { cancel_shipment: { outcome: "cancelled", message: "" } } });
+	const frm = workflow_form("Cancel", { docstatus: 1, custom_integration_status: "Created" });
+	frm.reload_doc = function () {
+		this.reloads++;
+		this.doc.docstatus = 2;
+		return Promise.resolve();
+	};
+	assert.equal(await settled(mod.before_workflow_action(frm)), "pending");
+	assert.match(alerts[0].message, /already cancelled/);
+});
+
+test("declining the confirm sends nothing and halts the workflow Cancel", async () => {
+	const { mod, calls } = load();
+	frappe.confirm = (message, yes, no) => no();
+	const frm = workflow_form("Cancel", { docstatus: 1, custom_integration_status: "Created" });
+	assert.equal(await settled(mod.before_workflow_action(frm)), "pending");
+	assert.deepEqual(calls, []);
+});
+
 test("Check with Noon while another request runs does nothing and ends the cancel attempt", async () => {
 	const { mod, dialogs, calls } = load({ responses: { cancel_shipment: { outcome: "unknown", message: "" } } });
 	const shell = use_real_shell();

@@ -83,7 +83,12 @@ The Delivery Note of a Noon Sales Order is the shipment. The Noon adapter
 - **Cancel.** Noon is asked first (`GetFbpiOrder`): every unit of the shipment already cancelled is success
   with no cancel call. Otherwise `CancelShipment`: 200 cancels, a definite 4xx leaves the note submitted with
   Noon's reason, anything else is Cancellation Unknown (Retry asks Noon first again). The ERPNext cancel
-  follows only after Noon confirms. Changing the AWB or items of a created shipment is cancel and amend. A person cancelling a note or shipment never cancels the Sales Order from here; only a cancel Noon started (the automatic cancel after a read shows every unit cancelled, plus a stored Noon order with no eligible unit) does (`services/order_cancel_cascade.py`).
+  follows only after Noon confirms. **Noon's "Shipped" is not a block (#541):** a submitted note showing Shipped is
+  in the stage Ready for Pickup and is cancelled from Status > Cancel (`public/js/delivery_note_noon.js::before_workflow_action`,
+  the same Noon-first cancel as the native Cancel; a refusal shows "Noon refused: ..." and nothing is cancelled in ERPNext, an
+  unknown answer offers Retry / Check with Noon). `picked_up` (used by the Sales Order cancel) is true only when the stage is
+  Picked Up, In Transit or Delivered: the Sales Order cancel cancels a Ready for Pickup shipment at Noon first, then the note,
+  and refuses a note at Picked Up or later up front, pointing to a Sales Return. Changing the AWB or items of a created shipment is cancel and amend. A person cancelling a note or shipment never cancels the Sales Order from here; only a cancel Noon started (the automatic cancel after a read shows every unit cancelled, plus a stored Noon order with no eligible unit) does (`services/order_cancel_cascade.py`).
   Noon documents (CancelShipment in `noon_api_full.md`): "Cancels an existing shipment. All items included in
   that shipment will also be canceled". So the order sync may then cancel or shrink the Sales Order by itself
   and the units may not be shippable again; the Cancel confirmation says so. UNVERIFIED against real Noon (see
@@ -108,7 +113,8 @@ The Delivery Note of a Noon Sales Order is the shipment. The Noon adapter
   `noon-refresh|<note>` job per submitted Noon note (drafts ignored). The nightly `noon-reconcile` long job
   (23:59, from `carrier_shipments.reconcile_open_notes`) commits per note and survives one note's failure:
   Creating (stale) / Creation Unknown = lookup only (`check`, never creates); Cancellation Unknown and Created
-  = refresh; a draft with a shipment number whose shipment Noon has = the error "draft holds a Noon
+  = refresh (a Created note is read until its stage is Delivered, Noon shows it Cancelled, or it is 60 days old; Noon's
+  Shipped no longer stops it, #541); a draft with a shipment number whose shipment Noon has = the error "draft holds a Noon
   shipment" (Needs Attention, Carrier Creation Problem).
 - **Retired in #415 (phase 4).** Removed: the AWB pool (`awb_pool.py`, `api/noon_awbs.py`, doctype `Noon AWB`, the Generate Noon AWBs button), the old note flow (`delivery_note.js`, `delivery_note_drafts.py`, the `after_insert` hook, Retry endpoint), the Sales Order shipment actions, the handover chain (`handover_state.py`, Mark Handed Over, its Needs Attention rows), `custom_carrier_status` / `custom_carrier_error` and the doctypes `Marketplace Order Shipment`, `...Unit`, `...AWB`. Kept in `fulfillment.py`: Mark Out of Stock, the order invoice, the stuck-reservation release and the shared helpers. The per-shipment invoice returns on the Delivery Note with #416. Order reconciliation, the return AWB scan, the sync debounce and Mark Out of Stock read started units and AWBs from the Noon Delivery Notes (`started_units_of_order`, `recent_awbs_of_orders`, `has_created_note`).
 - **FBPI warehouse check (#416).** The Noon Marketplace Account form has a Check Noon Warehouse button

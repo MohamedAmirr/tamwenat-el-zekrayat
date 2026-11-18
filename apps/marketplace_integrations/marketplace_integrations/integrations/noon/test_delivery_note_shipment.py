@@ -99,7 +99,8 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		return fixture
 
 	def _draft_note(self, fixture, lr_no=None, generate_awb=0):
-		"""Save a draft Delivery Note from the Sales Order the way Create > Delivery Note does."""
+		"""Save a draft Delivery Note from the Sales Order the way Create > Delivery Note does (it stays a draft; tests
+		that need a submitted note flip the docstatus flags with ``_submit_flags``)."""
 		note = make_delivery_note(fixture.name)
 		note.lr_no = lr_no
 		note.custom_noon_generate_awb = generate_awb
@@ -677,6 +678,25 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 			self._refresh(note, self._found(fx), [self._unit("1")])
 			self.assertEqual(self._note(note.name).get(lifecycle.FIELD), manual)
 
+	def test_a_manual_stage_does_not_hide_a_cancel_noon_did(self):
+		# A submitted note a person moved to In Transit: a refresh that reads every unit cancelled still moves it to
+		# Returned / Failed (state_for beats state_of_row's manual override) and runs the automatic native cancel.
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		self._submit_flags(note)
+		frappe.db.set_value("Delivery Note", note.name, lifecycle.FIELD, lifecycle.IN_TRANSIT, update_modified=False)
+		frappe.db.commit()
+		with patch.object(noon, "_cancel_note_natively") as native:
+			result, _client, _get = self._refresh(note, self._found(fx), [self._unit("1", "ACKNOWLEDGED", mp=_CANCELLED)])
+		self.assertEqual(result, "Cancelled")
+		stored = self._note(note.name)
+		self.assertEqual(stored.custom_integration_status, "Cancelled")
+		self.assertEqual(stored.get(lifecycle.FIELD), lifecycle.RETURNED_FAILED)
+		native.assert_called_once_with(note.name)
+		frappe.db.set_value("Delivery Note", note.name, "docstatus", 0, update_modified=False)
+		frappe.db.set_value("Delivery Note Item", {"parent": note.name}, "docstatus", 0, update_modified=False)
+		frappe.db.commit()
+
 	def test_a_noon_note_is_counted_in_the_sales_order_summary_and_a_refresh_updates_it(self):
 		fx = self._order([("SKU-A", 1)], ["SKU-A"])
 		note = self._created_note(fx)
@@ -795,19 +815,37 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		self.assertIn(one.name, seen)
 		self.assertIn(two.name, seen)
 
-	def test_the_nightly_reconcile_stops_at_shipped_or_cancelled_and_after_60_days(self):
+	def test_picked_up_is_the_workflow_stage_not_noons_shipped(self):
+		for stage, expected in (
+			(lifecycle.READY_FOR_PICKUP, False),
+			(lifecycle.SHIPMENT_CREATED, False),
+			("", False),
+			(lifecycle.PICKED_UP, True),
+			(lifecycle.IN_TRANSIT, True),
+			(lifecycle.DELIVERED, True),
+		):
+			for shipping in ("Shipped", "Mixed", "Acknowledged"):
+				doc = frappe._dict({lifecycle.FIELD: stage, "custom_shipping_status": shipping})
+				self.assertEqual(noon.picked_up(doc), expected, (stage, shipping))
+
+	def test_the_nightly_reconcile_reads_shipped_and_stops_at_delivered_cancelled_and_after_60_days(self):
 		notes = {}
-		for key in ("acknowledged", "shipped", "cancelled", "old", "cancelled_submitted"):
+		for key in ("acknowledged", "shipped", "delivered", "cancelled", "old", "cancelled_submitted"):
 			sku = f"SKU-{key}"  # one SKU per order: a mapping is unique per account and SKU
 			notes[key] = self._created_note(self._order([(sku, 1)], [sku]))
 		for key, status in (
 			("acknowledged", "Acknowledged"),
 			("shipped", "Shipped"),
+			("delivered", "Shipped"),
 			("cancelled", "Cancelled"),
 			("old", "Acknowledged"),
 			("cancelled_submitted", "Cancelled"),
 		):
 			frappe.db.set_value("Delivery Note", notes[key].name, "custom_shipping_status", status, update_modified=False)
+		# the Shipped and Delivered notes are submitted, as real ones are (stage Ready for Pickup / Delivered)
+		for key, stage in (("shipped", lifecycle.READY_FOR_PICKUP), ("delivered", lifecycle.DELIVERED)):
+			self._submit_flags(notes[key])
+			frappe.db.set_value("Delivery Note", notes[key].name, lifecycle.FIELD, stage, update_modified=False)
 		# Noon shows it cancelled but the note is still Created and submitted: it must be refreshed so it
 		# becomes Cancelled and is cancelled natively.
 		self._submit_flags(notes["cancelled_submitted"])
@@ -822,10 +860,13 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 
 		self.assertIn(notes["acknowledged"].name, seen)
 		self.assertIn(notes["cancelled_submitted"].name, seen)
-		for key in ("shipped", "cancelled", "old"):
+		# Noon's Shipped is no longer a stop (#541): a Ready for Pickup note is still read
+		self.assertIn(notes["shipped"].name, seen)
+		for key in ("delivered", "cancelled", "old"):
 			self.assertNotIn(notes[key].name, seen)
-		frappe.db.set_value("Delivery Note", notes["cancelled_submitted"].name, "docstatus", 0, update_modified=False)
-		frappe.db.set_value("Delivery Note Item", {"parent": notes["cancelled_submitted"].name}, "docstatus", 0, update_modified=False)
+		for key in ("cancelled_submitted", "shipped", "delivered"):
+			frappe.db.set_value("Delivery Note", notes[key].name, "docstatus", 0, update_modified=False)
+			frappe.db.set_value("Delivery Note Item", {"parent": notes[key].name}, "docstatus", 0, update_modified=False)
 		frappe.db.commit()
 
 	def test_refresh_cancels_natively_only_when_it_moved_the_note_into_cancelled_or_retries_a_blocked_one(self):
