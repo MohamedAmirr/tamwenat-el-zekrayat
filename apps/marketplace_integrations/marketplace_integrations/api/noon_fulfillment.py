@@ -129,6 +129,34 @@ def upload_delivery_note_invoice(
 	)
 
 
+def _authorize_confirm_returned(delivery_note):
+	"""Who may use Confirm Returned (#527): a Noon User or System Manager with document-level read on a Noon
+	Delivery Note. No Delivery Note write, cancel or Stock Entry right is needed: the service runs the cancels and the
+	write-off with a narrow ``ignore_permissions`` bypass, after this check."""
+	if not ({"Noon User", "System Manager"} & set(frappe.get_roles())):
+		frappe.throw(frappe._("Only a Noon User or System Manager can confirm returned goods."), frappe.PermissionError)
+	frappe.has_permission("Delivery Note", "read", doc=delivery_note, throw=True)
+	if not frappe.db.exists("Delivery Note", delivery_note) or not delivery_note_shipment.noon_order_name(
+		frappe.get_doc("Delivery Note", delivery_note)
+	):
+		frappe.throw(frappe._("Delivery Note {0} is not a Noon shipment.").format(delivery_note))
+
+
+@frappe.whitelist(methods=["POST"])
+def get_return_lines(delivery_note: str):
+	"""The lines of the Confirm Returned dialog of a held note (#527)."""
+	_authorize_confirm_returned(delivery_note)
+	return delivery_note_shipment.get_return_lines(delivery_note)
+
+
+@frappe.whitelist(methods=["POST"])
+def confirm_returned(delivery_note: str, lines: str | list, write_off: int | bool = 0):
+	"""Confirm Returned of a note Noon cancelled after pickup (#527): authorizes, then delegates (the service cancels
+	the note and its unpaid invoices and, when asked, writes the missing units off)."""
+	_authorize_confirm_returned(delivery_note)
+	return delivery_note_shipment.confirm_returned(delivery_note, lines, write_off)
+
+
 @frappe.whitelist(methods=["POST"])
 def check_invoice_upload(document_type: str, document_name: str, idempotency_key: str):
 	"""Poll of the invoice dialog: ``{"state": pending|done|failed, "message"}`` (write on the document the

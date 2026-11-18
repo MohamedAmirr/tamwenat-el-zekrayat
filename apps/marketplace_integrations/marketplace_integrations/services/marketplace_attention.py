@@ -750,6 +750,21 @@ def _collect_carrier_items(problem_type=None):
 			# in the error and a person must cancel the note by hand.
 			if problem_type in (None, CARRIER_EXCEPTION):
 				add(CARRIER_EXCEPTION, carrier, row, f"{name}: {error}", seen)
+		elif (
+			status == carrier_log.CANCELLED
+			and row.docstatus == 1
+			and shipping_status
+			and shipping_status == getattr(adapter, "SHIPPING_AWAITING_RETURN", None)
+		):
+			# #527: the carrier cancelled after pickup and the note is held on purpose until Confirm Returned.
+			if problem_type in (None, CARRIER_CANCELLED):
+				add(
+					CARRIER_CANCELLED,
+					carrier,
+					row,
+					_("{0} cancelled this shipment after pickup. When the goods are back, press Confirm Returned.").format(name),
+					seen,
+				)
 		elif status == carrier_log.CANCELLED and row.docstatus == 1 and problem_type in (None, CARRIER_CANCELLED):
 			# Cancelled at the carrier but still submitted here (the local cancel failed): stays until it is
 			# cancelled in ERPNext, however the carrier was told.

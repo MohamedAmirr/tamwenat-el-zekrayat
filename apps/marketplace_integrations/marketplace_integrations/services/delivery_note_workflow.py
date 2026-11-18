@@ -71,7 +71,8 @@ STATE_DOCSTATUS = {
 # submitted Noon note is Ready for Pickup; Picked Up, In Transit (old notes) and Delivered are then set by a
 # person (Workflow actions Confirm Pickup / Confirm Delivery), and ``state_of_row`` keeps them.
 DELIVERED_STATUSES = ("Delivered",)
-NOON_RETURNED_FAILED_STATUSES = ("Cancelled", "Out of Stock")
+#: "Awaiting Return" (#527) is a note Noon cancelled after a person confirmed the pickup: still submitted, stock out.
+NOON_RETURNED_FAILED_STATUSES = ("Cancelled", "Out of Stock", "Awaiting Return")
 #: Stages a person sets on a submitted Noon note; a refresh of the Noon statuses never moves them.
 NOON_MANUAL_STATES = (PICKED_UP, IN_TRANSIT, DELIVERED)
 

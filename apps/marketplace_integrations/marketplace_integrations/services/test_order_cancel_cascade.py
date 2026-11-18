@@ -412,7 +412,8 @@ class IntegrationTestNoonOrderCancel(IntegrationTestCase):
 		enqueue = self._queue(self._note())
 		enqueue.assert_called_once()
 		self.assertEqual(enqueue.call_args.kwargs["sales_order"], "SO-1")
-		self.assertEqual(enqueue.call_args.kwargs["requested_by"], frappe.session.user)
+		# always the system, whoever's session cancelled the note (Confirm Returned runs as a Noon User)
+		self.assertEqual(enqueue.call_args.kwargs["requested_by"], "Administrator")
 
 	def test_a_persons_cancel_of_a_noon_note_leaves_the_order_alone(self):
 		self._queue(self._note(carrier=False)).assert_not_called()

@@ -41,12 +41,23 @@ refuses Submit-time creation unless ``catalog.fbpi_ready(account)`` says the sto
 import base64
 import html
 import json
+import math
 import re
 
 import frappe
 from frappe import _
 from frappe.query_builder.functions import Lower
-from frappe.utils import add_days, cint, cstr, flt, getdate, now_datetime, strip_html
+from frappe.utils import (
+	add_days,
+	cint,
+	cstr,
+	escape_html,
+	flt,
+	getdate,
+	now_datetime,
+	strip_html,
+	strip_html_tags,
+)
 
 from marketplace_integrations.integrations.noon import catalog, fulfillment
 from marketplace_integrations.integrations.noon.client import SERVICE_NAME
@@ -89,6 +100,11 @@ SHIPPING_SHIPPED = "Shipped"
 SHIPPING_OUT_OF_STOCK = "Out of Stock"
 SHIPPING_CANCELLED = "Cancelled"
 SHIPPING_MIXED = "Mixed"
+#: Noon cancelled the shipment after a person confirmed the pickup (#527): the note stays submitted with the stock
+#: out until Confirm Returned. Held = Integration Status Cancelled + this Shipping Status.
+SHIPPING_AWAITING_RETURN = "Awaiting Return"
+#: Set on the note by ``confirm_returned`` so ``guard_cancel`` lets that one native cancel through.
+CONFIRM_RETURNED_FLAG = "noon_confirm_returned"
 MP_STATUS_CANCELLED = "MP_ITEM_STATUS_CANCELLED"
 #: GetFbpiOrder ``integration_status`` -> Shipping Status word.
 _INTEGRATION_STATUS_NAMES = {
@@ -862,6 +878,269 @@ def after_cancelled(delivery_note):
 
 
 # ---------------------------------------------------------------------------
+# Held after a Noon cancel past pickup: Confirm Returned (#527)
+# ---------------------------------------------------------------------------
+
+
+def is_held(values):
+	"""A submitted note Noon cancelled after pickup: Integration Status Cancelled + Shipping Status Awaiting Return.
+	``values`` is a dict or document with ``docstatus``, ``custom_integration_status`` and ``custom_shipping_status``."""
+	return (
+		cint(values.get("docstatus")) == 1
+		and cstr(values.get("custom_integration_status")) == CANCELLED
+		and cstr(values.get("custom_shipping_status")) == SHIPPING_AWAITING_RETURN
+	)
+
+
+def guard_cancel(doc):
+	"""The contract's optional ``guard_cancel`` (``carrier_shipments.guard_cancel_or_delete``, ``before_cancel``):
+	the native cancel of a held note (form, workflow, list) is refused; only ``confirm_returned`` cancels it
+	(it sets ``flags.noon_confirm_returned``). Judged by the stored values."""
+	if doc.flags.get(CONFIRM_RETURNED_FLAG):
+		return
+	stored = frappe.db.get_value(
+		"Delivery Note", doc.name, ["docstatus", "custom_integration_status", "custom_shipping_status"], as_dict=True
+	)
+	if stored and is_held(stored):
+		frappe.throw(
+			_("Noon cancelled this shipment after pickup. Use Confirm Returned when the goods are back."),
+			title=_("Noon shipment"),
+		)
+
+
+def _stock_lines(doc):
+	"""The posted stock lines of a note: a plain row, or for a Product Bundle row its Packed Items (what ERPNext's
+	``SellingController.get_item_list`` posts). Rows of items that are not stock items post nothing and are
+	left out. Each line: ``_dict(name, doctype, item_code, item_name, uom, conversion_factor, warehouse, qty,
+	serial_batch, precision)``."""
+	lines = []
+
+	def add(row, doctype, warehouse):
+		item = frappe.get_cached_value(
+			"Item", row.item_code, ["is_stock_item", "has_serial_no", "has_batch_no"], as_dict=True
+		)
+		if not item or not item.is_stock_item:
+			return
+		lines.append(
+			frappe._dict(
+				name=row.name,
+				doctype=doctype,
+				item_code=row.item_code,
+				item_name=row.get("item_name") or row.item_code,
+				uom=row.get("uom"),
+				conversion_factor=flt(row.get("conversion_factor")) or 1,
+				warehouse=warehouse,
+				qty=flt(row.qty, frappe.get_precision(doctype, "qty")),
+				serial_batch=bool(
+					item.has_serial_no
+					or item.has_batch_no
+					or row.get("serial_and_batch_bundle")
+					or row.get("serial_no")
+					or row.get("batch_no")
+				),
+				precision=frappe.get_precision(doctype, "qty"),
+			)
+		)
+
+	for row in doc.get("items") or []:
+		if row.get("delivered_by_supplier"):
+			continue
+		if doc.has_product_bundle(row.item_code):
+			for packed in doc.get("packed_items") or []:
+				if packed.parent_detail_docname == row.name and packed.parent_item == row.item_code:
+					add(packed, "Packed Item", packed.warehouse or row.warehouse)
+		else:
+			add(row, "Delivery Note Item", row.warehouse)
+	return lines
+
+
+def _held_note(delivery_note, lock=False):
+	"""The held note's stored values, else a readable refusal."""
+	values = frappe.db.get_value(
+		"Delivery Note",
+		delivery_note,
+		["docstatus", "custom_integration_status", "custom_shipping_status"],
+		as_dict=True,
+		for_update=lock,
+	)
+	if not values or not is_held(values):
+		if lock:
+			frappe.db.commit()
+		frappe.throw(
+			_("This Delivery Note is not waiting for its goods to come back from Noon."), title=_("Noon shipment")
+		)
+
+
+def get_return_lines(delivery_note):
+	"""The lines of the Confirm Returned dialog of a held note: ``[{name, item_code, item_name, shipped_qty, uom}]``.
+	The API authorized the caller (the note is read as the system)."""
+	_held_note(delivery_note)
+	doc = frappe.get_doc("Delivery Note", delivery_note)
+	if not noon_order_name(doc):
+		frappe.throw(_("This Delivery Note is not a Noon shipment."))
+	return [
+		{
+			"name": line.name,
+			"item_code": line.item_code,
+			"item_name": line.item_name,
+			"shipped_qty": line.qty,
+			"uom": line.uom,
+		}
+		for line in _stock_lines(doc)
+	]
+
+
+def _check_returned(doc, lines, write_off):
+	"""The write-off plan (nothing is written): ``[(line, shortfall)]`` for the lines with a shortfall. Refuses
+	(``frappe.ValidationError``) a missing, unknown or repeated line, a returned quantity below 0 or above the shipped
+	one, a shortfall without the write-off, a write-off of a serial / batch line and a Company without a Stock
+	Adjustment Account or default cost center."""
+	posted = {line.name: line for line in _stock_lines(doc)}
+	sent = {}
+	if isinstance(lines, str):
+		try:
+			lines = frappe.parse_json(lines)
+		except Exception:
+			lines = None
+	if lines is None:
+		lines = []
+	if not isinstance(lines, (list, tuple)) or not all(isinstance(entry, dict) for entry in lines):
+		frappe.throw(_("The returned quantities are not a list of lines."))
+	for entry in lines:
+		name = cstr(entry.get("name"))
+		if name not in posted or name in sent:
+			frappe.throw(_("The returned quantities do not match the lines of this Delivery Note."))
+		sent[name] = entry.get("returned_qty")
+	if set(sent) != set(posted):
+		frappe.throw(_("The returned quantities do not match the lines of this Delivery Note."))
+	plan = []
+	for name, line in posted.items():
+		try:
+			if sent[name] is None or cstr(sent[name]).strip() == "":
+				raise ValueError  # a blank is not "none came back"
+			number = float(sent[name])
+			if not math.isfinite(number):
+				raise ValueError  # nan / inf
+			returned = flt(number, line.precision)
+		except (TypeError, ValueError):
+			frappe.throw(_("Returned quantity of {0} is not a number.").format(frappe.bold(escape_html(line.item_code))))
+		if returned < 0 or returned > line.qty:
+			frappe.throw(
+				_("Returned quantity of {0} must be between 0 and the shipped quantity ({1}).").format(
+					frappe.bold(escape_html(line.item_code)), line.qty
+				)
+			)
+		shortfall = flt(line.qty - returned, line.precision)
+		if shortfall > 0:
+			plan.append((line, shortfall))
+	if plan and not write_off:
+		frappe.throw(
+			_("Some units did not come back. Tick Create Material Issue for broken/missing units, or enter the full shipped quantity.")
+		)
+	if write_off and plan:
+		for line, _shortfall in plan:
+			if line.serial_batch:
+				frappe.throw(
+					_("Item {0} has serial or batch numbers: write off its missing units by hand with a Stock Entry.").format(
+						frappe.bold(escape_html(line.item_code))
+					)
+				)
+		accounts = frappe.db.get_value("Company", doc.company, ["stock_adjustment_account", "cost_center"], as_dict=True)
+		if not accounts or not accounts.stock_adjustment_account or not accounts.cost_center:
+			frappe.throw(
+				_("Company {0} needs a Stock Adjustment Account and a Default Cost Center to write off units.").format(
+					frappe.bold(escape_html(doc.company))
+				)
+			)
+	return plan
+
+
+def _write_off(doc, plan):
+	"""Insert and submit the Material Issue for the units that did not come back (``plan`` from
+	``_check_returned``), on the Company's Stock Adjustment Account and default cost center whatever the Item says
+	(ERPNext 16.51.1 would otherwise default them from the Item). Returns the Stock Entry."""
+	accounts = frappe.db.get_value("Company", doc.company, ["stock_adjustment_account", "cost_center"], as_dict=True)
+	entry = frappe.new_doc("Stock Entry")
+	entry.stock_entry_type = "Material Issue"
+	entry.purpose = "Material Issue"
+	entry.company = doc.company
+	entry.remarks = _("Units of Delivery Note {0} that did not come back after Noon cancelled the shipment.").format(doc.name)
+	for line, shortfall in plan:
+		entry.append(
+			"items",
+			{
+				"item_code": line.item_code,
+				"s_warehouse": line.warehouse,
+				"qty": shortfall,
+				"uom": line.uom,
+				# a Packed Item's qty is in its stock UOM; the Delivery Note Item's is in its sales UOM
+				"conversion_factor": 1 if line.doctype == "Packed Item" else line.conversion_factor,
+				"expense_account": accounts.stock_adjustment_account,
+				"cost_center": accounts.cost_center,
+			},
+		)
+	# Permission bypass (narrow): ``api/noon_fulfillment.confirm_returned`` authorized the caller (Noon User or
+	# System Manager, read on the note), who may hold no Stock Entry rights.
+	entry.flags.ignore_permissions = True
+	entry.insert()
+	entry.submit()
+	return entry
+
+
+def confirm_returned(delivery_note, lines, write_off):
+	"""Confirm Returned of a held note (the API authorized the caller). The goods are back: ONE transaction
+	cancels the unpaid linked Sales Invoices and the note (stock back in), then, when ``write_off`` and some
+	units did not come back, writes them off with a Material Issue. Any failure rolls it all back (the note stays
+	held) and shows the escaped reason. After the commit: ``after_cancelled``. Returns ``{"stock_entry"}``.
+
+	``lines`` is ``[{"name", "returned_qty"}]`` for every line of ``get_return_lines``. Commit, then lock the
+	note as the next statement (MariaDB snapshot isolation); a second call finds it cancelled and is refused."""
+	from marketplace_integrations.services import carrier_shipments
+
+	write_off = bool(cint(write_off))
+	frappe.db.commit()
+	_held_note(delivery_note, lock=True)
+	doc = frappe.get_doc("Delivery Note", delivery_note)
+	try:
+		if not noon_order_name(doc):
+			frappe.throw(_("This Delivery Note is not a Noon shipment."))
+		plan = _check_returned(doc, lines, write_off)
+	except Exception:
+		frappe.db.commit()
+		raise
+	try:
+		# Permission bypass (narrow): the API authorized the caller; the invoice cancels and the note cancel are
+		# the system's work (the person may hold no cancel right on them).
+		cancelled_invoices = carrier_shipments._cancel_linked_sales_invoices(doc)
+		if cancelled_invoices:
+			doc.reload()  # the invoice cancel rewrote the note's billing status
+		carrier_shipments._check_native_cancel_not_blocked(doc)
+		doc.flags.ignore_permissions = True
+		doc.flags[CONFIRM_RETURNED_FLAG] = True
+		# The order cancel hook (order_cancel_cascade) reads it: Noon cancelled, a person did not.
+		doc.flags.cancelled_by_carrier = True
+		doc.cancel()
+		entry = _write_off(doc, plan) if write_off and plan else None
+		if entry:
+			doc.add_comment(
+				"Comment", _("Units that did not come back were written off with Stock Entry {0}.").format(entry.name)
+			)
+	except Exception as exc:
+		frappe.db.rollback()
+		if not isinstance(exc, frappe.ValidationError):
+			frappe.log_error(title="Confirm Returned failed", message=f"{delivery_note}\n{frappe.get_traceback()}")
+		frappe.clear_messages()
+		reason = escape_html(strip_html_tags(cstr(exc)).strip()[:300]) or exc.__class__.__name__
+		frappe.throw(
+			_("The Delivery Note was not cancelled and nothing was written off: {0}").format(reason),
+			title=_("Noon shipment"),
+		)
+	frappe.db.commit()
+	after_cancelled(delivery_note)
+	return {"stock_entry": entry.name if entry else None}
+
+
+# ---------------------------------------------------------------------------
 # Shipment invoice (spec section 9, #416)
 # ---------------------------------------------------------------------------
 # Invoice upload is a backup step: it never blocks Submit or Cancel (nothing here is called from a document
@@ -1090,9 +1369,15 @@ def refresh(delivery_note):
 	error is a readable ``frappe.ValidationError`` (the Refresh button shows it; jobs log it)."""
 	doc = frappe.get_doc("Delivery Note", delivery_note)
 	status = cstr(doc.get("custom_integration_status"))
-	if status == CANCELLED and doc.docstatus == 1 and cstr(doc.get("custom_last_integration_error")):
+	if (
+		status == CANCELLED
+		and doc.docstatus == 1
+		and cstr(doc.get("custom_last_integration_error"))
+		and cstr(doc.get("custom_shipping_status")) != SHIPPING_AWAITING_RETURN
+	):
 		# Cancelled with an error left by an earlier blocked automatic cancel: retry it (a note this app's
-		# own Cancel just wrote Cancelled has no error and is left to the person about to cancel it).
+		# own Cancel just wrote Cancelled has no error and is left to the person about to cancel it). A held
+		# note (Awaiting Return) is never retried: only Confirm Returned cancels it.
 		_cancel_note_natively(delivery_note)
 		return frappe.db.get_value("Delivery Note", delivery_note, "custom_shipping_status")
 	if status not in (CREATED, CANCELLATION_UNKNOWN) or not noon_order_name(doc):
@@ -1118,6 +1403,7 @@ def refresh(delivery_note):
 		if values.get("custom_integration_status") == CANCELLED:
 			_cancel_note_natively(delivery_note)
 		return frappe.db.get_value("Delivery Note", delivery_note, "custom_shipping_status")
+	held = False
 	snapshot = _snapshot_data(note.get("custom_carrier_request_snapshot"))
 	if shipment is None:
 		found_error = _("Noon has no shipment with number {0}.").format(_reference(note))
@@ -1146,14 +1432,34 @@ def refresh(delivery_note):
 			snapshot.pop("refresh_error", None)
 			if snapshot != _snapshot_data(note.get("custom_carrier_request_snapshot")):
 				values["custom_carrier_request_snapshot"] = json.dumps(snapshot)
+			if picked_up(note):
+				# #527: a person confirmed the pickup (the stage, never Noon's Shipped), so the goods may be on
+				# the road: the stock stays out until Confirm Returned. Held = Cancelled + Awaiting Return,
+				# no error text, and no native cancel.
+				values["custom_shipping_status"] = SHIPPING_AWAITING_RETURN
+				held = True
 		for row in note.get("items") or []:
 			if derived.rows.get(row.name):
 				row.db_set("custom_noon_item_status", derived.rows[row.name], update_modified=False)
 	note.db_set(lifecycle.with_state(delivery_note, values), update_modified=False, notify=True, commit=True)
 	_update_summary(delivery_note)
-	if values.get("custom_integration_status") == CANCELLED:
+	if held:
+		_notify_held(note)
+	elif values.get("custom_integration_status") == CANCELLED:
 		_cancel_note_natively(delivery_note)
 	return frappe.db.get_value("Delivery Note", delivery_note, "custom_shipping_status")
+
+
+def _notify_held(note):
+	"""One Notification Log to the submitter and the Stock Managers when a note is held (the refresh that wrote it
+	runs once: a second read finds the note no longer Created). Never raises."""
+	from marketplace_integrations.services import carrier_shipments
+
+	carrier_shipments._notify(
+		note,
+		_("Noon cancelled Delivery Note {0} after pickup. Stock stays out until you press Confirm Returned.").format(note.name),
+	)
+	frappe.db.commit()
 
 
 def _cancel_note_natively(delivery_note):

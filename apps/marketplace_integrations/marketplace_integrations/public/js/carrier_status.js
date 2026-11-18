@@ -31,6 +31,7 @@
 			"Returned to stock",
 			"Mixed",
 			"Partially Delivered",
+			"Awaiting Return",
 		],
 		red: ["Exception", "Lost", "Damaged", "Investigation", "Awaiting your action", "Terminated", "Out of Stock"],
 		grey: ["Canceled", "Cancelled", "Archived"],

@@ -63,6 +63,22 @@ class TestStatusMapping(IntegrationTestCase):
 		self.assertEqual(lifecycle.state_for(0, "Created", "Shipped", transporter_name="Noon"), lifecycle.SHIPMENT_CREATED)
 		self.assertEqual(lifecycle.state_for(2, "Created", "Shipped", transporter_name="Noon"), lifecycle.CANCELLED)
 
+	def test_a_held_noon_note_is_returned_failed_but_stays_submitted(self):
+		# #527: Noon cancelled after a person confirmed the pickup: Cancelled + Awaiting Return, docstatus 1
+		self.assertIn("Awaiting Return", lifecycle.NOON_RETURNED_FAILED_STATUSES)
+		self.assertEqual(
+			lifecycle.state_for(1, "Cancelled", "Awaiting Return", transporter_name="Noon"), lifecycle.RETURNED_FAILED
+		)
+		for stored in lifecycle.NOON_MANUAL_STATES:
+			row = {
+				"docstatus": 1,
+				"transporter_name": "Noon",
+				"custom_integration_status": "Cancelled",
+				"custom_shipping_status": "Awaiting Return",
+				lifecycle.FIELD: stored,
+			}
+			self.assertEqual(lifecycle.state_of_row(row), lifecycle.RETURNED_FAILED, stored)
+
 	def test_a_stored_manual_stage_of_a_submitted_noon_note_is_kept(self):
 		row = {"docstatus": 1, "transporter_name": "Noon", "custom_integration_status": "Created"}
 		for stored in (lifecycle.PICKED_UP, lifecycle.IN_TRANSIT, lifecycle.DELIVERED):

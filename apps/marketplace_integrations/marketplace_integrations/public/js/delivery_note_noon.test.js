@@ -467,3 +467,170 @@ test("Check with Noon while another request runs does nothing and ends the cance
 	release();
 	await holder;
 });
+
+// ---- Confirm Returned (#527) --------------------------------------------------------------------
+
+const held_note = (extra = {}) => ({
+	docstatus: 1,
+	custom_integration_status: "Cancelled",
+	custom_shipping_status: "Awaiting Return",
+	...extra,
+});
+
+function as_roles(...roles) {
+	global.frappe.user = { has_role: (role) => roles.includes(role) };
+}
+
+// A Dialog whose Table field and Check field can be driven like the real one.
+function install_dialog() {
+	const dialogs = [];
+	global.frappe.ui.Dialog = class {
+		constructor(config) {
+			this.config = config;
+			this.values = {};
+			const grid = {
+				updates: [],
+				refreshed: 0,
+				update_docfield_property: (field, property, value) => grid.updates.push([field, property, value]),
+				refresh: () => grid.refreshed++,
+			};
+			this.fields_dict = { lines: { df: { data: config.fields[0].data }, grid } };
+			dialogs.push(this);
+		}
+		show() {
+			this.shown = true;
+		}
+		hide() {
+			this.hidden = true;
+		}
+		get_value(name) {
+			return this.values[name];
+		}
+	};
+	return dialogs;
+}
+
+const RETURN_LINES = [{ name: "row-1", item_code: "ITEM-A", item_name: "Item A", shipped_qty: 3, uom: "Nos" }];
+
+test("Confirm Returned shows on a held note for a Noon User even with read-only access, and nowhere else", () => {
+	const { mod } = load();
+	const cases = [
+		[held_note(), ["Noon User"], true],
+		[held_note(), ["System Manager"], true],
+		[held_note(), ["Stock User"], false],
+		[held_note({ custom_shipping_status: "Cancelled" }), ["Noon User"], false],
+		[held_note({ docstatus: 0 }), ["Noon User"], false],
+		[held_note({ custom_integration_status: "Created" }), ["Noon User"], false],
+		[held_note({ transporter_name: "Bosta" }), ["Noon User"], false],
+	];
+	for (const [doc, roles, shown] of cases) {
+		as_roles(...roles);
+		const frm = make_form(doc);
+		frm.perm = [{ read: 1, write: 0 }];
+		mod.add_return_button(frm);
+		assert.equal(frm.buttons.some((b) => b.label === "Confirm Returned"), shown, JSON.stringify([doc, roles]));
+	}
+});
+
+test("a held note shows the intro that tells a Noon User to confirm the return", () => {
+	const { mod } = load();
+	const intros = [];
+	const frm = make_form(held_note());
+	frm.set_intro = (text, color) => intros.push({ text, color });
+	mod.refresh(frm);
+	assert.equal(intros.length, 1);
+	assert.match(intros[0].text, /cancelled this shipment after pickup/);
+	assert.equal(intros[0].color, "orange");
+
+	const other = make_form(held_note({ custom_shipping_status: "Cancelled" }));
+	other.set_intro = (text) => intros.push({ text });
+	mod.refresh(other);
+	assert.equal(intros.length, 1);
+});
+
+test("the dialog lists the lines with Returned Qty defaulting to Shipped Qty and read-only until the box is ticked", async () => {
+	const { mod, calls } = load({ responses: { get_return_lines: RETURN_LINES } });
+	const dialogs = install_dialog();
+	const frm = make_form(held_note());
+	await mod.confirm_returned(frm);
+	assert.match(calls[0].method, /noon_fulfillment\.get_return_lines$/);
+	assert.deepEqual(calls[0].args, { delivery_note: "MAT-DN-1" });
+	const table = dialogs[0].config.fields[0];
+	assert.deepEqual(table.data, [{ name: "row-1", item_code: "ITEM-A", item_name: "Item A", shipped_qty: 3, returned_qty: 3 }]);
+	const columns = table.fields.map((field) => [field.fieldname, field.label, field.read_only]);
+	assert.deepEqual(columns, [
+		["item_code", "Item", 1],
+		["item_name", "Item Name", 1],
+		["shipped_qty", "Shipped Qty", 1],
+		["returned_qty", "Returned Qty", 1],
+	]);
+	assert.equal(dialogs[0].config.fields[1].label, "Create Material Issue for broken/missing units");
+	assert.equal(table.cannot_add_rows, 1);
+
+	const dialog = dialogs[0];
+	const grid = dialog.fields_dict.lines.grid;
+	dialog.values.write_off = 1;
+	dialog.config.fields[1].onchange();
+	assert.deepEqual(grid.updates.pop(), ["returned_qty", "read_only", 0]);
+	table.data[0].returned_qty = 1;
+	dialog.values.write_off = 0;
+	dialog.config.fields[1].onchange();
+	assert.deepEqual(grid.updates.pop(), ["returned_qty", "read_only", 1]);
+	assert.equal(table.data[0].returned_qty, 3); // unticking puts every line back to "all returned"
+});
+
+test("a note without stock lines opens no dialog", async () => {
+	const { mod, msgprints } = load({ responses: { get_return_lines: [] } });
+	const dialogs = install_dialog();
+	await mod.confirm_returned(make_form(held_note()));
+	assert.equal(dialogs.length, 0);
+	assert.equal(msgprints.length, 1);
+});
+
+test("confirming without the write-off sends every shipped quantity, then reloads the form", async () => {
+	const { mod, calls, alerts } = load({ responses: { confirm_returned: { stock_entry: null } } });
+	const dialogs = install_dialog();
+	const frm = make_form(held_note());
+	const dialog = mod.open_return_dialog(frm, RETURN_LINES);
+	await dialog.config.primary_action({ write_off: 0, lines: [{ name: "row-1", shipped_qty: 3, returned_qty: 1 }] });
+	assert.match(calls[0].method, /noon_fulfillment\.confirm_returned$/);
+	assert.equal(calls[0].args.delivery_note, "MAT-DN-1");
+	assert.equal(calls[0].args.write_off, 0);
+	assert.deepEqual(JSON.parse(calls[0].args.lines), [{ name: "row-1", returned_qty: 3 }]);
+	assert.equal(dialog.hidden, true);
+	assert.equal(frm.reloads, 1);
+	assert.equal(alerts.length, 1);
+	assert.equal(dialogs.length, 1);
+});
+
+test("confirming with the write-off sends the returned quantities typed", async () => {
+	const { mod, calls } = load({ responses: { confirm_returned: { stock_entry: "MAT-STE-1" } } });
+	install_dialog();
+	const frm = make_form(held_note());
+	const dialog = mod.open_return_dialog(frm, RETURN_LINES);
+	await dialog.config.primary_action({ write_off: 1, lines: [{ name: "row-1", shipped_qty: 3, returned_qty: 1 }] });
+	assert.equal(calls[0].args.write_off, 1);
+	assert.deepEqual(JSON.parse(calls[0].args.lines), [{ name: "row-1", returned_qty: 1 }]);
+});
+
+test("a server refusal is shown escaped, keeps the dialog open and does not reload", async () => {
+	const { mod, msgprints } = load({ responses: { confirm_returned: new Error("refused") } });
+	global.frappe.marketplace_integrations.shipping.server_message = () => "<img src=x onerror=alert(1)> refused";
+	install_dialog();
+	const frm = make_form(held_note());
+	const dialog = mod.open_return_dialog(frm, RETURN_LINES);
+	await dialog.config.primary_action({ write_off: 0, lines: [{ name: "row-1", shipped_qty: 3, returned_qty: 3 }] });
+	assert.equal(msgprints.length, 1);
+	assert.equal(msgprints[0].message, "&lt;img src=x onerror=alert(1)&gt; refused");
+	assert.equal(msgprints[0].indicator, "red");
+	assert.equal(dialog.hidden, undefined);
+	assert.equal(frm.reloads, 0);
+});
+
+test("a refusal reading the lines is shown and no dialog opens", async () => {
+	const { mod, msgprints } = load({ responses: { get_return_lines: new Error("no") } });
+	const dialogs = install_dialog();
+	await mod.confirm_returned(make_form(held_note()));
+	assert.equal(dialogs.length, 0);
+	assert.equal(msgprints.length, 1);
+});
