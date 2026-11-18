@@ -83,11 +83,24 @@ The Delivery Note of a Noon Sales Order is the shipment. The Noon adapter
 - **Cancel.** Noon is asked first (`GetFbpiOrder`): every unit of the shipment already cancelled is success
   with no cancel call. Otherwise `CancelShipment`: 200 cancels, a definite 4xx leaves the note submitted with
   Noon's reason, anything else is Cancellation Unknown (Retry asks Noon first again). The ERPNext cancel
-  follows only after Noon confirms. Changing the AWB or items of a created shipment is cancel and amend. A person cancelling a note or shipment never cancels the Sales Order from here; only a cancel Noon started (the automatic cancel after a read shows every unit cancelled, plus a stored Noon order with no eligible unit) does (`services/order_cancel_cascade.py`).
+  follows only after Noon confirms. **Noon's "Shipped" is not a block (#541):** a submitted note showing Shipped is
+  in the stage Ready for Pickup and is cancelled from Status > Cancel (`public/js/delivery_note_noon.js::before_workflow_action`,
+  the same Noon-first cancel as the native Cancel; a refusal shows "Noon refused: ..." and nothing is cancelled in ERPNext, an
+  unknown answer offers Retry / Check with Noon). `picked_up` (used by the Sales Order cancel) is true only when the stage is
+  Picked Up, In Transit or Delivered: the Sales Order cancel cancels a Ready for Pickup shipment at Noon first, then the note,
+  and refuses a note at Picked Up or later up front, pointing to a Sales Return. Changing the AWB or items of a created shipment is cancel and amend. A person cancelling a note or shipment never cancels the Sales Order from here; only a cancel Noon started (the automatic cancel after a read shows every unit cancelled, plus a stored Noon order with no eligible unit) does (`services/order_cancel_cascade.py`). **Held after pickup (#527):** when that read finds every unit cancelled and the note's stage is Picked Up, In Transit or Delivered, `refresh` does not cancel the note: it stays submitted with Integration Status Cancelled + Shipping Status Awaiting Return (`SHIPPING_AWAITING_RETURN`, `is_held`), one Notification Log is sent, and the native cancel is refused (`guard_cancel`) until a Noon User presses Confirm Returned (`confirm_returned(delivery_note, lines, write_off)`; API `get_return_lines` / `confirm_returned` in `api/noon_fulfillment.py`; form button in `delivery_note_noon.js`). Known limit: a Picked Up note whose Noon status first turns Out of Stock is mapped to Returned / Failed (not a pickup stage), so a later all-units-cancelled read cancels it automatically instead of holding it. Details: `docs/marketplace-integrations/delivery-note-first.md`.
   Noon documents (CancelShipment in `noon_api_full.md`): "Cancels an existing shipment. All items included in
   that shipment will also be canceled". So the order sync may then cancel or shrink the Sales Order by itself
   and the units may not be shippable again; the Cancel confirmation says so. UNVERIFIED against real Noon (see
   business-spec section 12).
+- **Stage of a submitted Noon note (#540).** Shipping Status "Shipped" is set by Noon right after the shipment is
+  created and does NOT mean picked up. Noon has no Delivered status (its statuses are Acknowledged, Shipped, Out of
+  Stock, Cancelled, Mixed). `delivery_note_workflow.state_for` maps a submitted Noon note (`transporter_name` Noon) to
+  Ready for Pickup whatever the status says, except Cancelled / Out of Stock (Returned / Failed). Picked Up and Delivered are manual Workflow actions (Confirm Pickup, Confirm Delivery incl. from In Transit,
+  Stock User, bulk from the list Actions menu); `state_of_row` keeps a stored Picked Up / In Transit / Delivered so no
+  Refresh, webhook or nightly read moves it. Notes that were moved to In Transit by the old Shipped mapping stay as they are.
+  A Noon draft submitted by hand with Confirm Shipment is corrected to Ready for Pickup by `fix_state_after_submit`
+  (the timeline comment of that action may still say Picked Up).
 - **Status and refresh.** `refresh` (Refresh from Noon button, synchronous: HTTP first, then lock and write)
   calls `GetShipment` and `GetFbpiOrder` and derives Shipping Status from the units in the request snapshot:
   all units agree = Acknowledged / Shipped / Out of Stock, all cancelled = Cancelled (terminal), units differ
@@ -100,7 +113,8 @@ The Delivery Note of a Noon Sales Order is the shipment. The Noon adapter
   `noon-refresh|<note>` job per submitted Noon note (drafts ignored). The nightly `noon-reconcile` long job
   (23:59, from `carrier_shipments.reconcile_open_notes`) commits per note and survives one note's failure:
   Creating (stale) / Creation Unknown = lookup only (`check`, never creates); Cancellation Unknown and Created
-  = refresh; a draft with a shipment number whose shipment Noon has = the error "draft holds a Noon
+  = refresh (a Created note is read until its stage is Delivered, Noon shows it Cancelled, or it is 60 days old; Noon's
+  Shipped no longer stops it, #541); a draft with a shipment number whose shipment Noon has = the error "draft holds a Noon
   shipment" (Needs Attention, Carrier Creation Problem).
 - **Retired in #415 (phase 4).** Removed: the AWB pool (`awb_pool.py`, `api/noon_awbs.py`, doctype `Noon AWB`, the Generate Noon AWBs button), the old note flow (`delivery_note.js`, `delivery_note_drafts.py`, the `after_insert` hook, Retry endpoint), the Sales Order shipment actions, the handover chain (`handover_state.py`, Mark Handed Over, its Needs Attention rows), `custom_carrier_status` / `custom_carrier_error` and the doctypes `Marketplace Order Shipment`, `...Unit`, `...AWB`. Kept in `fulfillment.py`: Mark Out of Stock, the order invoice, the stuck-reservation release and the shared helpers. The per-shipment invoice returns on the Delivery Note with #416. Order reconciliation, the return AWB scan, the sync debounce and Mark Out of Stock read started units and AWBs from the Noon Delivery Notes (`started_units_of_order`, `recent_awbs_of_orders`, `has_created_note`).
 - **FBPI warehouse check (#416).** The Noon Marketplace Account form has a Check Noon Warehouse button

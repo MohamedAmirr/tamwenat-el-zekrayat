@@ -11,6 +11,7 @@
   {"state": "Waiting for Goods", "doc_status": "0", "allow_edit": "All", "style": "Warning"},
   {"state": "Shipment Requested", "doc_status": "0", "allow_edit": "All", "style": "Primary"},
   {"state": "Shipment Created", "doc_status": "0", "allow_edit": "All", "style": "Info"},
+  {"state": "Ready for Pickup", "doc_status": "1", "allow_edit": "All", "style": "Info"},
   {"state": "Picked Up", "doc_status": "1", "allow_edit": "All", "style": "Primary"},
   {"state": "In Transit", "doc_status": "1", "allow_edit": "All", "style": "Primary"},
   {"state": "Delivered", "doc_status": "1", "allow_edit": "All", "style": "Success"},
@@ -62,6 +63,28 @@
    "allowed": "Stock User",
    "condition": "not doc.is_return and doc.transporter_name != \"Bosta\""
   },
+  {
+   "state": "Ready for Pickup",
+   "action": "Confirm Pickup",
+   "next_state": "Picked Up",
+   "allowed": "Stock User",
+   "condition": "doc.transporter_name == \"Noon\" and not doc.is_return"
+  },
+  {
+   "state": "Picked Up",
+   "action": "Confirm Delivery",
+   "next_state": "Delivered",
+   "allowed": "Stock User",
+   "condition": "doc.transporter_name == \"Noon\" and not doc.is_return"
+  },
+  {
+   "state": "In Transit",
+   "action": "Confirm Delivery",
+   "next_state": "Delivered",
+   "allowed": "Stock User",
+   "condition": "doc.transporter_name == \"Noon\" and not doc.is_return"
+  },
+  {"state": "Ready for Pickup", "action": "Cancel", "next_state": "Cancelled", "allowed": "Stock Manager"},
   {"state": "Picked Up", "action": "Cancel", "next_state": "Cancelled", "allowed": "Stock Manager"},
   {"state": "In Transit", "action": "Cancel", "next_state": "Cancelled", "allowed": "Stock Manager"},
   {"state": "Delivered", "action": "Cancel", "next_state": "Cancelled", "allowed": "Stock Manager"},
