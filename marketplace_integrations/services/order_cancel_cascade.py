@@ -13,13 +13,13 @@ Three triggers, all registered in ``hooks.py``:
    plain error naming the document) when: a Sales Invoice has a Payment Entry, Journal Entry or is paid or partly paid
    (payments are never cancelled by this code); a return exists (a credit note or a return Delivery Note, draft or
    submitted: returns are left alone); a document also holds another order's items; a note's shipment result is
-   unknown; a note whose carrier shipment was already picked up (adapter ``picked_up``: the return flow applies); or the user may not cancel one of the documents. A carrier that refuses stops the cancel too. The carrier
+   unknown; a note whose carrier shipment was already picked up (adapter ``picked_up``: the return flow applies); a note the adapter holds back for its goods to come back (adapter ``is_held``); or the user may not cancel one of the documents. A carrier that refuses stops the cancel too. The carrier
    cancel commits (``carrier_shipments.cancel`` does), so a refusal after it leaves the earlier documents cancelled: the
    error names them and cancelling the Sales Order again carries on.
 2. ``queue_noon_order_cancel`` (Delivery Note ``on_cancel``): ONLY when Noon itself cancelled (the note was cancelled by
    the carrier-initiated automatic cancel, ``flags.cancelled_by_carrier``) and the stored Noon order shows no eligible
-   unit left, the Sales Order is cancelled in a job after the commit (as whoever's session cancelled the note: in practice always Administrator, since
-   only the system-run automatic cancel sets the marker, so this is no permission scoping). The
+   unit left, the Sales Order is cancelled in a job after the commit, always as Administrator (the system-run automatic cancel and
+   Confirm Returned, #527, set the marker; a person's own right plays no part). The
    cascade then also cancels the other notes (a live Noon shipment is cancelled at Noon through the generic carrier
    cancel). A person cancelling a note or shipment (the cancel-and-amend path for an AWB or items) never cancels the
    order. A block (a payment, a return) never undoes the note cancel: the Sales Order then stays and a comment and a
@@ -250,6 +250,16 @@ def _check_note(name, sales_order, ignore):
 			).format(adapter.SERVICE_NAME, name),
 			title=_("Cancel Sales Order"),
 		)
+	is_held = getattr(adapter, "is_held", None)
+	if adapter and is_held and is_held(note):
+		# The adapter holds the note back from the native cancel (goods still to come back): refuse up front, before
+		# any other shipment of this order is cancelled at the carrier.
+		frappe.throw(
+			_(
+				"Delivery Note {0} is waiting for its goods to come back from {1}. Use Confirm Returned on it first. Nothing was cancelled."
+			).format(name, adapter.SERVICE_NAME),
+			title=_("Cancel Sales Order"),
+		)
 	if not ignore:
 		frappe.has_permission("Delivery Note", "cancel", doc=name, throw=True)
 		if adapter and status in _CARRIER_LIVE:
@@ -384,7 +394,9 @@ def queue_noon_order_cancel(doc, method=None):
 				enqueue_after_commit=True,
 				sales_order=name,
 				delivery_note=doc.name,
-				requested_by=frappe.session.user,
+				# Always the system: the note is cancelled by the system-run automatic cancel or by Confirm Returned
+				# (a person with Noon User only, who must not be the user of the Sales Order cancel).
+				requested_by="Administrator",
 			)
 	except Exception:
 		frappe.log_error(title="Queueing the Noon Sales Order cancel failed", message=f"{doc.name}\n{frappe.get_traceback()}")
@@ -400,9 +412,9 @@ def _noon_cancelled_the_order(sales_order):
 
 
 def run_noon_order_cancel(sales_order, delivery_note, requested_by="Administrator"):
-	"""The job of ``queue_noon_order_cancel``. ``requested_by`` is the session user that cancelled the note; the
-	trigger is the system-run automatic cancel, so in practice it is always Administrator (there is no permission
-	scoping to rely on). The cascade then cancels the other invoices and notes and asks the carrier to cancel any
+	"""The job of ``queue_noon_order_cancel``. ``requested_by`` is always Administrator: the trigger is a system
+	run (a Noon cancel read by refresh, or Confirm Returned by a person who may hold no cancel rights), so there is
+	no session user to scope to. The cascade then cancels the other invoices and notes and asks the carrier to cancel any
 	live shipment (nothing else is sent to Noon). Never raises."""
 	frappe.set_user(requested_by)
 	try:

@@ -24,8 +24,10 @@
 	const CANCEL_STATUSES = ["Cancellation Pending", "Cancellation Unknown", "Cancelled"];
 	const EDITABLE = ["", NOT_CREATED, FAILED];
 	const RETURN_PICKUP = "Customer Return Pickup";
-	// The Workflow action ("Delivery Note Lifecycle", #498) that starts a carrier shipment.
+	// The Workflow actions ("Delivery Note Lifecycle", #498) that start a carrier shipment: the first request,
+	// and the retry of a note in Shipment Requested whose create ended Creation Unknown.
 	const CREATE_SHIPMENT = "Create Shipment";
+	const SHIPMENT_ACTIONS = [CREATE_SHIPMENT, "Retry Shipment"];
 	// Not a stored status: the wait ended because the shipment is Created but the job could not submit the note.
 	const SUBMIT_FAILED = "Submit Failed";
 
@@ -91,8 +93,12 @@
 				submit_error ? "red" : "green"
 			);
 		} else if (status === UNKNOWN) {
+			// a return pickup has no Retry Shipment action (the transition excludes returns): Check is its way on
+			const advice = frm.doc.is_return
+				? __("It is not known whether {0} created the shipment. Use Check with {0} before trying again.", [name])
+				: __("It is not known whether {0} created the shipment. Press Retry Shipment to try again: {0} is asked first whether it has the shipment.", [name]);
 			frm.set_intro(
-				__("It is not known whether {0} created the shipment. Use Check with {0} before trying again.", [name]) +
+				advice +
 					(error ? `<br>${error}` : ""),
 				"orange"
 			);
@@ -220,7 +226,9 @@
 		if (status === UNKNOWN) {
 			return (
 				`<p>${__("It is not known whether {0} created the shipment. The Delivery Note was not changed.", [carrier])}</p>` +
-				`<p class="text-muted">${__("Use Check with {0} on the Delivery Note before trying again.", [carrier])}</p>`
+				// the stored text is raw (a retry refused before the carrier was asked leaves its reason here): escaped
+				(error ? `<p>${escape(error)}</p>` : "") +
+				`<p class="text-muted">${__("Use Check with {0} or Retry Shipment on the Delivery Note to try again.", [carrier])}</p>`
 			);
 		}
 		if (status === FAILED) {
@@ -268,7 +276,7 @@
 	// Starts the carrier request (the create of a delivery, or the pickup of a return) and waits for it in a
 	// dialog. Resolves once the note is Created (form reloaded); otherwise sets frappe.validated = false and
 	// shows why. `submitting` is true when it is the native Submit that waits.
-	// `started` is true after the "Create Shipment" Workflow action: its transition already queued the request,
+	// `started` is true after the "Create Shipment" or "Retry Shipment" Workflow action: its transition already queued the request,
 	// so this only waits for the result (#498).
 	function send_and_wait(frm, carrier, submitting, started = false) {
 		// a request already in flight: this click starts nothing and the submit must not go on
@@ -439,7 +447,7 @@
 		});
 	}
 
-	// ---- "Create Shipment" Workflow action (#498) ---------------------------------------------------
+	// ---- "Create Shipment" and "Retry Shipment" Workflow actions (#498) ---------------------------------------------------
 	//
 	// The Workflow transition does the server work (it refuses what cannot be sent, then queues the carrier
 	// request); these two form events only add what Desk's own workflow button lacks: the carrier's own
@@ -448,7 +456,7 @@
 	// `frm.selected_workflow_action` is already null when after_workflow_action runs, so remember the action.
 	function before_workflow_action(frm) {
 		frm.__create_shipment_for = null;
-		if (frm.selected_workflow_action !== CREATE_SHIPMENT) return;
+		if (!SHIPMENT_ACTIONS.includes(frm.selected_workflow_action)) return;
 		const carrier = carrier_name(frm);
 		if (!carrier) return;
 		const hooks = carriers[carrier];

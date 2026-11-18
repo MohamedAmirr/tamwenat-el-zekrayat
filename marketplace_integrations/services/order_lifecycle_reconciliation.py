@@ -220,7 +220,7 @@ def _notes_by_order(sales_orders):
 		parent_rows.setdefault(row.parent, []).append(row)
 	if not parent_rows:
 		return {}
-	fields = ["name", "docstatus", "is_return", "custom_integration_status", "custom_shipping_status"]
+	fields = ["name", "docstatus", "is_return", "transporter_name", "custom_integration_status", "custom_shipping_status"]
 	if lifecycle.is_installed():
 		fields.append(lifecycle.FIELD)
 	by_order = {}

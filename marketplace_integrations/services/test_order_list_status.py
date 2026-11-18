@@ -46,6 +46,19 @@ class UnitTestStageOfNote(UnitTestCase):
 		self.assertEqual(service.stage_of_note(note(1, "Created", "Returned to business")), service.PROBLEM)
 		self.assertEqual(service.stage_of_note(note(1, "Created", "Lost")), service.PROBLEM)
 
+	def test_a_submitted_noon_note_is_ready_until_a_person_confirms_pickup_and_delivery(self):
+		def noon_note(state, shipping="Shipped"):
+			row = note(1, "Created", shipping, state)
+			row.transporter_name = "Noon"
+			return row
+
+		self.assertEqual(service.stage_of_note(noon_note(lifecycle.READY_FOR_PICKUP)), service.READY)
+		self.assertEqual(service.stage_of_note(noon_note(None)), service.READY)
+		self.assertEqual(service.stage_of_note(noon_note(lifecycle.PICKED_UP)), service.ON_THE_WAY)
+		self.assertEqual(service.stage_of_note(noon_note(lifecycle.IN_TRANSIT)), service.ON_THE_WAY)
+		self.assertEqual(service.stage_of_note(noon_note(lifecycle.DELIVERED)), service.DELIVERED)
+		self.assertEqual(service.stage_of_note(noon_note(lifecycle.PICKED_UP, "Cancelled")), service.PROBLEM)
+
 	def test_a_bosta_exception_code_is_a_failed_attempt_not_on_the_way(self):
 		# EXCEPTION_CODES 47, 102, 103, 105
 		for shipping in ("Exception", "Investigation", "Awaiting your action", "On hold"):
