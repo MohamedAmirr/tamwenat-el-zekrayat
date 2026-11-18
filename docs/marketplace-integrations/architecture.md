@@ -298,8 +298,12 @@ Noon is the second adapter (#415): the old `custom_carrier_status` / `custom_car
   Lifecycle" and the Custom Field `workflow_state` (label "Stage", read-only, in list view and standard filter,
   `allow_on_submit`, fixture `Delivery Note-workflow_state`). Employees see stage names, never Draft/Submitted: the native `status`
   field is out of the list view and the filters, and hidden on the form (three Property Setters in the fixtures).
-  Stages (docstatus): Order Received, Waiting for Goods, Shipment Requested, Shipment Created (0); Picked Up,
-  In Transit, Delivered, Returned / Failed (1); Cancelled (2). Buttons: Create Shipment (Bosta/Noon notes, not
+  Stages (docstatus): Order Received, Waiting for Goods, Shipment Requested, Shipment Created (0); Ready for Pickup,
+  Picked Up, In Transit, Delivered, Returned / Failed (1); Cancelled (2). Noon (#540): a submitted Noon note is
+  Ready for Pickup (Noon's Shipped only means the shipment exists); Confirm Pickup (Ready for Pickup to Picked Up)
+  and Confirm Delivery (Picked Up / In Transit to Delivered) are manual Stock User actions on Noon notes, applied in
+  bulk from the Delivery Note list; `state_of_row` keeps a stored Picked Up / In Transit / Delivered
+  (`NOON_MANUAL_STATES`); shipped by `patches/v0_0/add_noon_manual_stage_transitions.py`. Buttons: Create Shipment (Bosta/Noon notes, not
   returns; moves to Shipment Requested, then the async task `Request Carrier Shipment` calls
   `carrier_shipments.request_create` as the pressing user; the sync task `Check Carrier Shipment Request` runs
   `carrier_shipments.check_ready` inside the transition so an unsendable request never reaches Shipment

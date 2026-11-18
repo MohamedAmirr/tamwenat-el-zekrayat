@@ -40,6 +40,7 @@ ORDER_RECEIVED = "Order Received"
 WAITING_FOR_GOODS = "Waiting for Goods"
 SHIPMENT_REQUESTED = "Shipment Requested"
 SHIPMENT_CREATED = "Shipment Created"
+READY_FOR_PICKUP = "Ready for Pickup"
 PICKED_UP = "Picked Up"
 IN_TRANSIT = "In Transit"
 DELIVERED = "Delivered"
@@ -53,6 +54,7 @@ STATE_DOCSTATUS = {
 	WAITING_FOR_GOODS: 0,
 	SHIPMENT_REQUESTED: 0,
 	SHIPMENT_CREATED: 0,
+	READY_FOR_PICKUP: 1,
 	PICKED_UP: 1,
 	IN_TRANSIT: 1,
 	DELIVERED: 1,
@@ -64,16 +66,21 @@ STATE_DOCSTATUS = {
 # the ONE table in ``integrations/bosta/statuses.py`` (``STAGE_BY_CODE``, #500). Noon's are listed here. Anything
 # not listed is a carrier note whose carrier has the parcel and stays Picked Up (a submitted Bosta note is picked
 # up by definition: only the pickup submits it).
+#
+# Noon (#540): Noon sets "Shipped" right after the shipment is created, so it does NOT mean the parcel left. A
+# submitted Noon note is Ready for Pickup; Picked Up, In Transit (old notes) and Delivered are then set by a
+# person (Workflow actions Confirm Pickup / Confirm Delivery), and ``state_of_row`` keeps them.
 DELIVERED_STATUSES = ("Delivered",)
 NOON_RETURNED_FAILED_STATUSES = ("Cancelled", "Out of Stock")
-NOON_IN_TRANSIT_STATUSES = ("Shipped",)
+#: Stages a person sets on a submitted Noon note; a refresh of the Noon statuses never moves them.
+NOON_MANUAL_STATES = (PICKED_UP, IN_TRANSIT, DELIVERED)
 
 #: Set on the document by the Workflow task of a transition: a draft-to-draft stage change is only legitimate
 #: through a Workflow action.
 TRANSITION_FLAG = "delivery_note_workflow_transition"
 
 
-def state_for(docstatus, integration_status="", shipping_status="", is_return=False):
+def state_for(docstatus, integration_status="", shipping_status="", is_return=False, transporter_name=""):
 	"""The stage of a note: the single mapping used by the migration patch and by runtime writes."""
 	docstatus, integration, shipping = cint(docstatus), cstr(integration_status), cstr(shipping_status)
 	if docstatus == 2:
@@ -88,13 +95,15 @@ def state_for(docstatus, integration_status="", shipping_status="", is_return=Fa
 	if cint(is_return):
 		return RETURNED_FAILED
 	from marketplace_integrations.integrations.bosta import statuses
+	from marketplace_integrations.integrations.noon import delivery_note_shipment as noon
 
 	if shipping in DELIVERED_STATUSES:
 		return DELIVERED
 	if shipping in NOON_RETURNED_FAILED_STATUSES:
 		return RETURNED_FAILED
-	if shipping in NOON_IN_TRANSIT_STATUSES:
-		return IN_TRANSIT
+	if cstr(transporter_name) == noon.SHIPPING_CARRIER:
+		# the Noon statuses (Acknowledged, Shipped, Mixed) never say the parcel left: a person confirms pickup and delivery
+		return READY_FOR_PICKUP
 	bosta_stage = statuses.stage_for_name(shipping)
 	if bosta_stage:
 		# a submitted note never gets a draft-only stage (a Bosta status that maps to Shipment Created): the carrier
@@ -116,7 +125,12 @@ def state_of_row(row, overrides=None):
 		data.get("custom_integration_status"),
 		data.get("custom_shipping_status"),
 		data.get("is_return"),
+		data.get("transporter_name"),
 	)
+	if state == READY_FOR_PICKUP and cstr(row.get(FIELD)) in NOON_MANUAL_STATES:
+		# a person moved this submitted Noon note on (Confirm Pickup / Confirm Delivery); Returned / Failed and
+		# Cancelled came out of ``state_for`` above and win
+		return cstr(row.get(FIELD))
 	if state == ORDER_RECEIVED and cstr(row.get(FIELD)) == WAITING_FOR_GOODS and cint(data.get("docstatus")) == 0:
 		return WAITING_FOR_GOODS
 	return state
@@ -127,7 +141,14 @@ def is_installed():
 	return frappe.get_meta("Delivery Note").has_field(FIELD)
 
 
-_ROW_FIELDS = ["docstatus", "is_return", "custom_integration_status", "custom_shipping_status", FIELD]
+_ROW_FIELDS = [
+	"docstatus",
+	"is_return",
+	"transporter_name",
+	"custom_integration_status",
+	"custom_shipping_status",
+	FIELD,
+]
 
 
 def with_state(delivery_note, values):
@@ -186,7 +207,11 @@ def fix_state_after_submit(doc, method=None):
 	if not is_installed() or not doc.meta.get_workflow():
 		return
 	state = state_for(
-		doc.docstatus, doc.get("custom_integration_status"), doc.get("custom_shipping_status"), doc.get("is_return")
+		doc.docstatus,
+		doc.get("custom_integration_status"),
+		doc.get("custom_shipping_status"),
+		doc.get("is_return"),
+		doc.get("transporter_name"),
 	)
 	if cstr(doc.get(FIELD)) != state:
 		doc.db_set(FIELD, state, update_modified=False)

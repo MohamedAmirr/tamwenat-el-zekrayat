@@ -2020,6 +2020,7 @@ In Transit,قيد النقل
 Returned / Failed,مرتجعة / فاشلة
 Confirm Delivery,تأكيد التسليم
 Confirm Shipment,تأكيد الشحنة
+Confirm Pickup,تأكيد استلام الشحنة
 Retry Shipment,إعادة محاولة الشحنة
 Stage,المرحلة
 The stage of a Delivery Note changes only with its workflow buttons.,لا تتغير مرحلة مذكرة التسليم إلا من خلال أزرار سير العمل الخاصة بها.

@@ -44,12 +44,50 @@ class TestStatusMapping(IntegrationTestCase):
 
 	def test_every_listed_shipping_status_is_a_real_select_option(self):
 		options = (frappe.get_meta("Delivery Note").get_field("custom_shipping_status").options or "").split("\n")
-		listed = (
-			lifecycle.DELIVERED_STATUSES
-			+ lifecycle.NOON_RETURNED_FAILED_STATUSES
-			+ lifecycle.NOON_IN_TRANSIT_STATUSES
-		)
+		listed = lifecycle.DELIVERED_STATUSES + lifecycle.NOON_RETURNED_FAILED_STATUSES
 		self.assertFalse([status for status in listed if status not in options])
+
+	def test_a_submitted_noon_note_is_ready_for_pickup_whatever_noon_reports(self):
+		# Noon sets Shipped right after the shipment is created; it does not mean the parcel left (#540)
+		for shipping in ("", "Acknowledged", "Shipped", "Mixed"):
+			self.assertEqual(
+				lifecycle.state_for(1, "Created", shipping, transporter_name="Noon"), lifecycle.READY_FOR_PICKUP, shipping
+			)
+		# Noon has no Delivered status (Delivered is manual only); Cancelled and Out of Stock lead to Returned / Failed
+		for shipping in lifecycle.NOON_RETURNED_FAILED_STATUSES:
+			self.assertEqual(
+				lifecycle.state_for(1, "Created", shipping, transporter_name="Noon"), lifecycle.RETURNED_FAILED
+			)
+		self.assertEqual(lifecycle.state_for(1, "Created", "Shipped", True, "Noon"), lifecycle.RETURNED_FAILED)
+		# a draft Noon note keeps its draft stage, a cancelled one is Cancelled
+		self.assertEqual(lifecycle.state_for(0, "Created", "Shipped", transporter_name="Noon"), lifecycle.SHIPMENT_CREATED)
+		self.assertEqual(lifecycle.state_for(2, "Created", "Shipped", transporter_name="Noon"), lifecycle.CANCELLED)
+
+	def test_a_stored_manual_stage_of_a_submitted_noon_note_is_kept(self):
+		row = {"docstatus": 1, "transporter_name": "Noon", "custom_integration_status": "Created"}
+		for stored in (lifecycle.PICKED_UP, lifecycle.IN_TRANSIT, lifecycle.DELIVERED):
+			held = {**row, "custom_shipping_status": "Shipped", lifecycle.FIELD: stored}
+			self.assertEqual(lifecycle.state_of_row(held), stored)
+		# Returned / Failed and Cancelled win over a manual stage
+		picked = {**row, lifecycle.FIELD: lifecycle.PICKED_UP}
+		self.assertEqual(
+			lifecycle.state_of_row(picked, {"custom_shipping_status": "Out of Stock"}), lifecycle.RETURNED_FAILED
+		)
+		self.assertEqual(lifecycle.state_of_row(picked, {"custom_shipping_status": "Cancelled"}), lifecycle.RETURNED_FAILED)
+		self.assertEqual(lifecycle.state_of_row(picked, {"docstatus": 2}), lifecycle.CANCELLED)
+		# Ready for Pickup is recomputed, not kept as a manual stage
+		ready = {**row, "custom_shipping_status": "Shipped", lifecycle.FIELD: lifecycle.READY_FOR_PICKUP}
+		self.assertEqual(lifecycle.state_of_row(ready), lifecycle.READY_FOR_PICKUP)
+
+	def test_a_bosta_note_does_not_keep_a_stored_stage_through_the_noon_rule(self):
+		row = {
+			"docstatus": 1,
+			"transporter_name": "Bosta",
+			"custom_integration_status": "Created",
+			"custom_shipping_status": "Picked up",
+			lifecycle.FIELD: lifecycle.DELIVERED,
+		}
+		self.assertEqual(lifecycle.state_of_row(row), lifecycle.state_for(1, "Created", "Picked up"))
 
 	def test_a_submitted_note_never_gets_a_draft_only_stage(self):
 		# Bosta statuses that map to Shipment Created (a draft stage) give a submitted note at least Picked Up
@@ -96,6 +134,25 @@ class TestShippedWorkflow(IntegrationTestCase):
 		for adapter in carrier_shipments.CARRIERS.values():
 			self.assertIn(adapter.SHIPPING_CARRIER, retry["condition"])
 		self.assertIn("not doc.is_return", retry["condition"])
+
+	def test_the_noon_manual_transitions_are_for_noon_stock_users_and_not_returns(self):
+		by_action = {}
+		for t in self.spec["transitions"]:
+			if t["action"] in ("Confirm Pickup", "Confirm Delivery") and t.get("condition", "").startswith('doc.transporter_name == "Noon"'):
+				by_action.setdefault(t["action"], []).append(t)
+		self.assertEqual(
+			{(t["state"], t["next_state"]) for t in by_action["Confirm Pickup"]},
+			{(lifecycle.READY_FOR_PICKUP, lifecycle.PICKED_UP)},
+		)
+		self.assertEqual(
+			{(t["state"], t["next_state"]) for t in by_action["Confirm Delivery"]},
+			{(lifecycle.PICKED_UP, lifecycle.DELIVERED), (lifecycle.IN_TRANSIT, lifecycle.DELIVERED)},
+		)
+		for t in by_action["Confirm Pickup"] + by_action["Confirm Delivery"]:
+			self.assertEqual(t["allowed"], "Stock User")
+			self.assertIn("not doc.is_return", t["condition"])
+		cancel = [t for t in self.spec["transitions"] if t["state"] == lifecycle.READY_FOR_PICKUP and t["action"] == "Cancel"]
+		self.assertEqual([(t["next_state"], t["allowed"]) for t in cancel], [(lifecycle.CANCELLED, "Stock Manager")])
 
 	def test_only_stock_managers_cancel(self):
 		cancel = [t for t in self.spec["transitions"] if t["action"] == "Cancel"]
@@ -204,6 +261,101 @@ class TestTransitions(BostaFixtureMixin, IntegrationTestCase):
 				lifecycle.check_shipment_request(frappe.get_doc("Delivery Note", note.name))
 		self._set_status(note.name, "Creation Unknown")
 		lifecycle.check_shipment_request(frappe.get_doc("Delivery Note", note.name))  # does not raise
+
+	def _make_submitted_noon_note(self, state):
+		"""A Bosta-fixture note rewritten into a submitted Noon note at ``state`` (database writes, as the other
+		tests do), so only the Workflow conditions and roles are exercised."""
+		note = self.make_note()
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{
+				"docstatus": 1,
+				"transporter_name": "Noon",
+				"custom_integration_status": "Created",
+				"custom_shipping_status": "Shipped",
+				lifecycle.FIELD: state,
+			},
+			update_modified=False,
+		)
+		frappe.db.set_value("Delivery Note Item", {"parent": note.name}, "docstatus", 1, update_modified=False)
+		frappe.db.commit()
+		self._faked_submitted.append(note.name)
+		return note
+
+	def tearDown(self):
+		# The fixture purge CANCELS a submitted note (stock ledger, carrier hooks), but a faked-submitted note has no
+		# ledger entries: put it back to a draft first so the purge just deletes it.
+		frappe.set_user("Administrator")
+		for name in self.__dict__.pop("_faked_submitted_list", []):
+			if frappe.db.exists("Delivery Note", name):
+				frappe.db.set_value("Delivery Note", name, "docstatus", 0, update_modified=False)
+				frappe.db.set_value("Delivery Note Item", {"parent": name}, "docstatus", 0, update_modified=False)
+		frappe.db.commit()
+		super().tearDown()
+
+	@property
+	def _faked_submitted(self):
+		return self.__dict__.setdefault("_faked_submitted_list", [])
+
+	def test_the_noon_manual_actions_are_offered_by_stage_to_a_stock_user_only(self):
+		stock_user = self.make_user("Stock User")
+		sales_user = self.make_user("Sales User")
+		for state, offered in (
+			(lifecycle.READY_FOR_PICKUP, {"Confirm Pickup"}),
+			(lifecycle.PICKED_UP, {"Confirm Delivery"}),
+			(lifecycle.IN_TRANSIT, {"Confirm Delivery"}),
+		):
+			note = self._make_submitted_noon_note(state)
+			frappe.set_user(stock_user)
+			self.assertEqual(self._actions(note.name) - {"Cancel"}, offered, state)
+			frappe.set_user(sales_user)
+			self.assertFalse(self._actions(note.name), state)
+			frappe.set_user("Administrator")
+		# Cancel from Ready for Pickup is for a Stock Manager only
+		note = self._make_submitted_noon_note(lifecycle.READY_FOR_PICKUP)
+		frappe.set_user(stock_user)
+		self.assertNotIn("Cancel", self._actions(note.name))
+		frappe.set_user("Administrator")
+		self.assertIn("Cancel", self._actions(note.name))
+
+	def test_the_noon_manual_actions_are_not_offered_for_a_bosta_note_or_a_return(self):
+		frappe.set_user("Administrator")
+		note = self._make_submitted_noon_note(lifecycle.PICKED_UP)
+		frappe.db.set_value("Delivery Note", note.name, "transporter_name", "Bosta")
+		self.assertNotIn("Confirm Delivery", self._actions(note.name))
+		frappe.db.set_value("Delivery Note", note.name, {"transporter_name": "Noon", "is_return": 1})
+		self.assertNotIn("Confirm Delivery", self._actions(note.name))
+
+	def test_confirm_pickup_then_confirm_delivery_move_a_noon_note_and_a_refresh_keeps_them(self):
+		note = self._make_submitted_noon_note(lifecycle.READY_FOR_PICKUP)
+		frappe.set_user("Administrator")
+		for action, stage in (("Confirm Pickup", lifecycle.PICKED_UP), ("Confirm Delivery", lifecycle.DELIVERED)):
+			apply_workflow(frappe.get_doc("Delivery Note", note.name), action)
+			self.assertEqual(frappe.db.get_value("Delivery Note", note.name, lifecycle.FIELD), stage)
+			# what a Noon refresh writes: the carrier status together with the stage it leads to
+			written = lifecycle.with_state(note.name, {"custom_shipping_status": "Shipped"})
+			self.assertEqual(written[lifecycle.FIELD], stage)
+
+	def test_a_user_without_stock_user_is_refused_confirm_pickup_server_side(self):
+		note = self._make_submitted_noon_note(lifecycle.READY_FOR_PICKUP)
+		frappe.set_user(self.make_user("Sales User"))
+		with self.assertRaises(frappe.ValidationError):
+			apply_workflow(frappe.get_doc("Delivery Note", note.name), "Confirm Pickup")
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, lifecycle.FIELD), lifecycle.READY_FOR_PICKUP)
+
+	def test_the_patch_that_adds_the_noon_stages_is_idempotent(self):
+		from marketplace_integrations.patches.v0_0 import add_noon_manual_stage_transitions as noon_patch
+
+		noon_patch.execute()
+		noon_patch.execute()
+		workflow = frappe.get_doc("Workflow", lifecycle.WORKFLOW)
+		self.assertIn(lifecycle.READY_FOR_PICKUP, [row.state for row in workflow.states])
+		full = [(t.state, t.action, t.next_state, t.condition) for t in workflow.transitions]
+		self.assertEqual(len(full), len(set(full)))
+		actions = [(t.state, t.action) for t in workflow.transitions]
+		self.assertIn((lifecycle.READY_FOR_PICKUP, "Confirm Pickup"), actions)
 
 	def test_confirm_delivery_is_not_offered_to_a_carrier_note(self):
 		note = self.make_note()

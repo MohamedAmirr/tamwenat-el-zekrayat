@@ -88,6 +88,14 @@ The Delivery Note of a Noon Sales Order is the shipment. The Noon adapter
   that shipment will also be canceled". So the order sync may then cancel or shrink the Sales Order by itself
   and the units may not be shippable again; the Cancel confirmation says so. UNVERIFIED against real Noon (see
   business-spec section 12).
+- **Stage of a submitted Noon note (#540).** Shipping Status "Shipped" is set by Noon right after the shipment is
+  created and does NOT mean picked up. Noon has no Delivered status (its statuses are Acknowledged, Shipped, Out of
+  Stock, Cancelled, Mixed). `delivery_note_workflow.state_for` maps a submitted Noon note (`transporter_name` Noon) to
+  Ready for Pickup whatever the status says, except Cancelled / Out of Stock (Returned / Failed). Picked Up and Delivered are manual Workflow actions (Confirm Pickup, Confirm Delivery incl. from In Transit,
+  Stock User, bulk from the list Actions menu); `state_of_row` keeps a stored Picked Up / In Transit / Delivered so no
+  Refresh, webhook or nightly read moves it. Notes that were moved to In Transit by the old Shipped mapping stay as they are.
+  A Noon draft submitted by hand with Confirm Shipment is corrected to Ready for Pickup by `fix_state_after_submit`
+  (the timeline comment of that action may still say Picked Up).
 - **Status and refresh.** `refresh` (Refresh from Noon button, synchronous: HTTP first, then lock and write)
   calls `GetShipment` and `GetFbpiOrder` and derives Shipping Status from the units in the request snapshot:
   all units agree = Acknowledged / Shipped / Out of Stock, all cancelled = Cancelled (terminal), units differ

@@ -19,6 +19,7 @@ from marketplace_integrations.integrations.noon.test_fulfillment import (
 )
 from marketplace_integrations.patches.v0_0 import create_noon_transporter_supplier
 from marketplace_integrations.services import carrier_log, carrier_shipments
+from marketplace_integrations.services import delivery_note_workflow as lifecycle
 from marketplace_integrations.tests.handover_fixture import SubmittedOrderFixture
 
 _CLIENT = "marketplace_integrations.integrations.noon.fulfillment.NoonClient"
@@ -656,6 +657,25 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		self.assertTrue(stored.custom_last_sync_at)
 		self.assertFalse(stored.custom_last_integration_error)
 		self.assertEqual([(r.item_code, r.qty) for r in stored.items], rows_before)
+
+	def test_a_refresh_reading_shipped_leaves_a_submitted_note_ready_for_pickup_and_keeps_a_manual_stage(self):
+		# Noon sets Shipped right after the shipment is created: it is not a pickup (#540)
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{"docstatus": 1, lifecycle.FIELD: lifecycle.READY_FOR_PICKUP},
+			update_modified=False,
+		)
+		self._refresh(note, self._found(fx), [self._unit("1")])
+		self.assertEqual(self._note(note.name).get(lifecycle.FIELD), lifecycle.READY_FOR_PICKUP)
+
+		# a person confirmed the pickup: later refreshes leave the stage alone
+		for manual in (lifecycle.PICKED_UP, lifecycle.IN_TRANSIT):
+			frappe.db.set_value("Delivery Note", note.name, lifecycle.FIELD, manual, update_modified=False)
+			self._refresh(note, self._found(fx), [self._unit("1")])
+			self.assertEqual(self._note(note.name).get(lifecycle.FIELD), manual)
 
 	def test_a_noon_note_is_counted_in_the_sales_order_summary_and_a_refresh_updates_it(self):
 		fx = self._order([("SKU-A", 1)], ["SKU-A"])
