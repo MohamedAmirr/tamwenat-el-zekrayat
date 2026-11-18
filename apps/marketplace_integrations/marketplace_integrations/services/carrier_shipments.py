@@ -442,13 +442,15 @@ def check_deliverable(doc):
 
 
 def check_ready(doc):
-	"""Raise what ``request_create`` would refuse before it contacts the carrier (the "Create Shipment" Workflow
-	transition runs this inside the transition, so a note that cannot be sent never leaves Order Received). The
+	"""Raise what ``request_create`` would refuse before it contacts the carrier (the "Create Shipment" and "Retry
+	Shipment" Workflow transitions run this inside the transition, so a note that cannot be sent never leaves Order Received and a retry
+	that cannot be sent leaves the note in Shipment Requested). The
 	locked check in ``request_create`` still runs once more."""
 	adapter = adapter_for(doc)
 	if not adapter:
 		frappe.throw(_("This Delivery Note has no carrier shipment."))
-	if doc.docstatus != 0 or status_of(doc) not in EDITABLE_STATUSES:
+	# Creation Unknown is retried too (the "Retry Shipment" action): request_create then looks the shipment up first.
+	if doc.docstatus != 0 or status_of(doc) not in (*EDITABLE_STATUSES, UNKNOWN):
 		frappe.throw(_("The shipment of this Delivery Note was already requested."))
 	if not cstr(doc.get("custom_carrier_reference")):
 		check_deliverable(doc)

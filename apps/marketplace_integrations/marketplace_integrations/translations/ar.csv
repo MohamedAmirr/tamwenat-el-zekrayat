@@ -1585,7 +1585,9 @@ Fetch Bosta Label,جلب بوليصة Bosta
 Fetching the label...,جارٍ جلب البوليصة...
 HTTP Status,حالة HTTP
 It is not known whether {0} created the shipment. The Delivery Note was not changed.,من غير المعروف ما إذا كانت {0} قد أنشأت الشحنة. لم تتغير مذكرة التسليم.
+"It is not known whether {0} created the shipment. Press Retry Shipment to try again: {0} is asked first whether it has the shipment.",من غير المعروف ما إذا كانت {0} قد أنشأت الشحنة. اضغط إعادة محاولة الشحنة للمحاولة مرة أخرى: تُسأل {0} أولا عما إذا كانت لديها الشحنة.
 It is not known whether {0} created the shipment. Use Check with {0} before trying again.,من غير المعروف ما إذا كانت {0} قد أنشأت الشحنة. استخدم التحقق لدى {0} قبل المحاولة مرة أخرى.
+Use Check with {0} or Retry Shipment on the Delivery Note to try again.,استخدم التحقق لدى {0} أو إعادة محاولة الشحنة في مذكرة التسليم للمحاولة مرة أخرى.
 "Items, quantities and rows cannot be changed after the Bosta shipment was started. They must match the shipment sent to Bosta.",لا يمكن تغيير الأصناف والكميات والصفوف بعد بدء شحنة Bosta. يجب أن تطابق الشحنة المرسلة إلى Bosta.
 Last Bosta Event,آخر حدث من Bosta
 Last Synced,آخر مزامنة
@@ -2018,6 +2020,7 @@ In Transit,قيد النقل
 Returned / Failed,مرتجعة / فاشلة
 Confirm Delivery,تأكيد التسليم
 Confirm Shipment,تأكيد الشحنة
+Retry Shipment,إعادة محاولة الشحنة
 Stage,المرحلة
 The stage of a Delivery Note changes only with its workflow buttons.,لا تتغير مرحلة مذكرة التسليم إلا من خلال أزرار سير العمل الخاصة بها.
 The shipment of this Delivery Note was already requested.,سبق طلب شحنة مذكرة التسليم هذه.

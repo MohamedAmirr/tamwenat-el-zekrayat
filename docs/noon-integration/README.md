@@ -66,7 +66,9 @@ The Delivery Note of a Noon Sales Order is the shipment. The Noon adapter
   note stays a Created draft with the reason in Last Integration Error, Needs Attention flags it (Carrier
   Exception, also any Created draft older than 15 minutes) and a person submits it natively. The job asks Noon first (`GetShipment`) on every attempt, the first
   included; only a confirmed "No shipment found" allows `CreateShipment`. A timeout, 5xx, 408/429 or an
-  unrecognised answer is Creation Unknown (Check Noon, then Submit again); a definite 4xx is Creation Failed.
+  unrecognised answer is Creation Unknown (the note stays in the Shipment Requested stage; press Retry Shipment, a
+  Workflow action that runs the same job again and looks the shipment up first; Check with Noon only reads); a
+  definite 4xx is Creation Failed (the note goes back to Order Received, where Create Shipment works again).
   Nothing is retried automatically.
 - **Shipment number** = the Delivery Note name, stored in Carrier Reference at the first attempt. An amended
   note has a new name, so a new number.

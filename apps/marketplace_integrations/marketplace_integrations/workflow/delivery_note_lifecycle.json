@@ -27,6 +27,14 @@
    "transition_tasks": "Create Carrier Shipment"
   },
   {
+   "state": "Shipment Requested",
+   "action": "Retry Shipment",
+   "next_state": "Shipment Requested",
+   "allowed": "Stock User",
+   "condition": "doc.transporter_name in (\"Bosta\", \"Noon\") and not doc.is_return and doc.custom_integration_status == \"Creation Unknown\"",
+   "transition_tasks": "Create Carrier Shipment"
+  },
+  {
    "state": "Order Received",
    "action": "Confirm Delivery",
    "next_state": "Delivered",

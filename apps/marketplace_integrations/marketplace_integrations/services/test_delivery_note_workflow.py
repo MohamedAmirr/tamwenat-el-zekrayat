@@ -6,6 +6,7 @@ definition, the migration backfill and the transitions on a real database."""
 
 import json
 from pathlib import Path
+from unittest import mock
 
 import frappe
 from frappe.model.workflow import apply_workflow
@@ -86,6 +87,16 @@ class TestShippedWorkflow(IntegrationTestCase):
 			if getattr(adapter, "SUBMIT_AT_PICKUP", False):
 				self.assertIn(f'doc.transporter_name != "{adapter.SHIPPING_CARRIER}"', condition)
 
+	def test_retry_shipment_is_a_self_transition_with_the_create_shipment_task_and_role(self):
+		retry = next(t for t in self.spec["transitions"] if t["action"] == "Retry Shipment")
+		create = next(t for t in self.spec["transitions"] if t["action"] == "Create Shipment")
+		self.assertEqual((retry["state"], retry["next_state"]), (lifecycle.SHIPMENT_REQUESTED, lifecycle.SHIPMENT_REQUESTED))
+		self.assertEqual(retry["allowed"], create["allowed"])
+		self.assertEqual(retry["transition_tasks"], create["transition_tasks"])
+		for adapter in carrier_shipments.CARRIERS.values():
+			self.assertIn(adapter.SHIPPING_CARRIER, retry["condition"])
+		self.assertIn("not doc.is_return", retry["condition"])
+
 	def test_only_stock_managers_cancel(self):
 		cancel = [t for t in self.spec["transitions"] if t["action"] == "Cancel"]
 		self.assertTrue(cancel)
@@ -124,6 +135,75 @@ class TestTransitions(BostaFixtureMixin, IntegrationTestCase):
 		self.assertEqual(
 			frappe.db.get_value("Delivery Note", note.name, lifecycle.FIELD), lifecycle.SHIPMENT_REQUESTED
 		)
+
+	def _actions(self, name):
+		from frappe.model.workflow import get_transitions
+
+		return {t.action for t in get_transitions(frappe.get_doc("Delivery Note", name))}
+
+	def _set_status(self, name, status):
+		"""Write a status and the stage it leads to, as the carrier code does."""
+		frappe.db.set_value("Delivery Note", name, lifecycle.with_state(name, {"custom_integration_status": status}))
+		frappe.db.commit()
+
+	def test_retry_shipment_is_offered_only_for_a_draft_whose_create_is_unknown(self):
+		note = self.make_note()
+		frappe.set_user("Administrator")
+		self.assertNotIn("Retry Shipment", self._actions(note.name))  # Order Received
+		for status, offered in (("Creation Unknown", True), ("Creating", False), ("Created", False)):
+			self._set_status(note.name, status)
+			self.assertEqual("Retry Shipment" in self._actions(note.name), offered, status)
+		# Creation Failed goes back to Order Received, where Create Shipment already works, so Retry is not offered
+		self._set_status(note.name, "Creation Failed")
+		self.assertNotIn("Retry Shipment", self._actions(note.name))
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, lifecycle.FIELD), lifecycle.ORDER_RECEIVED)
+		self.assertIn("Create Shipment", self._actions(note.name))
+
+	def test_retry_shipment_is_not_offered_for_a_return_or_a_plain_note(self):
+		note = self.make_note()
+		frappe.set_user("Administrator")
+		self._set_status(note.name, "Creation Unknown")
+		frappe.db.set_value("Delivery Note", note.name, "is_return", 1)
+		self.assertNotIn("Retry Shipment", self._actions(note.name))
+		frappe.db.set_value("Delivery Note", note.name, "is_return", 0)
+		frappe.db.set_value("Delivery Note", note.name, "transporter_name", "Someone Else")
+		self.assertNotIn("Retry Shipment", self._actions(note.name))
+
+	def test_retry_shipment_needs_the_stock_user_role(self):
+		note = self.make_note()
+		frappe.set_user("Administrator")
+		self._set_status(note.name, "Creation Unknown")
+		stock_user = self.make_user("Stock User")
+		sales_user = self.make_user("Sales User")
+		frappe.set_user(stock_user)
+		self.assertIn("Retry Shipment", self._actions(note.name))
+		frappe.set_user(sales_user)
+		self.assertNotIn("Retry Shipment", self._actions(note.name))
+		frappe.set_user("Administrator")
+
+	def test_retry_shipment_on_an_unknown_note_stays_in_shipment_requested_and_starts_the_create(self):
+		note = self.make_note()
+		frappe.set_user("Administrator")
+		self._set_status(note.name, "Creation Unknown")
+		apply_workflow(frappe.get_doc("Delivery Note", note.name), "Retry Shipment")
+		self.assertEqual(
+			frappe.db.get_value("Delivery Note", note.name, lifecycle.FIELD), lifecycle.SHIPMENT_REQUESTED
+		)
+		# the async task is queued with the note; running it calls request_create as the requesting user
+		queued = [c for c in self.enqueue.call_args_list if c.args and c.args[0] is lifecycle.start_shipment]
+		self.assertEqual(len(queued), 1)
+		with mock.patch.object(carrier_shipments, "request_create", return_value={"status": "Creating"}) as request_create:
+			lifecycle.start_shipment(queued[0].kwargs["doc"])
+		request_create.assert_called_once_with(note.name, submit_as="Administrator")
+
+	def test_the_retry_check_refuses_a_note_whose_create_is_running_or_done_or_submitted(self):
+		note = self.make_note()
+		for status in ("Creating", "Created"):
+			self._set_status(note.name, status)
+			with self.assertRaises(frappe.ValidationError):
+				lifecycle.check_shipment_request(frappe.get_doc("Delivery Note", note.name))
+		self._set_status(note.name, "Creation Unknown")
+		lifecycle.check_shipment_request(frappe.get_doc("Delivery Note", note.name))  # does not raise
 
 	def test_confirm_delivery_is_not_offered_to_a_carrier_note(self):
 		note = self.make_note()

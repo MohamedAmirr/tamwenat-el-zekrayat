@@ -125,7 +125,13 @@ test("the intro follows the integration status and shows the tracking number (lr
 	const unknown = make_form({ custom_integration_status: "Creation Unknown" });
 	handlers.refresh(unknown);
 	assert.equal(unknown.intro.color, "orange");
-	assert.match(unknown.intro.text, /Check with Bosta/);
+	assert.match(unknown.intro.text, /Press Retry Shipment/);
+	assert.doesNotMatch(unknown.intro.text, /Check with/);
+	// a return pickup has no Retry Shipment action: it keeps pointing to Check
+	const return_unknown = make_form({ custom_integration_status: "Creation Unknown", is_return: 1, custom_return_source: "Customer Return Pickup" });
+	handlers.refresh(return_unknown);
+	assert.match(return_unknown.intro.text, /Use Check with Bosta before trying again/);
+	assert.doesNotMatch(return_unknown.intro.text, /Retry Shipment/);
 	const failed = make_form({ custom_integration_status: "Creation Failed", custom_last_integration_error: "bad <phone> & more" });
 	handlers.refresh(failed);
 	// stored raw, escaped once where it is shown
@@ -411,6 +417,15 @@ test("submit stops and says the outcome is unknown when creation is unknown", as
 	assert.equal(msgprints[0].primary_action.label, "Check with Bosta");
 });
 
+test("the Unknown dialog of a submit shows the stored reason escaped and names Check and Retry Shipment", async () => {
+	const { handlers, msgprints } = load({
+		statuses: [{ custom_integration_status: "Creation Unknown", custom_last_integration_error: "not sent <b>x</b>" }],
+	});
+	await handlers.before_submit(make_form({ custom_integration_status: "Not Created" }));
+	assert.match(msgprints[0].message, /not sent &lt;b>x&lt;\/b>/);
+	assert.match(msgprints[0].message, /Use Check with Bosta or Retry Shipment/);
+});
+
 test("the Check with Bosta button of the Unknown dialog calls the check method and reloads", async () => {
 	const { handlers, msgprints, calls } = load({ statuses: [{ custom_integration_status: "Creation Unknown" }] });
 	const frm = make_form({ custom_integration_status: "Not Created" });
@@ -603,6 +618,33 @@ test("before_workflow_action stops Create Shipment when the carrier pre-check re
 	assert.equal(result instanceof Promise, true);
 	assert.equal(unfrozen, 1);
 	assert.equal(frm.selected_workflow_action, null);
+	assert.equal(frm.__create_shipment_for, null);
+});
+
+test("Retry Shipment runs the carrier pre-check and opens the wait dialog like Create Shipment", async () => {
+	const { handlers, calls, dialogs } = load({
+		statuses: [{ custom_integration_status: "Created", docstatus: 0 }],
+		call_result: { status: "Creating" },
+	});
+	const frm = make_form({ custom_integration_status: "Creation Unknown" });
+	frm.selected_workflow_action = "Retry Shipment";
+	assert.equal(handlers.before_workflow_action(frm), undefined);
+	assert.equal(frm.__create_shipment_for, "MAT-DN-1");
+	frm.selected_workflow_action = null;
+	await handlers.after_workflow_action(frm);
+	assert.equal(dialogs.length > 0, true);
+	// the transition already queued the request: the form must not ask for it again
+	assert.equal(calls.length, 0);
+});
+
+test("before_workflow_action stops Retry Shipment when the carrier pre-check refuses", () => {
+	let unfrozen = 0;
+	const { handlers } = load();
+	global.frappe.dom = { unfreeze: () => unfrozen++ };
+	const frm = make_form({ custom_cod_confirmed: 0 });
+	frm.selected_workflow_action = "Retry Shipment";
+	assert.equal(handlers.before_workflow_action(frm) instanceof Promise, true);
+	assert.equal(unfrozen, 1);
 	assert.equal(frm.__create_shipment_for, null);
 });
 

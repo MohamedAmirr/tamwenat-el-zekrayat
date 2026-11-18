@@ -303,7 +303,11 @@ Noon is the second adapter (#415): the old `custom_carrier_status` / `custom_car
   returns; moves to Shipment Requested, then the async task `Request Carrier Shipment` calls
   `carrier_shipments.request_create` as the pressing user; the sync task `Check Carrier Shipment Request` runs
   `carrier_shipments.check_ready` inside the transition so an unsendable request never reaches Shipment
-  Requested), Confirm Delivery (non-carrier notes, and returns to Returned / Failed), Confirm Shipment (recovery
+  Requested), Retry Shipment (Shipment Requested to Shipment Requested, Stock User, same two tasks; condition:
+  Bosta/Noon, not a return, `custom_integration_status` Creation Unknown; the way out of a Creation Unknown draft,
+  `check_ready` accepts that status for it; shipped by `patches/v0_0/add_retry_shipment_workflow_transition.py`; a
+  Creation Failed note is already back in Order Received, where Create Shipment works; `request_create` looks the
+  carrier up first because the note holds a carrier reference), Confirm Delivery (non-carrier notes, and returns to Returned / Failed), Confirm Shipment (recovery
   when the Noon auto-submit after Created failed; not offered for a Bosta note, which only the pickup job submits:
   the transition condition excludes it and `patches/v0_0/update_delivery_note_lifecycle_workflow.py` re-applies the
   JSON on a site that already ran the first patch), Cancel (Stock Manager only). A Noon note is still

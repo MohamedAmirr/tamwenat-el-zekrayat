@@ -16,7 +16,7 @@ module owns what the Workflow cannot express:
   to another stage.
 - ``fix_state_after_submit``: ``doc.submit()`` puts a note in the FIRST submitted stage of the Workflow; the
   stage must come from the mapping.
-- The two Workflow transition tasks of "Create Shipment" (``hooks.py`` ``workflow_methods``).
+- The two Workflow transition tasks of "Create Shipment" and "Retry Shipment" (``hooks.py`` ``workflow_methods``).
 """
 
 import frappe
@@ -193,13 +193,13 @@ def fix_state_after_submit(doc, method=None):
 
 
 # ---------------------------------------------------------------------------
-# "Create Shipment" transition tasks (hooks.py workflow_methods)
+# "Create Shipment" / "Retry Shipment" transition tasks (hooks.py workflow_methods)
 # ---------------------------------------------------------------------------
 
 
 def check_shipment_request(doc):
-	"""Transition task (runs inside the transition): refuse what the shipment request would refuse, so the
-	note never reaches Shipment Requested without a request that can be sent. Also marks the save as a Workflow
+	"""Transition task (runs inside the transition; Create Shipment and Retry Shipment): refuse what the shipment
+	request would refuse, so the note never reaches (or stays in) Shipment Requested without a request that can be sent. Also marks the save as a Workflow
 	action (see ``keep_state_consistent``)."""
 	from marketplace_integrations.services import carrier_shipments
 
@@ -209,7 +209,7 @@ def check_shipment_request(doc):
 
 def start_shipment(doc):
 	"""Transition task (asynchronous, queued after the transition commits, runs as the user who pressed the
-	button): start the carrier create through the same path as before. A Noon note is submitted by the job as that
+	button): start the carrier create through the same path as before (Create Shipment, and Retry Shipment of a Creation Unknown note). A Noon note is submitted by the job as that
 	user once the carrier confirms Created; a Bosta note stays a draft until Bosta picks the parcel up (#500), then
 	the pickup job submits it as the user recorded as requester. A refusal that only the locked check can see
 	(the stock changed meanwhile) puts the note back to the stage its statuses lead to, with the reason.
