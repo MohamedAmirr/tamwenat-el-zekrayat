@@ -1585,7 +1585,9 @@ Fetch Bosta Label,جلب بوليصة Bosta
 Fetching the label...,جارٍ جلب البوليصة...
 HTTP Status,حالة HTTP
 It is not known whether {0} created the shipment. The Delivery Note was not changed.,من غير المعروف ما إذا كانت {0} قد أنشأت الشحنة. لم تتغير مذكرة التسليم.
+"It is not known whether {0} created the shipment. Press Retry Shipment to try again: {0} is asked first whether it has the shipment.",من غير المعروف ما إذا كانت {0} قد أنشأت الشحنة. اضغط إعادة محاولة الشحنة للمحاولة مرة أخرى: تُسأل {0} أولا عما إذا كانت لديها الشحنة.
 It is not known whether {0} created the shipment. Use Check with {0} before trying again.,من غير المعروف ما إذا كانت {0} قد أنشأت الشحنة. استخدم التحقق لدى {0} قبل المحاولة مرة أخرى.
+Use Check with {0} or Retry Shipment on the Delivery Note to try again.,استخدم التحقق لدى {0} أو إعادة محاولة الشحنة في مذكرة التسليم للمحاولة مرة أخرى.
 "Items, quantities and rows cannot be changed after the Bosta shipment was started. They must match the shipment sent to Bosta.",لا يمكن تغيير الأصناف والكميات والصفوف بعد بدء شحنة Bosta. يجب أن تطابق الشحنة المرسلة إلى Bosta.
 Last Bosta Event,آخر حدث من Bosta
 Last Synced,آخر مزامنة
@@ -2018,6 +2020,8 @@ In Transit,قيد النقل
 Returned / Failed,مرتجعة / فاشلة
 Confirm Delivery,تأكيد التسليم
 Confirm Shipment,تأكيد الشحنة
+Confirm Pickup,تأكيد استلام الشحنة
+Retry Shipment,إعادة محاولة الشحنة
 Stage,المرحلة
 The stage of a Delivery Note changes only with its workflow buttons.,لا تتغير مرحلة مذكرة التسليم إلا من خلال أزرار سير العمل الخاصة بها.
 The shipment of this Delivery Note was already requested.,سبق طلب شحنة مذكرة التسليم هذه.
@@ -2233,3 +2237,32 @@ Shipping of Sales Order {0} was not changed (Shopify: from {1} to {2}),لم يت
 Partially paid,مدفوع جزئيًا
 Part of the total is paid. Next step: collect the rest when the parcel is delivered.,تم دفع جزء من الإجمالي. الخطوة التالية: حصّل الباقي عند تسليم الطرد.
 Still owed: {0}. Next step: collect it when the parcel is delivered.,المتبقي: {0}. الخطوة التالية: حصّله عند تسليم الطرد.
+Awaiting Return,بانتظار الإرجاع
+Confirm Returned,تأكيد الإرجاع
+Noon cancelled Delivery Note {0} after pickup. Stock stays out until you press Confirm Returned.,ألغت Noon مذكرة التسليم {0} بعد الاستلام. يبقى المخزون خارج المستودع حتى تضغط «تأكيد الإرجاع».
+Noon cancelled this shipment after pickup. Use Confirm Returned when the goods are back.,ألغت Noon هذه الشحنة بعد الاستلام. استخدم «تأكيد الإرجاع» عند عودة البضاعة.
+This Delivery Note is not waiting for its goods to come back from Noon.,مذكرة التسليم هذه لا تنتظر عودة بضاعتها من Noon.
+The returned quantities do not match the lines of this Delivery Note.,الكميات المرتجعة لا تطابق بنود مذكرة التسليم هذه.
+Returned quantity of {0} is not a number.,الكمية المرتجعة للصنف {0} ليست رقمًا.
+Returned quantity of {0} must be between 0 and the shipped quantity ({1}).,يجب أن تكون الكمية المرتجعة للصنف {0} بين 0 والكمية المشحونة ({1}).
+"Some units did not come back. Tick Create Material Issue for broken/missing units, or enter the full shipped quantity.",لم تعد بعض الوحدات. فعّل «إنشاء صرف مواد للوحدات التالفة/المفقودة»، أو أدخل الكمية المشحونة كاملة.
+Item {0} has serial or batch numbers: write off its missing units by hand with a Stock Entry.,للصنف {0} أرقام تسلسلية أو دفعات: اشطب وحداته المفقودة يدويًا بقيد مخزون.
+Company {0} needs a Stock Adjustment Account and a Default Cost Center to write off units.,تحتاج الشركة {0} إلى حساب تسوية المخزون ومركز تكلفة افتراضي لشطب الوحدات.
+Units of Delivery Note {0} that did not come back after Noon cancelled the shipment.,وحدات من مذكرة التسليم {0} لم تعد بعد أن ألغت Noon الشحنة.
+Units that did not come back were written off with Stock Entry {0}.,شُطبت الوحدات التي لم تعد بقيد المخزون {0}.
+The Delivery Note was not cancelled and nothing was written off: {0},لم تُلغَ مذكرة التسليم ولم يُشطب شيء: {0}
+Only a Noon User or System Manager can confirm returned goods.,يمكن لمستخدم Noon أو مدير النظام فقط تأكيد إرجاع البضاعة.
+Delivery Note {0} is not a Noon shipment.,مذكرة التسليم {0} ليست شحنة Noon.
+Noon cancelled this shipment after pickup. The stock stays out until a Noon User confirms the goods are back (Confirm Returned).,ألغت Noon هذه الشحنة بعد الاستلام. يبقى المخزون خارج المستودع حتى يؤكد مستخدم Noon عودة البضاعة (تأكيد الإرجاع).
+Confirming the return...,جارٍ تأكيد الإرجاع...
+Returned goods confirmed. The Delivery Note was cancelled.,تم تأكيد إرجاع البضاعة. أُلغيت مذكرة التسليم.
+Shipped Qty,الكمية المشحونة
+Returned Qty,الكمية المرتجعة
+Create Material Issue for broken/missing units,إنشاء صرف مواد للوحدات التالفة/المفقودة
+The return could not be confirmed.,تعذّر تأكيد الإرجاع.
+The lines could not be read.,تعذّرت قراءة البنود.
+Reading the lines...,جارٍ قراءة البنود...
+This Delivery Note has no stock lines to confirm.,لا توجد في مذكرة التسليم هذه بنود مخزنية للتأكيد.
+"{0} cancelled this shipment after pickup. When the goods are back, press Confirm Returned.","ألغت {0} هذه الشحنة بعد الاستلام. عند عودة البضاعة، اضغط «تأكيد الإرجاع»."
+The returned quantities are not a list of lines.,الكميات المرتجعة ليست قائمة بنود.
+Delivery Note {0} is waiting for its goods to come back from {1}. Use Confirm Returned on it first. Nothing was cancelled.,"مذكرة التسليم {0} تنتظر عودة بضاعتها من {1}. استخدم «تأكيد الإرجاع» عليها أولًا. لم يتم إلغاء أي شيء."

@@ -38,6 +38,9 @@ An adapter is a module exposing (the contract; a contract test checks every adap
 - ``after_cancelled(delivery_note)``: work after the Cancelled write.
 - ``picked_up(doc)``: optional; True when the carrier already has the parcel / the shipment is past the point where a
   cancel is possible (the Sales Order cancel cascade refuses such a note up front instead of asking the carrier).
+- ``guard_cancel(doc)``: optional; ``before_cancel`` (and ``on_trash``): a deliberate refusal raises for a note the
+  adapter holds back from the native cancel (#527). The adapter's own service sets a flag to pass.
+- ``is_held(doc)``: optional; True for such a held note (the Sales Order cancel cascade refuses it up front).
 - ``refresh(delivery_note)``: read the carrier's state and apply it; returns the shipping status. Once it
   wrote the Integration Status Cancelled it calls ``cancel_after_carrier_cancelled`` (every path that reads
   the carrier does: webhook, nightly job, Refresh).
@@ -276,8 +279,12 @@ def after_submit(doc, method=None):
 
 def guard_cancel_or_delete(doc, method=None):
 	"""``before_cancel`` and ``on_trash``: refuse while a live shipment is linked. A note whose Integration
-	Status is Cancelled passes, without any call to the carrier."""
+	Status is Cancelled passes, without any call to the carrier, unless the adapter's optional ``guard_cancel(doc)``
+	refuses it (for example a note held after a carrier cancel past pickup, until its goods are confirmed back)."""
 	adapter = adapter_for(doc)
+	guard = getattr(adapter, "guard_cancel", None)
+	if guard:
+		guard(doc)
 	if adapter and status_of(doc) in LIVE_STATUSES:
 		frappe.throw(
 			_(
@@ -442,13 +449,15 @@ def check_deliverable(doc):
 
 
 def check_ready(doc):
-	"""Raise what ``request_create`` would refuse before it contacts the carrier (the "Create Shipment" Workflow
-	transition runs this inside the transition, so a note that cannot be sent never leaves Order Received). The
+	"""Raise what ``request_create`` would refuse before it contacts the carrier (the "Create Shipment" and "Retry
+	Shipment" Workflow transitions run this inside the transition, so a note that cannot be sent never leaves Order Received and a retry
+	that cannot be sent leaves the note in Shipment Requested). The
 	locked check in ``request_create`` still runs once more."""
 	adapter = adapter_for(doc)
 	if not adapter:
 		frappe.throw(_("This Delivery Note has no carrier shipment."))
-	if doc.docstatus != 0 or status_of(doc) not in EDITABLE_STATUSES:
+	# Creation Unknown is retried too (the "Retry Shipment" action): request_create then looks the shipment up first.
+	if doc.docstatus != 0 or status_of(doc) not in (*EDITABLE_STATUSES, UNKNOWN):
 		frappe.throw(_("The shipment of this Delivery Note was already requested."))
 	if not cstr(doc.get("custom_carrier_reference")):
 		check_deliverable(doc)

@@ -21,7 +21,15 @@ const EXPECTED = {
 		"Shipped",
 		"Created",
 	],
-	orange: ["Waiting for route", "On hold", "Returned to business", "Returned to stock", "Mixed", "Partially Delivered"],
+	orange: [
+		"Waiting for route",
+		"On hold",
+		"Returned to business",
+		"Returned to stock",
+		"Mixed",
+		"Partially Delivered",
+		"Awaiting Return",
+	],
 	red: ["Exception", "Lost", "Damaged", "Investigation", "Awaiting your action", "Terminated", "Out of Stock"],
 	grey: ["Canceled", "Cancelled", "Archived"],
 };

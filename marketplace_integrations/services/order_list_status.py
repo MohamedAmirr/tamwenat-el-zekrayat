@@ -50,6 +50,7 @@ _STAGE_OF_NOTE_STATE = {
 	lifecycle.ORDER_RECEIVED: READY,
 	lifecycle.SHIPMENT_REQUESTED: READY,
 	lifecycle.SHIPMENT_CREATED: READY,
+	lifecycle.READY_FOR_PICKUP: READY,
 	lifecycle.PICKED_UP: ON_THE_WAY,
 	lifecycle.IN_TRANSIT: ON_THE_WAY,
 	lifecycle.DELIVERED: DELIVERED,
@@ -203,6 +204,7 @@ def _notes_by_order(orders):
 		"creation",
 		"docstatus",
 		"is_return",
+		"transporter_name",
 		"custom_integration_status",
 		"custom_shipping_status",
 	]

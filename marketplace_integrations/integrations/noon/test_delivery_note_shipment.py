@@ -19,6 +19,7 @@ from marketplace_integrations.integrations.noon.test_fulfillment import (
 )
 from marketplace_integrations.patches.v0_0 import create_noon_transporter_supplier
 from marketplace_integrations.services import carrier_log, carrier_shipments
+from marketplace_integrations.services import delivery_note_workflow as lifecycle
 from marketplace_integrations.tests.handover_fixture import SubmittedOrderFixture
 
 _CLIENT = "marketplace_integrations.integrations.noon.fulfillment.NoonClient"
@@ -49,6 +50,10 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 	def setUp(self):
 		super().setUp()
 		self.fixtures = []
+		self._stock_items = []
+		self._invoices = []
+		self._bundles = []
+		self._extra_items = []
 		self._fbpi_ready_account()
 		self.created_supplier = False
 		if not noon.transporter_name():
@@ -58,11 +63,35 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
+		vouchers = []
+		self._drop_invoices()
 		for fixture in self.fixtures:
 			# the neutral cancel/delete guard refuses a note with a live shipment: close them first
 			for name in fixture.delivery_notes():
+				vouchers.append(name)
 				frappe.db.set_value("Delivery Note", name, "custom_integration_status", "Cancelled", update_modified=False)
+				# a held note (#527) refuses the native cancel: the fixture cleanup must be able to cancel it
+				if frappe.db.get_value("Delivery Note", name, "custom_shipping_status") == noon.SHIPPING_AWAITING_RETURN:
+					frappe.db.set_value("Delivery Note", name, "custom_shipping_status", "Cancelled", update_modified=False)
+				if self._stock_items and frappe.db.get_value("Delivery Note", name, "docstatus") == 1:
+					# cancel while the stock rows exist; they are purged BEFORE the fixture deletes its Items
+					note = frappe.get_doc("Delivery Note", name)
+					note.flags.ignore_permissions = True
+					note.cancel()
+		frappe.db.commit()
+		if self._bundles:
+			# a Product Bundle is linked to the Sales Orders / notes that sold it: remove those first
+			for fixture in self.fixtures:
+				fixture._step(fixture._remove_delivery_notes)
+				fixture._step(fixture._remove_sales_order)
+			frappe.db.commit()
+		for bundle in self._bundles:
+			frappe.delete_doc("Product Bundle", bundle, force=True, ignore_permissions=True)
+		self._purge_stock(vouchers)
+		for fixture in self.fixtures:
 			fixture.cleanup()
+		for item in self._extra_items:
+			frappe.delete_doc("Item", item, force=True, ignore_permissions=True)
 		frappe.db.commit()
 		super().tearDown()
 		if self.created_supplier:
@@ -98,7 +127,8 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		return fixture
 
 	def _draft_note(self, fixture, lr_no=None, generate_awb=0):
-		"""Save a draft Delivery Note from the Sales Order the way Create > Delivery Note does."""
+		"""Save a draft Delivery Note from the Sales Order the way Create > Delivery Note does (it stays a draft; tests
+		that need a submitted note flip the docstatus flags with ``_submit_flags``)."""
 		note = make_delivery_note(fixture.name)
 		note.lr_no = lr_no
 		note.custom_noon_generate_awb = generate_awb
@@ -169,6 +199,326 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 			client.error_message.side_effect = lambda response: response.message
 			result = carrier_shipments.cancel(note.name)
 		return result, client, get_order
+
+	# ---- real stock (Confirm Returned, #527) ---------------------------------------------------
+
+	def _purge_stock(self, vouchers=()):
+		"""Posted stock rows cannot be removed through the ORM: delete what these tests posted (test site only).
+		``vouchers`` are the Delivery Notes of this test: only their GL rows (and the Stock Entries') go."""
+		if not self._stock_items:
+			return
+		entries = frappe.get_all("Stock Entry Detail", filters={"item_code": ["in", self._stock_items]}, pluck="parent")
+		for entry in set(entries):
+			for doctype in ("GL Entry", "Stock Ledger Entry"):
+				frappe.db.delete(doctype, {"voucher_no": entry})
+			frappe.db.delete("Stock Entry Detail", {"parent": entry})
+			frappe.db.delete("Stock Entry", {"name": entry})
+			frappe.db.delete("Version", {"ref_doctype": "Stock Entry", "docname": entry})
+		for voucher in vouchers:
+			frappe.db.delete("GL Entry", {"voucher_type": "Delivery Note", "voucher_no": voucher})
+		for item in self._stock_items:
+			frappe.db.delete("Stock Ledger Entry", {"item_code": item})
+			frappe.db.delete("Repost Item Valuation", {"item_code": item})
+			frappe.db.delete("Bin", {"item_code": item})
+		frappe.db.commit()
+
+	def _drop_invoices(self):
+		"""Cancel and delete the Sales Invoices a test made (they block cancelling and deleting the note)."""
+		for name in self._invoices:
+			if not frappe.db.exists("Sales Invoice", name):
+				continue
+			if frappe.db.get_value("Sales Invoice", name, "docstatus") == 1:
+				frappe.get_doc("Sales Invoice", name).cancel()
+			frappe.delete_doc("Sales Invoice", name, force=True, ignore_permissions=True, delete_permanently=True)
+			for doctype in ("GL Entry", "Payment Ledger Entry"):
+				frappe.db.delete(doctype, {"voucher_no": name})
+			frappe.db.delete("Version", {"ref_doctype": "Sales Invoice", "docname": name})
+			frappe.db.delete("Comment", {"reference_doctype": "Sales Invoice", "reference_name": name})
+		frappe.db.commit()
+
+	def _held_note(self, qty=3, stock=10, stage=lifecycle.PICKED_UP, sku="SKU-A"):
+		"""A REALLY submitted Noon note of ``qty`` units of a stock Item (``stock`` received), at ``stage``, that Noon
+		then cancelled: held (Cancelled + Awaiting Return). Returns ``(fixture, note_name, item, warehouse)``."""
+		from erpnext.stock.doctype.stock_entry.stock_entry_utils import make_stock_entry
+
+		fx = self._order([(sku, qty)], [sku] * qty)  # the mapping (account + SKU) is unique: a second note needs its own SKU
+		item = fx.items[sku].name
+		frappe.db.set_value("Item", item, "is_stock_item", 1)
+		self._stock_items.append(item)
+		warehouse = fx.row_for(sku).warehouse
+		make_stock_entry(item_code=item, qty=stock, to_warehouse=warehouse, company=fx.sales_order.company, rate=10)
+		note = self._created_note(fx, units=tuple(str(n) for n in range(1, qty + 1)))
+		doc = self._note(note.name)
+		doc.submit()
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{
+				"custom_integration_status": "Cancelled",
+				"custom_shipping_status": noon.SHIPPING_AWAITING_RETURN,
+				lifecycle.FIELD: lifecycle.RETURNED_FAILED,
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		return fx, note.name, item, warehouse
+
+	@staticmethod
+	def _bin_qty(item, warehouse):
+		return frappe.db.get_value("Bin", {"item_code": item, "warehouse": warehouse}, "actual_qty") or 0
+
+	def _lines(self, note, returned=None):
+		"""The dialog's lines for ``note`` with ``returned`` ([qty per line]) or every unit back."""
+		lines = noon.get_return_lines(note)
+		return [
+			{"name": line["name"], "returned_qty": line["shipped_qty"] if returned is None else returned[index]}
+			for index, line in enumerate(lines)
+		]
+
+	def test_confirm_returned_with_everything_back_cancels_the_note_and_puts_the_stock_back(self):
+		_fx, note, item, warehouse = self._held_note(qty=3, stock=10)
+		self.assertEqual(self._bin_qty(item, warehouse), 7)
+		lines = noon.get_return_lines(note)
+		self.assertEqual([(row["item_code"], row["shipped_qty"]) for row in lines], [(item, 3)])
+		with patch("frappe.enqueue") as enqueue:
+			result = noon.confirm_returned(note, self._lines(note), 0)
+		self.assertEqual(result, {"stock_entry": None})
+		self.assertEqual(frappe.db.get_value("Delivery Note", note, "docstatus"), 2)
+		self.assertEqual(self._bin_qty(item, warehouse), 10)
+		# the Sales Order cancel is queued once, always as the system
+		jobs = [c for c in enqueue.call_args_list if "run_noon_order_cancel" in str(c)]
+		self.assertEqual(len(jobs), 1)
+		self.assertEqual(jobs[0].kwargs["requested_by"], "Administrator")
+		# a second confirm is refused and nothing else changes
+		with self.assertRaises(frappe.ValidationError):
+			noon.confirm_returned(note, self._lines(note), 0)
+
+	def test_confirm_returned_with_a_write_off_posts_one_material_issue_on_the_company_accounts(self):
+		fx, note, item, warehouse = self._held_note(qty=3, stock=10)
+		company = fx.sales_order.company
+		accounts = frappe.db.get_value("Company", company, ["stock_adjustment_account", "cost_center"], as_dict=True)
+		if not accounts.stock_adjustment_account or not accounts.cost_center:
+			self.skipTest("The test Company has no Stock Adjustment Account or default cost center.")
+		with patch("frappe.enqueue"):
+			result = noon.confirm_returned(note, self._lines(note, returned=[1]), 1)
+		self.assertTrue(result["stock_entry"])
+		self.assertEqual(frappe.db.get_value("Delivery Note", note, "docstatus"), 2)
+		entry = frappe.get_doc("Stock Entry", result["stock_entry"])
+		self.assertEqual((entry.docstatus, entry.purpose), (1, "Material Issue"))
+		self.assertIn(note, entry.remarks)
+		self.assertEqual(len(entry.items), 1)
+		row = entry.items[0]
+		self.assertEqual((row.item_code, row.s_warehouse, row.qty), (item, warehouse, 2))
+		self.assertEqual(row.expense_account, accounts.stock_adjustment_account)
+		self.assertEqual(row.cost_center, accounts.cost_center)
+		# 10 received, 3 delivered then back, 2 written off
+		self.assertEqual(self._bin_qty(item, warehouse), 8)
+		comments = frappe.get_all(
+			"Comment", filters={"reference_doctype": "Delivery Note", "reference_name": note, "comment_type": "Comment"}, pluck="content"
+		)
+		self.assertTrue(any(result["stock_entry"] in text for text in comments))
+
+	def test_confirm_returned_refuses_bad_quantities_and_changes_nothing(self):
+		_fx, note, item, warehouse = self._held_note(qty=3, stock=10)
+		line = noon.get_return_lines(note)[0]["name"]
+		cases = [
+			([{"name": line, "returned_qty": -1}], 1),  # below 0
+			([{"name": line, "returned_qty": 4}], 1),  # above shipped
+			([{"name": line, "returned_qty": 2}], 0),  # a shortfall without the write-off
+			([{"name": line, "returned_qty": None}], 1),  # a blank is not zero
+			([{"name": "no-such-row", "returned_qty": 3}], 0),  # a line the note does not have
+			([], 0),  # a missing line
+			([{"name": line, "returned_qty": "nan"}], 1),  # not finite
+			([{"name": line, "returned_qty": float("inf")}], 1),
+			({"name": line, "returned_qty": 3}, 0),  # not a list
+			("not json", 0),
+		]
+		for lines, write_off in cases:
+			with self.subTest(lines=lines, write_off=write_off):
+				with self.assertRaises(frappe.ValidationError):
+					noon.confirm_returned(note, lines, write_off)
+				self.assertEqual(frappe.db.get_value("Delivery Note", note, "docstatus"), 1)
+				self.assertTrue(noon.is_held(self._note(note)))
+				self.assertEqual(self._bin_qty(item, warehouse), 7)
+
+	def test_confirm_returned_refuses_a_write_off_of_a_serial_or_batch_line_and_a_company_without_accounts(self):
+		serial = frappe._dict(name="r1", item_code="I", qty=3, precision=3, serial_batch=True)
+		plain = frappe._dict(name="r1", item_code="I", qty=3, precision=3, serial_batch=False)
+		doc = frappe._dict(company="Some Company")
+		with patch.object(noon, "_stock_lines", return_value=[serial]):
+			with self.assertRaises(frappe.ValidationError):
+				noon._check_returned(doc, [{"name": "r1", "returned_qty": 1}], True)
+		no_accounts = frappe._dict(stock_adjustment_account=None, cost_center="CC")
+		with patch.object(noon, "_stock_lines", return_value=[plain]), patch.object(frappe.db, "get_value", return_value=no_accounts):
+			with self.assertRaises(frappe.ValidationError):
+				noon._check_returned(doc, [{"name": "r1", "returned_qty": 1}], True)
+
+	def test_a_failed_material_issue_rolls_the_note_cancel_back_and_the_note_stays_held(self):
+		_fx, note, item, warehouse = self._held_note(qty=3, stock=10)
+		with patch.object(noon, "_write_off", side_effect=frappe.ValidationError("<b>no account</b>")):
+			with self.assertRaises(frappe.ValidationError) as caught:
+				noon.confirm_returned(note, self._lines(note, returned=[1]), 1)
+		self.assertIn("no account", str(caught.exception))
+		self.assertNotIn("<b>", str(caught.exception))  # the reason is escaped
+		self.assertEqual(frappe.db.get_value("Delivery Note", note, "docstatus"), 1)
+		self.assertTrue(noon.is_held(self._note(note)))
+		self.assertEqual(self._bin_qty(item, warehouse), 7)
+		self.assertEqual(frappe.get_all("Stock Entry", filters={"remarks": ["like", f"%{note}%"]}), [])
+
+	def test_a_failed_material_issue_also_rolls_back_the_cancel_of_the_unpaid_sales_invoice(self):
+		from erpnext.stock.doctype.delivery_note.delivery_note import make_sales_invoice
+
+		_fx, note, item, warehouse = self._held_note(qty=3, stock=10)
+		invoice = make_sales_invoice(note)
+		invoice.insert()
+		invoice.submit()
+		frappe.db.commit()
+		self._invoices.append(invoice.name)
+		with patch.object(noon, "_write_off", side_effect=frappe.ValidationError("boom")):
+			with self.assertRaises(frappe.ValidationError):
+				noon.confirm_returned(note, self._lines(note, returned=[1]), 1)
+		self.assertEqual(frappe.db.get_value("Sales Invoice", invoice.name, "docstatus"), 1)
+		self.assertEqual(frappe.db.get_value("Delivery Note", note, "docstatus"), 1)
+		self.assertTrue(noon.is_held(self._note(note)))
+		self.assertEqual(self._bin_qty(item, warehouse), 7)
+		# and a good confirm cancels the unpaid invoice with the note
+		with patch("frappe.enqueue"):
+			noon.confirm_returned(note, self._lines(note), 0)
+		self.assertEqual(frappe.db.get_value("Sales Invoice", invoice.name, "docstatus"), 2)
+		self.assertEqual(frappe.db.get_value("Delivery Note", note, "docstatus"), 2)
+
+	def test_confirm_returned_on_a_product_bundle_note_works_on_its_packed_items(self):
+		accounts = frappe.db.get_value(
+			"Company", frappe.defaults.get_global_default("company"), ["stock_adjustment_account", "cost_center"], as_dict=True
+		)
+		if not accounts.stock_adjustment_account or not accounts.cost_center:
+			self.skipTest("The test Company has no Stock Adjustment Account or default cost center.")
+		from erpnext.stock.doctype.stock_entry.stock_entry_utils import make_stock_entry
+
+		fx = self._order([("SKU-A", 2)], ["SKU-A", "SKU-A"])
+		parent = fx.items["SKU-A"].name
+		part = frappe.get_doc(
+			{
+				"doctype": "Item",
+				"item_code": f"TEST-BUNDLE-PART-{frappe.generate_hash(length=6)}",
+				"item_group": "Products",
+				"stock_uom": "Nos",
+				"is_stock_item": 1,
+			}
+		).insert()
+		self._extra_items.append(part.name)
+		self._stock_items.append(part.name)
+		bundle = frappe.get_doc(
+			{"doctype": "Product Bundle", "new_item_code": parent, "items": [{"item_code": part.name, "qty": 2, "uom": "Nos"}]}
+		).insert()
+		self._bundles.append(bundle.name)
+		warehouse = fx.row_for("SKU-A").warehouse
+		make_stock_entry(item_code=part.name, qty=20, to_warehouse=warehouse, company=fx.sales_order.company, rate=10)
+		note = self._created_note(fx, units=("1", "2"))
+		self._note(note.name).submit()
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{
+				"custom_integration_status": "Cancelled",
+				"custom_shipping_status": noon.SHIPPING_AWAITING_RETURN,
+				lifecycle.FIELD: lifecycle.RETURNED_FAILED,
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		lines = noon.get_return_lines(note.name)
+		# 2 bundles x 2 parts = 4 units of the part (the bundle item itself posts nothing)
+		self.assertEqual([(row["item_code"], row["shipped_qty"]) for row in lines], [(part.name, 4)])
+		self.assertEqual(self._bin_qty(part.name, warehouse), 16)
+		with patch("frappe.enqueue"):
+			result = noon.confirm_returned(note.name, self._lines(note.name, returned=[3]), 1)
+		entry = frappe.get_doc("Stock Entry", result["stock_entry"])
+		self.assertEqual([(row.item_code, row.qty, row.conversion_factor) for row in entry.items], [(part.name, 1, 1)])
+		self.assertEqual(frappe.db.get_value("Delivery Note", note.name, "docstatus"), 2)
+		self.assertEqual(self._bin_qty(part.name, warehouse), 19)
+
+	def test_a_noon_user_with_only_read_confirms_returned_through_the_endpoint_with_and_without_a_write_off(self):
+		from marketplace_integrations.api import noon_fulfillment
+		from marketplace_integrations.tests.utils import make_role_user
+
+		reader, _role = make_role_user(self, "Noon Return Confirmer", {"Delivery Note": ["read"]})
+		frappe.get_doc("User", reader).add_roles("Noon User")
+		frappe.clear_cache(user=reader)
+		_fx, full, item, warehouse = self._held_note(qty=3, stock=10)
+		_fx2, partial, item2, warehouse2 = self._held_note(qty=3, stock=10, sku="SKU-B")
+		with self.set_user(reader), patch("frappe.enqueue"):
+			self.assertFalse(frappe.has_permission("Delivery Note", "write", doc=full))
+			rows = noon_fulfillment.get_return_lines(full)
+			self.assertEqual(rows[0]["shipped_qty"], 3)
+			result = noon_fulfillment.confirm_returned(full, frappe.as_json(self._lines(full)), 0)
+			self.assertEqual(result, {"stock_entry": None})
+			result = noon_fulfillment.confirm_returned(partial, frappe.as_json(self._lines(partial, returned=[1])), 1)
+		self.assertTrue(result["stock_entry"])
+		self.assertEqual(frappe.db.get_value("Delivery Note", full, "docstatus"), 2)
+		self.assertEqual(frappe.db.get_value("Delivery Note", partial, "docstatus"), 2)
+		self.assertEqual(self._bin_qty(item, warehouse), 10)
+		self.assertEqual(self._bin_qty(item2, warehouse2), 8)
+
+	def test_the_sales_order_cancel_refuses_a_held_note_up_front_and_cancels_nothing_at_noon(self):
+		from marketplace_integrations.services import order_cancel_cascade
+
+		fx = self._order([("SKU-A", 2)], ["SKU-A", "SKU-A"])
+		ready = self._created_note(fx, units=("1",))
+		held = self._created_note(fx, units=("2",))
+		for name in (ready.name, held.name):
+			self._submit_flags(self._note(name))
+		frappe.db.set_value(
+			"Delivery Note",
+			held.name,
+			{
+				"custom_shipping_status": noon.SHIPPING_AWAITING_RETURN,
+				"custom_integration_status": "Cancelled",
+				lifecycle.FIELD: lifecycle.RETURNED_FAILED,
+			},
+			update_modified=False,
+		)
+		frappe.db.set_value("Delivery Note", ready.name, lifecycle.FIELD, lifecycle.READY_FOR_PICKUP, update_modified=False)
+		frappe.db.commit()
+		with patch(_CLIENT) as client_class:
+			with self.assertRaises(frappe.ValidationError) as caught:
+				order_cancel_cascade._check_note(held.name, fx.name, True)
+			self.assertIn("Confirm Returned", str(caught.exception))
+			self.assertIn("Nothing was cancelled", str(caught.exception))
+			# the ready note alone passes the check; nothing was sent to Noon either way
+			order_cancel_cascade._check_note(ready.name, fx.name, True)
+			client_class.return_value.request.assert_not_called()
+		for name in (ready.name, held.name):
+			self._unflag(self._note(name))
+
+	def test_the_confirm_returned_endpoints_need_noon_user_or_system_manager_and_read_on_the_note(self):
+		from marketplace_integrations.api import noon_fulfillment
+		from marketplace_integrations.tests.utils import make_role_user
+
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._draft_note(fx, lr_no="TYPED-CR")
+		reader, _role = make_role_user(self, "Noon Return Reader", {"Delivery Note": ["read"]})
+		with (
+			patch.object(noon, "confirm_returned", return_value={"stock_entry": None}) as confirm,
+			patch.object(noon, "get_return_lines", return_value=[]) as lines,
+		):
+			with self.set_user(reader):
+				for call in (
+					lambda: noon_fulfillment.get_return_lines(note.name),
+					lambda: noon_fulfillment.confirm_returned(note.name, "[]", 0),
+				):
+					with self.assertRaises(frappe.PermissionError):
+						call()
+			confirm.assert_not_called()
+			lines.assert_not_called()
+			# Noon User with Delivery Note read only (no write) passes both
+			frappe.get_doc("User", reader).add_roles("Noon User")
+			frappe.clear_cache(user=reader)
+			with self.set_user(reader):
+				self.assertFalse(frappe.has_permission("Delivery Note", "write", doc=note.name))
+				self.assertEqual(noon_fulfillment.get_return_lines(note.name), [])
+				self.assertEqual(noon_fulfillment.confirm_returned(note.name, "[]", 1), {"stock_entry": None})
+			confirm.assert_called_once_with(note.name, "[]", 1)
 
 	# ---- contract ------------------------------------------------------------------------
 
@@ -657,6 +1007,142 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		self.assertFalse(stored.custom_last_integration_error)
 		self.assertEqual([(r.item_code, r.qty) for r in stored.items], rows_before)
 
+	def test_a_refresh_reading_shipped_leaves_a_submitted_note_ready_for_pickup_and_keeps_a_manual_stage(self):
+		# Noon sets Shipped right after the shipment is created: it is not a pickup (#540)
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{"docstatus": 1, lifecycle.FIELD: lifecycle.READY_FOR_PICKUP},
+			update_modified=False,
+		)
+		self._refresh(note, self._found(fx), [self._unit("1")])
+		self.assertEqual(self._note(note.name).get(lifecycle.FIELD), lifecycle.READY_FOR_PICKUP)
+
+		# a person confirmed the pickup: later refreshes leave the stage alone
+		for manual in (lifecycle.PICKED_UP, lifecycle.IN_TRANSIT):
+			frappe.db.set_value("Delivery Note", note.name, lifecycle.FIELD, manual, update_modified=False)
+			self._refresh(note, self._found(fx), [self._unit("1")])
+			self.assertEqual(self._note(note.name).get(lifecycle.FIELD), manual)
+
+	def _unflag(self, note):
+		frappe.db.set_value("Delivery Note", note.name, "docstatus", 0, update_modified=False)
+		frappe.db.set_value("Delivery Note Item", {"parent": note.name}, "docstatus", 0, update_modified=False)
+		frappe.db.commit()
+
+	def test_a_cancel_noon_did_after_a_person_confirmed_the_pickup_holds_the_note(self):
+		# #527: the stage (Picked Up, In Transit, Delivered; never Noon's Shipped or a unit status) decides. The note
+		# stays submitted: Cancelled + Awaiting Return, no error text, no native cancel, one notification.
+		for stage in lifecycle.NOON_MANUAL_STATES:
+			with self.subTest(stage=stage):
+				fx = self._order([("SKU-A", 1)], ["SKU-A"])
+				note = self._created_note(fx)
+				self._submit_flags(note)
+				frappe.db.set_value("Delivery Note", note.name, lifecycle.FIELD, stage, update_modified=False)
+				frappe.db.commit()
+				with (
+					patch.object(noon, "_cancel_note_natively") as native,
+					patch.object(carrier_shipments, "_notify") as notify,
+				):
+					result, _client, _get = self._refresh(
+						note, self._found(fx), [self._unit("1", "ACKNOWLEDGED", mp=_CANCELLED)]
+					)
+				self.assertEqual(result, noon.SHIPPING_AWAITING_RETURN)
+				stored = self._note(note.name)
+				self.assertEqual(stored.docstatus, 1)
+				self.assertEqual(stored.custom_integration_status, "Cancelled")
+				self.assertEqual(stored.custom_shipping_status, "Awaiting Return")
+				self.assertFalse(stored.custom_last_integration_error)
+				self.assertEqual(stored.get(lifecycle.FIELD), lifecycle.RETURNED_FAILED)
+				native.assert_not_called()
+				notify.assert_called_once()
+				self.assertIn(note.name, notify.call_args.args[1])
+				self.assertTrue(noon.is_held(stored))
+				self._unflag(note)
+				# the next stage builds its own fixture: the mapping (account + SKU) is unique, so drop this one now
+				for name in fx.delivery_notes():
+					frappe.db.set_value("Delivery Note", name, {"custom_integration_status": "Cancelled", "custom_shipping_status": "Cancelled"}, update_modified=False)
+				fx.cleanup()
+				self.fixtures.remove(fx)
+				frappe.db.commit()
+
+	def test_a_cancel_noon_did_before_a_pickup_was_confirmed_still_cancels_the_note(self):
+		# Ready for Pickup (Noon shows Shipped, nobody confirmed the pickup): the automatic native cancel, as before.
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		self._submit_flags(note)
+		frappe.db.set_value("Delivery Note", note.name, lifecycle.FIELD, lifecycle.READY_FOR_PICKUP, update_modified=False)
+		frappe.db.commit()
+		with patch.object(noon, "_cancel_note_natively") as native, patch.object(carrier_shipments, "_notify") as notify:
+			result, _client, _get = self._refresh(note, self._found(fx), [self._unit("1", "SHIPPED", mp=_CANCELLED)])
+		self.assertEqual(result, "Cancelled")
+		stored = self._note(note.name)
+		self.assertEqual((stored.custom_integration_status, stored.custom_shipping_status), ("Cancelled", "Cancelled"))
+		self.assertEqual(stored.get(lifecycle.FIELD), lifecycle.RETURNED_FAILED)
+		native.assert_called_once_with(note.name)
+		notify.assert_not_called()
+		self._unflag(note)
+
+	def test_a_held_note_is_not_cancelled_by_a_later_refresh_the_retry_or_the_nightly_run(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		self._submit_flags(note)
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{
+				"custom_integration_status": "Cancelled",
+				"custom_shipping_status": "Awaiting Return",
+				lifecycle.FIELD: lifecycle.RETURNED_FAILED,
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		with patch.object(noon, "_cancel_note_natively") as native, patch(_CLIENT) as client_class:
+			noon.refresh(note.name)
+			# even with an error text (a blocked earlier cancel) the retry branch skips a held note
+			frappe.db.set_value("Delivery Note", note.name, "custom_last_integration_error", "x", update_modified=False)
+			noon.refresh(note.name)
+			noon.run_reconcile()
+		native.assert_not_called()
+		client_class.return_value.request.assert_not_called()  # a Cancelled note is never read at Noon
+		self.assertTrue(noon.is_held(self._note(note.name)))
+		self._unflag(note)
+
+	def test_the_native_cancel_of_a_held_note_is_refused_unless_confirm_returned_passes_the_flag(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		self._submit_flags(note)
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{"custom_integration_status": "Cancelled", "custom_shipping_status": "Awaiting Return"},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		doc = self._note(note.name)
+		with self.assertRaises(frappe.ValidationError) as caught:
+			carrier_shipments.guard_cancel_or_delete(doc)
+		self.assertIn("Use Confirm Returned", str(caught.exception))
+		doc.flags[noon.CONFIRM_RETURNED_FLAG] = True
+		carrier_shipments.guard_cancel_or_delete(doc)  # no refusal: only Confirm Returned sets the flag
+		# a note Noon cancelled before pickup (Shipping Status Cancelled) is not held and passes
+		frappe.db.set_value("Delivery Note", note.name, "custom_shipping_status", "Cancelled", update_modified=False)
+		carrier_shipments.guard_cancel_or_delete(self._note(note.name))
+		self._unflag(note)
+
+	def test_an_amended_note_copies_no_shipping_status(self):
+		meta = frappe.get_meta("Delivery Note")
+		self.assertTrue(meta.get_field("custom_shipping_status").no_copy)
+		self.assertIn("custom_shipping_status", noon.SYSTEM_FIELDS)
+		self.assertIn("Awaiting Return", meta.get_field("custom_shipping_status").options.split("\n"))
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._draft_note(fx, lr_no="TYPED-AM")
+		note.custom_shipping_status = "Awaiting Return"  # what Amend copies from the cancelled source
+		noon.clear_inherited(note)
+		self.assertFalse(note.custom_shipping_status)
+
 	def test_a_noon_note_is_counted_in_the_sales_order_summary_and_a_refresh_updates_it(self):
 		fx = self._order([("SKU-A", 1)], ["SKU-A"])
 		note = self._created_note(fx)
@@ -775,19 +1261,37 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		self.assertIn(one.name, seen)
 		self.assertIn(two.name, seen)
 
-	def test_the_nightly_reconcile_stops_at_shipped_or_cancelled_and_after_60_days(self):
+	def test_picked_up_is_the_workflow_stage_not_noons_shipped(self):
+		for stage, expected in (
+			(lifecycle.READY_FOR_PICKUP, False),
+			(lifecycle.SHIPMENT_CREATED, False),
+			("", False),
+			(lifecycle.PICKED_UP, True),
+			(lifecycle.IN_TRANSIT, True),
+			(lifecycle.DELIVERED, True),
+		):
+			for shipping in ("Shipped", "Mixed", "Acknowledged"):
+				doc = frappe._dict({lifecycle.FIELD: stage, "custom_shipping_status": shipping})
+				self.assertEqual(noon.picked_up(doc), expected, (stage, shipping))
+
+	def test_the_nightly_reconcile_reads_shipped_and_stops_at_delivered_cancelled_and_after_60_days(self):
 		notes = {}
-		for key in ("acknowledged", "shipped", "cancelled", "old", "cancelled_submitted"):
+		for key in ("acknowledged", "shipped", "delivered", "cancelled", "old", "cancelled_submitted"):
 			sku = f"SKU-{key}"  # one SKU per order: a mapping is unique per account and SKU
 			notes[key] = self._created_note(self._order([(sku, 1)], [sku]))
 		for key, status in (
 			("acknowledged", "Acknowledged"),
 			("shipped", "Shipped"),
+			("delivered", "Shipped"),
 			("cancelled", "Cancelled"),
 			("old", "Acknowledged"),
 			("cancelled_submitted", "Cancelled"),
 		):
 			frappe.db.set_value("Delivery Note", notes[key].name, "custom_shipping_status", status, update_modified=False)
+		# the Shipped and Delivered notes are submitted, as real ones are (stage Ready for Pickup / Delivered)
+		for key, stage in (("shipped", lifecycle.READY_FOR_PICKUP), ("delivered", lifecycle.DELIVERED)):
+			self._submit_flags(notes[key])
+			frappe.db.set_value("Delivery Note", notes[key].name, lifecycle.FIELD, stage, update_modified=False)
 		# Noon shows it cancelled but the note is still Created and submitted: it must be refreshed so it
 		# becomes Cancelled and is cancelled natively.
 		self._submit_flags(notes["cancelled_submitted"])
@@ -802,10 +1306,13 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 
 		self.assertIn(notes["acknowledged"].name, seen)
 		self.assertIn(notes["cancelled_submitted"].name, seen)
-		for key in ("shipped", "cancelled", "old"):
+		# Noon's Shipped is no longer a stop (#541): a Ready for Pickup note is still read
+		self.assertIn(notes["shipped"].name, seen)
+		for key in ("delivered", "cancelled", "old"):
 			self.assertNotIn(notes[key].name, seen)
-		frappe.db.set_value("Delivery Note", notes["cancelled_submitted"].name, "docstatus", 0, update_modified=False)
-		frappe.db.set_value("Delivery Note Item", {"parent": notes["cancelled_submitted"].name}, "docstatus", 0, update_modified=False)
+		for key in ("cancelled_submitted", "shipped", "delivered"):
+			frappe.db.set_value("Delivery Note", notes[key].name, "docstatus", 0, update_modified=False)
+			frappe.db.set_value("Delivery Note Item", {"parent": notes[key].name}, "docstatus", 0, update_modified=False)
 		frappe.db.commit()
 
 	def test_refresh_cancels_natively_only_when_it_moved_the_note_into_cancelled_or_retries_a_blocked_one(self):
@@ -962,6 +1469,29 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		frappe.db.commit()
 		found = [i for i in attention._collect_carrier_items(attention.CARRIER_CREATION_PROBLEM) if i["reference_name"] == note.name]
 		self.assertEqual(len(found), 1)
+
+	def test_needs_attention_keeps_a_held_note_with_its_own_text_until_it_is_confirmed(self):
+		from marketplace_integrations.services import marketplace_attention as attention
+
+		note = self._created_note(self._order([("SKU-A", 1)], ["SKU-A"]))
+		self._submit_flags(note)
+		frappe.db.set_value(
+			"Delivery Note",
+			note.name,
+			{"custom_integration_status": "Cancelled", "custom_shipping_status": "Awaiting Return"},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		found = [i for i in attention._collect_carrier_items(attention.CARRIER_CANCELLED) if i["reference_name"] == note.name]
+		self.assertEqual(len(found), 1)
+		self.assertIn("press Confirm Returned", found[0]["explanation"])
+		self.assertNotIn("Press Cancel", found[0]["explanation"])
+		# a note Noon cancelled before pickup (the automatic cancel failed) keeps the old text
+		frappe.db.set_value("Delivery Note", note.name, "custom_shipping_status", "Cancelled", update_modified=False)
+		frappe.db.commit()
+		found = [i for i in attention._collect_carrier_items(attention.CARRIER_CANCELLED) if i["reference_name"] == note.name]
+		self.assertIn("Press Cancel", found[0]["explanation"])
+		self._unflag(note)
 
 	# ---- shipment invoice (#416) ------------------------------------------------------------------
 

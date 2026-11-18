@@ -72,7 +72,15 @@ def backfill_states():
 	"""Write the stage of every Delivery Note whose stored stage differs from the mapping."""
 	rows = frappe.get_all(
 		"Delivery Note",
-		fields=["name", "docstatus", "is_return", "custom_integration_status", "custom_shipping_status", lifecycle.FIELD],
+		fields=[
+			"name",
+			"docstatus",
+			"is_return",
+			"transporter_name",
+			"custom_integration_status",
+			"custom_shipping_status",
+			lifecycle.FIELD,
+		],
 		limit_page_length=0,
 	)
 	by_state = {}

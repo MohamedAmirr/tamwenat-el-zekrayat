@@ -73,6 +73,8 @@
 		frm.__noon_awb_generated = awb_generated(frm);
 		set_awb_state(frm);
 		show_invoice_intro(frm);
+		// after the shell's own intro, so it replaces "Cancelled at Noon. Press Cancel ..." (a held note is not cancelled by hand)
+		show_held_intro(frm);
 	}
 
 	// Ticking the box means Noon generates the AWB: a typed AWB is cleared (the server refuses both).
@@ -226,6 +228,45 @@
 		});
 	}
 
+	// Form hook for the Delivery Note Lifecycle workflow's Cancel action (Status menu), which does not go through
+	// before_cancel: without this the server guard refuses the cancel of a note with a live shipment (a Shipped note in
+	// Ready for Pickup included) and the form offers no other way out. Frappe applies the workflow action after this
+	// hook whatever frappe.validated says (form/workflow.js), so the only way to stop it is a promise that never
+	// settles; the screen it froze is released here. The server guard (guard_cancel_or_delete) stays the safety net.
+	function before_workflow_action(frm) {
+		if (frm.selected_workflow_action !== "Cancel") return;
+		if (frm.doc.transporter_name !== CARRIER || !CANCELLABLE.includes(frm.doc.custom_integration_status || "")) return;
+		const unfreeze = () => {
+			if (frappe.dom && frappe.dom.unfreeze) frappe.dom.unfreeze();
+		};
+		const halt = () => {
+			frm.selected_workflow_action = null;
+			unfreeze();
+			return new Promise(() => {});
+		};
+		unfreeze();
+		return new Promise((resolve) => {
+			frappe.confirm(
+				cancel_warning(),
+				() =>
+					cancel_at_noon(frm, {
+						done: () =>
+							Promise.resolve(frm.reload_doc()).then(() => {
+								// Already cancelled (a Check read found Noon's cancel): the workflow must not go on.
+								if (frm.doc.docstatus === 2) {
+									frappe.show_alert({ message: __("The Delivery Note was already cancelled."), indicator: "green" });
+									return halt();
+								}
+								if (frappe.dom && frappe.dom.freeze) frappe.dom.freeze();
+								resolve();
+							}),
+						stop: halt,
+					}),
+				halt
+			);
+		});
+	}
+
 	// A draft note with a live shipment cannot be deleted until the shipment is cancelled at Noon.
 	function cancel_shipment(frm) {
 		return new Promise((resolve) => {
@@ -282,6 +323,162 @@
 		return Boolean(frm.perm && frm.perm[0] && frm.perm[0].write);
 	}
 
+	// ---- Confirm Returned (#527) -----------------------------------------------------------------
+
+	const RETURN_API = "marketplace_integrations.api.noon_fulfillment.";
+
+	// Noon cancelled the shipment after a person confirmed the pickup: the note stays submitted until Confirm Returned.
+	function is_held(frm) {
+		return Boolean(
+			frm.doc &&
+				frm.doc.docstatus === 1 &&
+				frm.doc.custom_integration_status === "Cancelled" &&
+				frm.doc.custom_shipping_status === "Awaiting Return"
+		);
+	}
+
+	// The endpoints need Noon User or System Manager (no Delivery Note write right is needed).
+	function can_confirm_returned() {
+		const user = frappe.user;
+		return Boolean(user && user.has_role && (user.has_role("Noon User") || user.has_role("System Manager")));
+	}
+
+	function show_held_intro(frm) {
+		if (!is_held(frm) || !frm.set_intro) return;
+		frm.set_intro(
+			__(
+				"Noon cancelled this shipment after pickup. The stock stays out until a Noon User confirms the goods are back (Confirm Returned)."
+			),
+			"orange"
+		);
+	}
+
+	function show_error(error, fallback) {
+		frappe.msgprint({
+			message: escape(message_of(error) || fallback),
+			indicator: "red",
+			title: __("Noon shipment"),
+		});
+	}
+
+	// Returned Qty is editable only while the write-off box is ticked; unticking puts every line back to "all returned".
+	function sync_returned_editable(dialog) {
+		const on = Boolean(dialog.get_value("write_off"));
+		const field = dialog.fields_dict.lines;
+		if (field && field.grid && field.grid.update_docfield_property) {
+			field.grid.update_docfield_property("returned_qty", "read_only", on ? 0 : 1);
+		}
+		if (!on && field && field.df && field.df.data) {
+			field.df.data.forEach((row) => (row.returned_qty = row.shipped_qty));
+		}
+		if (field && field.grid && field.grid.refresh) field.grid.refresh();
+	}
+
+	function submit_return(frm, dialog, values) {
+		const write_off = values.write_off ? 1 : 0;
+		const lines = (values.lines || []).map((row) => ({
+			name: row.name,
+			returned_qty: write_off ? row.returned_qty : row.shipped_qty,
+		}));
+		return exclusive(frm, () =>
+			frappe
+				.call({
+					method: RETURN_API + "confirm_returned",
+					type: "POST",
+					args: { delivery_note: frm.doc.name, lines: JSON.stringify(lines), write_off },
+					freeze: true,
+					freeze_message: __("Confirming the return..."),
+					// the server's refusal is shown below (parsed and escaped), not by frappe.call
+					silent: true,
+				})
+				.then(
+					() => {
+						dialog.hide();
+						frappe.show_alert({
+							message: __("Returned goods confirmed. The Delivery Note was cancelled."),
+							indicator: "green",
+						});
+						return frm.reload_doc();
+					},
+					(error) => show_error(error, __("The return could not be confirmed."))
+				)
+		);
+	}
+
+	function open_return_dialog(frm, lines) {
+		const dialog = new frappe.ui.Dialog({
+			title: __("Confirm Returned"),
+			fields: [
+				{
+					fieldtype: "Table",
+					fieldname: "lines",
+					cannot_add_rows: 1,
+					cannot_delete_rows: 1,
+					in_place_edit: 1,
+					data: lines.map((line) => ({
+						name: line.name,
+						item_code: line.item_code,
+						item_name: line.item_name,
+						shipped_qty: line.shipped_qty,
+						returned_qty: line.shipped_qty,
+					})),
+					fields: [
+						{ fieldtype: "Data", fieldname: "item_code", label: __("Item"), read_only: 1, in_list_view: 1, columns: 3 },
+						{ fieldtype: "Data", fieldname: "item_name", label: __("Item Name"), read_only: 1, in_list_view: 1, columns: 3 },
+						{ fieldtype: "Float", fieldname: "shipped_qty", label: __("Shipped Qty"), read_only: 1, in_list_view: 1, columns: 2 },
+						{ fieldtype: "Float", fieldname: "returned_qty", label: __("Returned Qty"), read_only: 1, in_list_view: 1, columns: 2 },
+					],
+				},
+				{
+					fieldtype: "Check",
+					fieldname: "write_off",
+					label: __("Create Material Issue for broken/missing units"),
+					onchange: () => sync_returned_editable(dialog),
+				},
+			],
+			primary_action_label: __("Confirm Returned"),
+			primary_action: (values) => submit_return(frm, dialog, values),
+		});
+		dialog.show();
+		return dialog;
+	}
+
+	// "Confirm Returned" button: reads the lines (the server refuses a note that is not held), then asks.
+	function confirm_returned(frm) {
+		return frappe
+			.call({
+				method: RETURN_API + "get_return_lines",
+				type: "POST",
+				args: { delivery_note: frm.doc.name },
+				freeze: true,
+				freeze_message: __("Reading the lines..."),
+				silent: true,
+			})
+			.then(
+				(r) => {
+					const lines = r.message || [];
+					if (!lines.length) {
+						frappe.msgprint({
+							message: escape(__("This Delivery Note has no stock lines to confirm.")),
+							indicator: "orange",
+							title: __("Noon shipment"),
+						});
+						return;
+					}
+					return open_return_dialog(frm, lines);
+				},
+				(error) => show_error(error, __("The lines could not be read."))
+			);
+	}
+
+	// Its own form handler, not the shell's add_buttons hook: the shell shows carrier buttons only to a user with
+	// Delivery Note write, and Confirm Returned needs a Noon User with read only to see it.
+	function add_return_button(frm) {
+		if (frm.doc.transporter_name === CARRIER && is_held(frm) && can_confirm_returned()) {
+			frm.add_custom_button(__("Confirm Returned"), () => confirm_returned(frm));
+		}
+	}
+
 	function add_buttons(frm) {
 		if (frm.doc.docstatus === 0 && CANCELLABLE.includes(frm.doc.custom_integration_status || "")) {
 			frm.add_custom_button(__("Cancel Noon Shipment"), () => cancel_shipment(frm));
@@ -306,7 +503,12 @@
 	if (typeof frappe !== "undefined" && frappe.marketplace_integrations && frappe.marketplace_integrations.shipping) {
 		frappe.marketplace_integrations.shipping.register_carrier(CARRIER, hooks);
 		if (frappe.ui && frappe.ui.form) {
-			frappe.ui.form.on("Delivery Note", { before_cancel, custom_noon_generate_awb });
+			frappe.ui.form.on("Delivery Note", {
+				before_cancel,
+				before_workflow_action,
+				custom_noon_generate_awb,
+				refresh: add_return_button,
+			});
 		}
 	}
 
@@ -319,9 +521,17 @@
 			awb_generated,
 			custom_noon_generate_awb,
 			before_cancel,
+			before_workflow_action,
 			cancel_shipment,
 			add_buttons,
 			upload_shipment_invoice,
+			is_held,
+			add_return_button,
+			confirm_returned,
+			open_return_dialog,
+			submit_return,
+			sync_returned_editable,
+			show_held_intro,
 		};
 	}
 })();
