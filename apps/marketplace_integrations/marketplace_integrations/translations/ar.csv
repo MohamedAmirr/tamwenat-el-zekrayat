@@ -658,7 +658,7 @@ Deactivate destination {0}? Noon stops sending events to it.,إلغاء تفعي
 Delete Demo Data,حذف البيانات التجريبية
 Draft Credit Note created.,تم إنشاء إشعار دائن مسودة.
 Draft Sales Return created.,تم إنشاء مرتجع مبيعات مسودة.
-Draft or submitted return Delivery Note created from a Sellable outcome.,"مذكرة تسليم مرتجعة (مسودة أو معتمدة) أُنشئت من نتيجة ""قابل للبيع""."
+Draft or submitted return Delivery Note created from an inspection outcome.,مذكرة تسليم مرتجعة (مسودة أو معتمدة) أُنشئت من نتيجة الفحص.
 Draft or submitted return Sales Invoice (Credit Note) for this returned item.,فاتورة مبيعات مرتجعة (إشعار دائن) مسودة أو معتمدة لهذا العنصر المرتجع.
 ERPNext Customer {0} configured on Marketplace Account {1} does not exist.,عميل ERPNext {0} المضبوط في حساب السوق {1} غير موجود.
 ERPNext Customer {0}'s default currency ({1}) must match Company {2}'s default currency ({3}) before synchronizing orders. Multi-currency Sales Order synchronization is not supported.,يجب أن تطابق العملة الافتراضية لعميل ERPNext {0} ({1}) العملة الافتراضية للشركة {2} ({3}) قبل مزامنة الطلبات. مزامنة أوامر البيع متعددة العملات غير مدعومة.
@@ -723,7 +723,7 @@ IN_CART,في السلة
 Import Noon orders for this account now?,هل تريد استيراد طلبات Noon لهذا الحساب الآن؟
 Income account that receives the shipping charge of synced Shopify orders. Required once an order with a shipping charge is synced. Not used for merchandise.,حساب الإيرادات الذي يستلم رسوم الشحن لطلبات Shopify المتزامنة. مطلوب بمجرد مزامنة طلب له رسوم شحن. لا يُستخدم للبضائع.
 Incomplete,غير مكتمل
-Inspection outcome must be Sellable or Damaged.,"يجب أن تكون نتيجة الفحص ""قابل للبيع"" أو ""تالف""."
+"Inspection outcome must be Restock, Damaged or Damaged, Noon paid.","يجب أن تكون نتيجة الفحص ""إعادة للمخزون"" أو ""تالف"" أو ""تالف، دفعت Noon""."
 Inspection recorded.,تم تسجيل الفحص.
 Internal (#180): when the scheduled reconciliation sweep last bumped this order; used to back off re-checks. Set only by services/sales_order_sync_debounce.py.,داخلي (#180): وقت آخر تنبيه لهذا الطلب من مسح التسوية المجدول؛ يُستخدم لتأخير إعادة الفحص. يُضبط فقط بواسطة services/sales_order_sync_debounce.py.
 Internal Note,ملاحظة داخلية
@@ -1207,7 +1207,7 @@ The inspection outcome was already recorded as {0} and cannot be changed.,نتي
 The linked Marketplace Order has no submitted Sales Order.,طلب السوق المرتبط ليس له أمر بيع معتمد.
 The marketplace order cannot be cancelled from ERPNext: {0},لا يمكن إلغاء طلب السوق من ERPNext: {0}
 The marketplace order changed after it was synced to ERPNext.,تغيّر طلب السوق بعد مزامنته مع ERPNext.
-The merchant's decision for the returned item. Sellable creates a draft Sales Return into the account warehouse; Damaged records only (Noon is responsible for it).,"قرار التاجر بشأن العنصر المرتجع. ""قابل للبيع"" يُنشئ مسودة مرتجع مبيعات إلى مستودع الحساب؛ ""تالف"" يُسجَّل فقط (Noon مسؤولة عنه)."
+"The merchant's decision for the returned item. Sellable (shown as Restock) creates a draft Sales Return into the account warehouse; Damaged and Damaged, Noon paid create a draft Sales Return into the account's damaged warehouse.","قرار التاجر بشأن العنصر المرتجع. ""قابل للبيع"" (يظهر باسم ""إعادة للمخزون"") يُنشئ مسودة مرتجع مبيعات إلى مستودع الحساب؛ ""تالف"" و""تالف، دفعت Noon"" يُنشئان مسودة مرتجع مبيعات إلى مستودع التالف الخاص بالحساب."
 The one Bosta business pickup location used for this site. Pick it with Fetch Locations.,"موقع الاستلام التجاري الوحيد في Bosta المستخدم لهذا الموقع. اختره عبر ""جلب المواقع""."
 The order is already cancelled on Talabat.,الطلب ملغى بالفعل على Talabat.
 "The receivable account {0} is in {1}, not the Company currency {2}.",حساب المدينين {0} بعملة {1}، وليس بعملة الشركة {2}.
@@ -2266,3 +2266,16 @@ This Delivery Note has no stock lines to confirm.,لا توجد في مذكرة 
 "{0} cancelled this shipment after pickup. When the goods are back, press Confirm Returned.","ألغت {0} هذه الشحنة بعد الاستلام. عند عودة البضاعة، اضغط «تأكيد الإرجاع»."
 The returned quantities are not a list of lines.,الكميات المرتجعة ليست قائمة بنود.
 Delivery Note {0} is waiting for its goods to come back from {1}. Use Confirm Returned on it first. Nothing was cancelled.,"مذكرة التسليم {0} تنتظر عودة بضاعتها من {1}. استخدم «تأكيد الإرجاع» عليها أولًا. لم يتم إلغاء أي شيء."
+"Damaged, Noon paid","تالف، دفعت Noon"
+Restock,إعادة للمخزون
+Damaged Warehouse,مستودع التالف
+Damaged Warehouse must be different from the Marketplace Account Warehouse.,يجب أن يختلف مستودع التالف عن مستودع حساب السوق.
+"Damaged Warehouse must be a leaf Warehouse, not a group Warehouse.",يجب أن يكون مستودع التالف مستودعًا فرعيًا وليس مستودعًا مجمّعًا.
+Damaged Warehouse {0} does not belong to Company {1}.,مستودع التالف {0} لا يتبع الشركة {1}.
+(not set),(غير محدد)
+"Returned units inspected as Damaged or Damaged, Noon paid come back into this warehouse as a draft Sales Return, so they stay out of sellable stock. Not used by the Noon stock sync.","الوحدات المرتجعة التي فُحصت على أنها ""تالف"" أو ""تالف، دفعت Noon"" تعود إلى هذا المستودع في مسودة مرتجع مبيعات، فتبقى خارج المخزون القابل للبيع. لا تستخدمه مزامنة مخزون Noon."
+The Marketplace Account has no damaged warehouse; damaged returned stock needs one.,حساب السوق ليس له مستودع تالف؛ المخزون المرتجع التالف يحتاج إلى مستودع.
+Merchant code {0} is not one of this account's merchant codes.,رمز التاجر {0} ليس من رموز التاجر الخاصة بهذا الحساب.
+Send a list of at most {0} rows.,أرسل قائمة من {0} صفًا كحد أقصى.
+Noon Return {0} was not found.,لم يتم العثور على مرتجع Noon {0}.
+The lookup result expired. Look the barcode up again.,انتهت صلاحية نتيجة البحث. ابحث عن الباركود مرة أخرى.

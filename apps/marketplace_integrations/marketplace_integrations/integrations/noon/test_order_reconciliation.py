@@ -355,11 +355,16 @@ class IntegrationTestNoonReturnLookup(IntegrationTestCase):
 		self.assertTrue(self._evidence([row], {("Sales Invoice", "SI-1")}))
 		self.assertFalse(self._evidence([row], {("Delivery Note", "DN-1"), ("Sales Invoice", "SI-1")}))
 
-	def test_damaged_resolves_with_only_a_submitted_credit_note(self):
-		row = self._row("Damaged", None, "SI-2")
-		self.assertTrue(self._evidence([row]))
-		self.assertFalse(self._evidence([row], {("Sales Invoice", "SI-2")}))
+	def test_damaged_outcomes_resolve_like_sellable_only_with_both_documents_submitted(self):
+		for outcome in ("Damaged", "Damaged, Noon paid"):
+			row = self._row(outcome, "DN-2", "SI-2")
+			self.assertTrue(self._evidence([row]))
+			self.assertTrue(self._evidence([row], {("Sales Invoice", "SI-2")}))
+			self.assertTrue(self._evidence([row], {("Delivery Note", "DN-2")}))
+			self.assertFalse(self._evidence([row], {("Delivery Note", "DN-2"), ("Sales Invoice", "SI-2")}))
 
 	def test_any_unresolved_return_keeps_the_evidence(self):
-		resolved = self._row("Damaged", None, "SI-2")
-		self.assertTrue(self._evidence([resolved, self._row()], {("Sales Invoice", "SI-2")}))
+		resolved = self._row("Damaged", "DN-2", "SI-2")
+		self.assertTrue(
+			self._evidence([resolved, self._row()], {("Sales Invoice", "SI-2"), ("Delivery Note", "DN-2")})
+		)

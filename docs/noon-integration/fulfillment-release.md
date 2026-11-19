@@ -634,12 +634,20 @@ the merchant's decision with **Record Inspection** on the `Noon Return`:
   the Noon stock sync reads, so staff submitting the draft raises the quantity
   that the hourly sync pushes. No Noon call is made, nothing is auto-submitted,
   and the user needs create permission on Delivery Note.
-- **Damaged**: recorded only. Noon is responsible for damaged items, so no
-  document is created and no stock moves.
+- **Damaged** and **Damaged, Noon paid** (#549; the unit comes back to us but is
+  not restocked): each drafts one return Delivery Note exactly like Sellable
+  (the UI label of the stored value `Sellable` is "Restock"), but the row's
+  warehouse is the Marketplace Account's **Damaged Warehouse**
+  (`noon_damaged_warehouse`), never the Noon warehouse, so the unit stays out of
+  sellable stock and can be written off later with a Stock Entry. If the damaged
+  warehouse is not set the outcome is refused with a message (nothing is
+  assumed). The two differ only in what staff recorded; the Credit Note stays one
+  unit at the item's own price, and no Payment Entry is made for Noon's refund.
 
 It refuses, creating nothing, when the return is unacknowledged or unlinked, the
 Marketplace Order has no submitted Sales Order, the Partner SKU has no enabled
-mapping, the account has no warehouse, or there is not exactly one candidate
+mapping, the account has no warehouse (Sellable) or no damaged warehouse
+(Damaged outcomes), or there is not exactly one candidate
 Delivery Note row (the message names the candidates). A recorded outcome cannot
 be changed. Re-running Sellable returns the existing draft or submitted return;
 a cancelled or deleted one is replaced. ERPNext cannot make a Sales Return from a
@@ -647,7 +655,7 @@ Sales Order, and this app never creates a Delivery Note for a Noon order, so
 staff must already have delivered the order with a Delivery Note.
 
 **Create Credit Note** (#262) is offered once an outcome is recorded, for both
-Sellable and Damaged. It drafts a return Sales Invoice (qty -1, one unit) with
+every outcome. It drafts a return Sales Invoice (qty -1, one unit) with
 ERPNext's `make_sales_return` against the one submitted, non-return Sales
 Invoice row for the mapped Item on the Sales Order. It refuses, creating
 nothing, when there is not exactly one such invoice row, or when that invoice
@@ -658,10 +666,48 @@ Credit Note; a cancelled or deleted one is replaced.
 
 **Needs Attention clearing.** A `Noon Return` linked to an order keeps the
 order's `return` evidence (and so the compensating-transaction outcome) only
-while it is unresolved. Resolved means a submitted Credit Note AND either a
-Damaged outcome or a Sellable outcome with a submitted Sales Return. Drafts,
-cancelled documents and returns with no recorded outcome count as unresolved.
+while it is unresolved. Resolved means a submitted Credit Note AND a
+recorded outcome (Sellable, Damaged or Damaged, Noon paid) whose Sales Return is
+submitted too, so a stock movement cannot stay in draft. Drafts, cancelled
+documents and returns with no recorded outcome count as unresolved.
 The hourly sweep re-plans such orders, so no document events are needed.
+
+### Lookup by merchant code and batch confirm (#549, epic #551)
+
+- **Merchant code scoping.** `returns.queue_manual_lookup(account, barcode,
+  merchant_code=None)`: a blank code sends `{"barcode": ...}` only (Noon then
+  scopes to the connection's `default_project_code`); a set code sends
+  `merchant_codes: [code]` and is refused before anything is queued unless it is in
+  `_account_merchant_codes(account)`. The job id includes the merchant code, so the
+  same barcode with another code is its own job. The webhook and the daily AWB scan
+  keep the derived behavior.
+- **Result polling.** `lookup_return` returns `{queued, lookup_key}`. The worker
+  stores `{state: queued|done|error, names, error}` in `frappe.cache` under that
+  key for one hour (still writing the Marketplace Sync Log row); `get_lookup_result`
+  returns the state plus the saved Noon Returns read with `frappe.get_list`. Zero
+  items is `done` with no rows. `list_merchant_codes` lists the codes to choose from.
+  All three need Marketplace Account write and a Noon-bound account.
+- **Batch confirm.** `returns.apply_outcomes(rows)` (`api/noon_returns.py::apply_outcomes`,
+  at most 200 rows of `{noon_return, outcome}`): per row, in its own savepoint, it
+  checks Noon Return write, acknowledges receipt with the fixed note "Received
+  through New Return", then records the inspection. A refused row (acknowledgement
+  included) rolls back alone and the others still apply; each result is
+  `{noon_return, ok, outcome, sales_return, message}` with an escaped message. No
+  Noon call and nothing is submitted. The list dialog that drives it is the next
+  sub-issue (#550).
+- **Response contract for #550 (escaping).** The row result `message` and the
+  stored lookup `error` are already HTML-escaped on the server; `noon_return` and
+  `outcome` are not escaped. The client must not escape `message` or `error` again
+  (it would show `&amp;lt;`), and must escape `noon_return` and `outcome` itself
+  when putting them into HTML.
+- **Lookup state edge cases.** `queue_manual_lookup` writes `queued` before
+  enqueueing; when the enqueue is deduplicated (no new job) a previous `done` or
+  `error` result is restored so it cannot sit in `queued` until the cache entry
+  expires. `get_lookup_result` only reads keys starting with
+  `marketplace-noon-return-result-`; any other key gets the expired-result error.
+- **Damaged Warehouse.** `Marketplace Account.noon_damaged_warehouse`, when set,
+  must differ from `warehouse`, be a leaf Warehouse and belong to the account's
+  `erpnext_company` (checked on save).
 
 ## Out of scope (#153)
 

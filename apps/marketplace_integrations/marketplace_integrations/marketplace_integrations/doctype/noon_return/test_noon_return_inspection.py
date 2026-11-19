@@ -40,6 +40,14 @@ class TestNoonReturnInspection(IntegrationTestCase):
 			limit=1,
 		)
 		self.warehouse = warehouses[0]
+		self.damaged_warehouse = frappe.get_doc(
+			{
+				"doctype": "Warehouse",
+				"warehouse_name": f"Noon Damaged {self.suffix}",
+				"company": self.company,
+			}
+		).insert()
+		self.track("Warehouse", self.damaged_warehouse.name)
 		self.item = frappe.get_doc(
 			{
 				"doctype": "Item",
@@ -107,6 +115,7 @@ class TestNoonReturnInspection(IntegrationTestCase):
 					"noon_country_code": "ae",
 					"erpnext_company": self.company,
 					"erpnext_selling_price_list": self.price_list,
+						"noon_damaged_warehouse": self.damaged_warehouse.name,
 					"warehouse": self.warehouse,
 				}
 			).insert()
@@ -273,27 +282,72 @@ class TestNoonReturnInspection(IntegrationTestCase):
 		self.track("Delivery Note", replaced["sales_return"])
 		self.assertNotEqual(replaced["sales_return"], first["sales_return"])
 
-	def test_damaged_records_the_outcome_without_any_document_or_stock_move(self):
+	def test_damaged_outcomes_draft_one_return_into_the_damaged_warehouse_only(self):
+		for outcome in ("Damaged", "Damaged, Noon paid"):
+			order, sales_order, delivery_note = self.make_delivered_order(qty=2)
+			noon_return = self.make_return(order)
+			before = get_sellable_qty(self.item.name, self.warehouse, "Nos")
+
+			result = noon_return.record_inspection(outcome)
+
+			draft = frappe.get_doc("Delivery Note", result["sales_return"])
+			self.track("Delivery Note", draft.name)
+			self.assertEqual(draft.docstatus, 0)
+			self.assertEqual(draft.is_return, 1)
+			self.assertEqual(draft.return_against, delivery_note.name)
+			self.assertEqual(len(draft.items), 1)
+			self.assertEqual(draft.items[0].qty, -1)
+			self.assertEqual(draft.items[0].warehouse, self.damaged_warehouse.name)
+			self.assertEqual(draft.items[0].against_sales_order, sales_order.name)
+			self.assertNotEqual(draft.items[0].warehouse, self.warehouse)
+			noon_return.reload()
+			self.assertEqual(noon_return.inspection_outcome, outcome)
+			self.assertEqual(noon_return.sales_return, draft.name)
+			self.assertEqual(get_sellable_qty(self.item.name, self.warehouse, "Nos"), before)
+
+	def test_account_refuses_an_invalid_damaged_warehouse(self):
+		def refused(warehouse):
+			account = frappe.get_doc("Marketplace Account", self.account.name)
+			account.noon_damaged_warehouse = warehouse
+			with patch("marketplace_integrations.integrations.noon.catalog.validate_warehouse_code"):
+				with self.assertRaises(frappe.ValidationError):
+					account.save()
+
+		refused(self.warehouse)  # same as the account warehouse
+		group = frappe.db.get_value("Warehouse", {"company": self.company, "is_group": 1}, "name")
+		if group:
+			refused(group)
+		other = frappe.db.get_value(
+			"Warehouse", {"company": ["!=", self.company], "is_group": 0, "disabled": 0}, "name"
+		)
+		if other:
+			refused(other)
+
+	def test_damaged_outcomes_are_refused_without_a_damaged_warehouse(self):
 		order, _sales_order, _delivery_note = self.make_delivered_order(qty=2)
-		noon_return = self.make_return(order)
-		before = get_sellable_qty(self.item.name, self.warehouse, "Nos")
+		frappe.db.set_value("Marketplace Account", self.account.name, "noon_damaged_warehouse", None)
 		returns_before = frappe.db.count("Delivery Note", {"is_return": 1})
-
-		result = noon_return.record_inspection("Damaged")
-
-		self.assertIsNone(result["sales_return"])
-		noon_return.reload()
-		self.assertEqual(noon_return.inspection_outcome, "Damaged")
-		self.assertFalse(noon_return.sales_return)
+		for outcome in ("Damaged", "Damaged, Noon paid"):
+			noon_return = self.make_return(order)
+			with self.assertRaises(frappe.ValidationError) as raised:
+				noon_return.record_inspection(outcome)
+			self.assertIn("damaged warehouse", str(raised.exception))
+			self.assertFalse(frappe.db.get_value("Noon Return", noon_return.name, "inspection_outcome"))
 		self.assertEqual(frappe.db.count("Delivery Note", {"is_return": 1}), returns_before)
-		self.assertEqual(get_sellable_qty(self.item.name, self.warehouse, "Nos"), before)
+
+	def test_damaged_needs_a_submitted_sales_order(self):
+		noon_return = self.make_return(None)
+		with self.assertRaises(frappe.ValidationError):
+			noon_return.record_inspection("Damaged, Noon paid")
 
 	def test_recorded_outcome_cannot_be_changed(self):
 		order, _sales_order, _delivery_note = self.make_delivered_order(qty=2)
 		noon_return = self.make_return(order)
-		noon_return.record_inspection("Damaged")
-		with self.assertRaises(frappe.ValidationError):
-			noon_return.record_inspection("Sellable")
+		first = noon_return.record_inspection("Damaged")
+		self.track("Delivery Note", first["sales_return"])
+		for outcome in ("Sellable", "Damaged, Noon paid"):
+			with self.assertRaises(frappe.ValidationError):
+				noon_return.record_inspection(outcome)
 
 	def test_refusals_create_nothing(self):
 		order, _sales_order, _delivery_note = self.make_delivered_order(qty=2)
@@ -357,7 +411,8 @@ class TestNoonReturnInspection(IntegrationTestCase):
 			frappe.set_user(original_user)
 
 		with patch("marketplace_integrations.integrations.noon.client.NoonClient.request") as request:
-			noon_return.record_inspection("Damaged")
+			result = noon_return.record_inspection("Damaged")
+		self.track("Delivery Note", result["sales_return"])
 		request.assert_not_called()
 
 	def make_invoice(self, sales_order, update_stock=0):
@@ -478,3 +533,153 @@ class TestNoonReturnInspection(IntegrationTestCase):
 
 		frappe.get_doc("Delivery Note", noon_return.sales_return).submit()
 		self.assertFalse(_has_noon_return(order))
+
+	def test_damaged_outcomes_clear_only_after_credit_note_and_sales_return_are_submitted(self):
+		from marketplace_integrations.integrations.noon.order_reconciliation import _has_noon_return
+
+		order, sales_order, _delivery_note = self.make_delivered_order(qty=2)
+		self.make_invoice(sales_order)
+		noon_return = self.inspected_return(order, "Damaged, Noon paid")
+		self.assertTrue(_has_noon_return(order))
+
+		credit = frappe.get_doc("Sales Invoice", noon_return.create_credit_note()["credit_note"])
+		self.track("Sales Invoice", credit.name)
+		credit.submit()
+		self.assertTrue(_has_noon_return(order))  # the Sales Return is still a draft
+
+		frappe.get_doc("Delivery Note", noon_return.sales_return).submit()
+		self.assertFalse(_has_noon_return(order))
+
+	def apply_rows(self, *pairs):
+		from marketplace_integrations.integrations.noon.returns import apply_outcomes
+
+		results = apply_outcomes([{"noon_return": name, "outcome": outcome} for name, outcome in pairs])
+		for result in results:
+			if result["sales_return"]:
+				self.track("Delivery Note", result["sales_return"])
+		return results
+
+	def test_apply_outcomes_acknowledges_and_records_each_outcome(self):
+		order, _sales_order, _delivery_note = self.make_delivered_order(qty=5)
+		restock = self.make_return(order, acknowledged=False)
+		damaged = self.make_return(order, acknowledged=False)
+		paid = self.make_return(order, acknowledged=False)
+
+		with patch("marketplace_integrations.integrations.noon.client.NoonClient.request") as request:
+			results = self.apply_rows(
+				(restock.name, "Sellable"), (damaged.name, "Damaged"), (paid.name, "Damaged, Noon paid")
+			)
+		request.assert_not_called()
+
+		self.assertTrue(all(result["ok"] for result in results))
+		expected = {
+			restock.name: ("Sellable", self.warehouse),
+			damaged.name: ("Damaged", self.damaged_warehouse.name),
+			paid.name: ("Damaged, Noon paid", self.damaged_warehouse.name),
+		}
+		for name, (outcome, warehouse) in expected.items():
+			row = frappe.get_doc("Noon Return", name)
+			self.assertEqual(row.inspection_outcome, outcome)
+			self.assertEqual(row.receipt_acknowledgement_note, "Received through New Return")
+			self.assertTrue(row.receipt_acknowledged_on)
+			draft = frappe.get_doc("Delivery Note", row.sales_return)
+			self.assertEqual(draft.docstatus, 0)
+			self.assertEqual(draft.items[0].qty, -1)
+			self.assertEqual(draft.items[0].warehouse, warehouse)
+
+	def test_apply_outcomes_refused_row_rolls_back_alone(self):
+		order, _sales_order, _delivery_note = self.make_delivered_order(qty=5)
+		unlinked = self.make_return(None, acknowledged=False)
+		recorded = self.make_return(order)
+		first = recorded.record_inspection("Damaged")
+		self.track("Delivery Note", first["sales_return"])
+		good = self.make_return(order, acknowledged=False)
+		bad_outcome = self.make_return(order, acknowledged=False)
+
+		results = self.apply_rows(
+			(unlinked.name, "Sellable"),
+			(recorded.name, "Sellable"),
+			(good.name, "Sellable"),
+			(bad_outcome.name, "Broken"),
+			("NO-SUCH-RETURN", "Sellable"),
+		)
+
+		self.assertEqual([result["ok"] for result in results], [False, False, True, False, False])
+		for result in (results[0], results[1], results[3], results[4]):
+			self.assertTrue(result["message"])
+		self.assertTrue(results[2]["sales_return"])
+		# A refused row keeps no receipt acknowledgement either.
+		for row in (unlinked, bad_outcome):
+			values = frappe.db.get_value(
+				"Noon Return", row.name, ["receipt_acknowledged_on", "inspection_outcome"], as_dict=True
+			)
+			self.assertFalse(values.receipt_acknowledged_on)
+			self.assertFalse(values.inspection_outcome)
+		self.assertEqual(frappe.db.get_value("Noon Return", recorded.name, "inspection_outcome"), "Damaged")
+
+	def test_apply_outcomes_refuses_damaged_without_a_damaged_warehouse_per_row(self):
+		order, _sales_order, _delivery_note = self.make_delivered_order(qty=5)
+		frappe.db.set_value("Marketplace Account", self.account.name, "noon_damaged_warehouse", None)
+		damaged = self.make_return(order, acknowledged=False)
+		restock = self.make_return(order, acknowledged=False)
+
+		results = self.apply_rows((damaged.name, "Damaged"), (restock.name, "Sellable"))
+
+		self.assertEqual([result["ok"] for result in results], [False, True])
+		self.assertFalse(frappe.db.get_value("Noon Return", damaged.name, "receipt_acknowledged_on"))
+
+	def test_apply_outcomes_message_is_escaped(self):
+		results = self.apply_rows(("<img src=x onerror=1>", "Sellable"))
+		self.assertNotIn("<img", results[0]["message"])
+
+	def test_apply_outcomes_accepts_at_most_200_rows(self):
+		from marketplace_integrations.integrations.noon.returns import apply_outcomes
+
+		with self.assertRaises(frappe.ValidationError):
+			apply_outcomes([{"noon_return": "X", "outcome": "Sellable"}] * 201)
+
+	def test_apply_outcomes_permissions_are_checked_per_row(self):
+		from marketplace_integrations.api.noon_returns import apply_outcomes
+
+		order, _sales_order, _delivery_note = self.make_delivered_order(qty=5)
+		reader_row = self.make_return(order, acknowledged=False)
+		reader, _ = make_role_user(self, "Noon Return Reader Only", {"Noon Return": ["read"]})
+		with self.set_user(reader):
+			results = apply_outcomes([{"noon_return": reader_row.name, "outcome": "Sellable"}])
+		self.assertFalse(results[0]["ok"])
+		self.assertFalse(frappe.db.get_value("Noon Return", reader_row.name, "receipt_acknowledged_on"))
+
+		# Noon Return and Marketplace Account writers, but no Delivery Note create: Restock is refused.
+		writer, _ = make_role_user(
+			self,
+			"Noon Return Writer",
+			{
+				"Noon Return": ["read", "write"],
+				"Marketplace Account": ["read", "write"],
+				"Delivery Note": ["read"],
+			},
+		)
+		no_create = self.make_return(order, acknowledged=False)
+		with self.set_user(writer):
+			results = apply_outcomes([{"noon_return": no_create.name, "outcome": "Sellable"}])
+		self.assertFalse(results[0]["ok"])
+		self.assertFalse(frappe.db.get_value("Noon Return", no_create.name, "inspection_outcome"))
+
+		# With Delivery Note create the same user's row applies.
+		creator, _ = make_role_user(
+			self,
+			"Noon Return Full Writer",
+			{
+				"Noon Return": ["read", "write"],
+				"Marketplace Account": ["read", "write"],
+				"Delivery Note": ["read", "create"],
+				"Customer": ["read"],
+				"Item": ["read"],
+				"Account": ["read"],
+			},
+		)
+		allowed = self.make_return(order, acknowledged=False)
+		with self.set_user(creator):
+			results = apply_outcomes([{"noon_return": allowed.name, "outcome": "Sellable"}])
+		self.assertTrue(results[0]["ok"], results[0]["message"])
+		self.track("Delivery Note", results[0]["sales_return"])
