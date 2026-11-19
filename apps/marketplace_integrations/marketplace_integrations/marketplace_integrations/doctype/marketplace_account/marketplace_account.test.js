@@ -586,6 +586,8 @@ test("Check Noon Warehouse appears only on a saved, enabled Noon account with wr
 	let frm = make_noon_frm({ platform: "Noon", enabled: 1, connection: "NC-1" });
 	configure_noon(frm);
 	assert.ok(frm.buttons.includes(NOON_CHECK_WAREHOUSE_LABEL));
+	// The return lookup moved to the Noon Return list ("New Return", #550): one entry point.
+	assert.ok(!frm.buttons.includes("Look Up Noon Return"));
 
 	frm = make_noon_frm({ platform: "Noon", enabled: 1, connection: "NC-1" }, { is_new: true });
 	configure_noon(frm);

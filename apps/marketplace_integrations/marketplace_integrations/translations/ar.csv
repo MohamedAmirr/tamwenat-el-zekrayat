@@ -526,7 +526,6 @@ A Noon Return for Marketplace Account {0} and Purchase Item Nr {1} already exist
 A Noon destination for this connection already exists.,توجد بالفعل وجهة Noon لهذا الاتصال.
 A Noon fulfillment action for this order is already queued or running.,يوجد إجراء تنفيذ Noon لهذا الطلب في قائمة الانتظار أو قيد التشغيل بالفعل.
 A Noon refresh for this order is already queued or running.,يوجد تحديث Noon لهذا الطلب في قائمة الانتظار أو قيد التشغيل بالفعل.
-A Noon return lookup is already queued or running for barcode {0}.,يوجد بحث عن مرتجع Noon في قائمة الانتظار أو قيد التشغيل بالفعل للباركود {0}.
 "A Noon unit has a status this app does not recognize, so it is unknown whether the order can still change.",إحدى وحدات Noon لها حالة لا يتعرّف عليها هذا التطبيق، لذا لا يُعرف ما إذا كان الطلب لا يزال قابلًا للتغيير.
 A Shopify Marketplace Account must use a Shopify Connection.,يجب أن يستخدم حساب سوق Shopify اتصال Shopify.
 A Shopify order import is already running for Marketplace Account {0}.,يوجد استيراد طلبات Shopify قيد التشغيل بالفعل لحساب السوق {0}.
@@ -889,7 +888,6 @@ Noon rejected this item.,رفضت Noon هذا العنصر.
 Noon request failed (HTTP {0}).,فشل طلب Noon (HTTP {0}).
 Noon request path must be relative to the API host.,يجب أن يكون مسار طلب Noon نسبيًا إلى مضيف API.
 Noon request transport options are managed by the client.,خيارات نقل طلبات Noon يديرها العميل البرمجي.
-Noon return lookup queued for barcode {0}.,تمت إضافة البحث عن مرتجع Noon إلى قائمة الانتظار للباركود {0}.
 Noon returned an invalid order list response.,أرجعت Noon استجابة قائمة طلبات غير صالحة.
 Noon returned an invalid order pagination cursor.,أرجعت Noon مؤشر ترقيم صفحات غير صالح للطلبات.
 Noon returned an invalid order response.,أرجعت Noon استجابة طلب غير صالحة.
@@ -958,7 +956,6 @@ Push to Talabat,إرسال إلى Talabat
 Pushing to Shopify,جارٍ الإرسال إلى Shopify
 "Pushing... {0} succeeded, {1} failed, {2} skipped so far.",جارٍ الإرسال... نجح {0}، فشل {1}، تم تخطي {2} حتى الآن.
 Queuing Noon refresh...,جارٍ إضافة تحديث Noon إلى قائمة الانتظار...
-Queuing Noon return lookup...,جارٍ إضافة البحث عن مرتجع Noon إلى قائمة الانتظار...
 Queuing Noon sync...,جارٍ إضافة مزامنة Noon إلى قائمة الانتظار...
 Queuing Out of Stock update...,جارٍ إضافة تحديث النفاد من المخزون إلى قائمة الانتظار...
 Queuing Shopify inventory sync...,جارٍ إضافة مزامنة مخزون Shopify إلى قائمة الانتظار...
@@ -1057,7 +1054,6 @@ Select a valid Noon environment: Production or Static Sandbox.,اختر بيئة
 Select at least one Marketplace Product Mapping.,حدّد ربط منتجات سوق واحدًا على الأقل.
 Select one or more Error rows to retry.,حدّد صف خطأ واحدًا أو أكثر لإعادة المحاولة.
 Sellable,قابل للبيع
-Sellable drafts a Sales Return into the account warehouse. Damaged is only recorded: Noon is responsible for it.,"""قابل للبيع"" يُنشئ مسودة مرتجع مبيعات إلى مستودع الحساب. ""تالف"" يُسجَّل فقط: Noon مسؤولة عنه."
 Send the current webhook URL to Noon,إرسال رابط Webhook الحالي إلى Noon
 Send to Talabat,إرسال إلى Talabat
 Set the ERPNext Company before choosing a Clearing Account.,اضبط شركة ERPNext قبل اختيار حساب التسوية.
@@ -2279,3 +2275,25 @@ Merchant code {0} is not one of this account's merchant codes.,رمز التاج
 Send a list of at most {0} rows.,أرسل قائمة من {0} صفًا كحد أقصى.
 Noon Return {0} was not found.,لم يتم العثور على مرتجع Noon {0}.
 The lookup result expired. Look the barcode up again.,انتهت صلاحية نتيجة البحث. ابحث عن الباركود مرة أخرى.
+New Return,مرتجع جديد
+Confirm,تأكيد
+Leave blank to use the connection's default project code.,اتركه فارغًا لاستخدام رمز المشروع الافتراضي للاتصال.
+Looking up on Noon...,جارٍ البحث في Noon...
+Noon returned no return items for this barcode.,لم ترجع Noon أي أصناف مرتجعة لهذا الباركود.
+Try another merchant code,جرّب رمز تاجر آخر
+The lookup failed.,فشل البحث.
+Still looking up. Check the Noon Return list shortly.,لا يزال البحث جاريًا. تحقق من قائمة مرتجعات Noon بعد قليل.
+Not linked to a Marketplace Order,غير مرتبط بطلب سوق
+Already recorded: {0},سُجّل مسبقًا: {0}
+Outcome for {0},نتيجة {0}
+Enter a barcode.,أدخل الباركود.
+Applying outcomes...,جارٍ تطبيق النتائج...
+{0} refused: {1},رُفض {0}: {1}
+{0} recorded as {1}.,تم تسجيل {0} كـ {1}.
+Draft Sales Return {0},مسودة مرتجع مبيعات {0}
+Applied: {0},تم التطبيق: {0}
+Refused: {0},المرفوض: {0}
+The row was refused.,رُفض الصف.
+Create the Credit Note from each Noon Return form.,أنشئ إشعار الدائن من نموذج كل مرتجع Noon.
+There is no enabled Noon Marketplace Account that you can read.,لا يوجد حساب سوق Noon مفعّل يمكنك الاطلاع عليه.
+"Restock drafts a Sales Return into the account warehouse. Damaged and Damaged, Noon paid come back to us: a Sales Return is drafted into the damaged warehouse, so they are not restocked.","""إعادة للمخزون"" يُنشئ مسودة مرتجع مبيعات إلى مستودع الحساب. ""تالف"" و""تالف، دفعت Noon"" يعودان إلينا: تُنشأ مسودة مرتجع مبيعات إلى مستودع التالف، فلا يُعاد تخزينهما."

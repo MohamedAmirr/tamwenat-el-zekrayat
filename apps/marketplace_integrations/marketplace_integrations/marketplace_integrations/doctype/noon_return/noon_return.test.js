@@ -110,6 +110,47 @@ test("Record Inspection is offered once acknowledged and calls record_inspection
 	assert.equal(alerts.at(-1).message, "Inspection recorded.");
 });
 
+test("the Record Inspection dialog offers Restock, Damaged and Damaged, Noon paid with the stored values", () => {
+	const form = makeForm({ acknowledgedOn: "2026-10-14 10:00:00" });
+	handlers.refresh(form);
+	form.button.action();
+	const field = dialog.options.fields[0];
+	assert.deepEqual(field.options, [
+		{ value: "Sellable", label: "Restock" },
+		{ value: "Damaged", label: "Damaged" },
+		{ value: "Damaged, Noon paid", label: "Damaged, Noon paid" },
+	]);
+	assert.match(field.description, /damaged warehouse/);
+	assert.doesNotMatch(field.description, /only recorded/);
+});
+
+test("a cancelled Sales Return can be created again for every outcome, with that outcome", async () => {
+	for (const outcome of ["Sellable", "Damaged", "Damaged, Noon paid"]) {
+		docstatus = 2;
+		const form = makeForm({
+			acknowledgedOn: "2026-10-14 10:00:00",
+			doc: { inspection_outcome: outcome, sales_return: "MAT-DN-0009" },
+		});
+		handlers.refresh(form);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		docstatus = 1;
+		assert.ok(form.buttons.includes("Create Sales Return"), outcome);
+		form.actions["Create Sales Return"]();
+		assert.deepEqual(form.callArgs, { method: "record_inspection", args: { outcome } });
+	}
+});
+
+test("a recorded outcome with no Sales Return offers Create Sales Return, without a cancelled lookup", () => {
+	const form = makeForm({
+		acknowledgedOn: "2026-10-14 10:00:00",
+		doc: { inspection_outcome: "Damaged", credit_note: "ACC-SINV-0010" },
+	});
+	handlers.refresh(form);
+	assert.ok(form.buttons.includes("Create Sales Return"));
+	form.actions["Create Sales Return"]();
+	assert.deepEqual(form.callArgs, { method: "record_inspection", args: { outcome: "Damaged" } });
+});
+
 test("a recorded outcome hides Record Inspection and a Sales Return can be opened", () => {
 	const form = makeForm({
 		acknowledgedOn: "2026-10-14 10:00:00",
@@ -129,7 +170,8 @@ test("Create Credit Note confirms, calls the server and Open Credit Note replace
 	};
 	const form = makeForm({ acknowledgedOn: "2026-10-14 10:00:00", doc: { inspection_outcome: "Damaged" } });
 	handlers.refresh(form);
-	assert.deepEqual(form.buttons, ["Create Credit Note"]);
+	// No Sales Return yet (a row recorded before #549): it can be created too.
+	assert.deepEqual(form.buttons, ["Create Credit Note", "Create Sales Return"]);
 	form.actions["Create Credit Note"]();
 	await confirmed();
 	assert.equal(form.callArgs.method, "create_credit_note");
@@ -140,7 +182,7 @@ test("Create Credit Note confirms, calls the server and Open Credit Note replace
 		doc: { inspection_outcome: "Damaged", credit_note: "ACC-SINV-0001" },
 	});
 	handlers.refresh(linked);
-	assert.deepEqual(linked.buttons, ["Open Credit Note"]);
+	assert.deepEqual(linked.buttons, ["Open Credit Note", "Create Sales Return"]);
 	linked.actions["Open Credit Note"]();
 	assert.deepEqual(route, ["Form", "Sales Invoice", "ACC-SINV-0001"]);
 });

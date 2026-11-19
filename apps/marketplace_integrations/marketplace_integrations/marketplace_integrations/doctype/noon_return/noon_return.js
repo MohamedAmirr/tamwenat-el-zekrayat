@@ -1,3 +1,14 @@
+// The three inspection outcomes (stored values; "Sellable" is shown as "Restock"). The Noon Return list
+// dialog (noon_return_list.js) offers the same three; keep them in step with INSPECTION_OUTCOMES in
+// noon_return.py.
+function noon_return_form_outcome_options() {
+	return [
+		{ value: "Sellable", label: __("Restock") },
+		{ value: "Damaged", label: __("Damaged") },
+		{ value: "Damaged, Noon paid", label: __("Damaged, Noon paid") },
+	];
+}
+
 function is_cancelled(doctype, name) {
 	return frappe.db.get_value(doctype, name, "docstatus").then((response) => {
 		return Boolean(response.message) && response.message.docstatus === 2;
@@ -44,17 +55,28 @@ frappe.ui.form.on("Noon Return", {
 				if (cancelled && frm.doc.credit_note === credit_note) add_credit_note_button(frm);
 			});
 		}
-		if (frm.doc.inspection_outcome === "Sellable" && frm.doc.sales_return) {
+		// Every outcome drafts a Sales Return (Restock into the account warehouse, the damaged
+		// ones into the damaged warehouse), so a cancelled one can be created again for any of them.
+		// A row recorded before #549 (Damaged, no Sales Return) has none yet: it gets the button too.
+		if (frm.doc.inspection_outcome) {
 			const sales_return = frm.doc.sales_return;
-			is_cancelled("Delivery Note", sales_return).then((cancelled) => {
-				if (!cancelled || frm.doc.sales_return !== sales_return) return;
+			const outcome = frm.doc.inspection_outcome;
+			const add_button = () => {
 				frm.add_custom_button(__("Create Sales Return"), () => {
-					frm.call("record_inspection", { outcome: "Sellable" }).then(() => {
+					frm.call("record_inspection", { outcome }).then(() => {
 						frm.reload_doc();
 						frappe.show_alert({ message: __("Draft Sales Return created."), indicator: "green" });
 					});
 				});
-			});
+			};
+			if (!sales_return) {
+				add_button();
+			} else {
+				is_cancelled("Delivery Note", sales_return).then((cancelled) => {
+					if (!cancelled || frm.doc.sales_return !== sales_return) return;
+					add_button();
+				});
+			}
 		}
 
 		if (frm.doc.receipt_acknowledged_on && !frm.doc.inspection_outcome) {
@@ -66,10 +88,10 @@ frappe.ui.form.on("Noon Return", {
 							fieldname: "outcome",
 							fieldtype: "Select",
 							label: __("Outcome"),
-							options: "Sellable\nDamaged",
+							options: noon_return_form_outcome_options(),
 							reqd: 1,
 							description: __(
-								"Sellable drafts a Sales Return into the account warehouse. Damaged is only recorded: Noon is responsible for it."
+								"Restock drafts a Sales Return into the account warehouse. Damaged and Damaged, Noon paid come back to us: a Sales Return is drafted into the damaged warehouse, so they are not restocked."
 							),
 						},
 					],
