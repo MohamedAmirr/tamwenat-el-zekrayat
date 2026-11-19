@@ -165,7 +165,7 @@ class IntegrationTestNoonPickedUp(IntegrationTestCase):
 class IntegrationTestCascadeApply(IntegrationTestCase):
 	"""``_apply``: the order of the cancels and what the error reports after a carrier commit."""
 
-	def _run(self, plan, outcomes, live=("DN-1", "DN-2")):
+	def _run(self, plan, outcomes, live=("DN-1", "DN-2"), adapter=None):
 		docs = {}
 
 		def get_doc(doctype, name=None):
@@ -174,7 +174,7 @@ class IntegrationTestCascadeApply(IntegrationTestCase):
 				docs[(doctype, name)].name = name
 			return docs[(doctype, name)]
 
-		adapter = SimpleNamespace(SERVICE_NAME="Bosta")
+		adapter = adapter or SimpleNamespace(SERVICE_NAME="Bosta")
 		statuses = {name: carrier_shipments.CREATED for name in live}
 		with (
 			patch.object(frappe.db, "commit"),
@@ -213,6 +213,49 @@ class IntegrationTestCascadeApply(IntegrationTestCase):
 			self._run({"invoices": [], "notes": ["DN-1"]}, outcomes)
 		self.assertIn("not known whether", str(caught.exception))
 		self.assertNotIn("did not cancel", str(caught.exception))
+
+	def test_a_carrier_cancel_that_leaves_the_note_held_stops_the_cancel_and_the_note_is_not_cancelled(self):
+		# #552: the adapter holds the note (goods still to come back): its native cancel is refused and the Sales Order
+		# cannot be cancelled over a submitted note, so the cascade stops and says what to do.
+		adapter = SimpleNamespace(SERVICE_NAME="Noon", is_held=lambda note: True)
+		outcomes = [{"outcome": "cancelled", "message": "", "status": "Cancelled"}]
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self._run({"invoices": [], "notes": ["DN-1"]}, outcomes, adapter=adapter)
+		self.assertIn("Confirm Returned", str(caught.exception))
+		self.docs[("Delivery Note", "DN-1")].cancel.assert_not_called()
+
+	def test_a_held_stop_after_invoices_names_them_without_the_contradictory_cancel_again_sentence(self):
+		adapter = SimpleNamespace(SERVICE_NAME="Noon", is_held=lambda note: True)
+		outcomes = [{"outcome": "cancelled", "message": "", "status": "Cancelled"}]
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self._run({"invoices": ["SINV-1"], "notes": ["DN-1"]}, outcomes, adapter=adapter)
+		message = str(caught.exception)
+		self.assertIn("SINV-1", message)
+		self.assertIn("Press Confirm Returned", message)
+		self.assertNotIn("Already cancelled before this stopped", message)
+		self.assertNotIn("to continue", message)
+
+	def test_every_live_note_is_cancelled_at_the_carrier_before_the_held_stop(self):
+		# One round, not one per note: both notes are asked, then one message names both.
+		adapter = SimpleNamespace(SERVICE_NAME="Noon", is_held=lambda note: True)
+		outcomes = [
+			{"outcome": "cancelled", "message": "", "status": "Cancelled"},
+			{"outcome": "cancelled", "message": "", "status": "Cancelled"},
+		]
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self._run({"invoices": [], "notes": ["DN-1", "DN-2"]}, outcomes, adapter=adapter)
+		self.assertEqual(self.cancel.call_count, 2)
+		message = str(caught.exception)
+		self.assertIn("DN-1", message)
+		self.assertIn("DN-2", message)
+		self.docs[("Delivery Note", "DN-1")].cancel.assert_not_called()
+		self.docs[("Delivery Note", "DN-2")].cancel.assert_not_called()
+
+	def test_a_carrier_cancel_that_leaves_the_note_not_held_goes_on_to_cancel_the_note(self):
+		adapter = SimpleNamespace(SERVICE_NAME="Noon", is_held=lambda note: False)
+		outcomes = [{"outcome": "cancelled", "message": "", "status": "Cancelled"}]
+		self._run({"invoices": [], "notes": ["DN-1"]}, outcomes, adapter=adapter)
+		self.docs[("Delivery Note", "DN-1")].cancel.assert_called_once()
 
 	def test_the_cascade_flag_is_restored_after_a_failure(self):
 		frappe.flags[cascade.CASCADE_FLAG] = None

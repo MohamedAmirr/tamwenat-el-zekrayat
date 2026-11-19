@@ -100,11 +100,16 @@ SHIPPING_SHIPPED = "Shipped"
 SHIPPING_OUT_OF_STOCK = "Out of Stock"
 SHIPPING_CANCELLED = "Cancelled"
 SHIPPING_MIXED = "Mixed"
-#: Noon cancelled the shipment after a person confirmed the pickup (#527): the note stays submitted with the stock
-#: out until Confirm Returned. Held = Integration Status Cancelled + this Shipping Status.
+#: The shipment of a submitted note was cancelled (by Noon or by us), at any stage (#527, #552): the note stays
+#: submitted with the stock out until Confirm Returned. Held = Integration Status Cancelled + this Shipping Status.
 SHIPPING_AWAITING_RETURN = "Awaiting Return"
 #: Set on the note by ``confirm_returned`` so ``guard_cancel`` lets that one native cancel through.
 CONFIRM_RETURNED_FLAG = "noon_confirm_returned"
+#: Key in ``custom_carrier_request_snapshot`` set to ``CANCELLED_BY_US`` when this app cancelled the shipment (a person's
+#: Cancel, the Sales Order cancel cascade, or the read that resolved our own Cancellation Unknown). Absent = Noon
+#: cancelled it. ``confirm_returned`` marks the note ``cancelled_by_carrier`` (which may cancel the Sales Order) only then.
+CANCELLED_BY_KEY = "cancelled_by"
+CANCELLED_BY_US = "us"
 MP_STATUS_CANCELLED = "MP_ITEM_STATUS_CANCELLED"
 #: GetFbpiOrder ``integration_status`` -> Shipping Status word.
 _INTEGRATION_STATUS_NAMES = {
@@ -836,9 +841,19 @@ def cancel_remote(doc):
 	lock and the log). Noon is asked first: GetFbpiOrder showing every unit of the shipment cancelled is
 	success with no cancel call (``custom_shipping_status`` Cancelled). Otherwise CancelShipment: 200 is
 	Cancelled, a definite 4xx is ``refused`` (Noon's text), anything else raises ``Unknown``. A failed
-	GetFbpiOrder is Unknown too: a cancel is never sent blind, and Retry asks first again."""
+	GetFbpiOrder is Unknown too: a cancel is never sent blind, and Retry asks first again.
+
+	A SUBMITTED note is held (#552): the write that records the Cancelled shipment also sets Shipping Status
+	Awaiting Return, so the stock stays out until Confirm Returned whatever the stage; a draft ends Cancelled.
+	The same write records that WE cancelled it (``CANCELLED_BY_KEY`` in the request snapshot), so Confirm Returned
+	never lets this cancel cancel the Sales Order."""
 	account, client = _client_for(doc, Unknown)
-	values = {"custom_shipping_status": SHIPPING_CANCELLED}
+	snapshot = _snapshot_data(doc.get("custom_carrier_request_snapshot"))
+	snapshot[CANCELLED_BY_KEY] = CANCELLED_BY_US
+	values = {
+		"custom_shipping_status": SHIPPING_AWAITING_RETURN if doc.docstatus == 1 else SHIPPING_CANCELLED,
+		"custom_carrier_request_snapshot": json.dumps(snapshot),
+	}
 	try:
 		raw_order = fulfillment.get_fbpi_order(account, _order_values(doc).external_order_id)
 	except Exception as exc:
@@ -864,7 +879,8 @@ def cancel_remote(doc):
 
 
 def picked_up(doc):
-	"""The contract's optional ``picked_up``: a person confirmed the pickup, i.e. the note's workflow stage is Picked
+	"""The contract's optional ``picked_up`` (the Sales Order cancel cascade refuses such a note up front; it no longer
+	decides the hold, #552): a person confirmed the pickup, i.e. the note's workflow stage is Picked
 	Up, In Transit or Delivered. Noon's own "Shipped" is NOT a pickup: Noon sets it right after the shipment is
 	created, and the note is then Ready for Pickup, where the shipment can still be cancelled at Noon (#541). The
 	states in which Noon itself refuses a cancel are not documented (business-spec, "Which states allow
@@ -873,23 +889,33 @@ def picked_up(doc):
 
 
 def after_cancelled(delivery_note):
-	"""Once the note is Cancelled: the Sales Order summary."""
+	"""Once the shipment is Cancelled: the Sales Order summary. A submitted note was written held by
+	``cancel_remote`` (#552): one Notification Log says so (its native cancel waits for Confirm Returned)."""
 	_update_summary(delivery_note)
+	note = frappe.get_doc("Delivery Note", delivery_note)
+	if note.docstatus == 1 and is_held(note):
+		_notify_held(note)
 
 
 # ---------------------------------------------------------------------------
-# Held after a Noon cancel past pickup: Confirm Returned (#527)
+# Held after a cancel of a submitted note's shipment, at any stage: Confirm Returned (#527, #552)
 # ---------------------------------------------------------------------------
 
 
 def is_held(values):
-	"""A submitted note Noon cancelled after pickup: Integration Status Cancelled + Shipping Status Awaiting Return.
+	"""A submitted note whose Noon shipment was cancelled (by Noon or by us), at any stage: Integration Status Cancelled
+	+ Shipping Status Awaiting Return.
 	``values`` is a dict or document with ``docstatus``, ``custom_integration_status`` and ``custom_shipping_status``."""
 	return (
 		cint(values.get("docstatus")) == 1
 		and cstr(values.get("custom_integration_status")) == CANCELLED
 		and cstr(values.get("custom_shipping_status")) == SHIPPING_AWAITING_RETURN
 	)
+
+
+def cancelled_by_noon(doc):
+	"""True unless this app cancelled the shipment (``CANCELLED_BY_US`` in the request snapshot, written with the cancel)."""
+	return _snapshot_data(doc.get("custom_carrier_request_snapshot")).get(CANCELLED_BY_KEY) != CANCELLED_BY_US
 
 
 def guard_cancel(doc):
@@ -903,7 +929,7 @@ def guard_cancel(doc):
 	)
 	if stored and is_held(stored):
 		frappe.throw(
-			_("Noon cancelled this shipment after pickup. Use Confirm Returned when the goods are back."),
+			_("The Noon shipment was cancelled. Use Confirm Returned when the goods are back."),
 			title=_("Noon shipment"),
 		)
 
@@ -1117,8 +1143,9 @@ def confirm_returned(delivery_note, lines, write_off):
 		carrier_shipments._check_native_cancel_not_blocked(doc)
 		doc.flags.ignore_permissions = True
 		doc.flags[CONFIRM_RETURNED_FLAG] = True
-		# The order cancel hook (order_cancel_cascade) reads it: Noon cancelled, a person did not.
-		doc.flags.cancelled_by_carrier = True
+		# The order cancel hook (order_cancel_cascade) reads it: set only when Noon initiated the cancel. A cancel
+		# of ours (a person's Cancel, the cascade) never cancels the Sales Order, however it is confirmed here.
+		doc.flags.cancelled_by_carrier = cancelled_by_noon(doc)
 		doc.cancel()
 		entry = _write_off(doc, plan) if write_off and plan else None
 		if entry:
@@ -1395,12 +1422,21 @@ def refresh(delivery_note):
 	values = {"custom_last_sync_at": now_datetime()}
 	if status == CANCELLATION_UNKNOWN:
 		if _all_units_cancelled(raw_order, _snapshot_units(note.get("custom_carrier_request_snapshot"))):
+			# #552: a submitted note is held (stock out until Confirm Returned), at any stage. The Unknown cancel was
+			# ours, so the marker is written with it.
+			snapshot = _snapshot_data(note.get("custom_carrier_request_snapshot"))
+			snapshot[CANCELLED_BY_KEY] = CANCELLED_BY_US
 			values.update(
-				custom_integration_status=CANCELLED, custom_shipping_status=SHIPPING_CANCELLED, custom_last_integration_error=None
+				custom_integration_status=CANCELLED,
+				custom_shipping_status=SHIPPING_AWAITING_RETURN if note.docstatus == 1 else SHIPPING_CANCELLED,
+				custom_last_integration_error=None,
+				custom_carrier_request_snapshot=json.dumps(snapshot),
 			)
 		note.db_set(lifecycle.with_state(delivery_note, values), update_modified=False, notify=True, commit=True)
 		_update_summary(delivery_note)
-		if values.get("custom_integration_status") == CANCELLED:
+		if values.get("custom_shipping_status") == SHIPPING_AWAITING_RETURN:
+			_notify_held(note)
+		elif values.get("custom_integration_status") == CANCELLED:
 			_cancel_note_natively(delivery_note)
 		return frappe.db.get_value("Delivery Note", delivery_note, "custom_shipping_status")
 	held = False
@@ -1426,18 +1462,18 @@ def refresh(delivery_note):
 		if derived.shipping_status:
 			values["custom_shipping_status"] = derived.shipping_status
 		if derived.shipping_status == SHIPPING_CANCELLED and note.docstatus == 1:
-			# Every unit of the shipment is cancelled at Noon (the proof ``cancel_remote`` accepts): the
-			# shipment is Cancelled, so the native cancel of the note is allowed and done below.
-			values.update(custom_integration_status=CANCELLED, custom_last_integration_error=None)
+			# Every unit of the shipment is cancelled at Noon (the proof ``cancel_remote`` accepts), at any
+			# stage (#527, #552): the goods may be on the road, so the stock stays out until Confirm Returned.
+			# Held = Cancelled + Awaiting Return, no error text, and no native cancel.
+			values.update(
+				custom_integration_status=CANCELLED,
+				custom_shipping_status=SHIPPING_AWAITING_RETURN,
+				custom_last_integration_error=None,
+			)
 			snapshot.pop("refresh_error", None)
 			if snapshot != _snapshot_data(note.get("custom_carrier_request_snapshot")):
 				values["custom_carrier_request_snapshot"] = json.dumps(snapshot)
-			if picked_up(note):
-				# #527: a person confirmed the pickup (the stage, never Noon's Shipped), so the goods may be on
-				# the road: the stock stays out until Confirm Returned. Held = Cancelled + Awaiting Return,
-				# no error text, and no native cancel.
-				values["custom_shipping_status"] = SHIPPING_AWAITING_RETURN
-				held = True
+			held = True
 		for row in note.get("items") or []:
 			if derived.rows.get(row.name):
 				row.db_set("custom_noon_item_status", derived.rows[row.name], update_modified=False)
@@ -1445,8 +1481,6 @@ def refresh(delivery_note):
 	_update_summary(delivery_note)
 	if held:
 		_notify_held(note)
-	elif values.get("custom_integration_status") == CANCELLED:
-		_cancel_note_natively(delivery_note)
 	return frappe.db.get_value("Delivery Note", delivery_note, "custom_shipping_status")
 
 
@@ -1457,7 +1491,7 @@ def _notify_held(note):
 
 	carrier_shipments._notify(
 		note,
-		_("Noon cancelled Delivery Note {0} after pickup. Stock stays out until you press Confirm Returned.").format(note.name),
+		_("The Noon shipment of Delivery Note {0} was cancelled. Stock stays out until you press Confirm Returned.").format(note.name),
 	)
 	frappe.db.commit()
 

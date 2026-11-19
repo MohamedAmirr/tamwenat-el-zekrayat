@@ -19,10 +19,17 @@
 
 	// Unverified at Noon: its API docs say CancelShipment cancels all items of the shipment too, and the order sync
 	// then cancels or shrinks the Sales Order by itself.
-	const cancel_warning = () =>
+	// A submitted note is then held (#552): it stops at Awaiting Return with the stock still out until Confirm Returned.
+	const cancel_warning = (frm) =>
 		__(
 			"Cancel the Noon shipment of this Delivery Note? Noon documents that cancelling the shipment also cancels its items at Noon: the Sales Order lines may be cancelled or reduced, and the units may not be shippable again. This cannot be undone."
-		);
+		) +
+		(frm && frm.doc && frm.doc.docstatus === 1
+			? " " +
+			  __(
+					"The Delivery Note will stop at Awaiting Return with its stock still out until a Noon User presses Confirm Returned."
+			  )
+			: "");
 
 	function escape(text) {
 		return frappe.utils.escape_html(text || "");
@@ -207,7 +214,7 @@
 			// Our own warning, asked once here (the native confirmation says nothing about Noon): Noon documents
 			// that cancelling the shipment also cancels its items. Declining ends the cancel.
 			frappe.confirm(
-				cancel_warning(),
+				cancel_warning(frm),
 				() =>
 					cancel_at_noon(frm, {
 						// the server changed the note: load it before the native cancel saves it
@@ -218,6 +225,14 @@
 								if (frm.doc.docstatus === 2) {
 									frappe.validated = false;
 									frappe.show_alert({ message: __("The Delivery Note was already cancelled."), indicator: "green" });
+								} else if (is_held(frm)) {
+									// #552: the shipment is cancelled and the note is held (Awaiting Return): the native cancel
+									// is refused until Confirm Returned, so it must not go on.
+									frappe.validated = false;
+									frappe.show_alert({
+										message: __("The Noon shipment was cancelled. Use Confirm Returned when the goods are back."),
+										indicator: "orange",
+									});
 								}
 								resolve();
 							}),
@@ -247,7 +262,7 @@
 		unfreeze();
 		return new Promise((resolve) => {
 			frappe.confirm(
-				cancel_warning(),
+				cancel_warning(frm),
 				() =>
 					cancel_at_noon(frm, {
 						done: () =>
@@ -255,6 +270,14 @@
 								// Already cancelled (a Check read found Noon's cancel): the workflow must not go on.
 								if (frm.doc.docstatus === 2) {
 									frappe.show_alert({ message: __("The Delivery Note was already cancelled."), indicator: "green" });
+									return halt();
+								}
+								if (is_held(frm)) {
+									// #552: held (Awaiting Return): the workflow Cancel must not go on until Confirm Returned.
+									frappe.show_alert({
+										message: __("The Noon shipment was cancelled. Use Confirm Returned when the goods are back."),
+										indicator: "orange",
+									});
 									return halt();
 								}
 								if (frappe.dom && frappe.dom.freeze) frappe.dom.freeze();
@@ -271,7 +294,7 @@
 	function cancel_shipment(frm) {
 		return new Promise((resolve) => {
 			frappe.confirm(
-				cancel_warning(),
+				cancel_warning(frm),
 				() =>
 					cancel_at_noon(frm, {
 						done: () =>
@@ -327,7 +350,7 @@
 
 	const RETURN_API = "marketplace_integrations.api.noon_fulfillment.";
 
-	// Noon cancelled the shipment after a person confirmed the pickup: the note stays submitted until Confirm Returned.
+	// The shipment of a submitted note was cancelled (by Noon or by us), at any stage: the note stays submitted until Confirm Returned.
 	function is_held(frm) {
 		return Boolean(
 			frm.doc &&
@@ -347,7 +370,7 @@
 		if (!is_held(frm) || !frm.set_intro) return;
 		frm.set_intro(
 			__(
-				"Noon cancelled this shipment after pickup. The stock stays out until a Noon User confirms the goods are back (Confirm Returned)."
+				"The Noon shipment was cancelled. The stock stays out until a Noon User confirms the goods are back (Confirm Returned)."
 			),
 			"orange"
 		);

@@ -13,16 +13,19 @@ Three triggers, all registered in ``hooks.py``:
    plain error naming the document) when: a Sales Invoice has a Payment Entry, Journal Entry or is paid or partly paid
    (payments are never cancelled by this code); a return exists (a credit note or a return Delivery Note, draft or
    submitted: returns are left alone); a document also holds another order's items; a note's shipment result is
-   unknown; a note whose carrier shipment was already picked up (adapter ``picked_up``: the return flow applies); a note the adapter holds back for its goods to come back (adapter ``is_held``); or the user may not cancel one of the documents. A carrier that refuses stops the cancel too. The carrier
-   cancel commits (``carrier_shipments.cancel`` does), so a refusal after it leaves the earlier documents cancelled: the
-   error names them and cancelling the Sales Order again carries on.
-2. ``queue_noon_order_cancel`` (Delivery Note ``on_cancel``): ONLY when Noon itself cancelled (the note was cancelled by
-   the carrier-initiated automatic cancel, ``flags.cancelled_by_carrier``) and the stored Noon order shows no eligible
-   unit left, the Sales Order is cancelled in a job after the commit, always as Administrator (the system-run automatic cancel and
-   Confirm Returned, #527, set the marker; a person's own right plays no part). The
+   unknown; a note whose carrier shipment was already picked up (adapter ``picked_up``: the return flow applies); a note the adapter holds back for its goods to come back (adapter ``is_held``); or the user may not cancel one of the documents. A carrier that refuses stops the cancel too, and so does a carrier cancel that leaves a note held (adapter ``is_held``,
+   #552). Every live shipment of the order is cancelled first (each such note is cancelled at the carrier and held, not
+   one round per note); only then does the cascade stop with one instruction: press Confirm Returned on each held
+   note, then cancel the Sales Order again. The carrier cancel commits (``carrier_shipments.cancel`` does), so a
+   refusal or a held stop after it leaves the earlier documents cancelled: the error names them.
+2. ``queue_noon_order_cancel`` (Delivery Note ``on_cancel``): ONLY when Noon itself initiated the cancel
+   (``flags.cancelled_by_carrier``: set by the carrier-initiated automatic cancel, and by Confirm Returned (#527, #552)
+   only for a note whose shipment Noon cancelled, never for one this app cancelled: a person's Cancel, the cascade)
+   and the stored Noon order shows no eligible unit left, the Sales Order is cancelled in a job after the commit,
+   always as Administrator (a person's own right plays no part). The
    cascade then also cancels the other notes (a live Noon shipment is cancelled at Noon through the generic carrier
    cancel). A person cancelling a note or shipment (the cancel-and-amend path for an AWB or items) never cancels the
-   order. A block (a payment, a return) never undoes the note cancel: the Sales Order then stays and a comment and a
+   order, not even through Confirm Returned. A block (a payment, a return) never undoes the note cancel: the Sales Order then stays and a comment and a
    notification say why. Other channels leave the order alive.
 3. ``queue_shopify_cancel`` (Sales Order ``on_cancel``): a cancelled Shopify order is also cancelled on Shopify, in a
    job after the commit (``marketplace_outbound.request_platform_cancel`` commits and must never run inside the cancel).
@@ -267,7 +270,10 @@ def _check_note(name, sales_order, ignore):
 
 
 class _Stop(Exception):
-	"""A carrier did not (or may not) cancel a shipment: ``args`` are the escaped message and the dialog title."""
+	"""A carrier did not (or may not) cancel a shipment, or left notes held: ``args`` are the escaped message and the
+	dialog title. ``complete`` means the message already says everything (what stayed cancelled included)."""
+
+	complete = False
 
 
 def _apply(order, plan, ignore):
@@ -290,6 +296,8 @@ def _apply(order, plan, ignore):
 	done = []
 	#: What a carrier cancel's own commit made permanent: a later error rolls back the rest.
 	committed = []
+	#: ``(service name, note)`` of the notes whose carrier cancel left them held (#552): they are not cancelled here.
+	held_notes = []
 	try:
 		for name in plan["invoices"]:
 			invoice = frappe.get_doc("Sales Invoice", name)
@@ -319,23 +327,48 @@ def _apply(order, plan, ignore):
 						_("{0} shipment").format(adapter.SERVICE_NAME),
 					)
 				note.reload()
+				held = getattr(adapter, "is_held", None)
+				if held and held(note):
+					# The carrier cancelled and the adapter holds the note until its goods are confirmed back (its stock
+					# stays out and the native cancel is refused). The carrier cancel is already committed. The other
+					# live shipments are cancelled too before this stops (one round, not one per note).
+					held_notes.append((adapter.SERVICE_NAME, name))
+					continue
 			note.flags.ignore_permissions = ignore
 			note.cancel()
 			note.add_comment("Comment", _("Cancelled automatically with Sales Order {0}.").format(order.name))
 			done.append(name)
+		if held_notes:
+			# The Sales Order cannot be cancelled over submitted notes that wait for their goods: stop with one
+			# instruction. What the carrier cancels committed (the invoices, earlier notes) stays cancelled.
+			message = _(
+				"{0} cancelled the shipment of these Delivery Notes: {1}. Each is waiting for its goods to come back, so Sales Order {2} was not cancelled. Press Confirm Returned on each of them, then cancel the Sales Order again."
+			).format(
+				", ".join(sorted({service for service, _note in held_notes})),
+				", ".join(note_name for _service, note_name in held_notes),
+				order.name,
+			)
+			if committed:
+				message = "{0} {1}".format(message, _("Already cancelled and kept: {0}.").format(", ".join(committed)))
+			stop = _Stop(message, _("Delivery Notes waiting for returned goods"))
+			stop.complete = True
+			raise stop
 	except (_Stop, frappe.ValidationError) as exc:
-		if not committed and not isinstance(exc, _Stop):
+		if not committed and not held_notes and not isinstance(exc, _Stop):
 			raise
 		if isinstance(exc, _Stop):
 			message, title = exc.args
 		else:
 			message, title = _plain(exc), _("Cancel Sales Order")
 		frappe.clear_messages()  # one dialog: the message below, not also the one first thrown
-		if committed:
-			# Only what a carrier cancel committed stays; a second cancel carries on from there.
-			message = _("{0} Already cancelled before this stopped: {1}. Cancel the Sales Order again to continue.").format(
-				message, ", ".join(committed)
-			)
+		if not getattr(exc, "complete", False):
+			if held_notes:
+				message = _("{0} Waiting for Confirm Returned: {1}.").format(message, ", ".join(note_name for _service, note_name in held_notes))
+			if committed:
+				# Only what a carrier cancel committed stays; a second cancel carries on from there.
+				message = _("{0} Already cancelled before this stopped: {1}. Cancel the Sales Order again to continue.").format(
+					message, ", ".join(committed)
+				)
 		frappe.throw(message, title=title)
 	finally:
 		frappe.flags[CASCADE_FLAG] = running
@@ -369,11 +402,11 @@ def _refresh_in_memory(order):
 
 
 def queue_noon_order_cancel(doc, method=None):
-	"""Delivery Note ``on_cancel``: queue the Sales Order cancel of a NOON order, but ONLY when Noon itself cancelled:
-	the note was cancelled by the carrier-initiated automatic cancel (``carrier_shipments._auto_cancel`` sets
-	``flags.cancelled_by_carrier`` after a read showed every unit cancelled at Noon without this app's own cancel). A
-	person cancelling a note or its shipment (the documented cancel-and-amend path for an AWB or items) never cancels
-	the order. Never raises."""
+	"""Delivery Note ``on_cancel``: queue the Sales Order cancel of a NOON order, but ONLY when Noon itself initiated the
+	cancel: ``flags.cancelled_by_carrier``, set by ``carrier_shipments._auto_cancel`` (a read showed every unit
+	cancelled at Noon without this app's own cancel) and by Confirm Returned for a note whose shipment Noon cancelled
+	(never for one this app cancelled). A person cancelling a note or its shipment (the documented cancel-and-amend
+	path for an AWB or items) never cancels the order. Never raises."""
 	try:
 		if doc.get("is_return") or not doc.flags.get("cancelled_by_carrier"):
 			return

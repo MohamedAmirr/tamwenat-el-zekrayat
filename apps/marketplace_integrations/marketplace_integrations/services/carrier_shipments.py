@@ -280,7 +280,7 @@ def after_submit(doc, method=None):
 def guard_cancel_or_delete(doc, method=None):
 	"""``before_cancel`` and ``on_trash``: refuse while a live shipment is linked. A note whose Integration
 	Status is Cancelled passes, without any call to the carrier, unless the adapter's optional ``guard_cancel(doc)``
-	refuses it (for example a note held after a carrier cancel past pickup, until its goods are confirmed back)."""
+	refuses it (for example a note held after a carrier cancel, until its goods are confirmed back)."""
 	adapter = adapter_for(doc)
 	guard = getattr(adapter, "guard_cancel", None)
 	if guard:

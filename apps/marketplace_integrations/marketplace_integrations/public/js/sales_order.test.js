@@ -729,7 +729,7 @@ test("a submitted Noon Sales Order shows the item-edit hint; other platforms and
 		await settle();
 		assert.equal(shown.length, intros, name);
 		if (intros) {
-			assert.match(shown[0].message, /Mark as Out of Stock on an item row of this Sales Order, or cancel and amend the Delivery Note/);
+			assert.match(shown[0].message, /Mark as Out of Stock on an item row of this Sales Order, or cancel the Delivery Note, which stops at Awaiting Return/);
 			assert.equal(shown[0].color, "orange");
 		}
 	}
