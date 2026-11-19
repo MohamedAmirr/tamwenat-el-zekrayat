@@ -537,12 +537,31 @@ what Noon's `ListReturnReferences`
 return still persists as a real record).
 
 Three triggers:
-- **Manual barcode lookup**: the "Look Up Noon Return" button on a Noon
-  Marketplace Account (`marketplace_account.js`) prompts for a barcode and
-  calls the whitelisted `api/noon_returns.py::lookup_return()`, which
-  enqueues `integrations/noon/returns.py::run_manual_lookup()` on the `long`
-  queue (job ID deduplicated on account + barcode) — no Noon HTTP call
-  happens in the Desk request itself.
+- **Manual barcode lookup (New Return, #550)**: the **New Return** button on
+  the Noon Return list (`noon_return_list.js`; it replaces the standard "Add
+  Noon Return" action, and the old "Look Up Noon Return" button on the
+  Marketplace Account form is gone, so there is one entry point) opens a
+  dialog: Marketplace Account (shown only when the user can read more than
+  one enabled Noon account), an optional Merchant Code (blank by default,
+  from `list_merchant_codes`), and a Barcode. Look Up (or Enter in the
+  barcode box) calls the whitelisted `api/noon_returns.py::lookup_return()`,
+  which enqueues `integrations/noon/returns.py::run_manual_lookup()` on the
+  `long` queue (job ID deduplicated on account + barcode + merchant code) — no
+  Noon HTTP call happens in the Desk request itself — and the dialog polls
+  `get_lookup_result` every 2 s for up to 60 s (states: looking up, no items,
+  error with Retry, timeout "check the list shortly"). Each found item is a
+  row (Purchase Item Nr, Partner SKU, Order Nr, linked Marketplace Order)
+  with a choice Restock (stored `Sellable`) / Damaged / Damaged, Noon paid,
+  blank by default (blank = skip). A row that already has an outcome shows it
+  read-only; an unlinked row shows "Not linked to a Marketplace Order" and
+  has no choice. One Confirm (disabled until a row has a choice) calls
+  `apply_outcomes`, which also acknowledges receipt, and then shows each
+  row's result with links to the Noon Return and the draft Sales Return,
+  refusals included. The Credit Note is still created from each Noon Return
+  form. The server text (`error`, row `message`) is pre-escaped and shown
+  as is; everything else is escaped in the client. The Noon Return form's
+  Record Inspection dialog offers the same three choices, and Create Sales
+  Return reappears (after a cancelled draft) for every outcome.
 - **Daily AWB scan (experimental)**: a `hooks.py` `scheduler_events["daily"]`
   entry (`integrations.noon.returns.scan_awbs_all_accounts`) scans AWBs from
   existing `Marketplace Order Shipment AWB` child rows and calls
@@ -693,8 +712,8 @@ The hourly sweep re-plans such orders, so no document events are needed.
   through New Return", then records the inspection. A refused row (acknowledgement
   included) rolls back alone and the others still apply; each result is
   `{noon_return, ok, outcome, sales_return, message}` with an escaped message. No
-  Noon call and nothing is submitted. The list dialog that drives it is the next
-  sub-issue (#550).
+  Noon call and nothing is submitted. The list dialog that drives it is the New
+  Return dialog (#550, see "Three triggers" above).
 - **Response contract for #550 (escaping).** The row result `message` and the
   stored lookup `error` are already HTML-escaped on the server; `noon_return` and
   `outcome` are not escaped. The client must not escape `message` or `error` again
