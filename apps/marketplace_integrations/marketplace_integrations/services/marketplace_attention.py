@@ -756,13 +756,13 @@ def _collect_carrier_items(problem_type=None):
 			and shipping_status
 			and shipping_status == getattr(adapter, "SHIPPING_AWAITING_RETURN", None)
 		):
-			# #527: the carrier cancelled after pickup and the note is held on purpose until Confirm Returned.
+			# #527, #552: the carrier shipment was cancelled and the note is held on purpose until Confirm Returned.
 			if problem_type in (None, CARRIER_CANCELLED):
 				add(
 					CARRIER_CANCELLED,
 					carrier,
 					row,
-					_("{0} cancelled this shipment after pickup. When the goods are back, press Confirm Returned.").format(name),
+					_("The shipment of {0} was cancelled. When the goods are back, press Confirm Returned.").format(name),
 					seen,
 				)
 		elif status == carrier_log.CANCELLED and row.docstatus == 1 and problem_type in (None, CARRIER_CANCELLED):

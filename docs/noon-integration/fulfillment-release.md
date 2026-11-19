@@ -341,7 +341,7 @@ side). The shipment row records `handed_over_on` and `delivery_note` (read-only)
 **Item lock.** A submitted Sales Order linked to a Noon order refuses changes to
 item, quantity, rate and row add or remove (`services/noon_item_edit_guard.py`, a check on the Sales Order Item rows (`before_update_after_submit`, `before_insert`, `on_trash`), because `update_child_qty_rate` changes the rows before it saves the parent),
 because Noon has no order update and the two would diverge. The message points to
-the Noon Fulfillment buttons on the Sales Order or to cancel and amend the Delivery Note; the Sales Order form shows the same hint. The sync
+the Noon Fulfillment buttons on the Sales Order or to cancel the Delivery Note and amend it. Cancelling the note stops at Awaiting Return (#552): a Noon User or System Manager enters the returned quantities in Confirm Returned (which cancels the note), and only then can the note be amended. The Sales Order form shows the same hint. The sync
 and the reconciliation planner still update the order (so Mark Out of Stock and
 Cancel Shipment reach the Sales Order through the planner), and non-item fields
 stay editable. Shopify and Talabat orders are not affected.

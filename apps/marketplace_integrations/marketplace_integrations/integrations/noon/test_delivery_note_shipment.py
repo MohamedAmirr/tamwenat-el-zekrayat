@@ -293,6 +293,22 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		with self.assertRaises(frappe.ValidationError):
 			noon.confirm_returned(note, self._lines(note), 0)
 
+	def test_confirm_returned_after_our_own_cancel_does_not_queue_the_sales_order_cancel(self):
+		# #552: only a cancel Noon started may cancel the order; a person's Cancel (or the cascade) never does.
+		_fx, note, _item, _warehouse = self._held_note(qty=2, stock=10)
+		frappe.db.set_value(
+			"Delivery Note",
+			note,
+			"custom_carrier_request_snapshot",
+			json.dumps({"mp_item_nrs": ["1", "2"], noon.CANCELLED_BY_KEY: noon.CANCELLED_BY_US}),
+			update_modified=False,
+		)
+		frappe.db.commit()
+		with patch("frappe.enqueue") as enqueue:
+			noon.confirm_returned(note, self._lines(note), 0)
+		self.assertEqual(frappe.db.get_value("Delivery Note", note, "docstatus"), 2)
+		self.assertEqual([c for c in enqueue.call_args_list if "run_noon_order_cancel" in str(c)], [])
+
 	def test_confirm_returned_with_a_write_off_posts_one_material_issue_on_the_company_accounts(self):
 		fx, note, item, warehouse = self._held_note(qty=3, stock=10)
 		company = fx.sales_order.company
@@ -1031,10 +1047,10 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 		frappe.db.set_value("Delivery Note Item", {"parent": note.name}, "docstatus", 0, update_modified=False)
 		frappe.db.commit()
 
-	def test_a_cancel_noon_did_after_a_person_confirmed_the_pickup_holds_the_note(self):
-		# #527: the stage (Picked Up, In Transit, Delivered; never Noon's Shipped or a unit status) decides. The note
-		# stays submitted: Cancelled + Awaiting Return, no error text, no native cancel, one notification.
-		for stage in lifecycle.NOON_MANUAL_STATES:
+	def test_a_cancel_noon_did_holds_the_submitted_note_at_any_stage(self):
+		# #527, #552: the stage no longer decides (Ready for Pickup, Picked Up, In Transit, Delivered). The note stays
+		# submitted: Cancelled + Awaiting Return, no error text, no native cancel, one notification.
+		for stage in (lifecycle.READY_FOR_PICKUP, *lifecycle.NOON_MANUAL_STATES):
 			with self.subTest(stage=stage):
 				fx = self._order([("SKU-A", 1)], ["SKU-A"])
 				note = self._created_note(fx)
@@ -1067,21 +1083,115 @@ class IntegrationTestNoonDeliveryNoteShipment(IntegrationTestNoonFulfillmentBase
 				self.fixtures.remove(fx)
 				frappe.db.commit()
 
-	def test_a_cancel_noon_did_before_a_pickup_was_confirmed_still_cancels_the_note(self):
-		# Ready for Pickup (Noon shows Shipped, nobody confirmed the pickup): the automatic native cancel, as before.
+	def test_a_cancel_noon_did_after_every_line_was_out_of_stock_holds_the_note_too(self):
+		# #552: the stage Returned / Failed an Out of Stock read set no longer lets a later cancel skip the hold.
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		self._submit_flags(note)
+		frappe.db.set_value("Delivery Note", note.name, lifecycle.FIELD, lifecycle.PICKED_UP, update_modified=False)
+		frappe.db.commit()
+		with patch.object(noon, "_cancel_note_natively") as native, patch.object(carrier_shipments, "_notify") as notify:
+			self._refresh(note, self._found(fx), [self._unit("1", "OUT_OF_STOCK")])
+			self.assertEqual(self._note(note.name).custom_shipping_status, "Out of Stock")
+			self.assertFalse(noon.is_held(self._note(note.name)))
+			result, _client, _get = self._refresh(note, self._found(fx), [self._unit("1", "OUT_OF_STOCK", mp=_CANCELLED)])
+		self.assertEqual(result, noon.SHIPPING_AWAITING_RETURN)
+		self.assertTrue(noon.is_held(self._note(note.name)))
+		native.assert_not_called()
+		notify.assert_called_once()
+		self._unflag(note)
+
+	def test_a_cancellation_unknown_resolved_by_a_read_holds_a_submitted_note(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		self._submit_flags(note)
+		frappe.db.set_value(
+			"Delivery Note", note.name, "custom_integration_status", "Cancellation Unknown", update_modified=False
+		)
+		frappe.db.commit()
+		with patch.object(noon, "_cancel_note_natively") as native, patch.object(carrier_shipments, "_notify") as notify:
+			result, _client, _get = self._refresh(note, None, [self._unit("1", "SHIPPED", mp=_CANCELLED)])
+		self.assertEqual(result, noon.SHIPPING_AWAITING_RETURN)
+		self.assertTrue(noon.is_held(self._note(note.name)))
+		native.assert_not_called()
+		notify.assert_called_once()
+		self._unflag(note)
+
+	def test_a_user_cancel_of_a_submitted_note_sends_the_cancel_to_noon_and_holds_the_note(self):
+		# #552: Cancel from Ready for Pickup (cancel_at_noon, the cancel cascade): CancelShipment still goes out
+		# automatically, then the note is held (no native cancel, no restock) until Confirm Returned.
 		fx = self._order([("SKU-A", 1)], ["SKU-A"])
 		note = self._created_note(fx)
 		self._submit_flags(note)
 		frappe.db.set_value("Delivery Note", note.name, lifecycle.FIELD, lifecycle.READY_FOR_PICKUP, update_modified=False)
 		frappe.db.commit()
-		with patch.object(noon, "_cancel_note_natively") as native, patch.object(carrier_shipments, "_notify") as notify:
-			result, _client, _get = self._refresh(note, self._found(fx), [self._unit("1", "SHIPPED", mp=_CANCELLED)])
-		self.assertEqual(result, "Cancelled")
+		with (
+			patch.object(carrier_shipments, "_check_native_cancel_not_blocked"),
+			patch.object(carrier_shipments, "_notify") as notify,
+		):
+			result, client, _get = self._cancel(note, _response(200))
+		self.assertEqual((result["status"], result["outcome"]), ("Cancelled", "cancelled"))
+		self.assertEqual(_paths(client), [noon.SHIPMENT_CANCEL_PATH.rsplit("/", 1)[-1]])
 		stored = self._note(note.name)
-		self.assertEqual((stored.custom_integration_status, stored.custom_shipping_status), ("Cancelled", "Cancelled"))
+		self.assertEqual((stored.docstatus, stored.custom_integration_status), (1, "Cancelled"))
+		self.assertEqual(stored.custom_shipping_status, noon.SHIPPING_AWAITING_RETURN)
 		self.assertEqual(stored.get(lifecycle.FIELD), lifecycle.RETURNED_FAILED)
-		native.assert_called_once_with(note.name)
-		notify.assert_not_called()
+		self.assertTrue(noon.is_held(stored))
+		notify.assert_called_once()
+		with self.assertRaises(frappe.ValidationError):
+			carrier_shipments.guard_cancel_or_delete(stored)  # the native cancel waits for Confirm Returned
+		self._unflag(note)
+
+	def test_cancel_remote_early_success_holds_a_submitted_note_and_marks_the_cancel_as_ours(self):
+		# #552: Noon already shows every unit cancelled, so no CancelShipment is sent; the submitted note is still held.
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		self._submit_flags(note)
+		with (
+			patch.object(carrier_shipments, "_check_native_cancel_not_blocked"),
+			patch.object(carrier_shipments, "_notify"),
+		):
+			result, client, get_order = self._cancel(note, order_items=[{"mp_item_nr": "1", "mp_status": _CANCELLED}])
+		get_order.assert_called_once()
+		client.request.assert_not_called()
+		self.assertEqual((result["status"], result["outcome"]), ("Cancelled", "cancelled"))
+		stored = self._note(note.name)
+		self.assertTrue(noon.is_held(stored))
+		self.assertEqual(stored.custom_shipping_status, noon.SHIPPING_AWAITING_RETURN)
+		self.assertFalse(noon.cancelled_by_noon(stored))
+		# the unit list the cancel read is kept next to the marker
+		self.assertEqual(noon._snapshot_units(stored.custom_carrier_request_snapshot), ["1"])
+		self._unflag(note)
+
+	def test_cancelling_a_draft_note_ends_cancelled_not_awaiting_return(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		result, _client, _get = self._cancel(note, _response(200))
+		self.assertEqual(result["outcome"], "cancelled")
+		stored = self._note(note.name)
+		self.assertEqual(stored.docstatus, 0)
+		self.assertEqual(stored.custom_shipping_status, noon.SHIPPING_CANCELLED)
+		self.assertFalse(noon.is_held(stored))
+
+	def test_a_cancel_noon_did_is_not_marked_ours_but_a_resolved_cancellation_unknown_is(self):
+		fx = self._order([("SKU-A", 1)], ["SKU-A"])
+		note = self._created_note(fx)
+		self._submit_flags(note)
+		with patch.object(noon, "_cancel_note_natively"), patch.object(carrier_shipments, "_notify"):
+			self._refresh(note, self._found(fx), [self._unit("1", "ACKNOWLEDGED", mp=_CANCELLED)])
+		self.assertTrue(noon.cancelled_by_noon(self._note(note.name)))
+		self._unflag(note)
+
+		fx = self._order([("SKU-B", 1)], ["SKU-B"])
+		note = self._created_note(fx)
+		self._submit_flags(note)
+		frappe.db.set_value(
+			"Delivery Note", note.name, "custom_integration_status", "Cancellation Unknown", update_modified=False
+		)
+		frappe.db.commit()
+		with patch.object(noon, "_cancel_note_natively"), patch.object(carrier_shipments, "_notify"):
+			self._refresh(note, None, [self._unit("1", "SHIPPED", mp=_CANCELLED)])
+		self.assertFalse(noon.cancelled_by_noon(self._note(note.name)))
 		self._unflag(note)
 
 	def test_a_held_note_is_not_cancelled_by_a_later_refresh_the_retry_or_the_nightly_run(self):
