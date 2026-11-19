@@ -26,6 +26,7 @@
   "shopify_location_gid",
   "shopify_location_name",
   "shopify_inventory_push_enabled",
+  "shopify_price_push_enabled",
   "shopify_orders_reconciled_through",
   "shopify_orders_sync_from",
   "outlet_status_section",
@@ -195,6 +196,14 @@
    "label": "Push Inventory to Shopify"
   },
   {
+   "default": "0",
+   "depends_on": "eval:doc.platform==\"Shopify\"",
+   "description": "Turn on to let ERPNext re-send the prices of all of this store's enabled listings every hour from the account's Selling Price List. This overwrites any price edited in Shopify admin within the hour. It writes to the live store, so keep it off until the Price List is ready. Manual price syncs from the mapping still run.",
+   "fieldname": "shopify_price_push_enabled",
+   "fieldtype": "Check",
+   "label": "Push Prices to Shopify"
+  },
+  {
    "fieldname": "shopify_orders_reconciled_through",
    "fieldtype": "Datetime",
    "label": "Shopify Orders Reconciled Through",
@@ -323,7 +332,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-11-19 12:00:00.000000",
+ "modified": "2026-11-19 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Marketplace Account",

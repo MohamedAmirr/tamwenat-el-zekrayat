@@ -453,7 +453,6 @@ External Barcode,الباركود الخارجي
 Sales UOM,وحدة قياس البيع
 Sync Status,حالة المزامنة
 Last Sync Reference,مرجع آخر مزامنة
-Shopify Inventory Sync,مزامنة مخزون Shopify
 Inventory Sync Status,حالة مزامنة المخزون
 Inventory Last Synced On,آخر مزامنة للمخزون
 Inventory Last Error,آخر خطأ في المخزون
@@ -1316,6 +1315,11 @@ Push Prices to Noon,إرسال الأسعار إلى Noon
 Turn off to keep importing Noon orders while ERPNext stops automatically writing stock to this account. Turning it back on does not trigger a full push. Manual syncs from the mapping still run.,أوقفه لمواصلة استيراد طلبات Noon بينما يتوقف ERPNext عن الكتابة التلقائية لـ المخزون في هذا الحساب. إعادة تشغيله لا تُطلق إرسالًا كاملًا. تظل المزامنة اليدوية من الربط تعمل.
 Turn off to keep importing Noon orders while ERPNext stops automatically writing prices to this account. Turning it back on does not trigger a full push. Manual syncs from the mapping still run.,أوقفه لمواصلة استيراد طلبات Noon بينما يتوقف ERPNext عن الكتابة التلقائية لـ الأسعار في هذا الحساب. إعادة تشغيله لا تُطلق إرسالًا كاملًا. تظل المزامنة اليدوية من الربط تعمل.
 Price push is paused for this account.,إرسال الأسعار متوقف مؤقتًا لهذا الحساب.
+Push Prices to Shopify,إرسال الأسعار إلى Shopify
+"Turn on to let ERPNext re-send the prices of all of this store's enabled listings every hour from the account's Selling Price List. This overwrites any price edited in Shopify admin within the hour. It writes to the live store, so keep it off until the Price List is ready. Manual price syncs from the mapping still run.","شغّله ليعيد ERPNext إرسال أسعار جميع القوائم المفعّلة في هذا المتجر كل ساعة من قائمة أسعار البيع الخاصة بالحساب. هذا يستبدل أي سعر تم تعديله في لوحة إدارة Shopify خلال الساعة. يكتب على المتجر الفعلي، لذا أبقه متوقفًا حتى تجهز قائمة الأسعار. تظل مزامنة الأسعار اليدوية من الربط تعمل."
+Noon did not answer in time (HTTP 504).,لم يرد Noon في الوقت المناسب (HTTP 504).
+Try the sync again in a few minutes.,حاول المزامنة مرة أخرى بعد بضع دقائق.
+Inventory Sync,مزامنة المخزون
 Bosta City Code,رمز مدينة Bosta
 Choose a Bosta city.,اختر مدينة Bosta.
 Could not load the Bosta city codes. Try again in a minute.,تعذر تحميل رموز مدن Bosta. حاول مرة أخرى بعد دقيقة.

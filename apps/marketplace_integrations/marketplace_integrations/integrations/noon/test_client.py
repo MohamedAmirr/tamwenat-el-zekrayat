@@ -250,6 +250,12 @@ class UnitTestNoonClient(UnitTestCase):
 			"Noon request failed (HTTP 500).",
 		)
 
+	def test_gateway_timeout_has_a_clear_translated_reason(self):
+		formatted = self.client.error_message(FakeResponse(504, None, text="<html>Gateway Time-out</html>"))
+		self.assertEqual(
+			formatted, "Noon did not answer in time (HTTP 504)."
+		)
+
 	def test_explicit_timeout_applies_to_the_call_but_not_to_login(self):
 		calls = []
 
