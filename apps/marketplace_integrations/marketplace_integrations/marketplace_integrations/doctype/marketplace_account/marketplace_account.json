@@ -21,6 +21,7 @@
   "noon_warehouse_checked_on",
   "noon_inventory_push_enabled",
   "noon_price_push_enabled",
+  "noon_damaged_warehouse",
   "shopify_location_section",
   "shopify_location_gid",
   "shopify_location_name",
@@ -158,6 +159,14 @@
    "fieldname": "noon_price_push_enabled",
    "fieldtype": "Check",
    "label": "Push Prices to Noon"
+  },
+  {
+   "depends_on": "eval:doc.platform==\"Noon\"",
+   "description": "Returned units inspected as Damaged or Damaged, Noon paid come back into this warehouse as a draft Sales Return, so they stay out of sellable stock. Not used by the Noon stock sync.",
+   "fieldname": "noon_damaged_warehouse",
+   "fieldtype": "Link",
+   "label": "Damaged Warehouse",
+   "options": "Warehouse"
   },
   {
    "fieldname": "shopify_location_section",
@@ -314,7 +323,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-11-06 18:00:00.000000",
+ "modified": "2026-11-19 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Marketplace Account",

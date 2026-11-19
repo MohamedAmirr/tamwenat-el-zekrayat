@@ -414,6 +414,136 @@ class IntegrationTestMerchantCodes(IntegrationTestNoonReturnsBase):
 		self.assertIn("MC-CAP-204", codes)
 
 
+class IntegrationTestManualLookupMerchantCode(IntegrationTestNoonReturnsBase):
+	"""#549: optional merchant code, shared job ids, and the stored lookup result."""
+
+	def tearDown(self):
+		for key in getattr(self, "_keys", []):
+			frappe.cache().delete_value(key)
+		super().tearDown()
+
+	def _client(self, items=None):
+		client = MagicMock()
+		client.request.return_value = self._mock_response(200, {"items": items or []})
+		return client
+
+	def _queue(self, barcode="BC-Q", merchant_code=None):
+		with patch.object(returns.frappe, "enqueue") as enqueue:
+			result = returns.queue_manual_lookup(self.account.name, barcode, merchant_code)
+		self._keys = [*getattr(self, "_keys", []), result["lookup_key"]]
+		return result, enqueue
+
+	def _seed_merchant_code(self, code):
+		upsert_marketplace_order(
+			self.account.name,
+			{
+				"external_order_id": f"ORD-{code}",
+				"latest_payload": {"merchant_code": code, "items": []},
+				"items": [],
+			},
+		)
+
+	def test_blank_merchant_code_sends_barcode_only(self):
+		self._seed_merchant_code("MC-DERIVED")
+		client = self._client()
+		with patch("marketplace_integrations.integrations.noon.returns.NoonClient", return_value=client):
+			returns.run_manual_lookup(self.account.name, "BC-BLANK")
+		self.assertEqual(client.request.call_args.kwargs["json"], {"barcode": "BC-BLANK"})
+
+	def test_merchant_code_is_sent_as_the_only_code(self):
+		client = self._client()
+		with patch("marketplace_integrations.integrations.noon.returns.NoonClient", return_value=client):
+			returns.run_manual_lookup(self.account.name, "BC-CODE", "MC-ONE")
+		self.assertEqual(
+			client.request.call_args.kwargs["json"], {"barcode": "BC-CODE", "merchant_codes": ["MC-ONE"]}
+		)
+
+	def test_unknown_merchant_code_is_refused_before_queueing(self):
+		self._seed_merchant_code("MC-KNOWN")
+		with patch.object(returns.frappe, "enqueue") as enqueue:
+			with self.assertRaises(frappe.ValidationError):
+				returns.queue_manual_lookup(self.account.name, "BC-X", "MC-OTHER")
+		enqueue.assert_not_called()
+
+	def test_account_without_codes_refuses_a_set_code(self):
+		with patch.object(returns.frappe, "enqueue") as enqueue:
+			with self.assertRaises(frappe.ValidationError):
+				returns.queue_manual_lookup(self.account.name, "BC-X", "MC-ANY")
+		enqueue.assert_not_called()
+
+	def test_job_id_is_shared_per_barcode_and_code_and_differs_by_code(self):
+		self._seed_merchant_code("MC-A")
+		self._seed_merchant_code("MC-B")
+		first, enqueue_first = self._queue("BC-J", "MC-A")
+		second, enqueue_second = self._queue("BC-J", "MC-A")
+		third, enqueue_third = self._queue("BC-J", "MC-B")
+		job_ids = [e.call_args.kwargs["job_id"] for e in (enqueue_first, enqueue_second, enqueue_third)]
+		self.assertEqual(job_ids[0], job_ids[1])
+		self.assertNotEqual(job_ids[0], job_ids[2])
+		self.assertEqual(first["lookup_key"], second["lookup_key"])
+		self.assertNotEqual(first["lookup_key"], third["lookup_key"])
+
+	def test_queue_stores_queued_state(self):
+		result, _enqueue = self._queue("BC-STATE")
+		self.assertEqual(
+			returns.get_lookup_result_state(self.account.name, result["lookup_key"]),
+			{"state": "queued", "names": [], "error": None},
+		)
+
+	def test_deduplicated_queue_keeps_an_existing_finished_result(self):
+		result, _enqueue = self._queue("BC-KEEP")
+		returns._store_lookup_result(result["lookup_key"], self.account.name, "done", names=["NR-1"])
+		with patch.object(returns.frappe, "enqueue", return_value=None):
+			again = returns.queue_manual_lookup(self.account.name, "BC-KEEP")
+		self.assertFalse(again["queued"])
+		self.assertEqual(
+			returns.get_lookup_result_state(self.account.name, again["lookup_key"]),
+			{"state": "done", "names": ["NR-1"], "error": None},
+		)
+
+	def test_worker_stores_done_with_saved_names(self):
+		result, _enqueue = self._queue("BC-DONE")
+		client = self._client([_return_item("PI-DONE-1"), _return_item("PI-DONE-2")])
+		with patch("marketplace_integrations.integrations.noon.returns.NoonClient", return_value=client):
+			returns.run_manual_lookup(self.account.name, "BC-DONE", lookup_key=result["lookup_key"])
+		stored = returns.get_lookup_result_state(self.account.name, result["lookup_key"])
+		self.assertEqual(stored["state"], "done")
+		self.assertEqual(
+			sorted(stored["names"]),
+			sorted(frappe.get_all("Noon Return", filters={"marketplace_account": self.account.name}, pluck="name")),
+		)
+		self.assertEqual(len(stored["names"]), 2)
+
+	def test_zero_items_is_done_with_no_names(self):
+		result, _enqueue = self._queue("BC-ZERO")
+		with patch("marketplace_integrations.integrations.noon.returns.NoonClient", return_value=self._client()):
+			returns.run_manual_lookup(self.account.name, "BC-ZERO", lookup_key=result["lookup_key"])
+		stored = returns.get_lookup_result_state(self.account.name, result["lookup_key"])
+		self.assertEqual((stored["state"], stored["names"]), ("done", []))
+
+	def test_worker_error_is_stored_escaped_and_logged(self):
+		result, _enqueue = self._queue("BC-ERR")
+		client = MagicMock()
+		client.request.return_value = self._mock_response(500, {})
+		client.error_message.return_value = "<b>boom</b>"
+		with patch("marketplace_integrations.integrations.noon.returns.NoonClient", return_value=client):
+			with self.assertRaises(frappe.ValidationError):
+				returns.run_manual_lookup(self.account.name, "BC-ERR", lookup_key=result["lookup_key"])
+		stored = returns.get_lookup_result_state(self.account.name, result["lookup_key"])
+		self.assertEqual(stored["state"], "error")
+		self.assertNotIn("<b>", stored["error"])
+		self.assertTrue(
+			frappe.db.exists(
+				"Marketplace Sync Log",
+				{"marketplace_account": self.account.name, "sync_type": "Return Lookup", "status": "Error"},
+			)
+		)
+
+	def test_result_of_another_account_is_not_returned(self):
+		result, _enqueue = self._queue("BC-OTHER")
+		self.assertIsNone(returns.get_lookup_result_state("SOME-OTHER-ACCOUNT", result["lookup_key"]))
+
+
 class IntegrationTestMerchantCodesScanLimit(IntegrationTestNoonReturnsBase):
 	def test_only_the_most_recent_orders_are_read(self):
 		"""Review finding M4: the scan is bounded, not every order ever imported."""

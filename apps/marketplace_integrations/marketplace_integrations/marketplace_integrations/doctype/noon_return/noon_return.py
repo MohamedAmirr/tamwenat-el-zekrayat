@@ -17,7 +17,7 @@ from frappe.utils import cstr, flt, now_datetime
 
 from marketplace_integrations.services.mappings import resolve_mapping_and_item
 
-INSPECTION_OUTCOMES = ("Sellable", "Damaged")
+INSPECTION_OUTCOMES = ("Sellable", "Damaged", "Damaged, Noon paid")
 
 
 def compute_return_identity_key(marketplace_account, purchase_item_nr):
@@ -65,17 +65,19 @@ class NoonReturn(Document):
 
 	@frappe.whitelist()
 	def record_inspection(self, outcome):
-		"""Record the merchant's inspection decision; Sellable drafts a Sales Return.
+		"""Record the merchant's inspection decision and draft one Sales Return.
 
-		No Noon call is made and nothing is submitted. Damaged items are only
-		recorded (Noon is responsible for them), so no stock moves.
+		Sellable (UI label Restock) drafts it into the account's Noon warehouse;
+		Damaged and Damaged, Noon paid draft it into the account's damaged
+		warehouse, so the unit is not restocked. No Noon call is made and nothing
+		is submitted.
 		"""
 		self.check_permission("write")
 		if self.is_new():
 			frappe.throw(_("Save the Noon Return before recording its inspection."))
 		outcome = cstr(outcome).strip()
 		if outcome not in INSPECTION_OUTCOMES:
-			frappe.throw(_("Inspection outcome must be Sellable or Damaged."))
+			frappe.throw(_("Inspection outcome must be Restock, Damaged or Damaged, Noon paid."))
 
 		locked = frappe.get_doc("Noon Return", self.name, for_update=True)
 		if not locked.receipt_acknowledged_on:
@@ -87,17 +89,11 @@ class NoonReturn(Document):
 				)
 			)
 
-		if outcome == "Damaged":
-			locked._require_submitted_sales_order()
-			locked.inspection_outcome = outcome
-			locked.save(ignore_permissions=True)
-			return {"outcome": outcome, "sales_return": None}
-
 		existing = locked._existing_sales_return()
 		if existing:
 			return {"outcome": outcome, "sales_return": existing, "already_created": True}
 
-		sales_return = locked._make_draft_sales_return()
+		sales_return = locked._make_draft_sales_return(outcome)
 		locked.inspection_outcome = outcome
 		locked.sales_return = sales_return
 		locked.save(ignore_permissions=True)
@@ -197,14 +193,23 @@ class NoonReturn(Document):
 			)
 		return candidates[0]
 
-	def _make_draft_sales_return(self):
+	def _make_draft_sales_return(self, outcome="Sellable"):
 		from erpnext.stock.doctype.delivery_note.delivery_note import make_sales_return
 
 		frappe.has_permission("Delivery Note", "create", throw=True)
 		sales_order = self._require_submitted_sales_order()
-		warehouse = frappe.db.get_value("Marketplace Account", self.marketplace_account, "warehouse")
-		if not warehouse:
-			frappe.throw(_("The Marketplace Account has no warehouse; returned stock needs one."))
+		if outcome == "Sellable":
+			warehouse = frappe.db.get_value("Marketplace Account", self.marketplace_account, "warehouse")
+			if not warehouse:
+				frappe.throw(_("The Marketplace Account has no warehouse; returned stock needs one."))
+		else:
+			warehouse = frappe.db.get_value(
+				"Marketplace Account", self.marketplace_account, "noon_damaged_warehouse"
+			)
+			if not warehouse:
+				frappe.throw(
+					_("The Marketplace Account has no damaged warehouse; damaged returned stock needs one.")
+				)
 		candidate = self._find_source_row(
 			"Delivery Note", "Delivery Note Item", "against_sales_order", sales_order
 		)

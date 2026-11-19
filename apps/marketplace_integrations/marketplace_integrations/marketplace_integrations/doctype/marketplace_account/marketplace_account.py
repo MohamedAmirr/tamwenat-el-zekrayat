@@ -191,6 +191,7 @@ class MarketplaceAccount(Document):
 		# compute a meaningful candidate identity key.
 		self.validate_shopify_account()
 		self.validate_noon_account()
+		self.validate_noon_damaged_warehouse()
 		self.validate_unique_account_identity()
 
 	def before_save(self):
@@ -349,6 +350,27 @@ class MarketplaceAccount(Document):
 			from marketplace_integrations.integrations.noon.catalog import validate_warehouse_code
 
 			validate_warehouse_code(self.connection, self.noon_warehouse_code)
+
+	def validate_noon_damaged_warehouse(self):
+		"""The Damaged Warehouse (where inspected Damaged returns are booked) must be a leaf
+		Warehouse of this account's Company and not the sellable ``warehouse``."""
+		if not self.noon_damaged_warehouse:
+			return
+		if self.noon_damaged_warehouse == self.warehouse:
+			frappe.throw(_("Damaged Warehouse must be different from the Marketplace Account Warehouse."))
+		values = frappe.db.get_value(
+			"Warehouse", self.noon_damaged_warehouse, ["is_group", "company"], as_dict=True
+		)
+		if not values:
+			return  # link validation reports a missing Warehouse
+		if values.is_group:
+			frappe.throw(_("Damaged Warehouse must be a leaf Warehouse, not a group Warehouse."))
+		if values.company != self.erpnext_company:
+			frappe.throw(
+				_("Damaged Warehouse {0} does not belong to Company {1}.").format(
+					self.noon_damaged_warehouse, self.erpnext_company or _("(not set)")
+				)
+			)
 
 	def validate_unique_account_identity(self):
 		# account_identity_key isn't set yet at this point (before_save runs
