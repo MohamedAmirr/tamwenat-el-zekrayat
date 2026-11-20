@@ -287,6 +287,93 @@ class UnitTestNoonInventory(UnitTestCase):
 		client.assert_not_called()
 		self.assertEqual(persist.call_args.kwargs, {"inventory": True})
 
+	def _push_with_responses(self, responses, error_text="Noon did not answer in time (HTTP 504)."):
+		"""Run a one-row manual push whose client answers with ``responses`` in order.
+		Returns (outcome, client, persist, sleep) with time.sleep patched."""
+		account = SimpleNamespace(
+			name="ACC", connection="CONN", warehouse="ERP-WH", noon_warehouse_code="NOON-WH"
+		)
+		prefix = "marketplace_integrations.integrations.noon.inventory"
+		with patch(f"{prefix}.get_account", return_value=account):
+			with patch(f"{prefix}.selected_mappings", return_value=self._two_rows()[:1]):
+				with patch(f"{prefix}.validate_account_warehouse"):
+					with patch(f"{prefix}.validate_warehouse_code"):
+						with patch(f"{prefix}.get_sellable_qty", return_value=5):
+							with patch(f"{prefix}.time.sleep") as sleep:
+								with patch(f"{prefix}.NoonClient") as client_class:
+									with patch(f"{prefix}.persist_outcomes") as persist:
+										client = client_class.return_value
+										client.request.side_effect = responses
+										client.error_message.return_value = error_text
+										outcome = push_stock("ACC", manual=True)
+		return outcome, client, persist, sleep
+
+	def test_a_504_is_resent_with_backoff_and_succeeds_when_noon_recovers(self):
+		timeout = Response([])
+		timeout.status_code = 504
+		outcome, client, persist, sleep = self._push_with_responses(
+			[timeout, timeout, Response([result("SKU-1")])]
+		)
+		self.assertEqual(outcome, {"synced": 1, "failed": 0})
+		self.assertEqual(client.request.call_count, 3)
+		self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 5])
+		# The same absolute-quantity payload is sent every time.
+		payloads = {str(call.kwargs["json"]) for call in client.request.call_args_list}
+		self.assertEqual(len(payloads), 1)
+		self.assertEqual(persist.call_args.args[0], {"M1": None})
+
+	def test_a_504_that_never_clears_ends_in_error_with_the_clear_reason(self):
+		timeout = Response([])
+		timeout.status_code = 504
+		outcome, client, persist, sleep = self._push_with_responses([timeout] * 4)
+		self.assertEqual(outcome, {"synced": 0, "failed": 1})
+		# first send plus one resend per backoff wait, then give up
+		self.assertEqual(client.request.call_count, 4)
+		self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 5, 10])
+		self.assertEqual(
+			persist.call_args.args[0],
+			{"M1": "Noon did not answer in time (HTTP 504). Try the sync again in a few minutes."},
+		)
+		self.assertEqual(persist.call_args.kwargs, {"inventory": True})
+
+	def test_after_one_chunk_exhausts_its_retries_later_chunks_are_sent_once_without_waits(self):
+		timeout = Response([])
+		timeout.status_code = 504
+		prefix = "marketplace_integrations.integrations.noon.inventory"
+		account = SimpleNamespace(
+			name="ACC", connection="CONN", warehouse="ERP-WH", noon_warehouse_code="NOON-WH"
+		)
+		with patch(f"{prefix}.get_account", return_value=account):
+			with patch(f"{prefix}.selected_mappings", return_value=self._two_rows()):
+				with patch(f"{prefix}.validate_account_warehouse"):
+					with patch(f"{prefix}.validate_warehouse_code"):
+						with patch(f"{prefix}.get_sellable_qty", return_value=5):
+							with patch(f"{prefix}.STOCK_CHUNK_SIZE", 1):
+								with patch(f"{prefix}.time.sleep") as sleep:
+									with patch(f"{prefix}.NoonClient") as client_class:
+										with patch(f"{prefix}.persist_outcomes") as persist:
+											client = client_class.return_value
+											client.request.side_effect = [timeout] * 5
+											client.error_message.return_value = (
+												"Noon did not answer in time (HTTP 504)."
+											)
+											outcome = push_stock("ACC", manual=True)
+		self.assertEqual(outcome, {"synced": 0, "failed": 2})
+		# chunk 1: first send + 3 resends; chunk 2: one send only, no waits
+		self.assertEqual(client.request.call_count, 5)
+		self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 5, 10])
+		reason = "Noon did not answer in time (HTTP 504). Try the sync again in a few minutes."
+		self.assertEqual([call.args[0] for call in persist.call_args_list], [{"M1": reason}, {"M2": reason}])
+
+	def test_other_failures_are_not_resent(self):
+		for status in (429, 500, 503):
+			failure = Response([])
+			failure.status_code = status
+			outcome, client, _persist, sleep = self._push_with_responses([failure], error_text="Noon failed")
+			self.assertEqual(outcome, {"synced": 0, "failed": 1})
+			self.assertEqual(client.request.call_count, 1)
+			sleep.assert_not_called()
+
 	def test_invalid_bundle_is_reported_locally_and_not_pushed_as_zero(self):
 		account = SimpleNamespace(
 			name="ACC", connection="CONN", warehouse="ERP-WH", noon_warehouse_code="NOON-WH"

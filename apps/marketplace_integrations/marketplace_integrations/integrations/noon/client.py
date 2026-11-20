@@ -170,6 +170,10 @@ class NoonClient:
 		whole object (including field-level details), so extract only these
 		two fields and apply the shared length bound after redaction.
 		"""
+		if response.status_code == 504:
+			# A gateway timeout has no useful body; say what happened (#516). Neutral: shipment,
+			# returns and status code share it; callers add their own advice.
+			return frappe._("Noon did not answer in time (HTTP 504).")
 		status = frappe._("Noon request failed (HTTP {0}).").format(response.status_code)
 		try:
 			body = response.json()

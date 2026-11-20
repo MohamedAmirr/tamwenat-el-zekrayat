@@ -12,6 +12,12 @@ STOCK_CHUNK_SIZE = 100
 # A 100-item stock/price chunk outlasts the shared 10 s transport timeout; we
 # disconnected and Noon logged 499 "context canceled". Used only by those two pushes.
 PUSH_TIMEOUT_SECONDS = 60
+# #516: a stock-update chunk that answers HTTP 504 (gateway timeout) is sent again after each of
+# these waits in seconds, then the chunk's mappings end in Error. Safe because every item carries
+# the absolute target qty (the same payload is re-sent by every hourly full push), so a repeat
+# of a request Noon already applied changes nothing. Only the stock push does this; 429 and every
+# other status are returned unchanged.
+STOCK_504_BACKOFF_SECONDS = (2, 5, 10)
 
 # ListFbpiOrders documents up to 50 orders per page
 # (docs/noon-integration/noon_api_full.md, #145's facts table).
