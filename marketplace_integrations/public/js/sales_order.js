@@ -878,7 +878,7 @@
 		if (typeof frm.set_intro !== "function") return;
 		frm.set_intro(
 			__(
-				"Items and quantities of a Noon order cannot be changed here. Use Mark as Out of Stock on an item row of this Sales Order, or cancel and amend the Delivery Note."
+				"Items and quantities of a Noon order cannot be changed here. Use Mark as Out of Stock on an item row of this Sales Order, or cancel the Delivery Note, which stops at Awaiting Return until a Noon User or System Manager enters the returned quantities in Confirm Returned, and then amend it."
 			),
 			"orange"
 		);

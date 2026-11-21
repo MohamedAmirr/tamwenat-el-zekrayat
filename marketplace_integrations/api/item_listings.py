@@ -36,6 +36,7 @@ ACCOUNT_FIELDS = [
 	"noon_inventory_push_enabled",
 	"noon_price_push_enabled",
 	"shopify_inventory_push_enabled",
+	"shopify_price_push_enabled",
 ]
 
 
@@ -87,7 +88,7 @@ def _account_summary(account_name):
 		price_push_off = not account.noon_price_push_enabled
 		stock_push_off = not account.noon_inventory_push_enabled
 	elif account.platform == "Shopify":
-		# Only the inventory push has a switch; the price push is manual-only.
+		price_push_off = not account.shopify_price_push_enabled
 		stock_push_off = not account.shopify_inventory_push_enabled
 	return {
 		"account_name": account.account_name or account_name,

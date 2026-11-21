@@ -336,7 +336,7 @@ workflow_methods = [
 scheduler_events = {
 	# #367: the hourly jobs run at staggered minutes instead of all at :00, where
 	# Frappe's own hourly jobs also start; prod hit "(1040) Too many connections" there.
-	# Each is still once an hour. :05/:15/:35 are odd minutes, so none lands on the
+	# Each is still once an hour. :05/:15/:25/:35 are odd minutes, so none lands on the
 	# every-2-minute inventory sweep tick either. #525: the Noon order poll left this
 	# group (now about every 25 minutes, at :01, :27 and :53, registered below from
 	# NOON_ORDER_POLL_CRON); the Noon 7-day order re-list is the 23:59 nightly catch-up.
@@ -346,6 +346,10 @@ scheduler_events = {
 		],
 		"15 * * * *": [
 			"marketplace_integrations.integrations.noon.sweep.sweep_all_accounts",
+		],
+		"25 * * * *": [
+			# #516: hourly Shopify price push for accounts with "Push Prices to Shopify" on (off by default).
+			"marketplace_integrations.integrations.shopify.catalog_push.sweep_price_pushes",
 		],
 		"35 * * * *": [
 			"marketplace_integrations.services.sales_order_sync_debounce.sweep_stuck_sales_order_reconciliations",

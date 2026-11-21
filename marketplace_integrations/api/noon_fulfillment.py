@@ -151,7 +151,7 @@ def get_return_lines(delivery_note: str):
 
 @frappe.whitelist(methods=["POST"])
 def confirm_returned(delivery_note: str, lines: str | list, write_off: int | bool = 0):
-	"""Confirm Returned of a note Noon cancelled after pickup (#527): authorizes, then delegates (the service cancels
+	"""Confirm Returned of a held note whose Noon shipment was cancelled (#527, #552): authorizes, then delegates (the service cancels
 	the note and its unpaid invoices and, when asked, writes the missing units off)."""
 	_authorize_confirm_returned(delivery_note)
 	return delivery_note_shipment.confirm_returned(delivery_note, lines, write_off)

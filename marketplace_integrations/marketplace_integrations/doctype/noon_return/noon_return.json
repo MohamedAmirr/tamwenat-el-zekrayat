@@ -162,17 +162,17 @@
    "label": "Inspection"
   },
   {
-   "description": "The merchant's decision for the returned item. Sellable creates a draft Sales Return into the account warehouse; Damaged records only (Noon is responsible for it).",
+   "description": "The merchant's decision for the returned item. Sellable (shown as Restock) creates a draft Sales Return into the account warehouse; Damaged and Damaged, Noon paid create a draft Sales Return into the account's damaged warehouse.",
    "fieldname": "inspection_outcome",
    "fieldtype": "Select",
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Inspection Outcome",
-   "options": "\nSellable\nDamaged",
+   "options": "\nSellable\nDamaged\nDamaged, Noon paid",
    "read_only": 1
   },
   {
-   "description": "Draft or submitted return Delivery Note created from a Sellable outcome.",
+   "description": "Draft or submitted return Delivery Note created from an inspection outcome.",
    "fieldname": "sales_return",
    "fieldtype": "Link",
    "label": "Sales Return",
@@ -192,7 +192,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-10-22 12:00:00.000000",
+ "modified": "2026-11-19 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Noon Return",

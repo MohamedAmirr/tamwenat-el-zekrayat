@@ -586,6 +586,8 @@ test("Check Noon Warehouse appears only on a saved, enabled Noon account with wr
 	let frm = make_noon_frm({ platform: "Noon", enabled: 1, connection: "NC-1" });
 	configure_noon(frm);
 	assert.ok(frm.buttons.includes(NOON_CHECK_WAREHOUSE_LABEL));
+	// The return lookup moved to the Noon Return list ("New Return", #550): one entry point.
+	assert.ok(!frm.buttons.includes("Look Up Noon Return"));
 
 	frm = make_noon_frm({ platform: "Noon", enabled: 1, connection: "NC-1" }, { is_new: true });
 	configure_noon(frm);
@@ -663,4 +665,26 @@ test("check_noon_warehouse asks to save an edited form first and sends nothing",
 	await check_noon_warehouse({ doc: { name: "MKTACC-1" }, is_dirty: () => true });
 
 	assert.equal(message, "Save the Marketplace Account first.");
+});
+
+test("form layout (#517): four tabs, every field placed once, switches on Pricing and Stock", () => {
+	const meta = JSON.parse(require("node:fs").readFileSync(`${__dirname}/marketplace_account.json`, "utf8"));
+	const by_name = Object.fromEntries(meta.fields.map((field) => [field.fieldname, field]));
+	assert.deepEqual([...meta.field_order].sort(), Object.keys(by_name).sort());
+	assert.equal(new Set(meta.field_order).size, meta.field_order.length);
+
+	const tabs = {};
+	let current;
+	for (const fieldname of meta.field_order) {
+		if (by_name[fieldname].fieldtype === "Tab Break") {
+			current = by_name[fieldname].label;
+			tabs[current] = [];
+		} else tabs[current].push(fieldname);
+	}
+	assert.deepEqual(Object.keys(tabs), ["General", "Pricing and Stock", "Orders and Shipping", "Platform Status"]);
+	for (const fieldname of ["shopify_price_push_enabled", "noon_damaged_warehouse", "erpnext_selling_price_list"]) {
+		assert.ok(tabs["Pricing and Stock"].includes(fieldname), fieldname);
+	}
+	assert.ok(tabs["Orders and Shipping"].includes("delivery_lead_days"));
+	assert.ok(tabs["Platform Status"].includes("external_status_error"));
 });

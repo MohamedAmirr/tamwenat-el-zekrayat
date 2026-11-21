@@ -253,14 +253,35 @@ test("before_cancel ignores a note that is not a created Noon shipment", async (
 	assert.deepEqual(calls, []);
 });
 
-test("before_cancel lets the native cancel go on once Noon cancelled, and reloads the form", async () => {
-	const { mod, calls } = load({ responses: { cancel_shipment: { status: "Cancelled", outcome: "cancelled", message: "" } } });
-	const frm = make_form({ docstatus: 1, custom_integration_status: "Created" });
+// #552: after Noon confirmed the cancel of a submitted note the server holds it (Cancelled + Awaiting Return).
+function reload_held(frm) {
+	frm.reload_doc = function () {
+		this.reloads++;
+		this.doc.custom_integration_status = "Cancelled";
+		this.doc.custom_shipping_status = "Awaiting Return";
+		return Promise.resolve();
+	};
+	return frm;
+}
+
+test("before_cancel stops the native cancel once Noon cancelled and the note is held, and reloads the form", async () => {
+	const { mod, calls, alerts } = load({ responses: { cancel_shipment: { status: "Cancelled", outcome: "cancelled", message: "" } } });
+	const frm = reload_held(make_form({ docstatus: 1, custom_integration_status: "Created" }));
 	await mod.before_cancel(frm);
-	assert.equal(frappe.validated, true);
+	assert.equal(frappe.validated, false);
 	assert.equal(frm.reloads, 1);
 	assert.equal(calls.length, 1);
 	assert.ok(calls[0].method.endsWith("carrier_shipments.cancel_shipment"));
+	assert.equal(alerts[0].indicator, "orange");
+	assert.match(alerts[0].message, /Use Confirm Returned/);
+});
+
+test("before_cancel lets the native cancel go on when the reloaded note is not held (a draft)", async () => {
+	const { mod, alerts } = load({ responses: { cancel_shipment: { status: "Cancelled", outcome: "cancelled", message: "" } } });
+	const frm = make_form({ docstatus: 0, custom_integration_status: "Created" });
+	await mod.before_cancel(frm);
+	assert.equal(frappe.validated, true);
+	assert.deepEqual(alerts, []);
 });
 
 test("a Noon refusal stops the cancel and shows Noon's text escaped", async () => {
@@ -335,6 +356,7 @@ test("the submitted-note cancel asks once, warning that Noon also cancels the it
 	assert.match(confirms[0], /also cancels its items at Noon/);
 	assert.match(confirms[0], /Sales Order lines may be cancelled or reduced/);
 	assert.match(confirms[0], /may not be shippable again/);
+	assert.match(confirms[0], /stop at Awaiting Return with its stock still out until a Noon User presses Confirm Returned/);
 	assert.equal(calls.length, 1);
 	assert.equal(frappe.validated, true);
 });
@@ -395,15 +417,27 @@ test("a workflow action other than Cancel, or a note without a live Noon shipmen
 	assert.equal(confirms.length, 0);
 });
 
-test("the workflow Cancel on a Created note (Shipped at Noon) asks once, cancels at Noon, then lets the workflow go on", async () => {
-	const { mod, calls, confirms } = load({ responses: { cancel_shipment: { status: "Cancelled", outcome: "cancelled", message: "" } } });
-	const frm = workflow_form("Cancel", { docstatus: 1, custom_integration_status: "Created" });
-	assert.equal(await settled(mod.before_workflow_action(frm)), "resolved");
+test("the workflow Cancel on a Created note (Shipped at Noon) asks once, cancels at Noon, then halts because the note is held", async () => {
+	const { mod, calls, confirms, alerts } = load({ responses: { cancel_shipment: { status: "Cancelled", outcome: "cancelled", message: "" } } });
+	const frm = reload_held(workflow_form("Cancel", { docstatus: 1, custom_integration_status: "Created" }));
+	assert.equal(await settled(mod.before_workflow_action(frm)), "pending");
 	assert.equal(confirms.length, 1);
 	assert.match(confirms[0], /also cancels its items at Noon/);
+	assert.match(confirms[0], /Awaiting Return/);
 	assert.ok(calls[0].method.endsWith("carrier_shipments.cancel_shipment"));
 	assert.deepEqual(calls[0].args, { delivery_note: "MAT-DN-1" });
 	assert.equal(frm.reloads, 1);
+	assert.equal(frm.selected_workflow_action, null);
+	assert.equal(alerts[0].indicator, "orange");
+	assert.match(alerts[0].message, /Use Confirm Returned/);
+});
+
+test("the workflow Cancel goes on when the reloaded note is not held (a draft)", async () => {
+	const { mod, confirms } = load({ responses: { cancel_shipment: { status: "Cancelled", outcome: "cancelled", message: "" } } });
+	const frm = workflow_form("Cancel", { docstatus: 0, custom_integration_status: "Created" });
+	assert.equal(await settled(mod.before_workflow_action(frm)), "resolved");
+	// the held-note warning is only for a submitted note
+	assert.doesNotMatch(confirms[0], /Awaiting Return/);
 });
 
 test("the workflow Cancel stops for good when Noon refuses, with the reason escaped", async () => {
@@ -539,7 +573,7 @@ test("a held note shows the intro that tells a Noon User to confirm the return",
 	frm.set_intro = (text, color) => intros.push({ text, color });
 	mod.refresh(frm);
 	assert.equal(intros.length, 1);
-	assert.match(intros[0].text, /cancelled this shipment after pickup/);
+	assert.match(intros[0].text, /The Noon shipment was cancelled/);
 	assert.equal(intros[0].color, "orange");
 
 	const other = make_form(held_note({ custom_shipping_status: "Cancelled" }));

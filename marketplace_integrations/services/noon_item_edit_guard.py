@@ -79,7 +79,8 @@ def _refuse_if_locked(row):
 		_(
 			"Items, quantities and rates of a Noon order cannot be changed in ERPNext because Noon "
 			"has no order update. Use Mark as Out of Stock on an item row of the Sales Order, or "
-			"cancel and amend the Delivery Note."
+			"cancel the Delivery Note, which stops at Awaiting Return until a Noon User or System Manager "
+			"enters the returned quantities in Confirm Returned, and then amend it."
 		),
 		title=_("Noon order items are locked"),
 	)
