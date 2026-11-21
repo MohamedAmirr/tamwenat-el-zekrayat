@@ -368,3 +368,53 @@ test("Sync Noon Pricing and Stock uses the plain queued message when the switch 
 	assert.doesNotMatch(msg, /manual run/);
 	assert.match(msg, /queued/);
 });
+
+test("the form error message names price and/or stock errors and clears when there are none", () => {
+	const { error_indicator_labels, show_error_indicators } = require("./marketplace_product_mapping.js");
+
+	assert.deepEqual(error_indicator_labels({ sync_status: "Synced", inventory_sync_status: "Synced" }), []);
+	assert.deepEqual(error_indicator_labels({ sync_status: "Error", inventory_sync_status: "Synced" }), ["Price Error"]);
+	assert.deepEqual(error_indicator_labels({ sync_status: "Queued", inventory_sync_status: "Error" }), ["Stock Error"]);
+	assert.deepEqual(error_indicator_labels({ sync_status: "Error", inventory_sync_status: "Error" }), [
+		"Price Error",
+		"Stock Error",
+	]);
+
+	const calls = [];
+	const make_frm = (doc) => ({ doc, layout: { show_message: (...args) => calls.push(args) } });
+
+	show_error_indicators(make_frm({ sync_status: "Error", inventory_sync_status: "Error" }));
+	assert.deepEqual(calls, [[""], ["Price Error, Stock Error", "red", true]]);
+
+	calls.length = 0;
+	show_error_indicators(make_frm({ sync_status: "Synced", inventory_sync_status: "Error" }));
+	assert.deepEqual(calls, [[""], ["Stock Error", "red", true]]);
+
+	// Clear path: no error leaves only the clearing call.
+	calls.length = 0;
+	show_error_indicators(make_frm({ sync_status: "Synced", inventory_sync_status: "Synced" }));
+	assert.deepEqual(calls, [[""]]);
+});
+
+test("form layout (#517): Mapping then Sync tab, Price and Stock columns hold their status fields", () => {
+	const meta = JSON.parse(require("node:fs").readFileSync(`${__dirname}/marketplace_product_mapping.json`, "utf8"));
+	const by_name = Object.fromEntries(meta.fields.map((field) => [field.fieldname, field]));
+	assert.deepEqual([...meta.field_order].sort(), Object.keys(by_name).sort());
+	assert.equal(new Set(meta.field_order).size, meta.field_order.length);
+
+	const tabs = meta.field_order.filter((name) => by_name[name].fieldtype === "Tab Break");
+	assert.deepEqual(tabs, ["mapping_tab", "sync_tab"]);
+
+	const columns = {};
+	let current;
+	for (const name of meta.field_order.slice(meta.field_order.indexOf("sync_tab") + 1)) {
+		if (by_name[name].fieldtype === "Column Break") {
+			current = by_name[name].label;
+			columns[current] = [];
+		} else columns[current].push(name);
+	}
+	assert.deepEqual(columns, {
+		Price: ["sync_status", "last_sync_reference", "last_synced_on", "last_error"],
+		Stock: ["inventory_sync_status", "inventory_last_synced_on", "inventory_last_error"],
+	});
+});

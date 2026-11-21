@@ -664,3 +664,25 @@ test("check_noon_warehouse asks to save an edited form first and sends nothing",
 
 	assert.equal(message, "Save the Marketplace Account first.");
 });
+
+test("form layout (#517): four tabs, every field placed once, switches on Pricing and Stock", () => {
+	const meta = JSON.parse(require("node:fs").readFileSync(`${__dirname}/marketplace_account.json`, "utf8"));
+	const by_name = Object.fromEntries(meta.fields.map((field) => [field.fieldname, field]));
+	assert.deepEqual([...meta.field_order].sort(), Object.keys(by_name).sort());
+	assert.equal(new Set(meta.field_order).size, meta.field_order.length);
+
+	const tabs = {};
+	let current;
+	for (const fieldname of meta.field_order) {
+		if (by_name[fieldname].fieldtype === "Tab Break") {
+			current = by_name[fieldname].label;
+			tabs[current] = [];
+		} else tabs[current].push(fieldname);
+	}
+	assert.deepEqual(Object.keys(tabs), ["General", "Pricing and Stock", "Orders and Shipping", "Platform Status"]);
+	for (const fieldname of ["shopify_price_push_enabled", "noon_damaged_warehouse", "erpnext_selling_price_list"]) {
+		assert.ok(tabs["Pricing and Stock"].includes(fieldname), fieldname);
+	}
+	assert.ok(tabs["Orders and Shipping"].includes("delivery_lead_days"));
+	assert.ok(tabs["Platform Status"].includes("external_status_error"));
+});
