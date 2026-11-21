@@ -1,6 +1,7 @@
 if (typeof frappe !== "undefined") {
 	frappe.ui.form.on("Marketplace Product Mapping", {
 		refresh(frm) {
+			show_error_indicators(frm);
 			if (frm.is_new()) return;
 			add_platform_push_button(frm);
 		},
@@ -8,6 +9,22 @@ if (typeof frappe !== "undefined") {
 			show_save_notices(frm);
 		},
 	});
+}
+
+// The form message container sits above the tab list, so this stays visible on every tab (#517).
+// frm.dashboard.add_indicator would render inside the first tab only. Plain text, no HTML.
+function error_indicator_labels(doc) {
+	const labels = [];
+	if (doc.sync_status === "Error") labels.push(__("Price Error"));
+	if (doc.inventory_sync_status === "Error") labels.push(__("Stock Error"));
+	return labels;
+}
+
+function show_error_indicators(frm) {
+	const labels = error_indicator_labels(frm.doc);
+	// Always clear first so a fixed error does not leave a stale message.
+	frm.layout.show_message("");
+	if (labels.length) frm.layout.show_message(labels.join(", "), "red", true);
 }
 
 // Desk form only: the Item Data Import never runs this script.
@@ -178,5 +195,7 @@ if (typeof module !== "undefined") {
 		sync_noon_mapping,
 		add_platform_push_button,
 		show_save_notices,
+		error_indicator_labels,
+		show_error_indicators,
 	};
 }
