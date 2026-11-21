@@ -109,6 +109,7 @@ import re
 import frappe
 from frappe import _
 from frappe.utils import cstr, now_datetime
+from rq.timeouts import BaseTimeoutException
 
 from marketplace_integrations.integrations.shopify.client import ShopifyClient
 from marketplace_integrations.integrations.shopify.constants import SHOPIFY_CATALOG_PUSH_VARIANT_CHUNK_SIZE
@@ -118,6 +119,11 @@ from marketplace_integrations.services.mapping_push import group_mappings_by_acc
 MAPPING_DOCTYPE = "Marketplace Product Mapping"
 
 REMOTE_ERROR = _("Shopify did not accept the price update.")
+
+def _price_push_paused_message():
+	# Translated when used, not at import, so it follows the request/job language.
+	return _("Price push is paused for this account.")
+
 
 # Structured userErrors messages are Shopify's own admin-facing text, not a
 # raw response body - still bounded defensively so a pathological/unexpected
@@ -347,15 +353,22 @@ def queue_catalog_push(mapping_names):
 	"""
 	mapping_names = parse_mapping_names(mapping_names)
 	accounts = group_mappings_by_account(mapping_names)
-	return _enqueue_account_pushes(accounts)
+	return _enqueue_account_pushes(accounts, manual=True)
 
 
-def _enqueue_account_pushes(accounts):
+def _enqueue_account_pushes(accounts, manual=False):
 	"""Validate each account's local config and enqueue its price-push job.
 
 	``accounts`` is ``{account_name: {"account": account_doc, "mapping_names": [...]}}``
 	as returned by ``group_mappings_by_account()`` or built directly by a caller
 	that already loaded the account and its mapping names.
+
+	``manual`` (#516) defaults to False (automatic, like Noon); the two Desk callers pass
+	True explicitly. The account's "Push Prices to Shopify" switch governs only the
+	automatic run, so a manual job ignores it. It is passed to the worker as a kwarg set
+	here, never read from a request. For an automatic run, an account skipped for a local
+	configuration reason has that reason written onto its mappings (visible in the
+	mapping list) instead of being silently skipped every hour.
 	"""
 	owner = frappe.session.user
 	jobs = []
@@ -366,9 +379,10 @@ def _enqueue_account_pushes(accounts):
 			_validate_push_account_local(selected["account"])
 		except frappe.ValidationError as error:
 			frappe.clear_last_message()
-			skipped_accounts.append(
-				{"account": account_name, "reason": _config_error_message(error, account_name)}
-			)
+			reason = _config_error_message(error, account_name)
+			skipped_accounts.append({"account": account_name, "reason": reason})
+			if not manual:
+				_mark_mappings_error(selected["mapping_names"], reason)
 			continue
 		valid_accounts[account_name] = selected
 
@@ -388,6 +402,7 @@ def _enqueue_account_pushes(accounts):
 			owner=owner,
 			account_name=account_name,
 			mapping_names=selected["mapping_names"],
+			manual=manual,
 		)
 		if job is None:
 			frappe.cache().delete_value(_push_cache_key(job_id))
@@ -431,8 +446,52 @@ def queue_account_catalog_push(account_name):
 	if not mapping_names:
 		return {"jobs": [], "skipped_accounts": []}
 	return _enqueue_account_pushes(
-		{account_doc.name: {"account": account_doc, "mapping_names": list(mapping_names)}}
+		{account_doc.name: {"account": account_doc, "mapping_names": list(mapping_names)}}, manual=True
 	)
+
+
+def sweep_price_pushes():
+	"""Hourly (``hooks.py`` ``scheduler_events["cron"]``): queue ONE price-push job per enabled
+	Shopify account whose "Push Prices to Shopify" switch is on, covering that account's
+	enabled mappings (#516). Makes no Shopify call itself: the local Price List checks run
+	in ``_enqueue_account_pushes()``, and the worker's ``validate_push_account()`` compares
+	the Price List currency with the shop's currency before anything is written, so a
+	mismatching account is refused there. An account already being pushed (RQ dedup) is
+	picked up by the next hourly run. One account's failure is logged and isolated."""
+	accounts = frappe.get_all(
+		"Marketplace Account",
+		filters={"platform": "Shopify", "enabled": 1, "shopify_price_push_enabled": 1},
+		pluck="name",
+		order_by="name asc",
+	)
+	for account_name in accounts:
+		try:
+			mapping_names = frappe.get_all(
+				MAPPING_DOCTYPE,
+				filters={"marketplace_account": account_name, "enabled": 1},
+				pluck="name",
+				order_by="name asc",
+			)
+			if not mapping_names:
+				continue
+			_enqueue_account_pushes(
+				{
+					account_name: {
+						"account": frappe.get_doc("Marketplace Account", account_name),
+						"mapping_names": list(mapping_names),
+					}
+				},
+				manual=False,
+			)
+		except BaseTimeoutException:
+			raise
+		except Exception:
+			frappe.log_error(title="Shopify price sweep: account failed", message=frappe.get_traceback())
+
+
+def _price_push_paused(account_name):
+	"""True when the account's "Push Prices to Shopify" switch is off (one fresh DB read)."""
+	return not frappe.db.get_value("Marketplace Account", account_name, "shopify_price_push_enabled")
 
 
 def get_push_status(job_id):
@@ -442,16 +501,40 @@ def get_push_status(job_id):
 	return {key: value for key, value in state.items() if key != "owner"}
 
 
-def push_catalog(job_id_for_result, owner, account_name, mapping_names):
+def push_catalog(job_id_for_result, owner, account_name, mapping_names, manual=False):
 	"""Background job body (the worker): resolve the current price and push
 	it to Shopify for every given mapping via ``productVariantsBulkUpdate``,
 	grouped one mutation call per Shopify product. See module docstring for
-	the full worker shape and the idempotency mechanism."""
+	the full worker shape and the idempotency mechanism.
+
+	``manual`` (#516) is set by the enqueuer (True for every Desk action, False for the
+	hourly ``sweep_price_pushes()``). An automatic run does nothing when the account's
+	"Push Prices to Shopify" switch is off, checked here before any Shopify call and again
+	(fresh DB read) before every product group, so turning it off stops a running job
+	before its next Shopify write; groups already written stay recorded. An automatic run
+	whose account validation fails (currency mismatch, shop query failure, disabled
+	connection) writes the reason onto the mappings and returns without raising, so the
+	hourly sweep does not write an Error Log every hour; a manual run raises to the user."""
 	try:
+		if not manual and _price_push_paused(account_name):
+			_update_push_status(
+				job_id_for_result, owner, status="failed", error=_price_push_paused_message()
+			)
+			return {"paused": True}
 		_update_push_status(
 			job_id_for_result, owner, status="running", processed=0, result=_push_result_payload([])
 		)
-		account_doc, connection, price_list = validate_push_account(account_name)
+		try:
+			account_doc, connection, price_list = validate_push_account(account_name)
+		except frappe.ValidationError as error:
+			if manual:
+				raise
+			frappe.clear_last_message()
+			message = _config_error_message(error, account_name)
+			_mark_mappings_error(mapping_names, message)
+			frappe.db.commit()
+			_update_push_status(job_id_for_result, owner, status="failed", error=message)
+			return {"failed": True, "error": message}
 		client = ShopifyClient(connection.name)
 
 		mappings = _mappings_for_push(account_doc.name, mapping_names)
@@ -471,6 +554,16 @@ def push_catalog(job_id_for_result, owner, account_name, mapping_names):
 		)
 
 		for group_index, (product_id, group_mappings) in enumerate(groups.items(), start=1):
+			if not manual and _price_push_paused(account_name):
+				_update_push_status(
+					job_id_for_result,
+					owner,
+					status="failed",
+					error=_price_push_paused_message(),
+					processed=len(results),
+					result=_push_result_payload(results),
+				)
+				return {"paused": True}
 			results.extend(_push_product_group(client, price_list, product_id, group_mappings, item_by_name))
 			# Throttled (review finding #1) - the unconditional "completed"
 			# update right after this loop always reports the true final
@@ -728,6 +821,13 @@ def _mark_error(mapping_name, error):
 		{"sync_status": "Error", "last_error": cstr(error).strip()},
 		update_modified=False,
 	)
+
+
+def _mark_mappings_error(mapping_names, message):
+	"""Write the same Error status/reason onto every given mapping (automatic-run failures
+	that are about the account, not one mapping)."""
+	for mapping_name in mapping_names:
+		_mark_error(mapping_name, message)
 
 
 def _push_result_payload(results):

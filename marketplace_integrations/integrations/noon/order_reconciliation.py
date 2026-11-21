@@ -41,6 +41,9 @@ from frappe.utils import cstr
 
 from marketplace_integrations.integrations.noon.fulfillment import _latest_payload_items
 from marketplace_integrations.integrations.noon.order_mapper import INTEGRATION_STATUS_MAP, MP_STATUS_MAP
+from marketplace_integrations.marketplace_integrations.doctype.noon_return.noon_return import (
+	INSPECTION_OUTCOMES,
+)
 from marketplace_integrations.services.sales_order_sync import (
 	NOON_ELIGIBLE_EXTERNAL_STATUS,
 	NOON_INELIGIBLE_INTEGRATION_STATUS,
@@ -67,9 +70,10 @@ def _has_unresolved_create(order):
 def _has_noon_return(order):
 	"""True while any Noon Return linked to the order is unresolved (#262).
 
-	Resolved means a submitted Credit Note AND either a Damaged outcome (Noon is
-	responsible, no stock returns) or a Sellable outcome with a submitted Sales
-	Return. A draft or cancelled document does not count as resolved.
+	Resolved means a submitted Credit Note AND a recorded outcome (Sellable,
+	Damaged or Damaged, Noon paid) whose Sales Return is submitted, so the stock
+	movement cannot stay in draft. A draft or cancelled document does not count
+	as resolved.
 	"""
 	order_name = getattr(order, "name", None)
 	if not order_name:
@@ -89,9 +93,7 @@ def _submitted(doctype, name):
 def _is_return_resolved(row):
 	if not _submitted("Sales Invoice", row.credit_note):
 		return False
-	if row.inspection_outcome == "Damaged":
-		return True
-	return row.inspection_outcome == "Sellable" and _submitted("Delivery Note", row.sales_return)
+	return row.inspection_outcome in INSPECTION_OUTCOMES and _submitted("Delivery Note", row.sales_return)
 
 
 def build_evidence(order):

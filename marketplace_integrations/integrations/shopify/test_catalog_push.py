@@ -187,7 +187,7 @@ class IntegrationTestPushCatalog(IntegrationTestCase):
 				}
 			),
 		):
-			catalog_push.push_catalog("job-1", "Administrator", self.account.name, [mapping.name])
+			catalog_push.push_catalog("job-1", "Administrator", self.account.name, [mapping.name], manual=True)
 
 		mapping.reload()
 		self.assertEqual(mapping.sync_status, "Synced")
@@ -210,7 +210,7 @@ class IntegrationTestPushCatalog(IntegrationTestCase):
 				}
 			),
 		):
-			catalog_push.push_catalog("job-2", "Administrator", self.account.name, [mapping.name])
+			catalog_push.push_catalog("job-2", "Administrator", self.account.name, [mapping.name], manual=True)
 
 		mapping.reload()
 		self.assertEqual(mapping.sync_status, "Error")
@@ -226,7 +226,7 @@ class IntegrationTestPushCatalog(IntegrationTestCase):
 		# price. _currency_only_dispatcher() raises if anything else is asked
 		# of ShopifyClient.execute().
 		with patch(EXECUTE_TARGET, side_effect=_currency_only_dispatcher()):
-			catalog_push.push_catalog("job-3", "Administrator", self.account.name, [mapping.name])
+			catalog_push.push_catalog("job-3", "Administrator", self.account.name, [mapping.name], manual=True)
 
 		mapping.reload()
 		self.assertEqual(mapping.sync_status, "Error")
@@ -237,7 +237,7 @@ class IntegrationTestPushCatalog(IntegrationTestCase):
 		mapping = self._make_mapping("not-a-variant-gid", "gid://shopify/Product/4")
 
 		with patch(EXECUTE_TARGET, side_effect=_currency_only_dispatcher()):
-			catalog_push.push_catalog("job-4", "Administrator", self.account.name, [mapping.name])
+			catalog_push.push_catalog("job-4", "Administrator", self.account.name, [mapping.name], manual=True)
 
 		mapping.reload()
 		self.assertEqual(mapping.sync_status, "Error")
@@ -255,8 +255,8 @@ class IntegrationTestPushCatalog(IntegrationTestCase):
 		)
 
 		with patch(EXECUTE_TARGET, side_effect=dispatcher) as execute:
-			catalog_push.push_catalog("job-5a", "Administrator", self.account.name, [mapping.name])
-			catalog_push.push_catalog("job-5b", "Administrator", self.account.name, [mapping.name])
+			catalog_push.push_catalog("job-5a", "Administrator", self.account.name, [mapping.name], manual=True)
+			catalog_push.push_catalog("job-5b", "Administrator", self.account.name, [mapping.name], manual=True)
 
 		for call in execute.call_args_list:
 			query = call.args[0]
@@ -278,7 +278,7 @@ class IntegrationTestPushCatalog(IntegrationTestCase):
 
 		with patch(EXECUTE_TARGET, side_effect=_raise_on_bulk_update):
 			catalog_push.push_catalog(
-				"job-6", "Administrator", self.account.name, [mapping_a.name, mapping_b.name]
+				"job-6", "Administrator", self.account.name, [mapping_a.name, mapping_b.name], manual=True
 			)
 
 		mapping_a.reload()
@@ -294,7 +294,7 @@ class IntegrationTestPushCatalog(IntegrationTestCase):
 		mapping.db_set("enabled", 0, update_modified=False)
 
 		with patch(EXECUTE_TARGET, side_effect=_currency_only_dispatcher()):
-			catalog_push.push_catalog("job-7", "Administrator", self.account.name, [mapping.name])
+			catalog_push.push_catalog("job-7", "Administrator", self.account.name, [mapping.name], manual=True)
 
 		mapping.reload()
 		# Nothing was attempted, so sync_status is untouched (still whatever
@@ -319,7 +319,7 @@ class IntegrationTestPushCatalog(IntegrationTestCase):
 		frappe.db.set_value("Item", self.item, "disabled", 1)
 
 		with patch(EXECUTE_TARGET, side_effect=_currency_only_dispatcher()):
-			catalog_push.push_catalog("job-8", "Administrator", self.account.name, [mapping.name])
+			catalog_push.push_catalog("job-8", "Administrator", self.account.name, [mapping.name], manual=True)
 
 		mapping.reload()
 		self.assertNotEqual(mapping.sync_status, "Error")
@@ -355,7 +355,7 @@ class IntegrationTestPushCatalog(IntegrationTestCase):
 			raise AssertionError(f"Unexpected query in test: {query}")
 
 		with patch(EXECUTE_TARGET, side_effect=_side_effect):
-			catalog_push.push_catalog("job-9", "Administrator", self.account.name, mapping_names)
+			catalog_push.push_catalog("job-9", "Administrator", self.account.name, mapping_names, manual=True)
 
 		self.assertEqual(len(bulk_update_calls), 2)
 		self.assertEqual(len(bulk_update_calls[0]["variants"]), chunk_size)
@@ -416,7 +416,7 @@ class IntegrationTestPushCatalog(IntegrationTestCase):
 			raise AssertionError(f"Unexpected query in test: {query}")
 
 		with patch(EXECUTE_TARGET, side_effect=_side_effect):
-			catalog_push.push_catalog("job-price", "Administrator", self.account.name, [mapping.name])
+			catalog_push.push_catalog("job-price", "Administrator", self.account.name, [mapping.name], manual=True)
 
 		self.assertEqual(len(captured_variables), 1)
 		variables = captured_variables[0]
@@ -512,6 +512,8 @@ class IntegrationTestQueueCatalogPush(IntegrationTestCase):
 		mocked_enqueue.assert_called_once()
 		self.assertEqual(mocked_enqueue.call_args.kwargs["account_name"], self.account.name)
 		self.assertEqual(mocked_enqueue.call_args.kwargs["mapping_names"], [self.mapping.name])
+		# #516: the by-mapping Desk path is a manual push.
+		self.assertIs(mocked_enqueue.call_args.kwargs["manual"], True)
 
 	def test_dedup_rejection_reports_skipped_and_clears_queued_cache_entry(self):
 		with (
@@ -715,3 +717,310 @@ class IntegrationTestQueueAccountCatalogPush(IntegrationTestCase):
 			catalog_push.queue_account_catalog_push(self.account.name)
 
 		mocked_enqueue.assert_not_called()
+
+	def test_manual_account_push_tells_the_worker_it_is_manual(self):
+		self._make_mapping(207)
+
+		with patch("frappe.enqueue", return_value=object()) as mocked_enqueue:
+			catalog_push.queue_account_catalog_push(self.account.name)
+
+		self.assertIs(mocked_enqueue.call_args.kwargs["manual"], True)
+
+
+class IntegrationTestShopifyPricePushSwitch(IntegrationTestCase):
+	"""#516: "Push Prices to Shopify" (shopify_price_push_enabled, default OFF) governs only the
+	automatic hourly sweep; a manual push still runs. Every Shopify call is mocked."""
+
+	def setUp(self):
+		self.suffix = frappe.generate_hash(length=8)
+		self.price_list = (
+			frappe.get_doc(
+				{
+					"doctype": "Price List",
+					"price_list_name": f"Price Switch Price List {self.suffix}",
+					"currency": "USD",
+					"selling": 1,
+					"enabled": 1,
+				}
+			)
+			.insert()
+			.name
+		)
+		self.account = make_shopify_account(f"Price Switch Account {self.suffix}")
+		self.account.db_set("erpnext_selling_price_list", self.price_list, update_modified=False)
+		self.account.reload()
+		self.item = make_item(f"Price Switch Item {self.suffix}")
+		self.item_price = (
+			frappe.get_doc(
+				{
+					"doctype": "Item Price",
+					"price_list": self.price_list,
+					"item_code": self.item,
+					"uom": "Nos",
+					"price_list_rate": 25,
+					"selling": 1,
+				}
+			)
+			.insert()
+			.name
+		)
+
+	def tearDown(self):
+		frappe.db.delete("Marketplace Product Mapping", {"marketplace_account": self.account.name})
+		frappe.delete_doc("Marketplace Account", self.account.name, ignore_permissions=True, force=True)
+		frappe.delete_doc("Shopify Connection", self.account.connection, ignore_permissions=True, force=True)
+		frappe.delete_doc("Item Price", self.item_price, ignore_permissions=True, force=True)
+		frappe.delete_doc("Item", self.item, ignore_permissions=True, force=True)
+		frappe.delete_doc("Price List", self.price_list, ignore_permissions=True, force=True)
+		# push_catalog() commits per group, so this teardown must commit too.
+		frappe.db.commit()
+
+	def _make_mapping(self, number, enabled=1):
+		return frappe.get_doc(
+			{
+				"doctype": "Marketplace Product Mapping",
+				"marketplace_account": self.account.name,
+				"item": self.item,
+				"external_reference": f"gid://shopify/ProductVariant/{number}",
+				"external_product_id": f"gid://shopify/Product/{number}",
+				"enabled": enabled,
+			}
+		).insert()
+
+	def _sweep(self):
+		"""Run the sweep with enqueue and Shopify mocked; return this account's enqueue calls."""
+		with patch(EXECUTE_TARGET) as mocked_execute, patch("frappe.enqueue", return_value=object()) as enqueue:
+			catalog_push.sweep_price_pushes()
+		mocked_execute.assert_not_called()  # the sweep itself never calls Shopify
+		return [c for c in enqueue.call_args_list if c.kwargs.get("account_name") == self.account.name]
+
+	def test_switch_defaults_to_off_and_the_column_exists(self):
+		self.assertEqual(frappe.get_meta("Marketplace Account").get_field("shopify_price_push_enabled").default, "0")
+		self.assertEqual(self.account.shopify_price_push_enabled, 0)
+
+	def test_sweep_is_registered_hourly(self):
+		cron = frappe.get_hooks("scheduler_events")["cron"]
+		self.assertIn(
+			"marketplace_integrations.integrations.shopify.catalog_push.sweep_price_pushes", cron["25 * * * *"]
+		)
+
+	def test_sweep_skips_an_account_with_the_switch_off(self):
+		self._make_mapping(501)
+		self.assertEqual(self._sweep(), [])
+
+	def test_sweep_queues_only_enabled_mappings_of_a_switched_on_account_as_automatic(self):
+		enabled = self._make_mapping(502)
+		self._make_mapping(503, enabled=0)
+		self.account.db_set("shopify_price_push_enabled", 1, update_modified=False)
+
+		calls = self._sweep()
+
+		self.assertEqual(len(calls), 1)
+		self.assertEqual(calls[0].kwargs["mapping_names"], [enabled.name])
+		self.assertIs(calls[0].kwargs["manual"], False)
+
+	def test_sweep_skips_a_disabled_account_and_an_account_without_enabled_mappings(self):
+		self.account.db_set("shopify_price_push_enabled", 1, update_modified=False)
+		self.assertEqual(self._sweep(), [])  # no mappings at all
+		self._make_mapping(504, enabled=0)
+		self.assertEqual(self._sweep(), [])  # only a disabled mapping
+		self._make_mapping(505)
+		self.account.db_set("enabled", 0, update_modified=False)
+		self.assertEqual(self._sweep(), [])  # disabled account
+
+	def test_sweep_isolates_one_accounts_failure(self):
+		self._make_mapping(506)
+		self.account.db_set("shopify_price_push_enabled", 1, update_modified=False)
+		with (
+			patch.object(catalog_push, "_enqueue_account_pushes", side_effect=RuntimeError("boom")),
+			patch.object(frappe, "log_error") as log_error,
+		):
+			catalog_push.sweep_price_pushes()  # must not raise
+		log_error.assert_called()
+
+	def test_automatic_job_does_nothing_when_the_switch_is_off(self):
+		mapping = self._make_mapping(507)
+
+		with patch(EXECUTE_TARGET) as mocked_execute:
+			outcome = catalog_push.push_catalog(
+				"job-sw-1", "Administrator", self.account.name, [mapping.name], manual=False
+			)
+
+		mocked_execute.assert_not_called()
+		self.assertEqual(outcome, {"paused": True})
+		mapping.reload()
+		self.assertEqual(mapping.sync_status, "Not Synced")
+		state = frappe.cache().get_value(catalog_push._push_cache_key("job-sw-1"))
+		self.assertEqual(state["status"], "failed")
+		self.assertEqual(state["error"], "Price push is paused for this account.")
+
+	def test_manual_job_pushes_with_the_switch_off(self):
+		mapping = self._make_mapping(508)
+		self.assertEqual(self.account.shopify_price_push_enabled, 0)
+
+		with patch(
+			EXECUTE_TARGET,
+			side_effect=_execute_dispatcher(
+				bulk_response={"productVariants": [{"id": mapping.external_reference}], "userErrors": []}
+			),
+		):
+			catalog_push.push_catalog("job-sw-2", "Administrator", self.account.name, [mapping.name], manual=True)
+
+		mapping.reload()
+		self.assertEqual(mapping.sync_status, "Synced")
+
+	def test_automatic_job_pushes_when_the_switch_is_on(self):
+		mapping = self._make_mapping(509)
+		self.account.db_set("shopify_price_push_enabled", 1, update_modified=False)
+
+		with patch(
+			EXECUTE_TARGET,
+			side_effect=_execute_dispatcher(
+				bulk_response={"productVariants": [{"id": mapping.external_reference}], "userErrors": []}
+			),
+		):
+			catalog_push.push_catalog(
+				"job-sw-3", "Administrator", self.account.name, [mapping.name], manual=False
+			)
+
+		mapping.reload()
+		self.assertEqual(mapping.sync_status, "Synced")
+
+	def test_automatic_job_with_a_currency_mismatch_writes_the_mapping_error_and_does_not_raise(self):
+		mapping = self._make_mapping(510)
+		self.account.db_set("shopify_price_push_enabled", 1, update_modified=False)
+
+		with patch(EXECUTE_TARGET, side_effect=_currency_only_dispatcher(currency="EGP")):
+			outcome = catalog_push.push_catalog(
+				"job-sw-4", "Administrator", self.account.name, [mapping.name], manual=False
+			)
+
+		self.assertTrue(outcome["failed"])
+		mapping.reload()
+		self.assertEqual(mapping.sync_status, "Error")
+		self.assertIn("currency", mapping.last_error)
+		state = frappe.cache().get_value(catalog_push._push_cache_key("job-sw-4"))
+		self.assertEqual(state["status"], "failed")
+		self.assertIn("currency", state["error"])
+
+	def test_manual_job_with_a_currency_mismatch_still_raises_to_the_user(self):
+		mapping = self._make_mapping(513)
+
+		with (
+			patch(EXECUTE_TARGET, side_effect=_currency_only_dispatcher(currency="EGP")),
+			self.assertRaisesRegex(frappe.ValidationError, "currency"),
+		):
+			catalog_push.push_catalog(
+				"job-sw-6", "Administrator", self.account.name, [mapping.name], manual=True
+			)
+
+	def test_sweep_isolates_a_failing_account_and_still_runs_the_second(self):
+		self._make_mapping(514)
+		self.account.db_set("shopify_price_push_enabled", 1, update_modified=False)
+		other = make_shopify_account(f"Price Switch Other Account {self.suffix}")
+		other.db_set("erpnext_selling_price_list", self.price_list, update_modified=False)
+		other.db_set("shopify_price_push_enabled", 1, update_modified=False)
+		other_mapping = frappe.get_doc(
+			{
+				"doctype": "Marketplace Product Mapping",
+				"marketplace_account": other.name,
+				"item": self.item,
+				"external_reference": "gid://shopify/ProductVariant/515",
+				"external_product_id": "gid://shopify/Product/515",
+			}
+		).insert()
+
+		def _cleanup():
+			frappe.db.delete("Marketplace Product Mapping", {"name": other_mapping.name})
+			frappe.delete_doc("Marketplace Account", other.name, ignore_permissions=True, force=True)
+			frappe.delete_doc("Shopify Connection", other.connection, ignore_permissions=True, force=True)
+
+		self.addCleanup(_cleanup)
+		seen = []
+
+		def _enqueue(accounts, manual=False):
+			name = next(iter(accounts))
+			if name == self.account.name:
+				raise RuntimeError("boom")
+			seen.append((name, manual))
+			return {"jobs": [], "skipped_accounts": []}
+
+		with (
+			patch.object(catalog_push, "_enqueue_account_pushes", side_effect=_enqueue),
+			patch.object(frappe, "log_error") as log_error,
+		):
+			catalog_push.sweep_price_pushes()
+
+		log_error.assert_called_once()
+		self.assertEqual(seen, [(other.name, False)])
+
+	def test_sweep_when_enqueue_is_deduplicated_does_not_raise_or_mark_the_mapping(self):
+		mapping = self._make_mapping(516)
+		self.account.db_set("shopify_price_push_enabled", 1, update_modified=False)
+
+		with patch(EXECUTE_TARGET) as mocked_execute, patch("frappe.enqueue", return_value=None):
+			catalog_push.sweep_price_pushes()  # must not raise
+
+		mocked_execute.assert_not_called()
+		mapping.reload()
+		self.assertEqual(mapping.sync_status, "Not Synced")
+
+	def test_sweep_skipping_a_misconfigured_account_writes_the_reason_on_its_mappings(self):
+		mapping = self._make_mapping(517)
+		self.account.db_set("shopify_price_push_enabled", 1, update_modified=False)
+		self.account.db_set("erpnext_selling_price_list", None, update_modified=False)
+
+		self.assertEqual(self._sweep(), [])
+
+		mapping.reload()
+		self.assertEqual(mapping.sync_status, "Error")
+		self.assertIn("Selling Price List", mapping.last_error)
+
+	def test_desk_paths_pass_manual_true_and_the_default_is_automatic(self):
+		mapping = self._make_mapping(518)
+		with patch("frappe.enqueue", return_value=object()) as enqueue:
+			catalog_push.queue_catalog_push([mapping.name])
+			catalog_push.queue_account_catalog_push(self.account.name)
+		self.assertEqual([c.kwargs["manual"] for c in enqueue.call_args_list], [True, True])
+
+		with patch("frappe.enqueue", return_value=object()) as enqueue:
+			catalog_push._enqueue_account_pushes(
+				{self.account.name: {"account": self.account, "mapping_names": [mapping.name]}}
+			)
+		self.assertIs(enqueue.call_args.kwargs["manual"], False)
+
+	def test_switch_turned_off_mid_job_stops_before_the_next_product_group(self):
+		first = self._make_mapping(511)
+		second = self._make_mapping(512)
+		self.account.db_set("shopify_price_push_enabled", 1, update_modified=False)
+		real_push_group = catalog_push._push_product_group
+
+		def push_group_then_switch_off(*args, **kwargs):
+			outcome = real_push_group(*args, **kwargs)
+			frappe.db.set_value("Marketplace Account", self.account.name, "shopify_price_push_enabled", 0)
+			return outcome
+
+		with (
+			patch(
+				EXECUTE_TARGET,
+				side_effect=_execute_dispatcher(
+					bulk_response={
+						"productVariants": [
+							{"id": first.external_reference},
+							{"id": second.external_reference},
+						],
+						"userErrors": [],
+					}
+				),
+			),
+			patch.object(catalog_push, "_push_product_group", side_effect=push_group_then_switch_off),
+		):
+			outcome = catalog_push.push_catalog(
+				"job-sw-5", "Administrator", self.account.name, [first.name, second.name], manual=False
+			)
+
+		self.assertEqual(outcome, {"paused": True})
+		first.reload()
+		second.reload()
+		self.assertEqual(first.sync_status, "Synced")
+		self.assertEqual(second.sync_status, "Not Synced")

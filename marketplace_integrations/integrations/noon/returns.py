@@ -40,7 +40,7 @@ from datetime import timedelta
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, now_datetime
+from frappe.utils import cstr, escape_html, now_datetime
 
 from marketplace_integrations.integrations.noon.catalog import get_account, validate_connection_enabled
 from marketplace_integrations.integrations.noon.client import NoonClient
@@ -56,6 +56,9 @@ from marketplace_integrations.marketplace_integrations.doctype.noon_return.noon_
 from marketplace_integrations.services.sales_order_sync_debounce import bump_sync_debounce
 
 RQ_JOB_PREFIX = "marketplace-noon-return"
+LOOKUP_RESULT_TTL_SECONDS = 3600
+APPLY_OUTCOMES_MAX = 200
+RECEIVED_THROUGH_NEW_RETURN = "Received through New Return"
 
 
 # ---------------------------------------------------------------------------
@@ -402,15 +405,22 @@ def upsert_return_item(account, item, found_via):
 def _upsert_items(account, items, found_via):
 	"""Upsert each returned item on its own, so one bad item (a duplicate-key race,
 	an over-long Noon field, a future validation error) is logged and skipped
-	instead of dropping the rest of the batch, like the AWB scan does per AWB."""
+	instead of dropping the rest of the batch, like the AWB scan does per AWB.
+
+	Returns the names of the Noon Returns that were saved."""
+	names = []
 	for item in items:
 		if not isinstance(item, dict):
 			continue
 		try:
-			upsert_return_item(account, item, found_via)
+			doc = upsert_return_item(account, item, found_via)
 		except Exception:
 			frappe.db.rollback()
 			frappe.log_error(title="Noon return lookup: item failed", message=frappe.get_traceback())
+			continue
+		if doc is not None:
+			names.append(doc.name)
+	return names
 
 
 def run_webhook_lookup(account_name, barcode):
@@ -445,35 +455,75 @@ def queue_webhook_lookup(account_name, barcode):
 	return job is not None
 
 
-def run_manual_lookup(account_name, barcode):
+def _lookup_hash(account_name, barcode, merchant_code):
+	"""Deterministic (not ``frappe.generate_hash()``, which is random) so two requests for the same
+	account + barcode + merchant code collide on one job id for RQ's ``deduplicate=True``."""
+	return hashlib.sha256(f"{account_name}:{barcode}:{merchant_code}".encode()).hexdigest()[:16]
+
+
+def _store_lookup_result(lookup_key, account_name, state, names=None, error=None):
+	frappe.cache().set_value(
+		lookup_key,
+		{"state": state, "account": account_name, "names": names or [], "error": error},
+		expires_in_sec=LOOKUP_RESULT_TTL_SECONDS,
+	)
+
+
+def get_lookup_result_state(account_name, lookup_key):
+	"""The stored ``{state, names, error}`` of one manual lookup for this account, or ``None`` when
+	the key is unknown, expired or belongs to another account."""
+	result = frappe.cache().get_value(lookup_key) if lookup_key else None
+	if not isinstance(result, dict) or result.get("account") != account_name:
+		return None
+	return {"state": result.get("state"), "names": result.get("names") or [], "error": result.get("error")}
+
+
+def run_manual_lookup(account_name, barcode, merchant_code=None, lookup_key=None):
 	"""The enqueued worker target for a manual barcode lookup - switches to
 	Administrator (same rationale as every other Noon background worker in
 	this app) since this runs detached from whatever Desk session originally
-	queued it."""
+	queued it.
+
+	A blank ``merchant_code`` sends no ``merchant_codes`` (Noon scopes to the connection's
+	``default_project_code``); a set one sends just that code. The outcome (saved Noon Return
+	names, or the error) is kept in the cache under ``lookup_key`` for the Desk to poll."""
 	frappe.set_user("Administrator")
-	account = get_account(account_name)
-	validate_connection_enabled(account)
-	items = list_return_references(account, barcode)
-	_upsert_items(account, items, "Manual Lookup")
+	try:
+		account = get_account(account_name)
+		validate_connection_enabled(account)
+		merchant_codes = [merchant_code] if merchant_code else []
+		items = list_return_references(account, barcode, merchant_codes=merchant_codes)
+		names = _upsert_items(account, items, "Manual Lookup")
+	except Exception as exc:
+		if lookup_key:
+			_store_lookup_result(lookup_key, account_name, "error", error=escape_html(cstr(exc)))
+		raise
+	if lookup_key:
+		_store_lookup_result(lookup_key, account_name, "done", names=names)
 
 
-def queue_manual_lookup(account_name, barcode):
+def queue_manual_lookup(account_name, barcode, merchant_code=None):
 	"""Queue a manual ``ListReturnReferences`` lookup for one barcode on the
-	``long`` queue, deduplicated by a job_id keyed on account + barcode
-	(#153 scope) - never makes a Noon HTTP call in the calling request
-	itself."""
+	``long`` queue, deduplicated by a job_id keyed on account + barcode +
+	merchant code (#153, #549) - never makes a Noon HTTP call in the calling
+	request itself.
+
+	``merchant_code`` is optional; when set it must be one of the account's derived merchant codes,
+	else nothing is queued. Returns ``{queued, lookup_key}``; the key addresses the result."""
 	account = get_account(account_name)
 	account.check_permission("write")
 	validate_connection_enabled(account)
 	barcode = cstr(barcode).strip()
 	if not barcode:
 		frappe.throw(_("A barcode is required."))
+	merchant_code = cstr(merchant_code).strip()
+	if merchant_code and merchant_code not in (_account_merchant_codes(account) or []):
+		frappe.throw(_("Merchant code {0} is not one of this account's merchant codes.").format(merchant_code))
 
-	# A deterministic hash (not frappe.generate_hash(), which is a random
-	# string generator, not a function of its input) - two concurrent lookup
-	# requests for the same account + barcode must collide on the same
-	# job_id for RQ's own deduplicate=True to actually catch them.
-	job_id_hash = hashlib.sha256(f"{account.name}:{barcode}".encode()).hexdigest()[:16]
+	job_id_hash = _lookup_hash(account.name, barcode, merchant_code)
+	lookup_key = f"{RQ_JOB_PREFIX}-result-{job_id_hash}"
+	previous = get_lookup_result_state(account.name, lookup_key)
+	_store_lookup_result(lookup_key, account.name, "queued")
 	job = frappe.enqueue(
 		run_manual_lookup,
 		queue="long",
@@ -482,8 +532,48 @@ def queue_manual_lookup(account_name, barcode):
 		deduplicate=True,
 		account_name=account.name,
 		barcode=barcode,
+		merchant_code=merchant_code,
+		lookup_key=lookup_key,
 	)
-	return {"queued": job is not None}
+	if job is None and previous and previous["state"] in ("done", "error"):
+		# Deduplicated: no new job will write a result, so a finished result must not be
+		# replaced by a "queued" that nothing would ever resolve.
+		_store_lookup_result(
+			lookup_key, account.name, previous["state"], names=previous["names"], error=previous["error"]
+		)
+	return {"queued": job is not None, "lookup_key": lookup_key}
+
+
+def apply_outcomes(rows):
+	"""Receive and inspect several Noon Returns at once (#549): per row the receipt is acknowledged
+	("Received through New Return") and the outcome recorded, each row in its own savepoint so a
+	refused row (its acknowledgement included) rolls back alone. Makes no Noon call and submits
+	nothing. Returns one ``{noon_return, ok, outcome, sales_return, message}`` per row."""
+	if not isinstance(rows, list) or len(rows) > APPLY_OUTCOMES_MAX:
+		frappe.throw(_("Send a list of at most {0} rows.").format(APPLY_OUTCOMES_MAX))
+
+	results = []
+	for index, row in enumerate(rows):
+		row = row if isinstance(row, dict) else {}
+		name = cstr(row.get("noon_return")).strip()
+		outcome = cstr(row.get("outcome")).strip()
+		result = {"noon_return": name, "ok": False, "outcome": outcome, "sales_return": None, "message": None}
+		savepoint = f"noon_return_apply_{index}"
+		frappe.db.savepoint(savepoint)
+		try:
+			if not name or not frappe.db.exists("Noon Return", name):
+				frappe.throw(_("Noon Return {0} was not found.").format(name))
+			doc = frappe.get_doc("Noon Return", name)
+			doc.check_permission("write")
+			doc.acknowledge_receipt(RECEIVED_THROUGH_NEW_RETURN)
+			recorded = doc.record_inspection(outcome)
+			result.update(ok=True, sales_return=recorded.get("sales_return"))
+		except Exception as exc:
+			frappe.db.rollback(save_point=savepoint)
+			frappe.clear_messages()
+			result["message"] = escape_html(cstr(exc))
+		results.append(result)
+	return results
 
 
 # ---------------------------------------------------------------------------

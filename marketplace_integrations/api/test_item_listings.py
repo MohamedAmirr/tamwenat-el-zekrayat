@@ -164,6 +164,21 @@ class IntegrationTestItemListings(IntegrationTestCase):
 		self.assertFalse(rows[self.talabat_mapping.name]["stock_push_off"])
 		self.assertFalse(rows[self.talabat_mapping.name]["price_push_off"])
 
+	def test_shopify_account_reports_its_price_and_inventory_switches_separately(self):
+		from marketplace_integrations.api import item_listings
+
+		account = frappe._dict(
+			account_name="Shop",
+			platform="Shopify",
+			shopify_inventory_push_enabled=1,
+			shopify_price_push_enabled=0,
+		)
+		with patch.object(item_listings.frappe.db, "get_value", return_value=account):
+			summary = item_listings._account_summary("ANY")
+
+		self.assertTrue(summary["price_push_off"])
+		self.assertFalse(summary["stock_push_off"])
+
 	def mapping_count(self):
 		result = get_open_count("Item", self.item, ["Marketplace Product Mapping"])
 		(link,) = result["count"]["external_links_found"]

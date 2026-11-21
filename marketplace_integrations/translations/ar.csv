@@ -335,7 +335,13 @@ Last Confirmed External Status Until,آخر حالة خارجية مؤكدة ح�
 External Status Last Checked On,آخر فحص للحالة الخارجية
 External Status Error,خطأ الحالة الخارجية
 External Status Payload,بيانات الحالة الخارجية
-ERPNext Integration Settings,إعدادات تكامل ERPNext
+General,عام
+Pricing and Stock,الأسعار والمخزون
+Orders and Shipping,الطلبات والشحن
+Platform Status,حالة المنصة
+Sync,المزامنة
+Price Error,خطأ السعر
+Stock Error,خطأ المخزون
 ERPNext Company,شركة ERPNext
 ERPNext Selling Price List,قائمة أسعار البيع في ERPNext
 ERPNext Customer,عميل ERPNext
@@ -453,7 +459,6 @@ External Barcode,الباركود الخارجي
 Sales UOM,وحدة قياس البيع
 Sync Status,حالة المزامنة
 Last Sync Reference,مرجع آخر مزامنة
-Shopify Inventory Sync,مزامنة مخزون Shopify
 Inventory Sync Status,حالة مزامنة المخزون
 Inventory Last Synced On,آخر مزامنة للمخزون
 Inventory Last Error,آخر خطأ في المخزون
@@ -526,7 +531,6 @@ A Noon Return for Marketplace Account {0} and Purchase Item Nr {1} already exist
 A Noon destination for this connection already exists.,توجد بالفعل وجهة Noon لهذا الاتصال.
 A Noon fulfillment action for this order is already queued or running.,يوجد إجراء تنفيذ Noon لهذا الطلب في قائمة الانتظار أو قيد التشغيل بالفعل.
 A Noon refresh for this order is already queued or running.,يوجد تحديث Noon لهذا الطلب في قائمة الانتظار أو قيد التشغيل بالفعل.
-A Noon return lookup is already queued or running for barcode {0}.,يوجد بحث عن مرتجع Noon في قائمة الانتظار أو قيد التشغيل بالفعل للباركود {0}.
 "A Noon unit has a status this app does not recognize, so it is unknown whether the order can still change.",إحدى وحدات Noon لها حالة لا يتعرّف عليها هذا التطبيق، لذا لا يُعرف ما إذا كان الطلب لا يزال قابلًا للتغيير.
 A Shopify Marketplace Account must use a Shopify Connection.,يجب أن يستخدم حساب سوق Shopify اتصال Shopify.
 A Shopify order import is already running for Marketplace Account {0}.,يوجد استيراد طلبات Shopify قيد التشغيل بالفعل لحساب السوق {0}.
@@ -658,7 +662,7 @@ Deactivate destination {0}? Noon stops sending events to it.,إلغاء تفعي
 Delete Demo Data,حذف البيانات التجريبية
 Draft Credit Note created.,تم إنشاء إشعار دائن مسودة.
 Draft Sales Return created.,تم إنشاء مرتجع مبيعات مسودة.
-Draft or submitted return Delivery Note created from a Sellable outcome.,"مذكرة تسليم مرتجعة (مسودة أو معتمدة) أُنشئت من نتيجة ""قابل للبيع""."
+Draft or submitted return Delivery Note created from an inspection outcome.,مذكرة تسليم مرتجعة (مسودة أو معتمدة) أُنشئت من نتيجة الفحص.
 Draft or submitted return Sales Invoice (Credit Note) for this returned item.,فاتورة مبيعات مرتجعة (إشعار دائن) مسودة أو معتمدة لهذا العنصر المرتجع.
 ERPNext Customer {0} configured on Marketplace Account {1} does not exist.,عميل ERPNext {0} المضبوط في حساب السوق {1} غير موجود.
 ERPNext Customer {0}'s default currency ({1}) must match Company {2}'s default currency ({3}) before synchronizing orders. Multi-currency Sales Order synchronization is not supported.,يجب أن تطابق العملة الافتراضية لعميل ERPNext {0} ({1}) العملة الافتراضية للشركة {2} ({3}) قبل مزامنة الطلبات. مزامنة أوامر البيع متعددة العملات غير مدعومة.
@@ -723,7 +727,7 @@ IN_CART,في السلة
 Import Noon orders for this account now?,هل تريد استيراد طلبات Noon لهذا الحساب الآن؟
 Income account that receives the shipping charge of synced Shopify orders. Required once an order with a shipping charge is synced. Not used for merchandise.,حساب الإيرادات الذي يستلم رسوم الشحن لطلبات Shopify المتزامنة. مطلوب بمجرد مزامنة طلب له رسوم شحن. لا يُستخدم للبضائع.
 Incomplete,غير مكتمل
-Inspection outcome must be Sellable or Damaged.,"يجب أن تكون نتيجة الفحص ""قابل للبيع"" أو ""تالف""."
+"Inspection outcome must be Restock, Damaged or Damaged, Noon paid.","يجب أن تكون نتيجة الفحص ""إعادة للمخزون"" أو ""تالف"" أو ""تالف، دفعت Noon""."
 Inspection recorded.,تم تسجيل الفحص.
 Internal (#180): when the scheduled reconciliation sweep last bumped this order; used to back off re-checks. Set only by services/sales_order_sync_debounce.py.,داخلي (#180): وقت آخر تنبيه لهذا الطلب من مسح التسوية المجدول؛ يُستخدم لتأخير إعادة الفحص. يُضبط فقط بواسطة services/sales_order_sync_debounce.py.
 Internal Note,ملاحظة داخلية
@@ -889,7 +893,6 @@ Noon rejected this item.,رفضت Noon هذا العنصر.
 Noon request failed (HTTP {0}).,فشل طلب Noon (HTTP {0}).
 Noon request path must be relative to the API host.,يجب أن يكون مسار طلب Noon نسبيًا إلى مضيف API.
 Noon request transport options are managed by the client.,خيارات نقل طلبات Noon يديرها العميل البرمجي.
-Noon return lookup queued for barcode {0}.,تمت إضافة البحث عن مرتجع Noon إلى قائمة الانتظار للباركود {0}.
 Noon returned an invalid order list response.,أرجعت Noon استجابة قائمة طلبات غير صالحة.
 Noon returned an invalid order pagination cursor.,أرجعت Noon مؤشر ترقيم صفحات غير صالح للطلبات.
 Noon returned an invalid order response.,أرجعت Noon استجابة طلب غير صالحة.
@@ -958,7 +961,6 @@ Push to Talabat,إرسال إلى Talabat
 Pushing to Shopify,جارٍ الإرسال إلى Shopify
 "Pushing... {0} succeeded, {1} failed, {2} skipped so far.",جارٍ الإرسال... نجح {0}، فشل {1}، تم تخطي {2} حتى الآن.
 Queuing Noon refresh...,جارٍ إضافة تحديث Noon إلى قائمة الانتظار...
-Queuing Noon return lookup...,جارٍ إضافة البحث عن مرتجع Noon إلى قائمة الانتظار...
 Queuing Noon sync...,جارٍ إضافة مزامنة Noon إلى قائمة الانتظار...
 Queuing Out of Stock update...,جارٍ إضافة تحديث النفاد من المخزون إلى قائمة الانتظار...
 Queuing Shopify inventory sync...,جارٍ إضافة مزامنة مخزون Shopify إلى قائمة الانتظار...
@@ -1057,7 +1059,6 @@ Select a valid Noon environment: Production or Static Sandbox.,اختر بيئة
 Select at least one Marketplace Product Mapping.,حدّد ربط منتجات سوق واحدًا على الأقل.
 Select one or more Error rows to retry.,حدّد صف خطأ واحدًا أو أكثر لإعادة المحاولة.
 Sellable,قابل للبيع
-Sellable drafts a Sales Return into the account warehouse. Damaged is only recorded: Noon is responsible for it.,"""قابل للبيع"" يُنشئ مسودة مرتجع مبيعات إلى مستودع الحساب. ""تالف"" يُسجَّل فقط: Noon مسؤولة عنه."
 Send the current webhook URL to Noon,إرسال رابط Webhook الحالي إلى Noon
 Send to Talabat,إرسال إلى Talabat
 Set the ERPNext Company before choosing a Clearing Account.,اضبط شركة ERPNext قبل اختيار حساب التسوية.
@@ -1207,7 +1208,7 @@ The inspection outcome was already recorded as {0} and cannot be changed.,نتي
 The linked Marketplace Order has no submitted Sales Order.,طلب السوق المرتبط ليس له أمر بيع معتمد.
 The marketplace order cannot be cancelled from ERPNext: {0},لا يمكن إلغاء طلب السوق من ERPNext: {0}
 The marketplace order changed after it was synced to ERPNext.,تغيّر طلب السوق بعد مزامنته مع ERPNext.
-The merchant's decision for the returned item. Sellable creates a draft Sales Return into the account warehouse; Damaged records only (Noon is responsible for it).,"قرار التاجر بشأن العنصر المرتجع. ""قابل للبيع"" يُنشئ مسودة مرتجع مبيعات إلى مستودع الحساب؛ ""تالف"" يُسجَّل فقط (Noon مسؤولة عنه)."
+"The merchant's decision for the returned item. Sellable (shown as Restock) creates a draft Sales Return into the account warehouse; Damaged and Damaged, Noon paid create a draft Sales Return into the account's damaged warehouse.","قرار التاجر بشأن العنصر المرتجع. ""قابل للبيع"" (يظهر باسم ""إعادة للمخزون"") يُنشئ مسودة مرتجع مبيعات إلى مستودع الحساب؛ ""تالف"" و""تالف، دفعت Noon"" يُنشئان مسودة مرتجع مبيعات إلى مستودع التالف الخاص بالحساب."
 The one Bosta business pickup location used for this site. Pick it with Fetch Locations.,"موقع الاستلام التجاري الوحيد في Bosta المستخدم لهذا الموقع. اختره عبر ""جلب المواقع""."
 The order is already cancelled on Talabat.,الطلب ملغى بالفعل على Talabat.
 "The receivable account {0} is in {1}, not the Company currency {2}.",حساب المدينين {0} بعملة {1}، وليس بعملة الشركة {2}.
@@ -1316,6 +1317,10 @@ Push Prices to Noon,إرسال الأسعار إلى Noon
 Turn off to keep importing Noon orders while ERPNext stops automatically writing stock to this account. Turning it back on does not trigger a full push. Manual syncs from the mapping still run.,أوقفه لمواصلة استيراد طلبات Noon بينما يتوقف ERPNext عن الكتابة التلقائية لـ المخزون في هذا الحساب. إعادة تشغيله لا تُطلق إرسالًا كاملًا. تظل المزامنة اليدوية من الربط تعمل.
 Turn off to keep importing Noon orders while ERPNext stops automatically writing prices to this account. Turning it back on does not trigger a full push. Manual syncs from the mapping still run.,أوقفه لمواصلة استيراد طلبات Noon بينما يتوقف ERPNext عن الكتابة التلقائية لـ الأسعار في هذا الحساب. إعادة تشغيله لا تُطلق إرسالًا كاملًا. تظل المزامنة اليدوية من الربط تعمل.
 Price push is paused for this account.,إرسال الأسعار متوقف مؤقتًا لهذا الحساب.
+Push Prices to Shopify,إرسال الأسعار إلى Shopify
+"Turn on to let ERPNext re-send the prices of all of this store's enabled listings every hour from the account's Selling Price List. This overwrites any price edited in Shopify admin within the hour. It writes to the live store, so keep it off until the Price List is ready. Manual price syncs from the mapping still run.","شغّله ليعيد ERPNext إرسال أسعار جميع القوائم المفعّلة في هذا المتجر كل ساعة من قائمة أسعار البيع الخاصة بالحساب. هذا يستبدل أي سعر تم تعديله في لوحة إدارة Shopify خلال الساعة. يكتب على المتجر الفعلي، لذا أبقه متوقفًا حتى تجهز قائمة الأسعار. تظل مزامنة الأسعار اليدوية من الربط تعمل."
+Noon did not answer in time (HTTP 504).,لم يرد Noon في الوقت المناسب (HTTP 504).
+Try the sync again in a few minutes.,حاول المزامنة مرة أخرى بعد بضع دقائق.
 Bosta City Code,رمز مدينة Bosta
 Choose a Bosta city.,اختر مدينة Bosta.
 Could not load the Bosta city codes. Try again in a minute.,تعذر تحميل رموز مدن Bosta. حاول مرة أخرى بعد دقيقة.
@@ -1535,9 +1540,9 @@ Product Bundle {0}: component Item {1} needs a positive quantity.,حزمة ال�
 Marketplace Order {0} has no Sales Order yet.,طلب السوق {0} ليس له أمر بيع بعد.
 Sales Order {0} is not submitted.,أمر البيع {0} غير معتمد.
 Some handed-over units could not be added to the draft Delivery Note. Fix the product mapping or add them to a Delivery Note by hand.,تعذّرت إضافة بعض الوحدات المسلّمة إلى مسودة مذكرة التسليم. أصلح ربط المنتج أو أضفها إلى مذكرة تسليم يدويًا.
-"Items, quantities and rates of a Noon order cannot be changed in ERPNext because Noon has no order update. Use Mark as Out of Stock on an item row of the Sales Order, or cancel and amend the Delivery Note.",لا يمكن تغيير أصناف وكميات وأسعار طلب Noon في ERPNext لأن Noon لا تدعم تحديث الطلب. استخدم «وضع علامة نفاد من المخزون» على صف صنف في أمر البيع، أو ألغِ مذكرة التسليم وعدّلها.
+"Items, quantities and rates of a Noon order cannot be changed in ERPNext because Noon has no order update. Use Mark as Out of Stock on an item row of the Sales Order, or cancel the Delivery Note, which stops at Awaiting Return until a Noon User or System Manager enters the returned quantities in Confirm Returned, and then amend it.",لا يمكن تغيير أصناف وكميات وأسعار طلب Noon في ERPNext لأن Noon لا تدعم تحديث الطلب. استخدم «وضع علامة نفاد من المخزون» على صف صنف في أمر البيع، أو ألغِ مذكرة التسليم (تتوقف عند «بانتظار الإرجاع» حتى يدخل مستخدم Noon أو مدير النظام الكميات المرتجعة في «تأكيد الإرجاع») ثم عدّلها.
 Noon order items are locked,أصناف طلب Noon مقفلة
-"Items and quantities of a Noon order cannot be changed here. Use Mark as Out of Stock on an item row of this Sales Order, or cancel and amend the Delivery Note.",لا يمكن تغيير أصناف وكميات طلب Noon هنا. استخدم «وضع علامة نفاد من المخزون» على صف صنف في أمر البيع هذا، أو ألغِ مذكرة التسليم وعدّلها.
+"Items and quantities of a Noon order cannot be changed here. Use Mark as Out of Stock on an item row of this Sales Order, or cancel the Delivery Note, which stops at Awaiting Return until a Noon User or System Manager enters the returned quantities in Confirm Returned, and then amend it.",لا يمكن تغيير أصناف وكميات طلب Noon هنا. استخدم «وضع علامة نفاد من المخزون» على صف صنف في أمر البيع هذا، أو ألغِ مذكرة التسليم (تتوقف عند «بانتظار الإرجاع» حتى يدخل مستخدم Noon أو مدير النظام الكميات المرتجعة في «تأكيد الإرجاع») ثم عدّلها.
 Delivery Note,مذكرة التسليم
 AWB,بوليصة الشحن
 Bosta shipments cannot be created for {0} orders: {0} fulfils its own orders.,لا يمكن إنشاء شحنات Bosta لطلبات {0}: {0} تتولى تنفيذ طلباتها بنفسها.
@@ -1754,6 +1759,7 @@ Noon still shows the shipment as not cancelled.,ما زالت Noon تعرض ال
 Checking with Noon...,جارٍ التحقق لدى Noon...
 Check with Noon,التحقق من Noon
 "Cancel the Noon shipment of this Delivery Note? Noon documents that cancelling the shipment also cancels its items at Noon: the Sales Order lines may be cancelled or reduced, and the units may not be shippable again. This cannot be undone.","هل تريد إلغاء شحنة Noon لمذكرة التسليم هذه؟ تذكر وثائق Noon أن إلغاء الشحنة يلغي أيضًا أصنافها لدى Noon: قد تُلغى بنود أمر البيع أو تُخفَّض، وقد لا تصبح الوحدات قابلة للشحن مرة أخرى. لا يمكن التراجع عن ذلك."
+The Delivery Note will stop at Awaiting Return with its stock still out until a Noon User presses Confirm Returned.,ستتوقف مذكرة التسليم عند «بانتظار الإرجاع» ويبقى مخزونها خارج المستودع حتى يضغط مستخدم Noon على «تأكيد الإرجاع».
 The Noon shipment was cancelled. The Delivery Note can now be deleted.,أُلغيت شحنة Noon. يمكن الآن حذف مذكرة التسليم.
 Noon returned a unit status this app does not know or no longer lists a unit.,أرجعت Noon حالة وحدة لا يعرفها التطبيق أو لم تعد تعرض إحدى الوحدات.
 Noon shows this shipment as cancelled. Cancel the Delivery Note here.,تعرض Noon هذه الشحنة ملغاة. ألغِ مذكرة التسليم هنا.
@@ -2239,8 +2245,8 @@ Part of the total is paid. Next step: collect the rest when the parcel is delive
 Still owed: {0}. Next step: collect it when the parcel is delivered.,المتبقي: {0}. الخطوة التالية: حصّله عند تسليم الطرد.
 Awaiting Return,بانتظار الإرجاع
 Confirm Returned,تأكيد الإرجاع
-Noon cancelled Delivery Note {0} after pickup. Stock stays out until you press Confirm Returned.,ألغت Noon مذكرة التسليم {0} بعد الاستلام. يبقى المخزون خارج المستودع حتى تضغط «تأكيد الإرجاع».
-Noon cancelled this shipment after pickup. Use Confirm Returned when the goods are back.,ألغت Noon هذه الشحنة بعد الاستلام. استخدم «تأكيد الإرجاع» عند عودة البضاعة.
+The Noon shipment of Delivery Note {0} was cancelled. Stock stays out until you press Confirm Returned.,أُلغيت شحنة Noon لمذكرة التسليم {0}. يبقى المخزون خارج المستودع حتى تضغط «تأكيد الإرجاع».
+The Noon shipment was cancelled. Use Confirm Returned when the goods are back.,أُلغيت شحنة Noon. استخدم «تأكيد الإرجاع» عند عودة البضاعة.
 This Delivery Note is not waiting for its goods to come back from Noon.,مذكرة التسليم هذه لا تنتظر عودة بضاعتها من Noon.
 The returned quantities do not match the lines of this Delivery Note.,الكميات المرتجعة لا تطابق بنود مذكرة التسليم هذه.
 Returned quantity of {0} is not a number.,الكمية المرتجعة للصنف {0} ليست رقمًا.
@@ -2253,7 +2259,7 @@ Units that did not come back were written off with Stock Entry {0}.,شُطبت �
 The Delivery Note was not cancelled and nothing was written off: {0},لم تُلغَ مذكرة التسليم ولم يُشطب شيء: {0}
 Only a Noon User or System Manager can confirm returned goods.,يمكن لمستخدم Noon أو مدير النظام فقط تأكيد إرجاع البضاعة.
 Delivery Note {0} is not a Noon shipment.,مذكرة التسليم {0} ليست شحنة Noon.
-Noon cancelled this shipment after pickup. The stock stays out until a Noon User confirms the goods are back (Confirm Returned).,ألغت Noon هذه الشحنة بعد الاستلام. يبقى المخزون خارج المستودع حتى يؤكد مستخدم Noon عودة البضاعة (تأكيد الإرجاع).
+The Noon shipment was cancelled. The stock stays out until a Noon User confirms the goods are back (Confirm Returned).,أُلغيت شحنة Noon. يبقى المخزون خارج المستودع حتى يؤكد مستخدم Noon عودة البضاعة (تأكيد الإرجاع).
 Confirming the return...,جارٍ تأكيد الإرجاع...
 Returned goods confirmed. The Delivery Note was cancelled.,تم تأكيد إرجاع البضاعة. أُلغيت مذكرة التسليم.
 Shipped Qty,الكمية المشحونة
@@ -2263,6 +2269,45 @@ The return could not be confirmed.,تعذّر تأكيد الإرجاع.
 The lines could not be read.,تعذّرت قراءة البنود.
 Reading the lines...,جارٍ قراءة البنود...
 This Delivery Note has no stock lines to confirm.,لا توجد في مذكرة التسليم هذه بنود مخزنية للتأكيد.
-"{0} cancelled this shipment after pickup. When the goods are back, press Confirm Returned.","ألغت {0} هذه الشحنة بعد الاستلام. عند عودة البضاعة، اضغط «تأكيد الإرجاع»."
+"The shipment of {0} was cancelled. When the goods are back, press Confirm Returned.","أُلغيت شحنة {0}. عند عودة البضاعة، اضغط «تأكيد الإرجاع»."
+"{0} cancelled the shipment of these Delivery Notes: {1}. Each is waiting for its goods to come back, so Sales Order {2} was not cancelled. Press Confirm Returned on each of them, then cancel the Sales Order again.","ألغت {0} شحنة مذكرات التسليم التالية: {1}. كل منها بانتظار عودة بضاعتها، لذلك لم يُلغَ أمر البيع {2}. اضغط «تأكيد الإرجاع» على كل منها ثم ألغِ أمر البيع مرة أخرى."
+Already cancelled and kept: {0}.,ما أُلغي وبقي ملغيًا: {0}.
+Delivery Notes waiting for returned goods,مذكرات تسليم بانتظار عودة البضاعة
+{0} Waiting for Confirm Returned: {1}.,{0} بانتظار «تأكيد الإرجاع»: {1}.
 The returned quantities are not a list of lines.,الكميات المرتجعة ليست قائمة بنود.
 Delivery Note {0} is waiting for its goods to come back from {1}. Use Confirm Returned on it first. Nothing was cancelled.,"مذكرة التسليم {0} تنتظر عودة بضاعتها من {1}. استخدم «تأكيد الإرجاع» عليها أولًا. لم يتم إلغاء أي شيء."
+"Damaged, Noon paid","تالف، دفعت Noon"
+Restock,إعادة للمخزون
+Damaged Warehouse,مستودع التالف
+Damaged Warehouse must be different from the Marketplace Account Warehouse.,يجب أن يختلف مستودع التالف عن مستودع حساب السوق.
+"Damaged Warehouse must be a leaf Warehouse, not a group Warehouse.",يجب أن يكون مستودع التالف مستودعًا فرعيًا وليس مستودعًا مجمّعًا.
+Damaged Warehouse {0} does not belong to Company {1}.,مستودع التالف {0} لا يتبع الشركة {1}.
+(not set),(غير محدد)
+"Returned units inspected as Damaged or Damaged, Noon paid come back into this warehouse as a draft Sales Return, so they stay out of sellable stock. Not used by the Noon stock sync.","الوحدات المرتجعة التي فُحصت على أنها ""تالف"" أو ""تالف، دفعت Noon"" تعود إلى هذا المستودع في مسودة مرتجع مبيعات، فتبقى خارج المخزون القابل للبيع. لا تستخدمه مزامنة مخزون Noon."
+The Marketplace Account has no damaged warehouse; damaged returned stock needs one.,حساب السوق ليس له مستودع تالف؛ المخزون المرتجع التالف يحتاج إلى مستودع.
+Merchant code {0} is not one of this account's merchant codes.,رمز التاجر {0} ليس من رموز التاجر الخاصة بهذا الحساب.
+Send a list of at most {0} rows.,أرسل قائمة من {0} صفًا كحد أقصى.
+Noon Return {0} was not found.,لم يتم العثور على مرتجع Noon {0}.
+The lookup result expired. Look the barcode up again.,انتهت صلاحية نتيجة البحث. ابحث عن الباركود مرة أخرى.
+New Return,مرتجع جديد
+Confirm,تأكيد
+Leave blank to use the connection's default project code.,اتركه فارغًا لاستخدام رمز المشروع الافتراضي للاتصال.
+Looking up on Noon...,جارٍ البحث في Noon...
+Noon returned no return items for this barcode.,لم ترجع Noon أي أصناف مرتجعة لهذا الباركود.
+Try another merchant code,جرّب رمز تاجر آخر
+The lookup failed.,فشل البحث.
+Still looking up. Check the Noon Return list shortly.,لا يزال البحث جاريًا. تحقق من قائمة مرتجعات Noon بعد قليل.
+Not linked to a Marketplace Order,غير مرتبط بطلب سوق
+Already recorded: {0},سُجّل مسبقًا: {0}
+Outcome for {0},نتيجة {0}
+Enter a barcode.,أدخل الباركود.
+Applying outcomes...,جارٍ تطبيق النتائج...
+{0} refused: {1},رُفض {0}: {1}
+{0} recorded as {1}.,تم تسجيل {0} كـ {1}.
+Draft Sales Return {0},مسودة مرتجع مبيعات {0}
+Applied: {0},تم التطبيق: {0}
+Refused: {0},المرفوض: {0}
+The row was refused.,رُفض الصف.
+Create the Credit Note from each Noon Return form.,أنشئ إشعار الدائن من نموذج كل مرتجع Noon.
+There is no enabled Noon Marketplace Account that you can read.,لا يوجد حساب سوق Noon مفعّل يمكنك الاطلاع عليه.
+"Restock drafts a Sales Return into the account warehouse. Damaged and Damaged, Noon paid come back to us: a Sales Return is drafted into the damaged warehouse, so they are not restocked.","""إعادة للمخزون"" يُنشئ مسودة مرتجع مبيعات إلى مستودع الحساب. ""تالف"" و""تالف، دفعت Noon"" يعودان إلينا: تُنشأ مسودة مرتجع مبيعات إلى مستودع التالف، فلا يُعاد تخزينهما."

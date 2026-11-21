@@ -34,7 +34,6 @@ const NOON_FIELDS = [
 const NOON_CHECK_WAREHOUSE_LABEL = "Check Noon Warehouse";
 const NOON_SYNC_LABEL = "Sync Noon Pricing and Stock";
 const NOON_IMPORT_ORDERS_LABEL = "Import Noon Orders";
-const NOON_LOOKUP_RETURN_LABEL = "Look Up Noon Return";
 
 // Every custom button configure_outlet_management() can ever add - needed so
 // a platform change away from Talabat can remove all of them (#103 review
@@ -222,7 +221,7 @@ function configure_noon(frm) {
 	frm.remove_custom_button(__(NOON_CHECK_WAREHOUSE_LABEL));
 	frm.remove_custom_button(__(NOON_SYNC_LABEL));
 	frm.remove_custom_button(__(NOON_IMPORT_ORDERS_LABEL));
-	frm.remove_custom_button(__(NOON_LOOKUP_RETURN_LABEL));
+	// The return lookup lives on the Noon Return list ("New Return", #550), not on this form.
 	frm.set_intro("");
 	if (!is_noon) return;
 	if (frm.doc.connection && frappe.model.can_write("Marketplace Account")) {
@@ -232,7 +231,6 @@ function configure_noon(frm) {
 		frm.add_custom_button(__(NOON_CHECK_WAREHOUSE_LABEL), () => check_noon_warehouse(frm));
 		frm.add_custom_button(__(NOON_SYNC_LABEL), () => sync_noon(frm));
 		frm.add_custom_button(__(NOON_IMPORT_ORDERS_LABEL), () => import_noon_orders(frm));
-		frm.add_custom_button(__(NOON_LOOKUP_RETURN_LABEL), () => lookup_noon_return(frm));
 	}
 }
 
@@ -255,44 +253,6 @@ function check_noon_warehouse(frm) {
 			frappe.show_alert({ message: __("Noon warehouse checked."), indicator: "green" });
 			return frm.reload_doc();
 		});
-}
-
-// Manual barcode lookup (#153) - the manual Desk trigger for
-// api/noon_returns.py::lookup_return(), same confirm/prompt -> queue ->
-// "queued or already queued" toast pattern as import_noon_orders() above.
-// No Noon HTTP call happens in this request; the server only enqueues a
-// background worker.
-function lookup_noon_return(frm) {
-	frappe.prompt(
-		[
-			{
-				fieldname: "barcode",
-				fieldtype: "Data",
-				label: __("Barcode"),
-				reqd: 1,
-			},
-		],
-		(values) => {
-			frappe.call({
-				method: "marketplace_integrations.api.noon_returns.lookup_return",
-				args: { account: frm.doc.name, barcode: values.barcode },
-				freeze: true,
-				freeze_message: __("Queuing Noon return lookup..."),
-			}).then((response) => {
-				const queued = (response.message || {}).queued;
-				frappe.show_alert({
-					message: queued
-						? __("Noon return lookup queued for barcode {0}.", [frappe.utils.escape_html(values.barcode)])
-						: __("A Noon return lookup is already queued or running for barcode {0}.", [
-								frappe.utils.escape_html(values.barcode),
-							]),
-					indicator: queued ? "green" : "orange",
-				});
-			});
-		},
-		__(NOON_LOOKUP_RETURN_LABEL),
-		__("Look Up")
-	);
 }
 
 // Account-level bulk order import (#145 decision 12) - the manual Desk

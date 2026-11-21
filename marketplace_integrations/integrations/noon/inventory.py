@@ -12,6 +12,8 @@ of 10 boxes), letting Noon oversell. ``get_sellable_qty()`` performs the same
 UOM conversion Talabat's catalog sync already relies on
 (``integrations/talabat/catalog_sync.py``)."""
 
+import time
+
 import frappe
 from frappe import _
 
@@ -21,7 +23,11 @@ from marketplace_integrations.integrations.noon.catalog import (
 	validate_warehouse_code,
 )
 from marketplace_integrations.integrations.noon.client import NoonClient
-from marketplace_integrations.integrations.noon.constants import PUSH_TIMEOUT_SECONDS, STOCK_CHUNK_SIZE
+from marketplace_integrations.integrations.noon.constants import (
+	PUSH_TIMEOUT_SECONDS,
+	STOCK_504_BACKOFF_SECONDS,
+	STOCK_CHUNK_SIZE,
+)
 from marketplace_integrations.integrations.noon.sync import (
 	authorize_selection,
 	chunks,
@@ -45,6 +51,23 @@ def queue_stock_push(account_name, mapping_names=None):
 	mapping_names = authorize_selection(account_name, mapping_names)
 	get_account(account_name)
 	return enqueue_push(push_stock, "stock", account_name, mapping_names, manual=True)
+
+
+def _post_stock_chunk(client, items, retry_504=True):
+	"""POST one stock chunk; with ``retry_504`` a 504 is sent again after each
+	``STOCK_504_BACKOFF_SECONDS`` wait.
+
+	The qty of every item is the absolute target quantity, so repeating a request Noon may
+	already have applied is harmless (#516). Any other status, including 429, is returned
+	as it is, and so is the last 504 once the waits are used up (or at once without
+	``retry_504``, used for the chunks after an outage so a long job cannot sit in waits)."""
+	response = None
+	for wait in (*STOCK_504_BACKOFF_SECONDS, None) if retry_504 else (None,):
+		response = client.request("POST", STOCK_PATH, timeout=PUSH_TIMEOUT_SECONDS, json={"items": items})
+		if response.status_code != 504 or wait is None:
+			break
+		time.sleep(wait)
+	return response
 
 
 def push_stock(account_name, mapping_names=None, manual=False):
@@ -100,6 +123,9 @@ def push_stock(account_name, mapping_names=None, manual=False):
 	client = NoonClient(account.connection)
 	synced = 0
 	failed = len(local_errors)
+	# Once one chunk has used up its 504 retries Noon is considered down: every later chunk
+	# is sent once, without waits, and ends in Error with the same reason if it also fails.
+	outage = False
 	for batch in chunks(prepared, STOCK_CHUNK_SIZE):
 		# Fresh DB read before every chunk (the previous chunk's commit ended the
 		# transaction snapshot): a running job makes no further Noon write once the
@@ -107,12 +133,11 @@ def push_stock(account_name, mapping_names=None, manual=False):
 		if not manual and is_push_paused(account.name, "stock"):
 			return {"synced": synced, "failed": failed, "paused": True}
 		try:
-			response = client.request(
-				"POST",
-				STOCK_PATH,
-				timeout=PUSH_TIMEOUT_SECONDS,
-				json={"items": [payload for _, payload in batch]},
-			)
+			response = _post_stock_chunk(client, [payload for _, payload in batch], retry_504=not outage)
+			if response.status_code == 504:
+				outage = True
+				# Stock-sync advice only; the shared 504 text stays neutral.
+				frappe.throw(f"{client.error_message(response)} {_('Try the sync again in a few minutes.')}")
 			results = response_by_key(
 				require_items_response(response, client), ("warehouse_code", "partner_sku")
 			)

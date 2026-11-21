@@ -6,6 +6,7 @@
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
+  "mapping_tab",
   "marketplace_account",
   "platform",
   "item",
@@ -17,16 +18,33 @@
   "external_variant_id",
   "sales_uom",
   "enabled",
+  "sync_tab",
+  "price_column",
   "sync_status",
   "last_sync_reference",
   "last_synced_on",
   "last_error",
-  "inventory_section",
+  "stock_column",
   "inventory_sync_status",
   "inventory_last_synced_on",
   "inventory_last_error"
  ],
  "fields": [
+  {
+   "fieldname": "mapping_tab",
+   "fieldtype": "Tab Break",
+   "label": "Mapping"
+  },
+  {
+   "fieldname": "sync_tab",
+   "fieldtype": "Tab Break",
+   "label": "Sync"
+  },
+  {
+   "fieldname": "price_column",
+   "fieldtype": "Column Break",
+   "label": "Price"
+  },
   {
    "description": "The account of the platform this listing belongs to. The platform is filled in automatically. A disabled account stops all its listings from matching orders.",
    "fieldname": "marketplace_account",
@@ -146,10 +164,9 @@
    "read_only": 1
   },
   {
-   "collapsible": 1,
-   "fieldname": "inventory_section",
-   "fieldtype": "Section Break",
-   "label": "Shopify Inventory Sync"
+   "fieldname": "stock_column",
+   "fieldtype": "Column Break",
+   "label": "Stock"
   },
   {
    "default": "Not Synced",
@@ -175,7 +192,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-11-02 21:00:00.000000",
+ "modified": "2026-11-20 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Marketplace Integrations",
  "name": "Marketplace Product Mapping",
